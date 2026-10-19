@@ -44,7 +44,8 @@ The command receives one eval prompt on stdin and must print the JSON verdict re
 - `make smoke-full` is the complete real smoke command for release-critical changes. It
   runs deterministic eval contracts, AI eval harness tests, workspace Rust tests,
   frontend unit tests with coverage, backend multi-process E2E, and frontend Playwright E2E.
-- `./scripts/check-health.sh --fast` must pass before commit.
+- The pre-commit hook checks staged whitespace and source formatting. Run
+  affected tests during development; reserve comprehensive gates for PR/review.
 - `./scripts/check-health.sh` must pass before review or release.
 - Backend networking / relay / sync / crypto changes must run `make e2e` or document why
   the environment cannot run multicast/TCP tests.
@@ -53,9 +54,15 @@ The command receives one eval prompt on stdin and must print the JSON verdict re
 - AI-assisted UI reviews use the screenshot evidence and interaction checks described in
   `docs/evals/ui-ux-ai-review.md`; the agent-contract eval does not assess app usability.
 
+For a backend-only change, the complete real backend smoke is `make test &&
+make e2e`. For a frontend-only change, run `cd frontend && npm test && npm run
+e2e` (plus the relevant visual snapshot review). For changes across both
+sides, run `make smoke-full`, which includes both workflows and the eval smoke.
+
 ## Trigger Rules
 
-- Local pre-commit runs `./scripts/check-health.sh --fast`, which includes `make eval-smoke`.
+- Local pre-commit checks staged whitespace and source formatting. `make
+  eval-smoke` runs in CI and before PR submission when relevant.
 - CI runs `make eval-smoke` and the AI eval harness tests directly on Ubuntu and still runs
   the normal test, lint, security, backend E2E, and UI E2E workflows.
 - `.github/workflows/ai-eval.yml` runs deterministic eval checks on eval/prompt/agent PRs.
@@ -65,8 +72,13 @@ The command receives one eval prompt on stdin and must print the JSON verdict re
 - Claude Code runs `scripts/ai-eval-smoke.sh --changed <file>` after edits to key files.
   Non-critical files are ignored; critical prompt, workflow, script, and core-flow files run
   the smoke gate immediately.
-- Codex and other agents are covered through the shared git hooks, `AGENTS.md`, PR template,
-  and CI gate.
+- Codex runs `make eval-smoke` after edits to code, agent rules, prompts, eval
+  files, CI, or core workflow scripts; Claude Code's changed-file hook provides
+  the same deterministic gate during its own edits. Before either agent claims
+  a prompt, model, agent rule, eval suite, or AI-assisted workflow change is
+  ready for review, run `make ai-eval` with a configured model provider and
+  record the result. A provider-less deterministic pass is not an AI eval pass.
+- Git hooks, the PR template, and CI repeat these gates for both agents.
 
 ## Known Gaps
 

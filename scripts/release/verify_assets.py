@@ -220,6 +220,61 @@ def verify_archive(path, platform, version, check_installers):
             require(installer_metadata["AppImage"]["elf"] == installer_metadata["deb"]["elf"], "AppImage/versioned Debian executable mismatch")
 
 
+def verify_post_office_binary(binary, platform):
+    if platform.startswith("macos_"):
+        cpu = 0x0100000C if platform == "macos_arm64" else 0x01000007
+        require(binary[:8] == b"\xcf\xfa\xed\xfe" + cpu.to_bytes(4, "little"), "post-office macOS architecture")
+    elif platform.startswith("linux_"):
+        machine = b"\xb7\x00" if platform == "linux_aarch64" else b"\x3e\x00"
+        require(binary[:6] == b"\x7fELF\x02\x01" and binary[18:20] == machine, "post-office Linux architecture")
+    else:
+        require(len(binary) >= 64 and binary[:2] == b"MZ", "post-office Windows executable")
+        offset = int.from_bytes(binary[0x3C:0x40], "little")
+        machine = b"\x64\x86" if platform == "windows_x86_64" else b"\x64\xaa"
+        require(binary[offset:offset + 6] == b"PE\0\0" + machine, "post-office Windows architecture")
+
+
+def verify_post_office_archive(path, platform, check_binaries):
+    binary_name = "mesh-talk-node.exe" if platform.startswith("windows_") else "mesh-talk-node"
+    expected = {binary_name, "README.md"}
+    if platform.startswith("windows_"):
+        expected.add("install-post-office-windows.ps1")
+    with zipfile.ZipFile(path) as archive:
+        members = archive.infolist()
+        names = [entry.filename for entry in members]
+        require(len(names) == len(set(names)), "duplicate post-office archive member")
+        require(len(members) <= 5 and sum(entry.file_size for entry in members) <= MAX_UNCOMPRESSED, "post-office archive exceeds size limits")
+        files = {}
+        for entry in members:
+            name = entry.filename
+            require(name.startswith("release/") and "\\" not in name and "\0" not in name and ".." not in PurePosixPath(name).parts, "unsafe post-office archive path")
+            mode = entry.external_attr >> 16
+            require(not stat.S_ISLNK(mode) and (not mode or stat.S_IFMT(mode) in (0, stat.S_IFREG, stat.S_IFDIR)), "unsafe post-office archive member")
+            if not entry.is_dir():
+                require(name.count("/") == 1, "unexpected post-office archive contents")
+                files[name.removeprefix("release/")] = entry
+        require(set(files) == expected | {"SHA256SUMS"}, "unexpected post-office archive contents")
+        manifest = archive.read(files["SHA256SUMS"]).decode("utf8")
+        checksums = {}
+        for line in manifest.splitlines():
+            match = re.fullmatch(r"([a-fA-F0-9]{64}) [ *](?:\./)?([^/\\]+)", line)
+            require(match is not None, "invalid post-office checksum manifest")
+            digest, name = match.groups()
+            require(name not in checksums, "duplicate post-office checksum")
+            checksums[name] = digest.lower()
+        require(set(checksums) == expected, "incomplete post-office checksum manifest")
+        for name in expected:
+            entry = files[name]
+            require(entry.file_size > 0, "empty post-office archive contents")
+            data = archive.read(entry)
+            require(hashlib.sha256(data).hexdigest() == checksums[name], "post-office checksum mismatch")
+            if name == binary_name and check_binaries:
+                require(len(data) >= 1024, "post-office binary too small")
+                verify_post_office_binary(data, platform)
+                if not platform.startswith("windows_"):
+                    require(entry.external_attr >> 16 & 0o111, "post-office binary is not executable")
+
+
 def verify_directory(root, tag, version, *, check_installers=True):
     root = Path(root)
     require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-ci\.[0-9]+)?", tag), "invalid artifact tag")
@@ -230,6 +285,8 @@ def verify_directory(root, tag, version, *, check_installers=True):
             suffix = "_lite" if variant == "lite" else ""
             name = f"mesh-talk_{tag}_{platform}{suffix}.zip"
             expected.update((name, name + ".bundle"))
+        relay_name = f"mesh-talk-post-office_{tag}_{platform}.zip"
+        expected.update((relay_name, relay_name + ".bundle"))
     require({path.name for path in root.iterdir()} == expected, "incomplete or unexpected asset set")
     for name in expected:
         path = root / name
@@ -243,7 +300,11 @@ def verify_directory(root, tag, version, *, check_installers=True):
             bundle = json.loads(Path(str(archive) + ".bundle").read_text())
             require(isinstance(bundle, dict) and bundle.get("mediaType"), "invalid signature bundle")
             verify_archive(archive, platform, version, check_installers)
-    return [f"{platform}:{variant}" for platform in PLATFORMS for variant in VARIANTS]
+        relay_archive = root / f"mesh-talk-post-office_{tag}_{platform}.zip"
+        relay_bundle = json.loads(Path(str(relay_archive) + ".bundle").read_text())
+        require(isinstance(relay_bundle, dict) and relay_bundle.get("mediaType"), "invalid post-office signature bundle")
+        verify_post_office_archive(relay_archive, platform, check_installers)
+    return [f"{platform}:{variant}" for platform in PLATFORMS for variant in VARIANTS] + [f"{platform}:post-office" for platform in PLATFORMS]
 
 
 def main():

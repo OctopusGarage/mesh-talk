@@ -114,6 +114,9 @@ impl MessageBody {
     ///    unknown version or an undecodable body falls through to raw text.
     /// 3. Anything else — a legacy raw-text message.
     pub fn decode(bytes: &[u8]) -> MessageBody {
+        let Some((_, bytes)) = crate::expiry::split(bytes) else {
+            return MessageBody::new(Vec::new(), None);
+        };
         if let Some(rest) = bytes.strip_prefix(MSG_MAGIC) {
             if let Ok(b) = opts().reject_trailing_bytes().deserialize::<WireV1>(rest) {
                 return MessageBody {
@@ -151,6 +154,13 @@ mod tests {
         assert_eq!(MessageBody::decode(&plain.encode()), plain);
         let reply = MessageBody::new(b"yes!".to_vec(), Some(EventId::new([7u8; 32])));
         assert_eq!(MessageBody::decode(&reply.encode()), reply);
+    }
+
+    #[test]
+    fn expiring_wrapper_decodes_the_inner_message() {
+        let body = MessageBody::new(b"private".to_vec(), None);
+        let wire = crate::expiry::wrap(&body.encode(), Some(1_700_000_300_000));
+        assert_eq!(MessageBody::decode(&wire), body);
     }
 
     #[test]

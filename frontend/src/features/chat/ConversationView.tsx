@@ -1,9 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { AnimatePresence, motion } from "framer-motion";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   ChevronDown,
   CircleAlert,
@@ -12,35 +9,30 @@ import {
   Upload,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import {
-  IdentityCrest,
-  PresenceDot,
-  AvatarEditMenu,
-} from "@/components/identity";
-import { GroupAvatar } from "@/components/GroupAvatar";
-import { isMacOverlay, needsCustomWindowControls } from "@/lib/platform";
+import { needsCustomWindowControls } from "@/lib/platform";
+import { ReceptionStatus } from "./ReceptionStatus";
 import { Composer } from "./Composer";
+import {
+  EmptyState,
+  StartupFailureState,
+  UnlockingState,
+} from "./ConversationStates";
+import { ChannelHeader, DmHeader, PersonalHeader } from "./ConversationHeaders";
 import { ScreenshotEditor } from "./ScreenshotEditor";
 import {
   messageRowKey,
   useConversationViewport,
 } from "./useConversationViewport";
-import {
-  IMAGE_EXTENSIONS,
-  VIDEO_EXTENSIONS,
-  isImage,
-  isVideo,
-} from "./mediaFile";
 import { MessageBubble } from "./MessageBubble";
 import { MembersDialog } from "./MembersDialog";
+import { PendingChannelInvite } from "./PendingChannelInvite";
 import { VerifyContactDialog } from "./VerifyContactDialog";
+import { MemberProfileDialog } from "./MemberProfileDialog";
+import type { MemberProfileTarget } from "./memberProfileDetails";
 import { CallButtons } from "./CallDialog";
 import { ConversationHistoryDialog } from "./ConversationHistoryDialog";
 import { AttachmentReceiveSettings } from "./AttachmentReceiveSettings";
 import { TransferBar } from "./TransferBar";
-import { DiagnosticsDialog } from "./DiagnosticsDialog";
-import { OfflineConnectDialog } from "./OfflineConnectDialog";
-import { HiddenContactsDialog } from "./HiddenContactsDialog";
 import {
   Dialog,
   DialogContent,
@@ -49,235 +41,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { chat as chatApi, obs } from "@/lib/api";
-import { errorMessage } from "@/lib/error";
+import { rosterProjection } from "@/lib/rosterProjection";
 import { mentionsName } from "@/lib/mentions";
 import { formatDay } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { ease, useMotionOK } from "@/lib/motion";
 import { useAuth } from "@/store/auth";
-import { useContactPolicy } from "@/store/contactPolicy";
-import {
-  convKey,
-  displayName,
-  useChat,
-  captureChatOwnership,
-  type ChatMessage,
-} from "@/store/chat";
-import {
-  presenceLabel,
-  presenceStatus,
-  usePresenceFor,
-} from "@/store/presence";
+import { convKey, displayName, useChat, type ChatMessage } from "@/store/chat";
+import { useAttachmentIntake } from "./attachments/useAttachmentIntake";
 import type { ReactionInfo } from "@/lib/types";
-
-function captureComposer() {
-  const lease = captureChatOwnership();
-  const active = useChat.getState().active;
-  const key = active ? convKey(active) : null;
-  return () =>
-    lease.current() &&
-    key !== null &&
-    useChat.getState().active !== null &&
-    convKey(useChat.getState().active!) === key;
-}
-
-function EmptyState() {
-  const { t } = useTranslation();
-  const accounts = useChat((s) => s.accounts);
-  const channels = useChat((s) => s.channels);
-  const favorites = useChat((s) => s.favorites);
-  const hidden = useContactPolicy((s) => s.contacts);
-  const policyLoaded = useContactPolicy((s) => s.loaded);
-  const policyError = useContactPolicy((s) => s.error);
-  const owner = useAuth((s) => s.user?.id);
-  const visibleCount =
-    channels.filter((channel) => !favorites[channel.channel_id]?.hidden)
-      .length +
-    (policyLoaded
-      ? accounts.filter((account) => !hidden[account.account_id]).length
-      : 0);
-  const hasConversations = visibleCount > 0;
-  const hiddenOnly = policyLoaded && !hasConversations && accounts.length > 0;
-  const policyUnavailable = !policyLoaded && !hasConversations;
-  const [guideOpen, setGuideOpen] = useState(false);
-  const [connectOpen, setConnectOpen] = useState(false);
-  return (
-    <div className="conversation-welcome flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-      <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-muted text-signal">
-        <MessagesSquare className="h-5 w-5" />
-      </div>
-      <div>
-        <p className="font-display text-base font-semibold tracking-tight">
-          {t(
-            hasConversations
-              ? "conversation.noneSelectedTitle"
-              : policyUnavailable
-                ? policyError
-                  ? "contactVisibility.loadError"
-                  : "redesign.loadingContacts"
-                : hiddenOnly
-                  ? "contactVisibility.allHidden"
-                  : "redesign.noPeersTitle",
-          )}
-        </p>
-        {hasConversations && (
-          <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
-            {t("conversation.noneSelectedDesc")}
-          </p>
-        )}
-        {!hasConversations && !hiddenOnly && !policyUnavailable && (
-          <p className="mt-1 max-w-sm text-[13px] leading-5 text-muted-foreground">
-            {t("redesign.noPeersBody")}
-          </p>
-        )}
-      </div>
-      {policyUnavailable && policyError && owner && (
-        <button
-          type="button"
-          onClick={() => void useContactPolicy.getState().load(owner)}
-          className="rounded-md px-3 py-2 text-sm font-medium text-signal hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {t("contactVisibility.retry")}
-        </button>
-      )}
-      {hiddenOnly && <HiddenContactsDialog />}
-      {!hasConversations && !hiddenOnly && !policyUnavailable && (
-        <>
-          <Button
-            type="button"
-            data-testid="empty-connect"
-            onClick={() => setConnectOpen(true)}
-          >
-            {t("redesign.connectToSomeone")}
-          </Button>
-          <button
-            type="button"
-            onClick={() => setGuideOpen(true)}
-            className="rounded-md px-2 py-1 text-sm font-medium text-signal underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {t("redesign.connectionHelp")}
-          </button>
-          <DiagnosticsDialog
-            open={guideOpen}
-            onOpenChange={setGuideOpen}
-            initialTab="help"
-          />
-          <OfflineConnectDialog
-            open={connectOpen}
-            onOpenChange={setConnectOpen}
-            includeSharedNetwork
-          />
-        </>
-      )}
-    </div>
-  );
-}
-
-// Shown on first boot while the node's encrypted stores are still being unlocked in the
-// background (the heavy argon2 KDF + store opens). The login invoke already returned, so
-// this is a non-blocking "two-phase startup" state — not a frozen window.
-function UnlockingState() {
-  const { t } = useTranslation();
-  const [slow, setSlow] = useState(false);
-  const [guideOpen, setGuideOpen] = useState(false);
-  useEffect(() => {
-    const id = window.setTimeout(() => setSlow(true), 15_000);
-    return () => window.clearTimeout(id);
-  }, []);
-  return (
-    <div
-      role="status"
-      className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
-    >
-      <div className="relative flex h-16 w-16 items-center justify-center">
-        <Loader2 className="h-7 w-7 animate-spin text-signal" />
-      </div>
-      <div>
-        <p className="font-display text-lg font-semibold tracking-tight">
-          {t("conversation.unlockingTitle")}
-        </p>
-        <p className="text-sm text-muted-foreground">
-          {t("conversation.unlockingDesc")}
-        </p>
-        {slow && (
-          <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-muted-foreground">
-            {t("redesign.slowStartup")}
-          </p>
-        )}
-      </div>
-      {slow && (
-        <>
-          <button
-            type="button"
-            onClick={() => setGuideOpen(true)}
-            className="rounded-md px-3 py-2 text-sm font-medium text-signal hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {t("redesign.openConnection")}
-          </button>
-          <DiagnosticsDialog
-            open={guideOpen}
-            onOpenChange={setGuideOpen}
-            initialTab="help"
-          />
-        </>
-      )}
-    </div>
-  );
-}
-
-function StartupFailureState() {
-  const { t } = useTranslation();
-  const setError = useChat((s) => s.setError);
-  const [guideOpen, setGuideOpen] = useState(false);
-  const revealLogs = async () => {
-    try {
-      await revealItemInDir(await obs.logFile());
-    } catch (e) {
-      setError(t("diagnostics.actionFailed", { error: errorMessage(e) }));
-    }
-  };
-
-  return (
-    <div
-      role="alert"
-      className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
-    >
-      <div className="flex h-12 w-12 items-center justify-center rounded-lg border border-destructive/30 bg-destructive/5 text-destructive">
-        <CircleAlert className="h-6 w-6" aria-hidden="true" />
-      </div>
-      <div className="max-w-md">
-        <p className="font-display text-lg font-semibold tracking-tight">
-          {t("conversation.startFailedTitle")}
-        </p>
-        <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-          {t("conversation.startFailedDesc")}
-        </p>
-      </div>
-      <div className="flex flex-wrap items-center justify-center gap-2">
-        <button
-          type="button"
-          onClick={() => setGuideOpen(true)}
-          className="rounded-md bg-signal px-3 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {t("redesign.openConnection")}
-        </button>
-        <button
-          type="button"
-          onClick={() => void revealLogs()}
-          className="rounded-md px-3 py-2 text-sm font-medium text-signal hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {t("diagnostics.revealLogs")}
-        </button>
-      </div>
-      <DiagnosticsDialog
-        open={guideOpen}
-        onOpenChange={setGuideOpen}
-        initialTab="help"
-      />
-    </div>
-  );
-}
 
 /** A quiet centered date separator between days in the message log. */
 function DaySeparator({ label }: { label: string }) {
@@ -290,198 +62,59 @@ function DaySeparator({ label }: { label: string }) {
   );
 }
 
-/** DM header — the large IdentityCrest (glyph + name + presence + verified), with the
- *  safety number reachable via the verify dialog rendered alongside in the header. */
-function DmHeader({ id, name }: { id: string; name: string }) {
-  const { t } = useTranslation();
-  const owner = useAuth((s) => s.user?.id);
-  const peers = useChat((s) => s.peers);
-  const presence = usePresenceFor(id);
-  const status = presenceStatus(presence);
-
-  // Verified state for the crest: a single trust read for the active account (not per-row,
-  // so no fan-out), refreshed when the conversation or its presenting device changes.
-  const fingerprint = peers.find((p) => p.account_id === id)?.user_id ?? "";
-  const [trustResult, setTrustResult] = useState<{
-    owner: string;
-    id: string;
-    fingerprint: string;
-    verified: boolean;
-  } | null>(null);
-  const verified =
-    trustResult !== null &&
-    trustResult.owner === owner &&
-    trustResult.id === id &&
-    trustResult.fingerprint === fingerprint &&
-    trustResult.verified;
-  useEffect(() => {
-    if (!fingerprint || !owner) return;
-    let live = true;
-    void chatApi
-      .getTrust(owner, id, fingerprint)
-      .then(
-        (tr) =>
-          live &&
-          setTrustResult({
-            owner,
-            id,
-            fingerprint,
-            verified: tr.verified && !tr.fingerprint_changed,
-          }),
-      )
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [owner, id, fingerprint]);
-
-  return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <IdentityCrest
-        id={id}
-        name={name}
-        verified={verified}
-        hideId
-        status={status}
-        variant="compact"
-      />
-      <span className="pl-12 text-[11px] text-muted-foreground">
-        {presenceLabel(presence, t)}
-      </span>
-    </div>
-  );
-}
-
-/** Channel header — a mesh/group glyph + name + member count. */
-function ChannelHeader({
-  id,
-  name,
-  memberCount,
-  archived,
-  dissolved,
-  left,
-  pendingInvite,
-}: {
-  id: string;
-  name: string;
-  memberCount: number;
-  archived: boolean;
-  dissolved: boolean;
-  left: boolean;
-  pendingInvite: boolean;
-}) {
-  const { t } = useTranslation();
-  const presence = usePresenceFor(id);
-  const status = presenceStatus(presence);
-  return (
-    <div className="flex min-w-0 items-center gap-3">
-      <div className="relative">
-        <AvatarEditMenu
-          id={id}
-          ariaLabel={t("avatar.editGroup")}
-          category="group"
-        >
-          <GroupAvatar channelId={id} size={36} title={name} />
-        </AvatarEditMenu>
-        {!archived && !dissolved && !left && !pendingInvite && (
-          <PresenceDot
-            status={status}
-            size="md"
-            className="absolute -bottom-0.5 -right-0.5"
-          />
-        )}
-      </div>
-      <div className="min-w-0">
-        <div
-          className="truncate font-display font-semibold tracking-tight"
-          title={name}
-        >
-          {name}
-        </div>
-        <div className="truncate text-xs text-muted-foreground">
-          {dissolved
-            ? t("conversation.dissolvedChannel")
-            : archived
-              ? t("conversation.archivedChannel")
-              : left
-                ? t("conversation.leftChannel")
-                : pendingInvite
-                  ? t("conversation.pendingInvite")
-                  : memberCount
-                    ? t("conversation.members", { count: memberCount })
-                    : t("conversation.channel")}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // Stable empty references. Returning a fresh `[]` from a zustand selector makes
 // useSyncExternalStore read a new snapshot on every render → an infinite render loop
 // ("Maximum update depth exceeded") that tears the whole app down to a blank screen.
 const NO_MESSAGES: ChatMessage[] = [];
+const NO_IDS: string[] = [];
 const NO_REACTIONS: ReactionInfo[] = [];
 
 export function ConversationView() {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
   const active = useChat((s) => s.active);
+  const receptionScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
+  const myAccountId = useChat((s) => s.myAccountId);
+  const isPersonal = active?.kind === "account" && active.id === myAccountId;
   const channels = useChat((s) => s.channels);
   const favorites = useChat((s) => s.favorites);
   const admitText = useChat((s) => s.admitText);
   const retry = useChat((s) => s.retry);
-  const sendFile = useChat((s) => s.sendFile);
-  const setError = useChat((s) => s.setError);
+  const [expiryDurationMs, setExpiryDurationMs] = useState<number | null>(
+    300_000,
+  );
+  const expiresAtSend = () =>
+    isPersonal || expiryDurationMs === null
+      ? null
+      : Date.now() + expiryDurationMs;
   const toggleReaction = useChat((s) => s.toggleReaction);
+  const openConversation = useChat((s) => s.open);
   const deleteMessage = useChat((s) => s.deleteMessage);
+  const [memberProfile, setMemberProfile] =
+    useState<MemberProfileTarget | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{
     key: string;
     id: string;
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [inviteBusy, setInviteBusy] = useState(false);
-  const [declineOpen, setDeclineOpen] = useState(false);
-  const acceptChannelInvite = useChat((s) => s.acceptChannelInvite);
-  const leaveChannel = useChat((s) => s.leaveChannel);
-  const [screenshotBytes, setScreenshotBytes] = useState<Uint8Array | null>(
-    null,
-  );
-  const [screenshotAvailable, setScreenshotAvailable] = useState(false);
-  useEffect(() => {
-    let active = true;
-    void chatApi.screenshotAvailable().then(
-      (available) => {
-        if (active) setScreenshotAvailable(available);
-      },
-      () => {
-        if (active) setScreenshotAvailable(false);
-      },
-    );
-    return () => {
-      active = false;
-    };
-  }, []);
+  useEffect(() => setMemberProfile(null), [active?.id]);
+  const attachments = useAttachmentIntake(t, {
+    expiresAtSend,
+    onHandoff: () => setExpiryDurationMs(300_000),
+  });
   const recallMessage = useChat((s) => s.recallMessage);
   const sendSticker = useChat((s) => s.sendSticker);
   const myId = useChat((s) => s.myId);
-  const myAccountId = useChat((s) => s.myAccountId);
   const members = useChat((s) => s.members);
   const peers = useChat((s) => s.peers);
-  // Map a channel author's device user_id → account id, so the per-message author glyph
-  // resolves the account-keyed (propagated/custom) avatar instead of a device id that never matches.
-  const accountByDevice = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const p of peers) if (p.account_id) map.set(p.user_id, p.account_id);
-    return map;
-  }, [peers]);
+  const roster = rosterProjection(peers);
   // Resolve a channel author's device user_id → display name, so bubbles show names, not raw
   // ids. Channel members win over the general roster (channel-specific naming).
-  const nameByDevice = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const p of peers) if (p.name) map.set(p.user_id, p.name);
-    for (const m of members) if (m.name) map.set(m.user_id, m.name);
+  const memberByDevice = useMemo(() => {
+    const map = new Map<string, (typeof members)[number]>();
+    for (const m of members) map.set(m.user_id, m);
     return map;
-  }, [peers, members]);
+  }, [members]);
   const key = active ? convKey(active) : "";
   useEffect(() => {
     setPendingDelete(null);
@@ -493,6 +126,11 @@ export function ConversationView() {
   const reactions = useChat((s) =>
     active ? (s.reactions[key] ?? NO_REACTIONS) : NO_REACTIONS,
   );
+  const unread = useChat((s) => s.unreadIds[key] ?? NO_IDS);
+  const earlier = useChat((s) => s.lateUnreadIds[key] ?? NO_IDS);
+  const recovery = useChat((s) => s.reception[key]);
+  const overflowUnread = useChat((s) => s.overflowUnread[key] ?? 0);
+  const markMessagesViewed = useChat((s) => s.markMessagesViewed);
   const loading = useChat((s) => s.loading);
   const historyError = useChat((s) => s.historyError === key);
   const searchTarget = useChat((s) => s.searchTarget);
@@ -506,68 +144,46 @@ export function ConversationView() {
     loading,
     historyError,
     searchTarget,
+    markMessagesViewed,
   );
 
-  // Native (Tauri) drag-and-drop: dropping file(s) onto the conversation sends them there.
-  // The webview drag-drop event is global, so we subscribe once and read the latest
-  // active conversation / sendFile through refs (avoids re-subscribing on every change).
-  const [dragOver, setDragOver] = useState(false);
-  const activeRef = useRef(active);
-  const archivedRef = useRef(false);
-  const sendFileRef = useRef(sendFile);
-  const setErrorRef = useRef(setError);
-  activeRef.current = active;
-  archivedRef.current =
-    active?.kind === "channel" &&
-    channels.some(
-      (channel) =>
-        channel.channel_id === active.id &&
-        (channel.archived ||
-          channel.dissolved ||
-          channel.left ||
-          channel.pending_invite),
-    );
-  sendFileRef.current = sendFile;
-  setErrorRef.current = setError;
+  const unreadNavigationRequest = useRef(0);
+  const [unreadNavigation, setUnreadNavigation] = useState<{
+    key: string;
+    id: string;
+  } | null>(null);
+  const [unavailableUnread, setUnavailableUnread] = useState<string | null>(
+    null,
+  );
   useEffect(() => {
-    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
-      const p = event.payload;
-      if (p.type === "over") {
-        setDragOver(activeRef.current != null && !archivedRef.current);
-      } else if (p.type === "leave") {
-        setDragOver(false);
-      } else if (p.type === "drop") {
-        setDragOver(false);
-        if (!activeRef.current || archivedRef.current) return;
-        const lease = captureChatOwnership();
-        const key = convKey(activeRef.current);
-        const current = () =>
-          lease.current() &&
-          useChat.getState().active != null &&
-          convKey(useChat.getState().active!) === key;
-        void (async () => {
-          for (const path of p.paths) {
-            if (!current()) return;
-            try {
-              // An image/video dropped here is sent as MEDIA (inline preview) — same as the
-              // image button; any other file is a generic attachment. (`isImage`/`isVideo`
-              // match the path's extension.)
-              const media = isImage(path) || isVideo(path);
-              await sendFileRef.current(path, media);
-            } catch (e) {
-              if (current())
-                setErrorRef.current(
-                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
-                );
-            }
-          }
-        })();
-      }
-    });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
-  }, [t]);
+    unreadNavigationRequest.current++;
+    setUnavailableUnread(null);
+    setUnreadNavigation(null);
+  }, [key]);
+  useEffect(() => {
+    if (
+      unreadNavigation?.key === key &&
+      viewport.jumpToMessage(unreadNavigation.id)
+    )
+      setUnreadNavigation(null);
+  }, [key, messages, unreadNavigation, viewport]);
+  const navigateUnread = async (id: string) => {
+    const request = ++unreadNavigationRequest.current;
+    const generation = useAuth.getState().generation;
+    setUnavailableUnread(null);
+    if (viewport.jumpToMessage(id)) return;
+    const found = await useChat.getState().revealUnread(key, id);
+    const current = useChat.getState().active;
+    if (
+      !current ||
+      convKey(current) !== key ||
+      useAuth.getState().generation !== generation ||
+      unreadNavigationRequest.current !== request
+    )
+      return;
+    if (found) setUnreadNavigation({ key, id });
+    else setUnavailableUnread(id);
+  };
 
   const [reply, setReply] = useState<{
     key: string;
@@ -606,7 +222,10 @@ export function ConversationView() {
     if (!primed.current && messages.length > 0) primed.current = true;
   }, [messages, key]);
   const isFresh = (m: ChatMessage, i: number) =>
-    primed.current && !seenKeys.current.has(messageRowKey(m, i));
+    primed.current &&
+    m.arrivalKind !== "catch_up" &&
+    m.arrivalKind !== "history_sync" &&
+    !seenKeys.current.has(messageRowKey(m, i));
 
   const byId = useMemo(() => {
     const m = new Map<string, ChatMessage>();
@@ -633,36 +252,6 @@ export function ConversationView() {
           : [],
     [active, members],
   );
-
-  // Route picked/pasted media bytes through the normal file-send pipeline: write to a temp
-  // file, then send the path. `name` (the picker has one) is kept so the real filename +
-  // extension survive to the chat list and the inline preview.
-  const sendImageBytes = async (
-    bytes: Uint8Array,
-    ext: string,
-    name?: string,
-  ) => {
-    const lease = captureComposer();
-    if (!lease()) return false;
-    try {
-      const tempPath = await chatApi.writeTempFile(
-        Array.from(bytes),
-        ext,
-        name,
-      );
-      if (!lease()) {
-        await chatApi.deleteTempFile(tempPath).catch(() => {});
-        return false;
-      }
-      // Image button / paste / screenshot → media intent (inline preview).
-      await sendFile(tempPath, true);
-      return true;
-    } catch (e) {
-      if (lease())
-        setError(t("composer.couldntOpenFile", { error: errorMessage(e) }));
-      throw e;
-    }
-  };
 
   if (!active) {
     return (
@@ -716,7 +305,9 @@ export function ConversationView() {
   // Reaction `who` is keyed by account id for account conversations, device user-id for channels.
   const selfReactionId = isChannel ? myId : myAccountId;
   // Alias (if set) overrides the conversation's announced name in the header + composer.
-  const headerName = displayName(favorites, active.id, active.name);
+  const headerName = isPersonal
+    ? t("personal.title")
+    : displayName(favorites, active.id, active.name);
 
   return (
     // min-w-0 lets this flex child shrink below its content's intrinsic width, so a wide
@@ -724,10 +315,11 @@ export function ConversationView() {
     // getting clipped under the shell's overflow-hidden / behind the sidebar).
     <main
       className="conversation-canvas relative flex min-w-0 flex-1 flex-col"
-      onClickCapture={() => useChat.getState().markActiveRead()}
+      onPointerDownCapture={() => useChat.getState().markLegacyActiveRead()}
+      onFocusCapture={() => useChat.getState().markLegacyActiveRead()}
     >
       <AnimatePresence>
-        {dragOver && (
+        {attachments.dragOver && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -766,7 +358,9 @@ export function ConversationView() {
         data-titlebar-inset
         className="flex min-h-[68px] items-center gap-3 border-b bg-card px-5 py-2.5"
       >
-        {isChannel ? (
+        {isPersonal ? (
+          <PersonalHeader />
+        ) : isChannel ? (
           <ChannelHeader
             id={active.id}
             name={headerName}
@@ -784,9 +378,10 @@ export function ConversationView() {
           conversation={{ ...active, name: headerName }}
         />
         {isChannel && !archived && !pendingInvite ? (
-          <MembersDialog dissolved={dissolved} />
+          <MembersDialog key={key} dissolved={dissolved} />
         ) : (
-          active.kind === "account" && (
+          active.kind === "account" &&
+          !isPersonal && (
             <>
               <AttachmentReceiveSettings key={active.id} account={active.id} />
               <CallButtons accountId={active.id} name={headerName} />
@@ -795,6 +390,20 @@ export function ConversationView() {
           )
         )}
       </header>
+      <ReceptionStatus
+        key={`${receptionScope}:${key}`}
+        conversation={key}
+        overflow={overflowUnread}
+        unread={unread}
+        earlier={earlier}
+        recovery={recovery}
+        onJump={(id) => void navigateUnread(id)}
+        unavailable={!!unavailableUnread && unread.includes(unavailableUnread)}
+        onMarkRead={() => {
+          useChat.getState().markActiveRead();
+          setUnavailableUnread(null);
+        }}
+      />
 
       <div className="conversation-log-surface relative flex-1 overflow-hidden">
         {!loading && historyError && (
@@ -862,10 +471,9 @@ export function ConversationView() {
             // switching conversations — equivalent to the old `[messages.length, key]` reset.
             key={key}
             data={messages}
-            // Announce newly-arriving messages to assistive tech. `polite` so it waits for
-            // a pause rather than interrupting; the per-bubble aria-label carries the text.
+            // ReceptionStatus batches announcements; row mounts are silent.
             role="log"
-            aria-live="polite"
+            aria-live="off"
             aria-label={t("conversation.messageLog", { name: headerName })}
             className="h-full py-3"
             // Keep a short conversation anchored to the bottom (just above the composer)
@@ -908,8 +516,15 @@ export function ConversationView() {
               const parent = m.replyTo ? (byId.get(m.replyTo) ?? null) : null;
               const mentioned =
                 isChannel && !m.fromMe && mentionsName(m.text, myName);
+              const authorMember = memberByDevice.get(m.who);
+              const authorName =
+                authorMember?.name || roster.nameForDevice(m.who) || undefined;
+              const authorAccount = roster.accountForMember(
+                authorMember ?? { user_id: m.who },
+              );
               return (
                 <div
+                  data-message-id={messageRowKey(m, i)}
                   className={cn(
                     "mx-auto max-w-[820px] px-0 pb-1 transition-colors duration-500 motion-reduce:transition-none",
                     viewport.highlightedKey === messageRowKey(m, i) &&
@@ -924,9 +539,17 @@ export function ConversationView() {
                     grouped={grouped}
                     showTime={showTime}
                     isChannel={isChannel}
+                    isPersonal={isPersonal}
                     readOnly={readOnly}
-                    authorAvatarId={accountByDevice.get(m.who) ?? m.who}
-                    authorName={nameByDevice.get(m.who)}
+                    authorAvatarId={authorAccount ?? m.who}
+                    authorName={authorName}
+                    onViewAuthor={() =>
+                      setMemberProfile({
+                        name: authorName || m.who,
+                        accountId: authorAccount,
+                        deviceId: m.who,
+                      })
+                    }
                     fresh={motionOK && isFresh(m, i)}
                     reactions={m.id ? (reactionsByTarget.get(m.id) ?? []) : []}
                     selfReactionId={selfReactionId}
@@ -957,6 +580,7 @@ export function ConversationView() {
         <AnimatePresence>
           {viewport.showJump && (
             <motion.button
+              data-testid="jump-to-latest"
               type="button"
               initial={{
                 opacity: 0,
@@ -1024,62 +648,7 @@ export function ConversationView() {
       </Dialog>
 
       {pendingInvite ? (
-        <div className="border-t bg-card px-5 py-4" role="status">
-          <p className="text-sm text-muted-foreground">
-            {t("conversation.pendingInviteHint")}
-          </p>
-          <div className="mt-3 flex gap-2">
-            <Button
-              disabled={inviteBusy}
-              onClick={() => {
-                setInviteBusy(true);
-                void acceptChannelInvite().finally(() => setInviteBusy(false));
-              }}
-            >
-              {t("conversation.acceptInvite")}
-            </Button>
-            <Button
-              variant="outline"
-              disabled={inviteBusy}
-              onClick={() => setDeclineOpen(true)}
-            >
-              {t("conversation.declineInvite")}
-            </Button>
-          </div>
-          <Dialog open={declineOpen} onOpenChange={setDeclineOpen}>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>{t("conversation.declineInvite")}</DialogTitle>
-                <DialogDescription>
-                  {t("conversation.declineInviteConfirm")}
-                </DialogDescription>
-              </DialogHeader>
-              <div className="flex justify-end gap-2">
-                <Button
-                  variant="ghost"
-                  disabled={inviteBusy}
-                  onClick={() => setDeclineOpen(false)}
-                >
-                  {t("common.cancel")}
-                </Button>
-                <Button
-                  variant="destructive"
-                  disabled={inviteBusy}
-                  onClick={() => {
-                    setInviteBusy(true);
-                    void leaveChannel()
-                      .then((ok) => {
-                        if (ok) setDeclineOpen(false);
-                      })
-                      .finally(() => setInviteBusy(false));
-                  }}
-                >
-                  {t("conversation.declineInvite")}
-                </Button>
-              </div>
-            </DialogContent>
-          </Dialog>
-        </div>
+        <PendingChannelInvite key={key} channelId={active.id} />
       ) : readOnly ? (
         <div
           className="border-t bg-card px-5 py-4 text-sm text-muted-foreground"
@@ -1095,7 +664,10 @@ export function ConversationView() {
         </div>
       ) : (
         <Composer
-          screenshotAvailable={screenshotAvailable}
+          expiryDurationMs={isPersonal ? null : expiryDurationMs}
+          onExpiryDurationChange={isPersonal ? undefined : setExpiryDurationMs}
+          screenshotAvailable={attachments.screenshotAvailable}
+          stagedScreenshot={attachments.stagedScreenshot}
           key={key}
           initialDraft={drafts.current.get(key) ?? ""}
           onDraftChange={(text) => {
@@ -1111,141 +683,44 @@ export function ConversationView() {
           myName={myName}
           replyTo={replyTo}
           prefill={prefill?.key === key ? prefill : null}
-          onSendSticker={(id, fallback) => void sendSticker(id, fallback)}
+          onSendSticker={(id, fallback) => {
+            void sendSticker(id, fallback, expiresAtSend());
+            setExpiryDurationMs(300_000);
+          }}
           onCancelReply={() => setReply(null)}
-          onAttach={async () => {
-            const current = captureComposer();
-            if (!current()) return;
-            try {
-              const path = await openFileDialog({ multiple: false });
-              // Attach button → generic attachment (lands in the received-files tray).
-              if (current() && typeof path === "string")
-                await sendFile(path, false);
-            } catch (e) {
-              if (current())
-                setError(
-                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
-                );
-            }
-          }}
-          onAttachDirectory={async () => {
-            const current = captureComposer();
-            if (!current()) return;
-            try {
-              const path = await openFileDialog({
-                directory: true,
-                multiple: false,
-              });
-              if (current() && typeof path === "string")
-                await sendFile(path, false);
-            } catch (e) {
-              if (current())
-                setError(
-                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
-                );
-            }
-          }}
-          onImage={async () => {
-            const current = captureComposer();
-            if (!current()) return;
-            // Image button → the NATIVE file dialog (a JS `<input type=file>` is flaky in
-            // WKWebView and silently no-ops), filtered to media, sent with `media: true` so it
-            // previews inline. Path-based, so no multi-MB bytes round-trip over IPC.
-            try {
-              const path = await openFileDialog({
-                multiple: false,
-                filters: [
-                  {
-                    name: "Images & Video",
-                    extensions: [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS],
-                  },
-                ],
-              });
-              if (current() && typeof path === "string")
-                await sendFile(path, true);
-            } catch (e) {
-              if (current())
-                setError(
-                  t("composer.couldntOpenFile", { error: errorMessage(e) }),
-                );
-            }
-          }}
+          onAttach={attachments.attachFile}
+          onAttachDirectory={attachments.attachDirectory}
+          onImage={attachments.pickMedia}
           onSend={(t) => {
-            const accepted = admitText(t, replyTo?.id ?? null);
+            const accepted = admitText(t, replyTo?.id ?? null, expiresAtSend());
             if (accepted) {
+              setExpiryDurationMs(300_000);
               setReply(null);
               setPrefill(null);
             }
             return accepted;
           }}
-          onPasteFiles={async (files) => {
-            const current = captureComposer();
-            for (const file of files) {
-              if (!current()) return;
-              try {
-                // The temp-file IPC accepts at most 64 MiB. Reject before materializing a
-                // large File as a JSON byte array in the webview.
-                if (file.size > 64 * 1024 * 1024)
-                  throw new Error(
-                    "Copied file exceeds 64 MB; use Attach instead",
-                  );
-                const ext =
-                  file.name.split(".").pop() ||
-                  file.type.split("/")[1] ||
-                  "bin";
-                const path = await chatApi.writeTempFile(
-                  Array.from(new Uint8Array(await file.arrayBuffer())),
-                  ext,
-                  file.name || undefined,
-                );
-                if (!current()) return;
-                await sendFile(
-                  path,
-                  file.type.startsWith("image/") ||
-                    isImage(file.name) ||
-                    isVideo(file.name),
-                );
-              } catch (e) {
-                if (current())
-                  setError(
-                    t("composer.couldntOpenFile", { error: errorMessage(e) }),
-                  );
-                throw e;
-              }
-            }
-          }}
-          onScreenshot={async (hideWindow) => {
-            const current = captureComposer();
-            if (!current()) return;
-            try {
-              const bytes = await chatApi.captureScreen(hideWindow);
-              // Empty bytes = the user cancelled the capture: send nothing.
-              if (current() && bytes.length > 0) setScreenshotBytes(bytes);
-            } catch (e) {
-              if (!current()) return;
-              const msg = errorMessage(e);
-              // The backend returns this sentinel when macOS Screen Recording isn't granted
-              // (otherwise screencapture silently yields only the desktop wallpaper).
-              setError(
-                msg.includes("screen-recording-permission")
-                  ? t("screenshot.permission")
-                  : t("screenshot.failed", { error: msg }),
-              );
-            }
-          }}
+          onPasteFiles={attachments.pasteFiles}
+          onScreenshot={attachments.captureScreenshot}
         />
       )}
-      {screenshotBytes && (
+      {attachments.screenshotBytes && (
         <ScreenshotEditor
-          bytes={screenshotBytes}
-          initialRegion={isMacOverlay()}
-          onCancel={() => setScreenshotBytes(null)}
-          onSend={async (bytes) => {
-            await sendImageBytes(bytes, "png");
-            setScreenshotBytes(null);
-          }}
+          bytes={attachments.screenshotBytes}
+          onCancel={attachments.cancelScreenshot}
+          onSend={attachments.sendScreenshot}
         />
       )}
+      <MemberProfileDialog
+        target={memberProfile}
+        onOpenChange={(next) => {
+          if (!next) setMemberProfile(null);
+        }}
+        onMessage={(accountId, name) => {
+          setMemberProfile(null);
+          openConversation({ kind: "account", id: accountId, name });
+        }}
+      />
     </main>
   );
 }

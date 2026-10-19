@@ -1,8 +1,11 @@
-//! Tauri IPC commands. After the legacy stack was retired this is just the auth surface
-//! (login / logout / register) plus the bridge that starts the node on login.
+//! Tauri authentication IPC commands and session lifecycle.
 //! All messaging/contact/file/channel commands live in [`crate::chat_commands`].
 
+#[cfg(test)]
 use crate::chat_commands::RuntimeAuthority;
+#[cfg(test)]
+use crate::runtime_bootstrap::node_start_error_for_log;
+use crate::runtime_bootstrap::spawn_node_runtime;
 use crate::services::auth_service::AuthError;
 use crate::services::user::User;
 use crate::state::AppState;
@@ -693,192 +696,14 @@ fn require_session(state: &AppState) -> CommandResult<crate::state::SessionInfo>
         .ok_or_else(|| CommandError::Authentication("User session not found. Please login.".into()))
 }
 
-// ---------------------------------------------------------------------------
-// Node lifecycle bridge
-// ---------------------------------------------------------------------------
-
-/// Startup errors can embed the account directory. Redact every occurrence at
-/// the logging boundary while preserving the error category and remaining context.
-fn node_start_error_for_log(
-    error: &mesh_talk_core::node::RuntimeError,
-    account_id: &str,
-) -> String {
-    let diagnostic = error.to_string();
-    if account_id.is_empty() {
-        diagnostic
-    } else {
-        diagnostic.replace(account_id, "[account]")
-    }
-}
-
-/// Spawn the node runtime in the background, wiring its inbound callbacks to the
-/// app's Tauri events, and store it in `node_handle`. Shared by login and by account
-/// adoption after device linking (which drops the old runtime and re-spawns; `start`
-/// reloads the account keystore, so a re-spawn adopts a freshly-linked account secret).
-/// `account_id` is the host-app namespace for the data directory — distinct from the
-/// node's cryptographic account.
-pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
-    app_handle: tauri::AppHandle<R>,
-    lease: crate::state::SessionLease,
-    password: String,
-    node_handle: crate::chat_commands::NodeState,
-    session: crate::state::SessionState,
-) {
-    let Ok(authority) = RuntimeAuthority::request(session, lease, node_handle.clone()) else {
-        return;
-    };
-    let dm_authority = authority.clone();
-    let channel_authority = authority.clone();
-    let file_authority = authority.clone();
-    let profile_authority = authority.clone();
-    let call_authority = authority.clone();
-    let app_handle_for_dm = app_handle.clone();
-    let app_handle_for_channel = app_handle.clone();
-    let app_handle_for_file = app_handle.clone();
-    let app_handle_for_profile = app_handle.clone();
-    let app_handle_for_call = app_handle.clone();
-    tauri::async_runtime::spawn(async move {
-        let Ok(permit) = authority.begin().await else {
-            return;
-        };
-        let display_name = permit.display_name.clone();
-        let account_id = authority.lease.owner().to_owned();
-        // The base directory for node per-account data (the app's `~/.mesh-talk`).
-        #[cfg(test)]
-        let (base_dir, discovery_port) = node_handle
-            .4
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap_or_else(|| (crate::data_dir(), crate::configured_discovery_port()));
-        #[cfg(not(test))]
-        let (base_dir, discovery_port) = (crate::data_dir(), crate::configured_discovery_port());
-        match mesh_talk_core::node::NodeRuntime::start_configured_guarded(
-            mesh_talk_core::node::RuntimeConfig {
-                base_dir: &base_dir,
-                account_id: &account_id,
-                display_name: &display_name,
-                password: &password,
-                discovery_port,
-            },
-            mesh_talk_core::node::RuntimeEvents {
-                on_dm: Box::new(move |dm| {
-                    let _ = dm_authority.current(|_| {
-                        crate::events::emit_dm_received(
-                            &app_handle_for_dm,
-                            dm.from,
-                            dm.from_name,
-                            dm.text,
-                            dm.reply_to,
-                        );
-                    });
-                }),
-                on_channel: Box::new(move |msg: mesh_talk_core::node::ReceivedChannelMessage| {
-                    let _ = channel_authority.current(|_| {
-                        crate::events::emit_channel_message(
-                            &app_handle_for_channel,
-                            hex::encode(msg.channel_id.as_bytes()),
-                            msg.channel_name,
-                            msg.from,
-                            msg.text,
-                            msg.reply_to,
-                        );
-                    });
-                }),
-                on_file: Box::new(move |f: mesh_talk_core::node::ReceivedFile| {
-                    let _ = file_authority.current(|_| {
-                        crate::events::emit_file_received(
-                            &app_handle_for_file,
-                            hex::encode(f.conv.as_bytes()),
-                            f.is_channel,
-                            f.from,
-                            f.name,
-                            f.size,
-                            f.mime,
-                            hex::encode(f.file_conv.as_bytes()),
-                            f.media,
-                        );
-                    });
-                }),
-                on_profile: Box::new(move |p: mesh_talk_core::node::ReceivedProfile| {
-                    let _ = profile_authority.current(|_| {
-                        crate::events::emit_profile_received(
-                            &app_handle_for_profile,
-                            p.account_id,
-                            p.avatar,
-                        );
-                    });
-                }),
-                on_call_signal: Box::new(move |s: mesh_talk_core::node::ReceivedCallSignal| {
-                    let _ = call_authority.current(|_| {
-                        crate::events::emit_call_signal(&app_handle_for_call, s.from, s.payload);
-                    });
-                }),
-            },
-            |launch| {
-                authority
-                    .current(|info| launch(&info.user.display_name))
-                    .map_err(|_| {
-                        mesh_talk_core::node::RuntimeError::Io(std::io::Error::new(
-                            std::io::ErrorKind::PermissionDenied,
-                            "session replaced",
-                        ))
-                    })
-            },
-        )
-        .await
-        {
-            Ok(runtime) => {
-                if !permit.install(runtime).await {
-                    return;
-                }
-                // Keep lifecycle diagnostics without persisting an account identifier.
-                log::info!("Node started");
-            }
-            Err(e) => log::warn!(
-                "Node failed to start: {}",
-                node_start_error_for_log(&e, &account_id)
-            ),
-        }
-    });
-}
-
-/// Adopt an account secret just persisted by a successful device link: drop the running
-/// node runtime and re-spawn it so it reloads the account keystore (now holding the
-/// linked account) and re-advertises under it. Reuses the held session credentials — no
-/// re-login required.
+/// Resume the node after device linking with its newly persisted account secret.
 #[tauri::command]
 pub async fn adopt_linked_account<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
 ) -> Result<(), CommandError> {
-    let lease = app_state
-        .session()
-        .capture()
-        .map_err(CommandError::Authentication)?;
-    let pw = {
-        let guard = node_state.0.lock().await;
-        app_state
-            .session()
-            .matching(&lease, |_| {
-                node_state.check_installation(&lease)?;
-                guard
-                    .as_ref()
-                    .filter(|rt| rt.host_account_id() == Some(lease.owner()))
-                    .map(|rt| rt.restart_password().to_string())
-                    .ok_or_else(CommandError::not_started)
-            })
-            .map_err(CommandError::Authentication)??
-    };
-    spawn_node_runtime(
-        app_handle,
-        lease,
-        pw,
-        node_state.inner().clone(),
-        app_state.session().clone(),
-    );
-    Ok(())
+    crate::linked_account::adopt_linked_account(app_handle, &app_state, &node_state).await
 }
 
 #[cfg(test)]
@@ -1012,6 +837,98 @@ mod tests {
             crate::session_store::clear(&self.alice);
             crate::session_store::clear(&self.bob);
         }
+    }
+
+    #[test]
+    fn owner_scoped_node_handle_rejects_same_owner_replacement_while_queued() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+        let fixture = AuthFixture::new("settings-node-generation");
+        let session = fixture.app_state.session();
+        let current = session.get().unwrap();
+        let owner = current.user.user_id.clone();
+        tauri::async_runtime::block_on(async {
+            // Bind this manually opened fixture through the production install
+            // interface before checking the installation's session generation.
+            let runtime = fixture.node.0.lock().await.take().unwrap();
+            let authority = crate::chat_commands::RuntimeAuthority::request(
+                session.clone(),
+                session.capture().unwrap(),
+                fixture.node.clone(),
+            )
+            .unwrap();
+            assert!(authority.begin().await.unwrap().install(runtime).await);
+            let guard = fixture.node.0.lock().await;
+            let pending = fixture.node.node_for_owner(session, &owner);
+            tokio::pin!(pending);
+            // Poll the real interface into its runtime wait, without sleeps.
+            poll_fn(|cx| {
+                assert!(pending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            session.publish("replacement".into(), current.user, current.password);
+            drop(guard);
+            assert!(
+                pending.await.is_none(),
+                "queued work must not adopt a new session lease"
+            );
+            assert!(
+                fixture.node.node_for_owner(session, &owner).await.is_none(),
+                "same-owner replacement must not authorize the prior installation"
+            );
+        });
+    }
+
+    #[test]
+    fn owner_scoped_node_handle_requires_matching_session_and_runtime() {
+        let fixture = AuthFixture::new("settings-node-owner");
+        let alice_owner = fixture
+            .app_state
+            .session()
+            .capture()
+            .unwrap()
+            .owner()
+            .to_owned();
+        assert!(
+            tauri::async_runtime::block_on(
+                fixture
+                    .node
+                    .node_for_owner(fixture.app_state.session(), &alice_owner)
+            )
+            .is_some()
+        );
+        assert!(
+            tauri::async_runtime::block_on(
+                fixture
+                    .node
+                    .node_for_owner(fixture.app_state.session(), "another-owner")
+            )
+            .is_none()
+        );
+
+        let bob_owner = "replacement-owner";
+        fixture.app_state.session().publish(
+            "replacement".into(),
+            fixture_user(bob_owner),
+            "pw".into(),
+        );
+        assert!(
+            tauri::async_runtime::block_on(
+                fixture
+                    .node
+                    .node_for_owner(fixture.app_state.session(), &alice_owner)
+            )
+            .is_none()
+        );
+        assert!(
+            tauri::async_runtime::block_on(
+                fixture
+                    .node
+                    .node_for_owner(fixture.app_state.session(), bob_owner)
+            )
+            .is_none()
+        );
     }
 
     fn invoke_auth(
@@ -1311,6 +1228,42 @@ mod tests {
                 .restart_password(),
             " password-a "
         );
+    }
+
+    #[test]
+    fn registered_adoption_restarts_runtime_for_current_session() {
+        let fixture = AuthFixture::new("adopt-current");
+        let lease = fixture.app_state.session().capture().unwrap();
+        let original_device = fixture
+            .node
+            .0
+            .blocking_lock()
+            .as_ref()
+            .unwrap()
+            .user_id()
+            .to_owned();
+
+        invoke_auth(
+            &fixture.webview,
+            "adopt_linked_account",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        tauri::async_runtime::block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if fixture.node.test_installed_for(&lease) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        let runtime = fixture.node.0.blocking_lock();
+        assert_eq!(runtime.as_ref().unwrap().user_id(), original_device);
+        assert_eq!(runtime.as_ref().unwrap().restart_password(), " password-a ");
     }
 
     #[test]

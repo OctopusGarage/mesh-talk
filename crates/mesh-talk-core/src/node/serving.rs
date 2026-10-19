@@ -3,7 +3,7 @@
 use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
-use crate::node::conversation::{account_conversation_id, dm_conversation_id};
+use crate::node::conversation::account_conversation_id;
 use crate::node::session::{Served, SessionError, request_round, serve_one, serve_wire_bytes};
 use crate::transport::SecureChannel;
 use std::sync::Arc;
@@ -16,9 +16,24 @@ use tokio::sync::Semaphore;
 const MAX_SERVE_ROUNDS: usize = 10_000;
 /// Drop an inbound connection that sends nothing for this long.
 const SERVE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Ceiling on concurrently-served inbound connections, so a flood of TCP + Noise handshakes
-/// can't spawn unbounded tasks. Generous for a LAN; excess connections wait for a slot.
-pub(super) const MAX_CONCURRENT_CONNS: usize = 256;
+/// Leave one shared TCP slot available to outbound progress. Excess inbound
+/// streams wait in the OS queue; the Node's shared pool also counts handshakes.
+pub(super) const MAX_CONCURRENT_CONNS: usize = super::session_pool::MAX_DIRECTION_CONNECTIONS;
+
+// A received event fits one transport frame (<64 KiB). Limiting a processing
+// pass to 64 messages bounds wrapped+decoded failed plaintext to about 8 MiB.
+const CHANNEL_PLAINTEXT_BATCH: usize = 64;
+
+#[derive(Default)]
+pub(in crate::node) struct PendingChannelPlaintext {
+    messages: Vec<super::channel::ReceivedChannelMessage>,
+    retry_at: Option<std::time::Instant>,
+    delay_ms: u64,
+    batch_id: Option<String>,
+    batch_size: usize,
+    // Contains metadata only, never decrypted text or a wrapped body.
+    terminal: Option<super::channel::ReceivedChannelMessage>,
+}
 
 impl Node {
     /// Dial `peer` directly and run one sync round for `conv`. Best-effort: the
@@ -28,12 +43,29 @@ impl Node {
         peer: &PeerRecord,
         conv: ConversationId,
     ) -> Result<(), SessionError> {
-        let mut channel = self
-            .privacy_dial(peer.addr, &peer.public)
-            .await
+        if peer.post_office {
+            return Err(SessionError::UnexpectedMessage);
+        }
+        let mut last_error = SessionError::UnexpectedMessage;
+        for fresh in [false, true] {
+            let mut channel = if fresh {
+                self.privacy_dial(peer.addr, &peer.public).await
+            } else {
+                self.privacy_sync_dial(peer.addr, &peer.public).await
+            }
             .map_err(SessionError::Transport)?;
-        let store = self.sync_store(channel.peer_identity());
-        request_round(&mut channel, &store, conv).await.map(|_| ())
+            let store = self.sync_store(channel.peer_identity());
+            match request_round(&mut channel, &store, conv).await {
+                Ok(_) => {
+                    self.recycle_sync_channel(channel);
+                    return Ok(());
+                }
+                Err(error) => last_error = error,
+            }
+            // A peer can close immediately after the idle liveness check.
+            // Signed idempotent reconciliation safely retries a fresh session.
+        }
+        Err(last_error)
     }
 
     /// Replicate `conv` to the elected post office, if one is known. Returns
@@ -43,34 +75,88 @@ impl Node {
         &self,
         conv: ConversationId,
     ) -> Result<bool, SessionError> {
-        let po = {
-            let roster = self.roster.lock().expect("roster mutex not poisoned");
-            elected_post_office(&roster)
-        };
-        let Some(po) = po else {
-            return Ok(false);
-        };
-        if !self.relay_allowed(&po.public) {
+        let me = self.identity.public();
+        let targets = self
+            .historical_dm_peers()
+            .into_iter()
+            .map(|proof| proof.public())
+            .filter(|recipient| {
+                conv == crate::node::conversation::dm_conversation_id(&me, recipient)
+                    || conv
+                        == crate::node::delivery_receipt::delivery_conversation_id(&me, recipient)
+            })
+            .collect();
+        self.replicate_to_post_office_targets(conv, targets).await
+    }
+
+    pub(in crate::node) async fn replicate_to_post_office_targets(
+        &self,
+        conv: ConversationId,
+        targets: Vec<crate::identity::device::PublicIdentity>,
+    ) -> Result<bool, SessionError> {
+        if targets.is_empty() {
             return Ok(false);
         }
-        let mut channel = self
-            .privacy_dial(po.addr, &po.public)
-            .await
-            .map_err(SessionError::Transport)?;
-        let store = self.sync_store(channel.peer_identity());
-        request_round(&mut channel, &store, conv).await?;
-        Ok(true)
+        let mut uploaded = false;
+        for recipient in &targets {
+            let candidates = {
+                let roster = self.roster.lock().expect("roster mutex not poisoned");
+                self.post_office_candidates_for(&roster, recipient)
+            };
+            let mut complete = false;
+            for po in candidates {
+                if !self.relay_send_allowed(&po.public) {
+                    continue;
+                }
+                let Ok(mut channel) = self.privacy_sync_dial(po.addr, &po.public).await else {
+                    continue;
+                };
+                if !self.relay_send_allowed(&po.public) {
+                    continue;
+                }
+                let Ok(events) = self
+                    .opaque_relay_round(&mut channel, recipient, Some(conv))
+                    .await
+                else {
+                    continue;
+                };
+                self.recycle_sync_channel(channel);
+                uploaded |= !events.is_empty();
+                complete = true;
+                break;
+            }
+            if !complete {
+                return Ok(false);
+            }
+        }
+        Ok(uploaded)
     }
 
     /// Accept inbound connections and maintain deferred profile compactions.
     /// Maintenance runs on the blocking pool and stops when this future is dropped;
     /// CLI and SDK hosts get the same log maintenance as the desktop runtime.
     pub async fn run_accept_loop(self: Arc<Self>, listener: TcpListener) {
+        let changes = self
+            .roster
+            .lock()
+            .expect("roster mutex not poisoned")
+            .changes();
         tokio::select! {
             _ = Arc::clone(&self).run_profile_compaction_loop() => {}
             _ = Arc::clone(&self).run_delivery_loop() => {}
             _ = Arc::clone(&self).run_channel_control_retry_loop() => {}
+            _ = Arc::clone(&self).run_channel_recovery_loop(changes) => {}
+            _ = Arc::clone(&self).run_account_history_loop() => {}
+            _ = Arc::clone(&self).run_expiry_loop() => {}
             _ = self.accept_connections(listener) => {}
+        }
+    }
+
+    async fn run_expiry_loop(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let node = Arc::clone(&self);
+            let _ = tokio::task::spawn_blocking(move || node.prune_expired_received()).await;
         }
     }
 
@@ -93,6 +179,13 @@ impl Node {
             let permit = match Arc::clone(&conns).acquire_owned().await {
                 Ok(p) => p,
                 Err(_) => return, // semaphore closed — shouldn't happen, stop cleanly
+            };
+            let tcp_permits = match self.sessions.inbound().await {
+                Ok(permits) => permits,
+                Err(_) => {
+                    drop(permit);
+                    continue;
+                }
             };
             // Only the (fast) TCP accept runs on the loop; the Noise handshake runs in the
             // spawned task (bounded by HANDSHAKE_TIMEOUT), so a peer that connects then stalls
@@ -117,7 +210,7 @@ impl Node {
                 if let Some(hook) = node.accepted_hook.lock().unwrap().take() {
                     let _ = hook.send(());
                 }
-                if let Ok(channel) = node.privacy_accept(stream).await {
+                if let Ok(channel) = node.privacy_accept_with_permits(stream, tcp_permits).await {
                     node.serve_connection(channel).await;
                 }
             }));
@@ -129,18 +222,91 @@ impl Node {
     /// a device-pairing request gets the linking handler; anything else is a sync wire
     /// and is served normally (then the loop continues).
     pub async fn serve_connection(&self, mut channel: SecureChannel<TcpStream>) {
-        let store = self.sync_store(channel.peer_identity());
+        if channel.pairing_only() {
+            // A retired account proof can recover an interrupted authorized link,
+            // but can never enter sync, account history, attachments or call IPC.
+            if let Ok(Ok(first)) = tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await
+                && let Some((request, history)) = PairingRequest::decode_selected(&first)
+            {
+                self.serve_pairing_selected(&mut channel, request, history)
+                    .await;
+            }
+            return;
+        }
+        // A relay may initiate a sync round too. The account preference applies to
+        // inbound relay sessions as well as our own upload/drain dials.
+        let is_relay = channel.peer_announcement().is_some_and(|a| a.post_office)
+            || self
+                .roster
+                .lock()
+                .expect("roster mutex not poisoned")
+                .get(&channel.peer_identity().user_id())
+                .is_some_and(|peer| peer.public == *channel.peer_identity() && peer.post_office);
+        if is_relay && !self.relay_allowed(channel.peer_identity()) {
+            return;
+        }
+        // Relay traffic is initiated by this node through opaque pairwise
+        // mailboxes. An inbound relay must never be able to request the local
+        // signed event log, whose headers and channel controls are readable.
+        if is_relay {
+            return;
+        }
+        let store = self.serve_sync_store(channel.peer_identity());
         // Bound the connection so an authenticated peer can't pin a task forever: an idle
         // timeout on every recv + a per-connection round ceiling (mirrors the relay).
         let first = match tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await {
             Ok(Ok(b)) => b,
             _ => return, // peer error or idle past the timeout
         };
-        if let Some(req) = PairingRequest::decode(&first) {
+        if is_relay && !self.relay_allowed(channel.peer_identity()) {
+            return;
+        }
+        if let Some((req, history)) = PairingRequest::decode_selected(&first) {
             if !self.account_allowed(channel.peer_identity(), channel.peer_announcement()) {
                 return;
             }
-            self.serve_pairing(&mut channel, req).await;
+            self.serve_pairing_selected(&mut channel, req, history)
+                .await;
+            return;
+        }
+        if let Some((
+            version,
+            super::account_sync_wire::AccountHistoryFrame::Request {
+                account_id,
+                cursor,
+                known_digest,
+                wanted,
+                ..
+            },
+        )) = super::account_sync_wire::AccountHistoryFrame::decode_versioned(&first)
+        {
+            self.serve_account_history(
+                &mut channel,
+                version,
+                &account_id,
+                cursor,
+                known_digest,
+                wanted,
+            )
+            .await;
+            return;
+        }
+        if let Some((
+            version,
+            super::account_sync_wire::AccountHistoryFrame::AttachmentRequest {
+                account_id,
+                file_conv,
+                ..
+            },
+        )) = super::account_sync_wire::AccountHistoryFrame::decode_versioned(&first)
+        {
+            self.serve_account_attachment(
+                &mut channel,
+                version,
+                &account_id,
+                crate::eventlog::event::ConversationId::new(file_conv),
+            )
+            .await;
             return;
         }
         // A call signal (SDP/bye): surface it live (bound to the authenticated peer) and
@@ -174,6 +340,9 @@ impl Node {
             _ => return,
         }
         for _ in 0..MAX_SERVE_ROUNDS {
+            if is_relay && !self.relay_allowed(channel.peer_identity()) {
+                break;
+            }
             match tokio::time::timeout(SERVE_IDLE_TIMEOUT, serve_one(&mut channel, &store)).await {
                 Ok(Ok(Served::Handled(conv))) => {
                     self.emit_new_messages(conv);
@@ -191,6 +360,14 @@ impl Node {
     /// author's X25519 from the roster). A no-op for conversations with no new
     /// manifest events. Own manifests are skipped (the sender already knows).
     pub(in crate::node) fn process_file_events(&self, conv: ConversationId) {
+        self.process_file_events_reception(conv, "live");
+    }
+
+    pub(in crate::node) fn process_file_events_reception(
+        &self,
+        conv: ConversationId,
+        context: &'static str,
+    ) {
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let all_events: Vec<Event> = {
             let log = self.log.lock().expect("log mutex not poisoned");
@@ -207,12 +384,30 @@ impl Node {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             book.state(&conv).is_some()
         };
+        if is_channel
+            && !self
+                .pending_channel_plaintext
+                .lock()
+                .expect("pending plaintext lock not poisoned")
+                .messages
+                .is_empty()
+        {
+            return;
+        }
         let content_gate = self.channel_content_gate(conv);
         let mut surfaced: Vec<ReceivedFile> = Vec::new();
         for event in all_events
             .into_iter()
             .filter(|event| event.kind == EventKind::FileManifest && event.author != self_author)
         {
+            if self
+                .account_suppression
+                .lock()
+                .expect("account suppression lock not poisoned")
+                .contains(conv, event.id)
+            {
+                continue;
+            }
             if content_gate
                 .as_ref()
                 .is_some_and(|ids| !ids.contains(&event.id))
@@ -225,6 +420,14 @@ impl Node {
                 .expect("files mutex not poisoned")
                 .is_emitted(&event.id)
             {
+                continue;
+            }
+            if !is_channel
+                && self
+                    .historical_author(event.author.ed25519_pub())
+                    .is_some_and(|proof| self.certified_sibling(&proof.public()))
+            {
+                // Sibling file metadata and bytes use the category-negotiated account path.
                 continue;
             }
             // NB: we mark emitted only AFTER a successful open+decode (below), so a
@@ -262,6 +465,17 @@ impl Node {
                     Err(_) => continue,
                 }
             };
+            let own_device = self
+                .linked_devices()
+                .iter()
+                .any(|device| device.public.user_id() == event.author.user_id());
+            if !own_device && self.recipient_expired(&plaintext, event.id, event.wall_clock) {
+                self.files
+                    .lock()
+                    .expect("files mutex not poisoned")
+                    .mark_emitted(event.id);
+                continue;
+            }
             let Some(manifest) = super::files::validated_manifest(&plaintext) else {
                 continue;
             };
@@ -282,6 +496,14 @@ impl Node {
                 mime: manifest.mime().to_string(),
                 file_conv: manifest.file_conv(),
                 media: crate::node::media_store::manifest_is_media(&manifest),
+                event_id: event.id,
+                authored_at: event.wall_clock,
+                received_at: super::node::now_millis(),
+                arrival_kind: context,
+                own_device,
+                batch_id: None,
+                batch_complete: true,
+                batch_size: 1,
             };
             // The conversation to FILE this manifest under for history. A channel manifest
             // stays in the channel conv (which is the UI's conversation id). A DM manifest
@@ -349,7 +571,24 @@ impl Node {
             }
             surfaced.push(received);
         }
-        for rf in surfaced {
+        let total = surfaced.len();
+        let kind = if context == "live" && total > 1 {
+            "catch_up"
+        } else {
+            context
+        };
+        let batch = (kind == "catch_up")
+            .then(|| {
+                surfaced
+                    .last()
+                    .map(|file| format!("file:{}", file.event_id.to_hex()))
+            })
+            .flatten();
+        for (index, mut rf) in surfaced.into_iter().enumerate() {
+            rf.arrival_kind = kind;
+            rf.batch_id = batch.clone();
+            rf.batch_complete = index + 1 == total;
+            rf.batch_size = total;
             // We have the manifest; if its chunks haven't all arrived, queue a direct pull
             // from peers (the sender's one-shot push may have raced our discovery, and on a
             // PO-less LAN nothing else fetches them). Cleared once the file completes.
@@ -439,31 +678,192 @@ impl Node {
     /// Run the channel book over `conv`'s events and stream any newly-decryptable
     /// channel messages. A no-op for DM conversations (no channel state).
     pub(in crate::node) fn process_channel(&self, conv: ConversationId) {
-        let events: Vec<Event> = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&conv).into_iter().cloned().collect()
-        };
-        let refs: Vec<&Event> = events.iter().collect();
-        let messages = {
-            let mut book = self.channels.lock().expect("channels mutex not poisoned");
-            book.process(&self.identity, conv, &refs)
-        };
-        for msg in messages {
-            // Persist the decrypted plaintext: the sender-key wire key is single-use,
-            // so channel history is served from the received store, not re-opened.
-            let _ = self
-                .received
-                .lock()
-                .expect("received mutex not poisoned")
-                .record(
-                    conv,
-                    msg.from.clone(),
-                    msg.wall_clock,
-                    &msg.wrapped,
-                    msg.event_id,
-                );
-            let _ = self.channel_incoming.send(msg);
+        self.process_channel_reception(conv, "live");
+    }
+
+    /// Recovery provenance is supplied by the operation, never inferred from a
+    /// sender's wall clock. A multi-message decryption pass is a catch-up batch.
+    pub(in crate::node) fn process_channel_reception(
+        &self,
+        conv: ConversationId,
+        context: &'static str,
+    ) {
+        let mut pending = self
+            .pending_channel_plaintext
+            .lock()
+            .expect("pending plaintext lock not poisoned");
+        if pending
+            .retry_at
+            .is_some_and(|deadline| std::time::Instant::now() < deadline)
+            || pending
+                .messages
+                .first()
+                .is_some_and(|message| message.channel_id != conv)
+        {
+            return;
         }
+        let mut saved: std::collections::HashSet<_> = self
+            .received
+            .lock()
+            .expect("received mutex not poisoned")
+            .entries_ref(&conv)
+            .iter()
+            .map(|entry| entry.event_id)
+            .collect();
+        let events: Vec<Event> = self
+            .log
+            .lock()
+            .expect("log mutex not poisoned")
+            .events(&conv)
+            .into_iter()
+            .cloned()
+            .collect();
+        let refs: Vec<_> = events.iter().collect();
+        let mut replay = super::channel::ChannelReplay::new(&refs);
+        let mut context = context;
+        loop {
+            let retrying = !pending.messages.is_empty();
+            let (mut messages, limited) = if retrying {
+                context = "catch_up";
+                (std::mem::take(&mut pending.messages), false)
+            } else {
+                self.channels
+                    .lock()
+                    .expect("channels mutex not poisoned")
+                    .process_replay(
+                        &self.identity,
+                        conv,
+                        &mut replay,
+                        CHANNEL_PLAINTEXT_BATCH,
+                        super::channel::CHANNEL_PENDING_BYTES.saturating_sub(
+                            pending
+                                .terminal
+                                .as_ref()
+                                .map_or(0, super::channel::ReceivedChannelMessage::retained_bytes),
+                        ),
+                    )
+            };
+            let own_devices: std::collections::HashSet<_> = self
+                .linked_devices()
+                .iter()
+                .map(|device| device.public.user_id())
+                .collect();
+            let observed_at = super::node::now_millis();
+            for msg in &mut messages {
+                if msg.received_at == 0 {
+                    msg.received_at = observed_at;
+                }
+                if !own_devices.contains(&msg.from) {
+                    let _ = self.recipient_expired(&msg.wrapped, msg.event_id, msg.wall_clock);
+                }
+            }
+            let opened = messages.len();
+            let mut received = Vec::new();
+            let mut messages = messages.into_iter();
+            while let Some(mut msg) = messages.next() {
+                if saved.contains(&msg.event_id)
+                    || self
+                        .account_suppression
+                        .lock()
+                        .expect("account suppression lock not poisoned")
+                        .contains(conv, msg.event_id)
+                {
+                    continue;
+                }
+                msg.own_device = own_devices.contains(&msg.from);
+                if !msg.own_device
+                    && self.recipient_expired(&msg.wrapped, msg.event_id, msg.wall_clock)
+                {
+                    continue;
+                }
+                if msg.received_at == 0 {
+                    msg.received_at = super::node::now_millis();
+                }
+                if let Err(error) = self
+                    .received
+                    .lock()
+                    .expect("received mutex not poisoned")
+                    .record(
+                        conv,
+                        msg.from.clone(),
+                        msg.wall_clock,
+                        &msg.wrapped,
+                        msg.event_id,
+                    )
+                {
+                    log::warn!(
+                        "channel plaintext persistence failed; retaining bounded retry: {error}"
+                    );
+                    pending.messages.push(msg);
+                    pending.messages.extend(messages);
+                    break;
+                }
+                saved.insert(msg.event_id);
+                received.push(msg);
+            }
+            let total = received.len();
+            let kind = if context == "live" && (opened > 1 || retrying) {
+                "catch_up"
+            } else {
+                context
+            };
+            if kind == "catch_up" {
+                if pending.batch_id.is_none() {
+                    pending.batch_id = received
+                        .first()
+                        .or_else(|| pending.messages.first())
+                        .map(|msg| format!("message:{}", msg.event_id.to_hex()));
+                }
+                pending.batch_size += total;
+                if pending.terminal.is_none() {
+                    pending.terminal = received
+                        .first()
+                        .or_else(|| pending.messages.first())
+                        .map(|msg| msg.terminal(pending.batch_id.clone(), pending.batch_size));
+                }
+                for mut msg in received {
+                    msg.arrival_kind = kind;
+                    msg.batch_id = pending.batch_id.clone();
+                    msg.batch_complete = false;
+                    msg.batch_size = pending.batch_size;
+                    pending.terminal =
+                        Some(msg.terminal(pending.batch_id.clone(), pending.batch_size));
+                    let _ = self.channel_incoming.send(msg);
+                }
+            } else {
+                for mut msg in received {
+                    msg.arrival_kind = kind;
+                    msg.batch_complete = true;
+                    msg.batch_size = total;
+                    let _ = self.channel_incoming.send(msg);
+                }
+            }
+            if total > 0 {
+                self.channel_recovery_notify.notify_one();
+            }
+            if !pending.messages.is_empty() {
+                let delay = pending.delay_ms.max(1000);
+                pending.retry_at = Some(std::time::Instant::now() + Duration::from_millis(delay));
+                pending.delay_ms = (delay * 2).min(30_000);
+                self.channel_recovery_notify.notify_one();
+                return;
+            }
+            pending.retry_at = None;
+            pending.delay_ms = 0;
+            if !limited && !retrying {
+                break;
+            }
+            context = "catch_up";
+        }
+        if let Some(mut terminal) = pending.terminal.take() {
+            terminal.batch_size = pending.batch_size;
+            let _ = self.channel_incoming.send(terminal);
+        }
+        pending.batch_id = None;
+        pending.batch_size = 0;
+        // ChannelBook returns only newly validated, decryptable messages. A
+        // coalesced domain-specific wake advances bounded background gossip;
+        // repeated processing and empty sync rounds do not create feedback.
         if self
             .log
             .lock()
@@ -476,73 +876,65 @@ impl Node {
         }
     }
 
-    /// Pull any DMs held for this node from the elected post office: dial it once,
-    /// then run a sync round for each known peer's DM conversation, surfacing
-    /// anything new. A no-op if no post office is known. Best-effort and
-    /// fail-soft — a dial/round error just ends this drain; the next one retries.
+    /// Retry exact failed plaintext even with no reachable member or new event.
+    pub(in crate::node) fn retry_channel_plaintext(&self) {
+        let channel = {
+            let pending = self
+                .pending_channel_plaintext
+                .lock()
+                .expect("pending plaintext lock not poisoned");
+            if pending
+                .retry_at
+                .is_some_and(|deadline| std::time::Instant::now() < deadline)
+            {
+                return;
+            }
+            pending.messages.first().map(|message| message.channel_id)
+        };
+        if let Some(channel) = channel {
+            self.process_channel_reception(channel, "catch_up");
+            self.process_file_events_reception(channel, "catch_up");
+        }
+    }
+
+    /// Pull from every known post office. Mailboxes are relay-specific, so a
+    /// message accepted during failover may remain on the fallback relay after
+    /// the preferred one returns.
     pub async fn drain_from_post_office(&self) {
         if self.cached_peer_snapshot_async().await.is_err() {
             log::warn!("verified discovery cache update failed");
         }
-        let post_office = {
+        let post_offices = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
-            elected_post_office(&roster)
+            self.post_office_candidates(&roster)
         };
-        let Some(po) = post_office else {
-            return;
-        };
-        if !self.relay_allowed(&po.public) {
-            return;
-        }
-        let mut channel = match self.privacy_dial(po.addr, &po.public).await {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let store = self.sync_store(channel.peer_identity());
-        // Drain a DM conversation per non-PO peer (we never DM a post office).
-        for peer in self.historical_dm_peers() {
-            let conv = dm_conversation_id(&self.identity.public(), &peer.public());
-            if request_round(&mut channel, &store, conv).await.is_err() {
-                return; // channel broke; the next drain re-dials
-            }
-            self.emit_new_messages(conv);
-            self.process_file_events(conv);
-            self.process_profile_events(conv);
-        }
-        // Drain known channel conversations as well.
-        let channel_ids: Vec<ConversationId> = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.channel_ids()
-        };
-        for cid in channel_ids {
-            if request_round(&mut channel, &store, cid).await.is_err() {
-                return;
-            }
-            self.process_channel(cid);
-            self.process_file_events(cid);
-        }
-        // Drain per-file conversations the file book knows (so a recipient pulls
-        // chunks the PO holds).
-        let file_convs: Vec<ConversationId> = {
-            let book = self.files.lock().expect("files mutex not poisoned");
-            book.file_convs()
-        };
-        for fc in file_convs {
-            if self.attachment_consent_status(fc)
-                != Some(super::attachment_consent::ReceiveDecision::Accepted)
-            {
+        for po in post_offices {
+            if !self.relay_receive_allowed(&po.public) {
                 continue;
             }
-            if request_round(&mut channel, &store, fc).await.is_err() {
-                // A bad legacy file conversation must not stall later approved files.
-                let Ok(reconnected) = self.privacy_dial(po.addr, &po.public).await else {
-                    return;
-                };
-                channel = reconnected;
+            let Ok(mut channel) = self.privacy_sync_dial(po.addr, &po.public).await else {
                 continue;
+            };
+            let mut reusable = true;
+            // A pairwise mailbox can contain DMs, channel invitations,
+            // controls, and file chunks unknown before this pull.
+            for peer in self.historical_dm_peers() {
+                if !self.verified_dm_pull_peer(&peer.public().user_id()) {
+                    continue;
+                }
+                if !self.relay_receive_allowed(&po.public)
+                    || self
+                        .opaque_relay_round(&mut channel, &peer.public(), None)
+                        .await
+                        .is_err()
+                {
+                    reusable = false;
+                    break;
+                }
             }
-            // Drained all chunks for a media file from the PO? Persist it durably + prune.
-            self.persist_media_if_complete(fc);
+            if reusable {
+                self.recycle_sync_channel(channel);
+            }
         }
     }
 
@@ -572,10 +964,16 @@ impl Node {
                 .collect()
         };
         for event in candidates {
-            let Some(proof) = self.historical_author(event.author.ed25519_pub()) else {
-                continue;
-            };
-            let _ = self.accept_dm_event(&event, &proof, &mut delivery);
+            if let Some(proof) = self.historical_author(event.author.ed25519_pub()) {
+                let _ = self.accept_dm_event(&event, &proof, &mut delivery);
+            } else if let Some(device) = self
+                .linked_devices()
+                .into_iter()
+                .find(|device| device.public.ed25519_pub == *event.author.ed25519_pub())
+            {
+                let _ =
+                    self.accept_dm_event_with_author(&event, &device.public, None, &mut delivery);
+            }
         }
         drop(delivery);
         // A recall may arrive before its target is viewed. Persist verified

@@ -1,7 +1,7 @@
 use super::{
     HistoryItem, NodeState, ReactionInfo, parse_channel_id, parse_event_id, to_reaction_infos,
 };
-use crate::commands::CommandError;
+use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use serde::Serialize;
 
 #[tauri::command]
@@ -63,20 +63,29 @@ pub async fn history<R: tauri::Runtime>(
 
 #[tauri::command]
 pub async fn send_to_account(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     account: String,
     text: String,
     reply_to: Option<String>,
 ) -> Result<(), CommandError> {
-    // Snapshot the node handle, then release the state lock before the .await send.
-    let node = state.node_handle().await?;
-    let reply = match reply_to {
-        Some(h) => Some(parse_event_id(&h)?),
-        None => None,
-    };
-    node.send_to_account(&account, text.as_bytes(), reply)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let reply = reply_to.as_deref().map(parse_event_id).transpose()?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let node = runtime.handle();
+                let id = node
+                    .enqueue_to_account_if(&account, text.as_bytes(), reply, |accept| {
+                        admission.authorize_accept(runtime, accept)
+                    })
+                    .await
+                    .map_err(CommandError::from)?;
+                node.flush_delivery(id).await;
+                Ok(())
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 /// Send an animated sticker as its own message. `convId` is the channel id (hex) when
@@ -84,28 +93,51 @@ pub async fn send_to_account(
 /// `fallback` is the emoji char shown if the recipient lacks that sticker.
 #[tauri::command]
 pub async fn send_sticker(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     conv_id: String,
     sticker_id: String,
     fallback: String,
     is_channel: bool,
+    expires_at_ms: Option<u64>,
 ) -> Result<(), CommandError> {
-    let channel = if is_channel {
-        Some(parse_channel_id(&conv_id)?)
-    } else {
-        None
-    };
-    let node = state.node_handle().await?;
-    match channel {
-        Some(channel) => node
-            .send_sticker_channel(channel, &sticker_id, fallback.as_bytes())
-            .await
-            .map_err(CommandError::from),
-        None => node
-            .send_sticker_to_account(&conv_id, &sticker_id, fallback.as_bytes())
-            .await
-            .map_err(CommandError::from),
-    }
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let channel = is_channel.then(|| parse_channel_id(&conv_id)).transpose()?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let node = runtime.handle();
+                match channel {
+                    Some(channel) => {
+                        // Channel sends retain their existing core policy; this entry
+                        // check rejects a queued replacement before starting the send.
+                        admission.authorize_accept(runtime, &mut || Ok(()))?;
+                        node.send_sticker_channel_expiring(
+                            channel,
+                            &sticker_id,
+                            fallback.as_bytes(),
+                            expires_at_ms,
+                        )
+                        .await
+                        .map_err(CommandError::from)
+                    }
+                    None => {
+                        let id = node
+                            .enqueue_sticker_to_account_if(
+                                &conv_id,
+                                &sticker_id,
+                                fallback.as_bytes(),
+                                |accept| admission.authorize_accept(runtime, accept),
+                            )
+                            .await
+                            .map_err(CommandError::from)?;
+                        node.flush_delivery(id).await;
+                        Ok(())
+                    }
+                }
+            })
+        })
+        .await
 }
 
 #[tauri::command]

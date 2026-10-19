@@ -223,8 +223,10 @@ async function startApp() {
 }
 async function login(username, register = false) {
   await element("login-form");
+  await until("stay signed in settings loaded", () => execute("return document.querySelector('[data-testid=login-stay-signed-in]')?.disabled === false;"));
   if (await execute("return document.querySelector('[data-testid=login-stay-signed-in]')?.checked === true;")) await click("login-stay-signed-in");
   await until("stay signed in disabled in production settings", async () => (await observe("get_app_settings")).stay_signed_in === false);
+  await until("stay signed in unchecked", () => execute("const e=document.querySelector('[data-testid=login-stay-signed-in]'); return !!e && !e.disabled && !e.checked;"));
   if (register) await click("login-tab-register");
   await fill("login-username", username);
   await fill("login-password", password);
@@ -260,6 +262,7 @@ async function manage() {
   await ensureOverflowOpen();
   await openDialog("sidebar-nav-settings");
   await settledDialog("settings-dialog");
+  await click("settings-nav-privacy");
   await openDialog("manage-hidden-contacts");
   await element("hidden-contacts-dialog");
   await settledDialog("hidden-contacts-dialog");
@@ -277,6 +280,7 @@ async function privacySettings() {
   await ensureOverflowOpen();
   await openDialog("sidebar-nav-settings");
   await settledDialog("settings-dialog");
+  await click("settings-nav-connection");
   await until("privacy controls loaded", () => execute("return document.querySelector('[data-testid=invisible-switch]')?.disabled === false;"));
 }
 async function signOut() {
@@ -378,7 +382,8 @@ try {
   // in either shipped language instead of assuming an English OS.
   assert.match(confirmationCopy, /History is kept|聊天历史保留/);
   assert.match(confirmationCopy, /Messages and calls can still arrive|仍可收到消息和来电/);
-  assert.match(confirmationCopy, /signed-in user on this device|本设备当前登录用户/);
+  assert.match(confirmationCopy, /Saved on this device|保存在本设备上/);
+  assert.match(confirmationCopy, /Linked devices can share this choice|已关联设备都启用联系人同步/);
   await key("\uE007");
   await until("Enter cancels confirmation", async () => !await exists("hide-contact-dialog"));
   assert.equal(await exists(row()), true);
@@ -451,7 +456,10 @@ try {
   await closeDialogs();
 
   await stop(peer, true);
-  await until("real offline peer expires from roster", async () => !(await observe("list_peers")).some(p => p.name === peerName), 180000);
+  // Authenticated routes remain valid for 300s, then discovery evicts them on
+  // its next 30s receive/cleanup tick. Observe real expiry without shortening
+  // production presence lifetimes or clearing the roster through a test hook.
+  await until("real offline peer expires from roster", async () => !(await observe("list_peers")).some(p => p.name === peerName), 360000);
   await manage();
   await fill("hidden-contacts-search", peerName);
   const nativeRect = await command("POST", "/window/rect", coreState.minimumWindow);

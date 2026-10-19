@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 test.use({ viewport: { width: 1100, height: 800 } });
 test("sidebar footer shows the Wi-Fi network name", async ({ page }) => {
@@ -8,6 +9,6 @@ test("sidebar footer shows the Wi-Fi network name", async ({ page }) => {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await expect(page.getByText("TestNet-5G")).toBeVisible();
 });

@@ -3,30 +3,22 @@
 //! holds the handles. Tauri-agnostic — inbound DMs are delivered via an injected
 //! `on_dm` callback, so this is unit-testable without a GUI.
 
-use crate::discovery::service::{
-    SharedAnnounce, shared_announce, spawn_discovery_with_visibility, swap_announce,
-};
-use crate::discovery::{Announce, PeerRecord, Roster};
+use super::{ParticipantConfig, ParticipantRuntime, PreparedParticipant};
+use crate::discovery::candidates::CandidateSource;
+use crate::discovery::{PeerRecord, Roster};
 use crate::eventlog::LogError;
 use crate::identity::account_keystore;
 use crate::identity::device::PublicIdentity;
 use crate::identity::keystore;
 use crate::node::name_directory::NameDirectory;
 use crate::node::{HistoryEntry, Node, NodeError, ReceivedDm};
-use crate::transport::net::discovery_socket;
+#[cfg(test)]
+use crate::transport::net::routed_ipv6_socket;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-
-/// How often the desktop node drains held DMs from the elected post office.
-const DRAIN_INTERVAL_SECS: u64 = 3;
-
-/// How often the node tries to pull chunks for files it has a manifest for but hasn't
-/// fully received yet — directly from peers (covers PO-less LANs where the sender's
-/// one-shot push is the only other delivery). A no-op when nothing is pending.
-const FILE_PULL_INTERVAL_SECS: u64 = 3;
 
 /// How often the node checks for freshly-discovered peers and re-publishes its current
 /// avatar to them (so a new contact sees the photo without waiting for the next change).
@@ -64,6 +56,10 @@ fn profile_republish_targets(
     }
     *present_prev = present_now;
     targets
+}
+
+fn channel_invitee_identity(peer: PeerRecord) -> Option<PublicIdentity> {
+    (!peer.post_office).then_some(peer.public)
 }
 
 /// Errors starting the node runtime.
@@ -105,6 +101,26 @@ pub struct RuntimeConfig<'a> {
     pub display_name: &'a str,
     pub password: &'a str,
     pub discovery_port: u16,
+    pub post_office_enabled: bool,
+    /// Optional host-owned routed address inventory; the core never starts a VPN.
+    pub candidate_source: Option<Arc<dyn CandidateSource>>,
+}
+
+/// Additive startup policy options; legacy RuntimeConfig callers retain defaults.
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeNetworkOptions {
+    pub post_office_send_enabled: bool,
+    pub post_office_receive_enabled: bool,
+    pub physical_lan_only: bool,
+}
+impl Default for RuntimeNetworkOptions {
+    fn default() -> Self {
+        Self {
+            post_office_send_enabled: true,
+            post_office_receive_enabled: true,
+            physical_lan_only: false,
+        }
+    }
 }
 
 /// Inbound events forwarded to the host from independent runtime tasks.
@@ -128,21 +144,12 @@ pub struct NodeRuntime {
     account_id: String,
     /// The display name this node advertises (for the diagnostics page).
     display_name: String,
-    /// The encoded announce the discovery loops broadcast, shared so a display-name
-    /// change can re-sign and swap it in live (no discovery restart).
-    announce: SharedAnnounce,
-    /// The OS-assigned TCP port the accept loop listens on (also needed to re-sign the
-    /// announce on a rename).
-    tcp_port: u16,
+    participant: ParticipantRuntime,
     /// Where the account keystore lives, so a successful device link can persist the
     /// adopted account secret (effective on next login).
     account_path: std::path::PathBuf,
     /// The session password, to re-encrypt the keystore when adopting a linked account.
     password: String,
-    /// Notify shared with the discovery broadcast + scan loops; firing it forces an
-    /// immediate re-announce and a /24 sweep (the manual "announce now / rescan").
-    discovery_trigger: Arc<Notify>,
-    tasks: Vec<JoinHandle<()>>,
 }
 
 impl NodeRuntime {
@@ -152,15 +159,8 @@ impl NodeRuntime {
     ///
     /// This does not cancel arbitrary SDK calls through externally held Node
     /// references; hosts must also serialize their own profile operations.
-    pub async fn stop(mut self) {
-        self.node.runtime_work.close();
-        for task in &self.tasks {
-            task.abort();
-        }
-        for task in std::mem::take(&mut self.tasks) {
-            let _ = task.await;
-        }
-        self.node.runtime_work.drain().await;
+    pub async fn stop(self) {
+        self.participant.stop().await;
     }
     /// Compatibility constructor with positional startup arguments.
     /// New hosts should use [`Self::start_configured`] or
@@ -231,10 +231,16 @@ impl NodeRuntime {
                 display_name,
                 password,
                 discovery_port,
+                post_office_enabled: true,
+                candidate_source: None,
             },
             RuntimeEvents {
                 on_dm: Box::new(on_dm),
-                on_channel: Box::new(on_channel),
+                on_channel: Box::new(move |message| {
+                    if !message.reception_only {
+                        on_channel(message);
+                    }
+                }),
                 on_file: Box::new(on_file),
                 on_profile: Box::new(on_profile),
                 on_call_signal: Box::new(on_call_signal),
@@ -253,12 +259,32 @@ impl NodeRuntime {
             &mut dyn FnMut(&str) -> NodeRuntime,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
+        Self::start_configured_guarded_with_network(
+            config,
+            events,
+            RuntimeNetworkOptions::default(),
+            authorize_launch,
+        )
+        .await
+    }
+
+    /// Initialize network preferences before any discovery or delivery producer starts.
+    pub async fn start_configured_guarded_with_network(
+        config: RuntimeConfig<'_>,
+        events: RuntimeEvents,
+        network: RuntimeNetworkOptions,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> NodeRuntime,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
         let RuntimeConfig {
             base_dir,
             account_id,
             display_name,
             password,
             discovery_port,
+            post_office_enabled,
+            candidate_source,
         } = config;
         let RuntimeEvents {
             on_dm,
@@ -294,12 +320,6 @@ impl NodeRuntime {
         // reachable over IPv6/link-local too; OS-assigned port (0).
         let listener = super::privacy_routes::stable_listener(&dir).await?;
         let tcp_port = listener.local_addr()?.port();
-
-        // Build the announce BEFORE the identity is moved into the node, and wrap it in a
-        // shared cell so a runtime rename can swap in a freshly re-signed announce.
-        let announce =
-            Announce::new_with_account(&identity, &account, display_name.to_string(), tcp_port);
-        let announce = shared_announce(&announce);
 
         let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
         let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<ReceivedDm>();
@@ -352,6 +372,12 @@ impl NodeRuntime {
         let names_result = names_handle.await;
         let node = node_result
             .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??;
+        node.set_post_office_permissions(
+            network.post_office_send_enabled,
+            network.post_office_receive_enabled,
+        );
+        node.set_post_office_enabled(post_office_enabled);
+        node.initialize_physical_lan_only(network.physical_lan_only);
         let names = Arc::new(Mutex::new(names_result.map_err(|e| {
             RuntimeError::Io(std::io::Error::other(format!("join error: {e}")))
         })??));
@@ -377,51 +403,19 @@ impl NodeRuntime {
             .set_public(!node.privacy_snapshot().invisible)
             .await;
 
-        let socket = Arc::new(discovery_socket(discovery_port)?);
+        let prepared = PreparedParticipant::prepare(
+            Arc::clone(&node),
+            listener,
+            visibility,
+            ParticipantConfig {
+                discovery_port,
+                candidate_source,
+            },
+        )?;
 
         let mut launch = Some(move |current_name: &str| {
-            let current_announce = node.signed_announce(current_name, tcp_port);
-            let _ = node.update_presence(&current_announce);
-            swap_announce(&announce, &current_announce);
-            let discovery_trigger = Arc::new(Notify::new());
+            let mut participant = prepared.launch(current_name);
             let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-            tasks.extend(spawn_discovery_with_visibility(
-                Arc::clone(&socket),
-                Arc::clone(&roster),
-                Arc::clone(&announce),
-                self_uid.clone(),
-                discovery_port,
-                Some(Arc::clone(&discovery_trigger)),
-                visibility,
-            ));
-            tasks.push(tokio::spawn(Arc::clone(&node).run_accept_loop(listener)));
-            {
-                let node = Arc::clone(&node);
-                tasks.push(tokio::spawn(async move {
-                    loop {
-                        node.probe_private_routes().await;
-                        tokio::time::sleep(Duration::from_secs(10)).await;
-                    }
-                }));
-            }
-            {
-                let node = Arc::clone(&node);
-                tasks.push(tokio::spawn(async move {
-                    loop {
-                        node.drain_from_post_office().await;
-                        tokio::time::sleep(Duration::from_secs(DRAIN_INTERVAL_SECS)).await;
-                    }
-                }));
-            }
-            {
-                let node = Arc::clone(&node);
-                tasks.push(tokio::spawn(async move {
-                    loop {
-                        node.pull_pending_files().await;
-                        tokio::time::sleep(Duration::from_secs(FILE_PULL_INTERVAL_SECS)).await;
-                    }
-                }));
-            }
             tasks.push(tokio::spawn(async move {
                 while let Some(dm) = incoming_rx.recv().await {
                     on_dm(dm);
@@ -493,6 +487,10 @@ impl NodeRuntime {
                 }));
             }
 
+            for task in tasks {
+                participant.register_host_task(task);
+            }
+
             NodeRuntime {
                 node,
                 roster,
@@ -500,12 +498,9 @@ impl NodeRuntime {
                 user_id: self_uid,
                 account_id,
                 display_name: current_name.to_string(),
-                announce,
-                tcp_port,
+                participant,
                 account_path: dir.join("account.keystore"),
                 password: password.to_string(),
-                discovery_trigger,
-                tasks,
             }
         });
         authorize_launch(&mut |name| launch.take().expect("runtime launch is single-use")(name))
@@ -514,6 +509,16 @@ impl NodeRuntime {
     /// This node's own user-id fingerprint.
     pub fn user_id(&self) -> &str {
         &self.user_id
+    }
+
+    pub fn discovery_port(&self) -> u16 {
+        self.participant.discovery_port()
+    }
+
+    /// Probe a user-supplied address without revealing this device's identity
+    /// until the other end returns a fresh, signed Mesh Talk response.
+    pub async fn probe_endpoint(&self, endpoint: std::net::SocketAddr) -> std::io::Result<()> {
+        self.participant.probe_endpoint(endpoint).await
     }
 
     /// The display name this node advertises to peers.
@@ -527,12 +532,10 @@ impl NodeRuntime {
     /// so it resolves consistently. Fires an immediate re-announce so peers converge fast.
     /// `account_id`/`user_id` are unchanged — only the human-readable name moves.
     pub fn set_display_name(&mut self, display_name: &str) {
-        let announce = self.node.signed_announce(display_name, self.tcp_port);
-        if self.node.update_presence(&announce).is_err() {
+        if self.participant.set_display_name(display_name).is_err() {
             log::warn!("Unable to update node presence");
             return;
         }
-        swap_announce(&self.announce, &announce);
         self.display_name = display_name.to_string();
         // Keep our own name in the durable directory too (it otherwise only tracks peers),
         // so `display_name_for(own_id)` stays consistent. A no-op when unchanged.
@@ -541,12 +544,11 @@ impl NodeRuntime {
             .lock()
             .expect("names mutex not poisoned")
             .record(&self.user_id, display_name);
-        self.discovery_trigger.notify_waiters();
     }
 
     /// The local TCP port the node's accept loop is listening on.
     pub fn listen_tcp_port(&self) -> u16 {
-        self.tcp_port
+        self.participant.listen_tcp_port()
     }
 
     /// This node's cryptographic account id (stable across devices once linking
@@ -600,7 +602,12 @@ impl NodeRuntime {
     /// the user can press "announce now" to converge without waiting for the next
     /// tick. Idempotent and harmless — peers self-filter duplicate announces.
     pub fn trigger_discovery(&self) {
-        self.discovery_trigger.notify_waiters();
+        self.participant.trigger_discovery();
+    }
+
+    /// Whether this runtime's discovery producers are still running.
+    pub fn discovery_available(&self) -> bool {
+        self.participant.discovery_available()
     }
 
     /// A snapshot of currently-known peers.
@@ -644,6 +651,14 @@ impl NodeRuntime {
         self.node.routing_peer(user_id).map(|p| p.public)
     }
 
+    /// Resolve a known chat peer for channel membership. A post office is a
+    /// transport node, not a participant that can accept a channel invitation.
+    pub fn channel_invitee_public(&self, user_id: &str) -> Option<PublicIdentity> {
+        self.node
+            .routing_peer(user_id)
+            .and_then(channel_invitee_identity)
+    }
+
     /// Send a DM to a known peer by user-id.
     pub async fn send_dm(&self, recipient: &str, text: &[u8]) -> Result<(), NodeError> {
         self.node.send_dm(recipient, text).await
@@ -666,6 +681,11 @@ impl NodeRuntime {
             .await
     }
 
+    /// Process-local revision for durable account history projection refreshes.
+    pub fn account_history_revision(&self) -> u64 {
+        self.node.account_history_revision()
+    }
+
     /// Account-level conversation history with `peer_account_id`.
     pub fn account_history(&self, peer_account_id: &str, limit: usize) -> Vec<HistoryEntry> {
         self.node.account_history(peer_account_id, limit)
@@ -684,6 +704,10 @@ impl NodeRuntime {
     /// Every peer avatar we hold, `account_id -> data-URL bytes` (for seeding the UI).
     pub fn peer_avatars(&self) -> std::collections::HashMap<String, Vec<u8>> {
         self.node.peer_avatars()
+    }
+
+    pub fn peer_profile_states(&self) -> std::collections::HashMap<String, Option<Vec<u8>>> {
+        self.node.peer_profile_states()
     }
 
     /// The session password held for re-encrypting the keystore — used only to
@@ -740,6 +764,24 @@ impl NodeRuntime {
             .link_to_device(peer.addr, &peer.public, code)
             .await?;
         let account = crate::identity::account::Account::from_secret_bytes(linked.secret);
+        let device_dir = self
+            .account_path
+            .parent()
+            .ok_or_else(|| NodeError::Channel("account path has no parent".into()))?;
+        let mut devices = super::account_devices::AccountDevices::open(
+            &super::account_devices::file_path(device_dir, &linked.account_id),
+            &self.password,
+            &linked.account_id,
+        )
+        .map_err(NodeError::Log)?;
+        for public in [self.node.identity.public(), peer.public] {
+            devices
+                .insert(super::account_devices::AccountDevice {
+                    certificate: account.certify(&public.ed25519_pub),
+                    public,
+                })
+                .map_err(NodeError::Log)?;
+        }
         self.node
             .persist_account_adoption(&account.account_id(), || {
                 crate::identity::account_keystore::save(
@@ -774,6 +816,14 @@ impl NodeRuntime {
         self.node.channel_members(channel)
     }
 
+    pub fn channel_replica_enabled(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+        member: &str,
+    ) -> bool {
+        self.node.channel_replica_enabled(channel, member)
+    }
+
     pub fn channel_pending_members(
         &self,
         channel: crate::eventlog::event::ConversationId,
@@ -796,6 +846,13 @@ impl NodeRuntime {
     /// The current owner of a channel.
     pub fn channel_owner(&self, channel: crate::eventlog::event::ConversationId) -> String {
         self.node.channel_owner(channel)
+    }
+
+    pub fn channel_recovery(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+    ) -> Option<super::ChannelRecovery> {
+        self.node.channel_recovery(channel)
     }
 
     /// History of a channel (all senders).
@@ -906,15 +963,6 @@ impl NodeRuntime {
     }
 }
 
-impl Drop for NodeRuntime {
-    fn drop(&mut self) {
-        self.node.runtime_work.close();
-        for task in &self.tasks {
-            task.abort();
-        }
-    }
-}
-
 #[cfg(test)]
 #[path = "runtime_privacy_tests.rs"]
 mod privacy_tests;
@@ -924,228 +972,5 @@ mod privacy_tests;
 mod retirement_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn failed_node_or_privacy_initialization_joins_already_started_names_writer() {
-        for failure_path in ["messages.log", "privacy.policy"] {
-            let root = tempfile::tempdir().unwrap();
-            let directory = root.path().join("accounts").join("owner");
-            std::fs::create_dir_all(directory.join(failure_path)).unwrap();
-            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            NAMES_OPEN_HOOKS.lock().unwrap().insert(
-                directory.join("names.log"),
-                Box::new(move || {
-                    entered_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
-                }),
-            );
-            let base = root.path().to_owned();
-            let (finished_tx, mut finished_rx) = tokio::sync::oneshot::channel();
-            let startup = tokio::spawn(async move {
-                let result = NodeRuntime::start(
-                    &base,
-                    "owner",
-                    "Owner",
-                    "pw",
-                    0,
-                    |_| {},
-                    |_| {},
-                    |_| {},
-                    |_| {},
-                    |_| {},
-                )
-                .await;
-                finished_tx.send(()).unwrap();
-                result
-            });
-            entered_rx.await.unwrap();
-            let returned_while_writer_blocked =
-                tokio::time::timeout(Duration::from_millis(150), &mut finished_rx)
-                    .await
-                    .is_ok();
-            release_tx.send(()).unwrap();
-            assert!(startup.await.unwrap().is_err());
-            assert!(
-                !returned_while_writer_blocked,
-                "{failure_path} error detached the paused names writer"
-            );
-            // Completion includes the real NameDirectory::open append/writer, not
-            // just the gate callback: both handles were actually joined.
-            assert!(directory.join("names.log").is_file());
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn names_initialization_error_waits_for_node_initializer_completion() {
-        let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("accounts").join("owner");
-        std::fs::create_dir_all(directory.join("names.log")).unwrap();
-        let result = NodeRuntime::start(
-            root.path(),
-            "owner",
-            "Owner",
-            "pw",
-            0,
-            |_| {},
-            |_| {},
-            |_| {},
-            |_| {},
-            |_| {},
-        )
-        .await;
-        assert!(result.is_err());
-        assert!(directory.join("messages.log").is_file());
-        // Reopening immediately after error must not race a detached Node writer.
-        let node = NodeRuntime::start(
-            root.path(),
-            "other",
-            "Other",
-            "pw",
-            0,
-            |_| {},
-            |_| {},
-            |_| {},
-            |_| {},
-            |_| {},
-        )
-        .await
-        .unwrap();
-        node.stop().await;
-    }
-
-    fn fake_peer(post_office: bool) -> PeerRecord {
-        PeerRecord {
-            public: crate::identity::device::DeviceIdentity::generate().public(),
-            addr: "127.0.0.1:1".parse().unwrap(),
-            name: "p".into(),
-            post_office,
-            account_id: None,
-            last_seen: std::time::Instant::now(),
-        }
-    }
-
-    #[test]
-    fn profile_republish_targets_fires_on_first_sight_and_on_reconnect() {
-        let bob = fake_peer(false);
-        let mut present = std::collections::HashSet::new();
-
-        // First sight → publish to Bob.
-        assert_eq!(
-            profile_republish_targets(&mut present, std::slice::from_ref(&bob)).len(),
-            1
-        );
-        // Still present next round → no re-publish (no log churn).
-        assert!(profile_republish_targets(&mut present, std::slice::from_ref(&bob)).is_empty());
-        // Bob goes offline (evicted from the roster).
-        assert!(profile_republish_targets(&mut present, &[]).is_empty());
-        // Bob reconnects → published to AGAIN. The old monotonic `seen` set skipped him here,
-        // so he kept showing our stale avatar until we manually re-set it.
-        assert_eq!(
-            profile_republish_targets(&mut present, std::slice::from_ref(&bob)).len(),
-            1,
-            "a reconnecting peer must be re-published to"
-        );
-
-        // A post office is never a profile target.
-        let mut p2 = std::collections::HashSet::new();
-        assert!(
-            profile_republish_targets(&mut p2, std::slice::from_ref(&fake_peer(true))).is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn start_opens_a_node_and_exposes_its_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        // An uncommon discovery port so the test doesn't touch the real one.
-        let dp = 47990;
-        let runtime = NodeRuntime::start_configured(
-            RuntimeConfig {
-                base_dir: dir.path(),
-                account_id: "alice-user-id",
-                display_name: "Alice",
-                password: "pw",
-                discovery_port: dp,
-            },
-            RuntimeEvents {
-                on_dm: Box::new(|_dm| {}),
-                on_channel: Box::new(|_ch| {}),
-                on_file: Box::new(|_f| {}),
-                on_profile: Box::new(|_p| {}),
-                on_call_signal: Box::new(|_s| {}),
-            },
-        )
-        .await
-        .expect("runtime starts");
-
-        // The node opened and exposes a stable fingerprint; no peers yet.
-        assert_eq!(runtime.user_id().len(), 32); // user_id is 32 hex chars
-        assert!(runtime.peers().is_empty());
-        assert!(runtime.peer_public("nobody").is_none());
-
-        // Per-user files were created on disk under accounts/<user_id>/.
-        let node_dir = dir.path().join("accounts").join("alice-user-id");
-        assert!(node_dir.join("identity.keystore").exists());
-        assert!(node_dir.join("messages.log").exists());
-        assert!(node_dir.join("sent.log").exists());
-
-        // Reopening the same dir reloads the SAME identity (persistent).
-        let runtime2 = NodeRuntime::start(
-            dir.path(),
-            "alice-user-id",
-            "Alice",
-            "pw",
-            dp,
-            |_dm| {},
-            |_ch| {},
-            |_f| {},
-            |_p| {},
-            |_s| {},
-        )
-        .await
-        .expect("runtime reopens");
-        assert_eq!(runtime.user_id(), runtime2.user_id());
-
-        // The cryptographic account is created on disk and stable across reopen.
-        assert_eq!(runtime.account_id().len(), 32); // account_id is 32 hex chars
-        assert_eq!(runtime.host_account_id(), Some("alice-user-id"));
-        assert!(node_dir.join("account.keystore").exists());
-        assert_eq!(runtime.account_id(), runtime2.account_id());
-    }
-
-    #[tokio::test]
-    async fn set_display_name_updates_advertised_name_and_own_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut runtime = NodeRuntime::start(
-            dir.path(),
-            "alice-user-id",
-            "Alice",
-            "pw",
-            47991,
-            |_dm| {},
-            |_ch| {},
-            |_f| {},
-            |_p| {},
-            |_s| {},
-        )
-        .await
-        .expect("runtime starts");
-
-        assert_eq!(runtime.display_name(), "Alice");
-        let uid = runtime.user_id().to_string();
-
-        // Rename to a permissive (spaces + emoji) display name.
-        runtime.set_display_name("Alice Renamed 🐻");
-
-        // The advertised name and our own durable record both reflect the change; the
-        // identity (user_id/account_id) is untouched.
-        assert_eq!(runtime.display_name(), "Alice Renamed 🐻");
-        assert_eq!(
-            runtime.display_name_for(&uid).as_deref(),
-            Some("Alice Renamed 🐻")
-        );
-        assert_eq!(runtime.user_id(), uid);
-    }
-}
+#[path = "runtime_routed_tests.rs"]
+mod tests;

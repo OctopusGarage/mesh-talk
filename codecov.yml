@@ -4,5 +4,5 @@ coverage:
   status:
     patch:
       default:
-        target: 80%
+        target: 92%
         threshold: 0%

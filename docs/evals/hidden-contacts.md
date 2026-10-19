@@ -7,6 +7,46 @@ The same native harness also evaluates issue #135's separate **invisible mode**:
 public presence suppression and account-scoped communication permissions. It restores
 public mode before testing #134, so list hiding is never mistaken for blocking.
 
+## Offline contact deletion
+
+**Delete contact** is separate from Hide: after confirmation, it removes an offline
+contact from this device's roster and permanently erases its local conversation
+history. Fresh online discovery can add the contact back without restoring erased
+history. Other devices and shared groups are unchanged.
+
+`frontend/e2e/delete-contacts.spec.ts` covers cancellation, irreversible-action
+copy, persistence after reload, online rediscovery without old history, online
+contacts, a presence change during confirmation, save failure/retry and a narrow
+confirmation screenshot. The shared IPC fixture implements the local deletion
+contract; it is not evidence of native storage erasure.
+
+The `contact_policy::native_mesh_tests` regression separately exchanges real
+signed discovery and encrypted messages, restarts offline, invokes the registered
+delete command, and restarts again to assert that erased history stays absent.
+The existing Hide assertions still verify that hiding preserves history.
+
+Run both layers with:
+
+```bash
+cargo test -p mesh-talk --lib contact_policy::
+cd frontend && npx playwright test e2e/delete-contacts.spec.ts e2e/hidden-contacts.spec.ts e2e/message-lifecycle.spec.ts --workers=1 --retries=0
+```
+
+The model-backed `make ai-eval` remains an evaluation of agent/workflow contracts;
+it does not establish this feature's UI or deletion correctness.
+
+Offline deletion validation on 2026-10-17:
+
+- `make e2e`: 13 backend cases passed, including the 110 MB directory case.
+- The three selected Playwright specs above: 20 cases passed; the 390×844
+  confirmation screenshot was inspected.
+- `make test`: 1205 Rust workspace tests passed; ignored cases remain separate.
+- Five affected frontend unit files: 132 tests passed.
+- `make eval-smoke` and `node --test scripts/test-ai-eval.mjs`: passed.
+- `AI_EVAL_COMMAND='codex exec --sandbox read-only --ephemeral --skip-git-repo-check -C /tmp -' make ai-eval`:
+  all 10 agent/workflow cases passed. The JSON report is generated at
+  `target/ai-eval/report.json`.
+
 ## Reproducible layers
 
 | Layer | Entry point | What it proves |

@@ -104,12 +104,51 @@ impl NodeState {
         )
     }
 
-    /// Clone the node before a command starts async or blocking work. The session
-    /// lock is released when this method returns, so other commands can proceed.
+    /// Legacy runtime snapshot, not session authority. The runtime lock is
+    /// released before return; new synchronous commands use RuntimeAdmission,
+    /// and asynchronous producers authorize at their actual commit seam.
     pub(crate) async fn node_handle(&self) -> Result<Arc<Node>, CommandError> {
         let guard = self.0.lock().await;
         let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
         Ok(runtime.handle())
+    }
+
+    /// Clone only from the installation matching the entry session lease and
+    /// requested account. This snapshot does not authorize later asynchronous
+    /// mutations; callers must still validate at their actual commit seam.
+    pub(crate) async fn node_for_owner(
+        &self,
+        session: &SessionState,
+        owner: &str,
+    ) -> Option<Arc<Node>> {
+        let lease = session.capture().ok()?;
+        if lease.owner() != owner {
+            return None;
+        }
+        let guard = self.0.lock().await;
+        let runtime = guard.as_ref()?;
+        self.with_session_runtime(session, &lease, runtime, || Ok(runtime.handle()))
+            .ok()
+    }
+
+    /// Called under the runtime guard. Keep the matching session guard through
+    /// synchronous work so session publication cannot split check from commit.
+    pub(crate) fn with_session_runtime<T>(
+        &self,
+        session: &SessionState,
+        lease: &SessionLease,
+        runtime: &NodeRuntime,
+        operation: impl FnOnce() -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        session
+            .matching(lease, |_| {
+                if runtime.host_account_id() != Some(lease.owner()) {
+                    return Err(CommandError::Authorization("runtime owner mismatch".into()));
+                }
+                self.check_installation(lease)?;
+                operation()
+            })
+            .map_err(CommandError::Authorization)?
     }
 }
 

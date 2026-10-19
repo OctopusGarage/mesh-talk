@@ -4,7 +4,10 @@
 //! plaintext UDP discovery (which carried no keys).
 
 pub mod announce;
+pub mod candidates;
+pub mod query;
 pub mod roster;
+pub(crate) mod scope;
 pub mod service;
 pub mod visibility;
 

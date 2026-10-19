@@ -9,7 +9,7 @@ test("backend evidence requires every expected scenario exactly once, not ignore
   const { validateBackendOutput } = await import("../evals/backend-runner.mjs");
   const valid = "test actual_flow ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
   assert.deepEqual(validateBackendOutput(valid, ["actual_flow"]), ["actual_flow"]);
-  for (const output of [valid.replace("... ok", "... ignored"), valid + "\ntest actual_flow ... ok", valid.replace("0 failed", "1 failed"), valid.replace("1 passed", "2 passed")]) assert.throws(() => validateBackendOutput(output, ["actual_flow"]));
+  for (const output of [valid.replace("... ok", "... ignored"), valid + "\ntest actual_flow ... ok", valid.replace("0 failed", "1 failed"), valid.replace("1 passed", "2 passed"), valid.replace("0 filtered out", "2 filtered out")]) assert.throws(() => validateBackendOutput(output, ["actual_flow"]));
 });
 test("backend evaluates every independent suite after a failure and retains a failing verdict", async () => {
   const { BACKEND_SUITES, evaluateBackendSuites } = await import("../evals/backend-runner.mjs");

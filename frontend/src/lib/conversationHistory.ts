@@ -3,13 +3,7 @@
 // unit-testable in the node test environment, mirroring lib/mentions.
 import type { ChatMessage } from "@/store/chat";
 import { messageSegments } from "@/lib/mentions";
-
-// Image/video extension sniffing — mirrors mediaFile.tsx's IMAGE_EXT/VIDEO_EXT. Duplicated
-// here (rather than imported) so this module stays React-free and unit-testable under the
-// node vitest environment (mediaFile.tsx pulls in JSX + lucide-react).
-const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|avif|svg)$/i;
-const VIDEO_EXT = /\.(mp4|mov|webm|m4v|ogv)$/i;
-const isMedia = (name: string) => IMAGE_EXT.test(name) || VIDEO_EXT.test(name);
+import { isImage, isVideo } from "@/lib/mediaTypes";
 
 export type HistoryCategory = "media" | "files" | "links" | "other";
 
@@ -28,7 +22,7 @@ export function hasLink(text: string): boolean {
  */
 export function categorize(m: ChatMessage): HistoryCategory {
   if (m.file) {
-    return isMedia(m.file.name) ? "media" : "files";
+    return isImage(m.file.name) || isVideo(m.file.name) ? "media" : "files";
   }
   return hasLink(m.text) ? "links" : "other";
 }

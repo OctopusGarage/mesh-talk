@@ -1,5 +1,5 @@
 use super::*;
-use crate::discovery::{Announce, roster::Roster};
+use crate::discovery::Announce;
 use crate::eventlog::{ConversationId, EventId};
 use crate::identity::{account::Account, device::DeviceIdentity};
 use std::{
@@ -8,6 +8,66 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::{net::TcpListener, sync::mpsc};
+
+#[tokio::test]
+async fn confirmed_destination_does_not_open_another_relay_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let recipient = DeviceIdentity::generate();
+    let account = Account::generate();
+    let proof = Announce::new_with_account(&recipient, &account, "recipient", 9);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay = DeviceIdentity::generate();
+    let relay_proof = Announce::new_post_office_with_account(
+        &relay,
+        &Account::generate(),
+        "relay",
+        listener.local_addr().unwrap().port(),
+    );
+    sender.roster.lock().unwrap().update(
+        &relay_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    let id = sender
+        .enqueue_to_account(&account.account_id(), b"already confirmed", None)
+        .await
+        .unwrap();
+    let destination = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations[0]
+        .clone();
+    // This store operation is invoked only after exact authenticated receipt
+    // validation; its authorization is exercised by the existing receipt tests.
+    sender
+        .delivery
+        .lock()
+        .unwrap()
+        .mark_delivered_for(id, destination.event.id)
+        .unwrap();
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Delivered));
+    let (result, incoming) = tokio::join!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            sender.replicate_delivery_destination(&destination)
+        ),
+        tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()),
+    );
+    assert!(
+        incoming.is_err(),
+        "confirmed destination opened an unnecessary relay connection"
+    );
+    assert!(matches!(result, Ok(false)));
+}
 
 async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -213,8 +273,8 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 1);
+    let bob_account = Account::generate();
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 1);
     let (a, _) = node(dir.path(), alice, aa, &bp);
     a.configure_privacy(
         dir.path(),
@@ -226,16 +286,19 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
     )
     .unwrap();
     let denied = a
-        .enqueue_to_account_if(&ba.account_id(), b"before permission", None, |_| {
-            Err(NodeError::Authorization("host replaced".into()))
-        })
+        .enqueue_to_account_if(
+            &bob_account.account_id(),
+            b"before permission",
+            None,
+            |_| Err(NodeError::Authorization("host replaced".into())),
+        )
         .await;
     assert!(matches!(denied, Err(NodeError::Authorization(_))));
     assert!(a.privacy_snapshot().allowed_accounts.is_empty());
     let before_sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
     let mut checks = 0;
     let denied = a
-        .enqueue_to_account_if(&ba.account_id(), b"deny WAL", None, |accept| {
+        .enqueue_to_account_if(&bob_account.account_id(), b"deny WAL", None, |accept| {
             checks += 1;
             if checks <= 2 {
                 accept()
@@ -259,7 +322,7 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
     let during_staging = authorized.clone();
     let denied = a
         .enqueue_file_to_account_progress_if(
-            &ba.account_id(),
+            &bob_account.account_id(),
             &path,
             crate::file::FileKind::File,
             move |_| during_staging.store(false, std::sync::atomic::Ordering::Release),
@@ -275,7 +338,7 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
         )
         .await;
     assert!(matches!(denied, Err(NodeError::Authorization(_))));
-    assert!(a.account_history(&ba.account_id(), 10).is_empty());
+    assert!(a.account_history(&bob_account.account_id(), 10).is_empty());
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     // Chunk staging was real, but no local file card/WAL transaction was accepted.
     assert!(!a.log.lock().unwrap().conversations().is_empty());
@@ -290,12 +353,12 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let secret = bob.secret_bytes();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 1);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 1);
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let id = a
         .enqueue_to_account(&b.account_id(), b"before rekey", None)
         .await
@@ -411,21 +474,21 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
     let source_secret = alice.secret_bytes();
     let source_account = aa.secret_bytes();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let other = DeviceIdentity::generate();
     let ca = Account::from_secret_bytes(aa.secret_bytes());
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let cp = Announce::new_with_account(&other, &ca, "Own copy", cl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
     a.roster
         .lock()
         .unwrap()
         .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     let (c, _) = node(cd.path(), other, ca, &ap);
     let path = ad.path().join("空文件.txt");
     std::fs::write(&path, []).unwrap();
@@ -535,9 +598,14 @@ async fn file_enqueue_progress_never_waits_for_stalled_contact_tcp() {
         let alice = DeviceIdentity::generate();
         let aa = Account::generate();
         let bob = DeviceIdentity::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", stalled.local_addr().unwrap().port());
+        let bp = Announce::new_with_account(
+            &bob,
+            &bob_account,
+            "Bob",
+            stalled.local_addr().unwrap().port(),
+        );
         let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
         let (a, _) = node(dir.path(), alice, aa, &bp);
         a.configure_privacy(
@@ -549,10 +617,14 @@ async fn file_enqueue_progress_never_waits_for_stalled_contact_tcp() {
         .unwrap();
         let path = dir.path().join("empty.txt");
         std::fs::write(&path, []).unwrap();
-        let accepted = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        // Windows runners may pause a local disk/KDF task for more than a second
+        // under the full workspace suite. The separate accept assertion below
+        // still proves enqueue never waits for or initiates contact TCP.
+        let local_budget = if cfg!(windows) { 5 } else { 1 };
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(local_budget), async {
             if account_addressed {
                 a.enqueue_file_to_account_progress(
-                    &ba.account_id(),
+                    &bob_account.account_id(),
                     &path,
                     crate::file::FileKind::File,
                     |_| {},
@@ -712,13 +784,13 @@ async fn file_terminal_negative_custody_retries_on_cadence_without_empty_cache_s
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     for (node, dir, proof) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
         node.configure_privacy(
             dir,
@@ -738,12 +810,20 @@ async fn file_terminal_negative_custody_retries_on_cadence_without_empty_cache_s
         .await
         .unwrap();
     let dm = super::conversation::dm_conversation_id(&a.identity.public(), &b.identity.public());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        sync_delivery_test_stage(&a, &b, &bl, dm).await;
-        sync_delivery_test_stage(&a, &b, &bl, file).await;
-    })
+    // Each independent sync needs its own bound: a busy Windows runner can
+    // spend several seconds on one authenticated handshake.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sync_delivery_test_stage(&a, &b, &bl, dm),
+    )
     .await
-    .unwrap();
+    .expect("DM setup sync completes");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sync_delivery_test_stage(&a, &b, &bl, file),
+    )
+    .await
+    .expect("file setup sync completes");
     let ids = a.sync_store(&bp.public()).lock().unwrap().event_ids(&file);
     assert_eq!(
         b.sync_store(&ap.public()).lock().unwrap().event_ids(&file),
@@ -848,12 +928,13 @@ async fn retained_file_transfer_rechecks_permission_and_exact_account_binding() 
         let bob = DeviceIdentity::generate();
         let bob_keys = bob.secret_bytes();
         let aa = Account::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+        let bp =
+            Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
         let (a, _) = node(ad.path(), alice, aa, &bp);
-        let (b, _) = node(bd.path(), bob, ba, &ap);
+        let (b, _) = node(bd.path(), bob, bob_account, &ap);
         for (node, dir, own) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
             node.configure_privacy(
                 dir,
@@ -933,15 +1014,15 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let secret = alice.secret_bytes();
     let account_secret = aa.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     for (node, dir, own) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
         node.configure_privacy(
             dir,
@@ -1485,10 +1566,10 @@ fn erased_static_manifest_reopen(adopt: bool) {
     let aa = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let secret = bob.secret_bytes();
-    let mut account_secret = ba.secret_bytes();
-    let (b, _) = node(dir.path(), bob, ba, &ap);
+    let mut account_secret = bob_account.secret_bytes();
+    let (b, _) = node(dir.path(), bob, bob_account, &ap);
     let conv = super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
     let manifest = crate::file::FileManifest {
         name: "erase.txt".into(),
@@ -1552,13 +1633,13 @@ async fn automatic_file_card_receipt_and_chunk_resume_without_manual_flush() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     let bytes = vec![5; crate::file::CHUNK_SIZE + 1];
     let path = ad.path().join("boundary.bin");
     std::fs::write(&path, &bytes).unwrap();
@@ -1658,13 +1739,13 @@ async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(dir.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
     let result = a
         .enqueue_to_account(&bp.account_id().unwrap(), &vec![b'x'; 128 * 1024], None)
@@ -1716,13 +1797,13 @@ async fn live_receive_recovery_emits_exactly_one_callback_after_durable_install(
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let id = a
         .enqueue_to_account(&b.account_id(), b"live recovery", None)
         .await
@@ -1783,15 +1864,16 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
         let alice = DeviceIdentity::generate();
         let aa = Account::generate();
         let bob = DeviceIdentity::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let secret = bob.secret_bytes();
-        let account_secret = ba.secret_bytes();
+        let account_secret = bob_account.secret_bytes();
         let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+        let bp =
+            Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
         let (a, _) = node(ad.path(), alice, aa, &bp);
-        let (mut b, _, mut files) = node_with_files(bd.path(), bob, ba, &ap);
+        let (mut b, _, mut files) = node_with_files(bd.path(), bob, bob_account, &ap);
         let path = ad.path().join("empty.txt");
         std::fs::write(&path, []).unwrap();
         let (id, file) = a
@@ -2669,8 +2751,8 @@ fn pending_accepted_intent_precedes_own_event(backfill: bool) {
         let dir = tempfile::tempdir().unwrap();
         let alice = DeviceIdentity::generate();
         let bob = DeviceIdentity::generate();
-        let ba = Account::generate();
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+        let bob_account = Account::generate();
+        let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
         let conv = super::conversation::dm_conversation_id(&alice.public(), &bob.public());
         let competing = Event::new(&alice, conv, 1, vec![], 1, 11, EventKind::React, vec![2]);
         let (a, _) = node(dir.path(), alice, Account::generate(), &bp);
@@ -2697,12 +2779,12 @@ fn pending_accepted_intent_precedes_own_event(backfill: bool) {
                 message: OutgoingDelivery {
                     logical_id: original.id,
                     sender_account: a.account_id(),
-                    recipient_account: Some(ba.account_id()),
+                    recipient_account: Some(bob_account.account_id()),
                     conversation: conv,
                     wall_clock: 10,
                     destinations: vec![DeliveryDestination {
                         device: bob.public(),
-                        account: Some(ba.account_id()),
+                        account: Some(bob_account.account_id()),
                         event: original.clone(),
                         receipt_eligible: true,
                     }],
@@ -2739,6 +2821,75 @@ fn pending_accepted_intent_precedes_own_event(backfill: bool) {
                 .any(|e| e.id == original.id)
         );
     }
+}
+
+#[tokio::test]
+async fn accepted_account_file_card_carries_fixed_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = Account::generate();
+    let proof = Announce::new_with_account(&DeviceIdentity::generate(), &remote, "Bob", 1);
+    let (node, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let path = dir.path().join("secret.txt");
+    std::fs::write(&path, b"secret").unwrap();
+    let deadline = super::node::now_millis() + 300_000;
+    let (id, _) = node
+        .enqueue_file_to_account_progress_expiring_if(
+            &remote.account_id(),
+            &path,
+            crate::file::FileKind::File,
+            |_| {},
+            Some(deadline),
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let row = node
+        .received_files
+        .lock()
+        .unwrap()
+        .entry(id)
+        .unwrap()
+        .clone();
+    assert_eq!(crate::expiry::deadline(&row.plaintext), Some(deadline));
+    assert!(crate::file::decode_manifest(&row.plaintext).is_some());
+}
+
+#[tokio::test]
+async fn accepted_account_message_carries_fixed_deadline_inside_encrypted_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = Account::generate();
+    let proof = Announce::new_with_account(&DeviceIdentity::generate(), &remote, "Bob", 1);
+    let (node, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let deadline = super::node::now_millis() + 300_000;
+    let id = node
+        .enqueue_to_account_expiring_if(
+            &remote.account_id(),
+            b"secret",
+            None,
+            Some(deadline),
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let conv =
+        super::conversation::account_conversation_id(&node.account_id(), &remote.account_id());
+    let sent = node.sentlog.lock().unwrap().entries(&conv);
+    let env = super::dm_envelope::DmEnvelope::decode(&sent[0].plaintext).unwrap();
+    assert_eq!(crate::expiry::deadline(&env.body), Some(deadline));
+    assert_eq!(
+        super::queries::decode_account_entry(&sent[0].plaintext).0,
+        id
+    );
 }
 
 fn node(
@@ -2823,27 +2974,7 @@ fn node_with_files(
     mpsc::UnboundedReceiver<ReceivedDm>,
     mpsc::UnboundedReceiver<ReceivedFile>,
 ) {
-    let roster = Arc::new(Mutex::new(Roster::default()));
-    roster.lock().unwrap().update(
-        proof,
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        &identity.public().user_id(),
-    );
-    let (tx, rx) = mpsc::unbounded_channel();
-    let (ch, _) = mpsc::unbounded_channel();
-    let (file, files) = mpsc::unbounded_channel();
-    let node = Node::open_with_account(
-        identity,
-        account,
-        roster,
-        tx,
-        ch,
-        file,
-        &dir.join("events.log"),
-        &dir.join("sent.log"),
-        "pw",
-    )
-    .unwrap();
+    let (node, rx, files) = super::test_support::node_with_files(dir, identity, account, proof);
     // Legacy delivery tests exercise the previous automatic-transfer contract.
     // The consent-specific loopback test keeps the new manual default.
     node.set_attachment_global_auto(true).unwrap();
@@ -2852,12 +2983,12 @@ fn node_with_files(
 
 #[tokio::test]
 async fn automatic_receipt_roundtrip_with_both_original_peers_stopped_in_turn() {
-    automatic_offline_roundtrip(false).await;
+    automatic_offline_roundtrip(false, false).await;
 }
 
 #[tokio::test]
 async fn automatic_receipt_reuses_exact_ack_after_relay_eviction() {
-    automatic_offline_roundtrip(true).await;
+    automatic_offline_roundtrip(true, true).await;
 }
 
 #[tokio::test]
@@ -2867,9 +2998,9 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let po = DeviceIdentity::generate();
     let pa = Account::generate();
     let pp = Announce::new_post_office_with_account(&po, &pa, "PO", 9);
@@ -2898,7 +3029,7 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
     };
     let payload = super::delivery_receipt::ReceiptPayload::prepare(
         &bob.public(),
-        &ba.account_id(),
+        &bob_account.account_id(),
         &ap,
         &original,
         &received,
@@ -2923,7 +3054,9 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
             .ingest(ack.clone())
             .is_err()
     );
-    p.set_allowed(&ba.account_id(), true).await.unwrap();
+    p.set_allowed(&bob_account.account_id(), true)
+        .await
+        .unwrap();
     assert!(
         p.sync_store(&alice.public())
             .lock()
@@ -2962,7 +3095,9 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
             .ingest(forged)
             .is_err()
     );
-    p.set_allowed(&ba.account_id(), false).await.unwrap();
+    p.set_allowed(&bob_account.account_id(), false)
+        .await
+        .unwrap();
     assert!(
         p.sync_store(&alice.public())
             .lock()
@@ -2985,13 +3120,13 @@ async fn automatic_worker_stalled_fanout_does_not_starve_other_messages_and_drop
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let extra = DeviceIdentity::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let ep = Announce::new_with_account(
         &extra,
         &aa,
@@ -3003,7 +3138,7 @@ async fn automatic_worker_stalled_fanout_does_not_starve_other_messages_and_drop
         .lock()
         .unwrap()
         .update(&ep, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let first = a
         .enqueue_to_account(&b.account_id(), b"first fair", None)
         .await
@@ -3054,13 +3189,13 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
             let akeys = alice.secret_bytes();
             let own = aa.account_id();
             let bob = DeviceIdentity::generate();
-            let ba = Account::generate();
+            let bob_account = Account::generate();
             let bkeys = bob.secret_bytes();
-            let baccount = ba.secret_bytes();
+            let baccount = bob_account.secret_bytes();
             let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-            let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+            let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
             let (a, _) = node(ad.path(), alice, aa, &bp);
-            let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+            let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
             b.configure_privacy(
                 bd.path(),
                 "pw",
@@ -3224,25 +3359,25 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
     }
 }
 
-async fn automatic_offline_roundtrip(evict: bool) {
+async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let akeys = alice.secret_bytes();
     let aaccount = aa.secret_bytes();
     let bkeys = bob.secret_bytes();
-    let baccount = ba.secret_bytes();
-    let target = ba.account_id();
+    let baccount = bob_account.secret_bytes();
+    let target = bob_account.account_id();
     let own = aa.account_id();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
-    let (initial_bob, _) = node(bd.path(), bob, ba, &ap);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let (initial_bob, _) = node(bd.path(), bob, bob_account, &ap);
     drop(initial_bob);
     drop(bl); // Bob's prior profile is closed and listener stopped before enqueue.
     let po = DeviceIdentity::generate();
@@ -3258,6 +3393,7 @@ async fn automatic_offline_roundtrip(evict: bool) {
         relay.clone(),
     )));
     let (a, _) = node(ad.path(), alice, aa, &bp);
+    a.set_bridge_discovery_enabled(bridge_enabled);
     a.roster
         .lock()
         .unwrap()
@@ -3269,14 +3405,32 @@ async fn automatic_offline_roundtrip(evict: bool) {
         .unwrap();
     let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
         .event
-        .id;
+        .clone();
+    let mailbox =
+        crate::postoffice::opaque::RelayMailbox::new(&a.identity, &bp.public(), &pp.public())
+            .unwrap();
+    let outer_id = mailbox.wrap(&original).unwrap().id;
+    let federated_outer_id =
+        crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public())
+            .unwrap()
+            .wrap(&original)
+            .unwrap()
+            .id;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !relay.lock().unwrap().has(&original) {
+        while !relay.lock().unwrap().has(&outer_id)
+            || (bridge_enabled && !relay.lock().unwrap().has(&federated_outer_id))
+        {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
     .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        relay.lock().unwrap().has(&federated_outer_id),
+        bridge_enabled
+    );
+    assert!(!relay.lock().unwrap().has(&original.id));
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     at.abort();
     let _ = at.await;
@@ -3288,6 +3442,7 @@ async fn automatic_offline_roundtrip(evict: bool) {
         Account::from_secret_bytes(baccount),
         &ap,
     );
+    b.replace_verified_dm_pull_peers(vec![ap.public().user_id()]);
     b.roster
         .lock()
         .unwrap()
@@ -3348,6 +3503,7 @@ async fn automatic_offline_roundtrip(evict: bool) {
         Account::from_secret_bytes(aaccount),
         &bp,
     );
+    a.replace_verified_dm_pull_peers(vec![bp.public().user_id()]);
     a.roster
         .lock()
         .unwrap()
@@ -3383,8 +3539,8 @@ async fn automatic_offline_roundtrip(evict: bool) {
 async fn durable_raw_send_offline_is_accepted() {
     let dir = tempfile::tempdir().unwrap();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(
         dir.path(),
         DeviceIdentity::generate(),
@@ -3403,10 +3559,14 @@ async fn real_post_office_acceptance_keeps_certified_account_delivery_awaiting()
     let dir = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bp =
-        Announce::new_with_account(&bob, &ba, "Offline Bob", dead.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Offline Bob",
+        dead.local_addr().unwrap().port(),
+    );
     drop(dead);
     let po = DeviceIdentity::generate();
     let po_secret = po.secret_bytes();
@@ -3431,14 +3591,23 @@ async fn real_post_office_acceptance_keeps_certified_account_delivery_awaiting()
         .unwrap()
         .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
     let id = a
-        .enqueue_to_account(&ba.account_id(), b"relay is not recipient", None)
+        .enqueue_to_account(&bob_account.account_id(), b"relay is not recipient", None)
         .await
         .unwrap();
     let original = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
         .event
-        .id;
+        .clone();
     a.flush_delivery(id).await;
-    assert!(relay.lock().unwrap().has(&original));
+    let mailbox =
+        crate::postoffice::opaque::RelayMailbox::new(&a.identity, &bob.public(), &proof.public())
+            .unwrap();
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .has(&mailbox.wrap(&original).unwrap().id)
+    );
+    assert!(!relay.lock().unwrap().has(&original.id));
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     task.abort();
     let _ = task.await;
@@ -3452,15 +3621,15 @@ async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bp_port = bl.local_addr().unwrap().port();
     drop(bl);
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bp_port);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bp_port);
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     let path = ad.path().join("resume.bin");
     let bytes = vec![6; crate::file::CHUNK_SIZE + 1];
     std::fs::write(&path, &bytes).unwrap();
@@ -3565,23 +3734,475 @@ async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
 }
 
 #[tokio::test]
+async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnects() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let pd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
+    b.set_attachment_global_auto(false).unwrap();
+    b.replace_verified_dm_pull_peers(vec![ap.public().user_id()]);
+
+    let po = DeviceIdentity::generate();
+    let keys = po.secret_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = Announce::new_post_office(&po, "Relay", listener.local_addr().unwrap().port());
+    let relay = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", po).unwrap(),
+    ));
+    let relay_task = tokio::spawn(super::postbox::run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        listener,
+        relay.clone(),
+    ));
+    for peer in [&a, &b] {
+        peer.roster.lock().unwrap().update(
+            &proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &peer.user_id(),
+        );
+    }
+
+    let source = ad.path().join("offline-file.bin");
+    let bytes = vec![7; crate::file::CHUNK_SIZE + 17];
+    std::fs::write(&source, &bytes).unwrap();
+    let (card, file) = a
+        .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    a.flush_delivery(card).await;
+    b.drain_from_post_office().await;
+    let offer = tokio::time::timeout(std::time::Duration::from_secs(5), offers.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(offer.file_conv, file);
+    b.decide_attachment(file, true).unwrap();
+
+    let recipient_task = tokio::spawn(b.clone().run_accept_loop(bl));
+    let recipient = a.routing_peer(&b.user_id()).unwrap();
+    let mut channel = a
+        .privacy_dial(recipient.addr, &recipient.public)
+        .await
+        .unwrap();
+    let binding = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .destinations[0]
+        .binding
+        .event_id;
+    let status = super::session::request_file_consent(&mut channel, file, binding)
+        .await
+        .unwrap();
+    assert_eq!(status, crate::eventlog::sync::FileConsentStatus::Accepted);
+    a.outgoing_file_consents
+        .lock()
+        .unwrap()
+        .insert((card, binding), status);
+    drop(channel);
+    recipient_task.abort();
+    let _ = recipient_task.await;
+
+    // A stale preferred relay must not strand consented chunks while another
+    // authenticated relay on this LAN is accepting mailbox rounds.
+    let offline_relay = DeviceIdentity::generate();
+    let offline_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let offline_proof = Announce::new_post_office(
+        &offline_relay,
+        "Offline preferred",
+        offline_listener.local_addr().unwrap().port(),
+    );
+    drop(offline_listener);
+    a.roster.lock().unwrap().update(
+        &offline_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &a.user_id(),
+    );
+    a.set_bridge_hub_id(Some(&offline_relay.user_id())).unwrap();
+
+    assert!(
+        b.read_file(file).is_err(),
+        "recipient was offline during upload"
+    );
+    let final_chunk = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .final_chunk
+        .unwrap();
+    let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &a.identity,
+        &b.identity.public(),
+        &proof.public(),
+    )
+    .unwrap();
+    let outer_final = mailbox
+        .wrap(a.log.lock().unwrap().get(&final_chunk).unwrap())
+        .unwrap()
+        .id;
+    // The immediate flush API is one bounded best-effort turn. Exercise the
+    // retained production worker until the live fallback actually owns the bytes.
+    let worker = tokio::spawn(a.clone().run_delivery_loop());
+    let custody = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !relay.lock().unwrap().has(&outer_final) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    let _ = worker.await;
+    assert!(
+        custody.is_ok(),
+        "live fallback must retain the exact encrypted final chunk"
+    );
+    assert!(
+        b.read_file(file).is_err(),
+        "recipient remains offline throughout upload"
+    );
+    assert!(
+        !a.outgoing_file_progress(card).unwrap().delivered,
+        "relay custody is not recipient completion"
+    );
+    assert!(!relay.lock().unwrap().has(&final_chunk));
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            b.drain_from_post_office().await;
+            if b.read_file(file)
+                .as_ref()
+                .is_ok_and(|actual| actual == &bytes)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    relay_task.abort();
+    let _ = relay_task.await;
+}
+
+/// Real LAN custody tests require the installed relay's signed device ID.
+/// The sender has no accept loop, so its file worker cannot race the
+/// controlled consent and offline handoffs below.
+#[tokio::test]
+#[ignore = "requires installed mac2015 post office on the same LAN"]
+async fn mac2015_post_office_delivers_file_bytes_after_both_peers_go_offline() {
+    let service = std::env::var("MESH_TALK_E2E_MAC2015_SERVICE").ok();
+    installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
+        "MESH_TALK_E2E_MAC2015_RELAY_ID",
+        "mac2015",
+        MacRelayService::parse(service.as_deref()).restart_command(),
+    )
+    .await;
+}
+
+#[derive(Debug, PartialEq)]
+enum MacRelayService {
+    LegacyAgent,
+    System,
+}
+
+impl MacRelayService {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            None | Some("legacy-agent") => Self::LegacyAgent,
+            Some("system") => Self::System,
+            Some(other) => panic!(
+                "invalid MESH_TALK_E2E_MAC2015_SERVICE={other:?}; use system or legacy-agent"
+            ),
+        }
+    }
+
+    fn restart_command(&self) -> &'static str {
+        match self {
+            Self::LegacyAgent => {
+                "launchctl kickstart -k gui/$(id -u)/com.octopusgarage.mesh-talk.post-office"
+            }
+            Self::System => {
+                "sudo -n launchctl kickstart -k system/com.octopusgarage.mesh-talk.post-office"
+            }
+        }
+    }
+}
+
+#[test]
+fn mac_relay_service_selector_preserves_legacy_and_requires_explicit_system() {
+    assert_eq!(MacRelayService::parse(None), MacRelayService::LegacyAgent);
+    assert_eq!(
+        MacRelayService::parse(Some("legacy-agent")),
+        MacRelayService::LegacyAgent
+    );
+    assert_eq!(
+        MacRelayService::parse(Some("system")),
+        MacRelayService::System
+    );
+    assert!(
+        MacRelayService::System
+            .restart_command()
+            .starts_with("sudo -n launchctl")
+    );
+    assert!(std::panic::catch_unwind(|| MacRelayService::parse(Some("typo"))).is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires installed windows10 post office on the same LAN"]
+async fn windows10_post_office_delivers_file_bytes_after_both_peers_go_offline() {
+    installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
+        "MESH_TALK_E2E_WINDOWS10_RELAY_ID",
+        "windows10",
+        "powershell -NoProfile -Command \"Stop-ScheduledTask -TaskName MeshTalk-PostOffice; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName MeshTalk-PostOffice\"",
+    )
+    .await;
+}
+
+async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
+    relay_id_env: &str,
+    relay_host: &str,
+    restart_command: &str,
+) {
+    use crate::discovery::announce::decode;
+
+    let relay_id = std::env::var(relay_id_env)
+        .unwrap_or_else(|_| panic!("set {relay_id_env} to the installed relay device ID"));
+    let socket = crate::transport::net::discovery_socket(47474).unwrap();
+    let (relay_proof, relay_ip) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut buf = [0u8; 2048];
+        loop {
+            let (len, source) = socket.recv_from(&mut buf).await.unwrap();
+            if let Some(proof) = decode(&buf[..len])
+                && proof.verify()
+                && proof.post_office
+                && proof.user_id == relay_id
+            {
+                break (proof, source.ip());
+            }
+        }
+    })
+    .await
+    .expect("installed relay's signed LAN announce was not received");
+
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "File Alice", 1);
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "File Bob",
+        bl.local_addr().unwrap().port(),
+    );
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
+    b.set_attachment_global_auto(false).unwrap();
+    b.replace_verified_dm_pull_peers(vec![ap.public().user_id()]);
+    for peer in [&a, &b] {
+        peer.roster
+            .lock()
+            .unwrap()
+            .update(&relay_proof, relay_ip, &peer.user_id());
+        assert_eq!(
+            super::postbox::elected_post_office(&peer.roster.lock().unwrap())
+                .unwrap()
+                .public
+                .user_id(),
+            relay_id
+        );
+    }
+
+    let source = ad.path().join("remote-relay-file.bin");
+    let bytes = (0..(crate::file::CHUNK_SIZE + 37))
+        .map(|n| (n % 251) as u8)
+        .collect::<Vec<_>>();
+    std::fs::write(&source, &bytes).unwrap();
+    let (card, file) = a
+        .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    // Bob has no listener yet. The offer must reach the remote relay.
+    a.flush_delivery(card).await;
+    b.drain_from_post_office().await;
+    let offer = tokio::time::timeout(std::time::Duration::from_secs(10), offers.recv())
+        .await
+        .expect("recipient did not receive offline offer from installed relay")
+        .expect("file offer channel closed");
+    assert_eq!(offer.file_conv, file);
+    assert!(!b.file_ready_to_save(file));
+    b.decide_attachment(file, true).unwrap();
+
+    // Authenticate a live recipient's consent, then close their only listener.
+    // No file chunk is sent on the consent channel.
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let recipient = a.routing_peer(&b.user_id()).unwrap();
+    let mut channel = a
+        .privacy_dial(recipient.addr, &recipient.public)
+        .await
+        .unwrap();
+    let binding = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .destinations[0]
+        .binding
+        .event_id;
+    let status = super::session::request_file_consent(&mut channel, file, binding)
+        .await
+        .unwrap();
+    assert_eq!(status, crate::eventlog::sync::FileConsentStatus::Accepted);
+    a.outgoing_file_consents
+        .lock()
+        .unwrap()
+        .insert((card, binding), status);
+    drop(channel);
+    bt.abort();
+    let _ = bt.await;
+    assert!(!b.file_ready_to_save(file));
+    assert!(b.log.lock().unwrap().events(&file).is_empty());
+
+    // Confirm every encrypted chunk at the relay before removing the only sender.
+    // A best-effort flush turn alone is not a complete-upload barrier.
+    let final_chunk = a
+        .delivery
+        .lock()
+        .unwrap()
+        .file_card(card)
+        .unwrap()
+        .final_chunk
+        .unwrap();
+    let mailbox = crate::postoffice::opaque::RelayMailbox::new(
+        &a.identity,
+        &bp.public(),
+        &relay_proof.public(),
+    )
+    .unwrap();
+    let outer_chunks = a
+        .log
+        .lock()
+        .unwrap()
+        .events(&file)
+        .into_iter()
+        .map(|event| mailbox.wrap(event).unwrap().id)
+        .collect::<Vec<_>>();
+    assert!(!outer_chunks.is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            a.flush_file_delivery(card).await;
+            let mut channel = a
+                .privacy_dial(
+                    (relay_ip, relay_proof.tcp_port).into(),
+                    &relay_proof.public(),
+                )
+                .await
+                .unwrap();
+            let mut complete = true;
+            for outer in &outer_chunks {
+                if !super::session::request_durable_have(&mut channel, mailbox.id(), *outer)
+                    .await
+                    .unwrap_or(false)
+                {
+                    complete = false;
+                    break;
+                }
+            }
+            if complete {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("installed relay never confirmed custody of all encrypted chunks");
+    assert!(
+        !a.outgoing_file_progress(card).unwrap().delivered,
+        "relay custody must not claim recipient completion"
+    );
+    assert!(!b.file_ready_to_save(file));
+    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    drop(a);
+
+    // The relay is restarted while it alone holds the bytes, then the recipient
+    // pulls and verifies them with the sender absent.
+    let restart = std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            relay_host,
+            restart_command,
+        ])
+        .status()
+        .expect("ssh to installed relay failed");
+    assert!(restart.success(), "installed relay restart failed");
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            b.drain_from_post_office().await;
+            if b.read_file(file)
+                .as_ref()
+                .is_ok_and(|actual| actual == &bytes)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("installed relay did not redeliver complete file bytes after restart");
+    assert_eq!(b.read_file(file).unwrap(), bytes);
+    assert!(
+        !b.historical_file_completion(file, final_chunk, &ap.public()),
+        "recovered chunks alone must not record a verified save"
+    );
+    let destination = bd.path().join("recovered.bin");
+    b.save_file(file, &destination).unwrap();
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        Sha256::digest(std::fs::read(&destination).unwrap()),
+        Sha256::digest(&bytes)
+    );
+    assert!(
+        b.historical_file_completion(file, final_chunk, &ap.public()),
+        "verified save must retain exact-file completion while sender remains stopped"
+    );
+}
+
+#[tokio::test]
 async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_residue() {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let akeys = alice.secret_bytes();
     let aaccount = aa.secret_bytes();
     let bkeys = bob.secret_bytes();
-    let baccount = ba.secret_bytes();
+    let baccount = bob_account.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     let mut bytes = vec![6; 1024];
     bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
     let path = ad.path().join("preview.png");
@@ -3650,11 +4271,11 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
     let alice = DeviceIdentity::from_secret_bytes(akeys.0, akeys.1);
     let aa = Account::from_secret_bytes(aaccount);
     let bob = DeviceIdentity::from_secret_bytes(bkeys.0, bkeys.1);
-    let ba = Account::from_secret_bytes(baccount);
+    let bob_account = Account::from_secret_bytes(baccount);
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _) = node(bd.path(), bob, ba, &ap);
+    let (b, _) = node(bd.path(), bob, bob_account, &ap);
     assert_eq!(b.read_media(file).unwrap(), bytes);
     assert!(b.historical_file_completion(file, final_chunk, &ap.public()));
     assert!(!b.historical_file_completion(file, EventId::new([1; 32]), &ap.public()));
@@ -3697,11 +4318,11 @@ async fn completed_file_fixture(
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(ad, alice, aa, &bp);
-    let (b, _) = node(bd, bob, ba, &ap);
+    let (b, _) = node(bd, bob, bob_account, &ap);
     let bytes = vec![7; crate::file::CHUNK_SIZE + 11];
     let path = ad.join("completion.bin");
     std::fs::write(&path, &bytes).unwrap();
@@ -4206,11 +4827,11 @@ async fn durable_enqueue_is_awaiting_without_transport_and_survives_restart() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let secret = alice.secret_bytes();
     let acct = aa.secret_bytes();
-    let target = ba.account_id();
+    let target = bob_account.account_id();
     let (a, _) = node(dir.path(), alice, aa, &proof);
     let id = a
         .enqueue_to_account(&target, b"durable offline", None)
@@ -4236,17 +4857,17 @@ async fn actual_durable_receive_sends_control_receipt_without_chat_callback() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
-    let target = ba.account_id();
+    let bob_account = Account::generate();
+    let target = bob_account.account_id();
     let own = aa.account_id();
     let sender_secret = alice.secret_bytes();
     let sender_account = aa.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, mut arx) = node(ad.path(), alice, aa, &bp);
-    let (b, mut brx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut brx) = node(bd.path(), bob, bob_account, &ap);
     let at = tokio::spawn(a.clone().run_accept_loop(al));
     let bt = tokio::spawn(b.clone().run_accept_loop(bl));
     let id = a
@@ -4303,11 +4924,11 @@ async fn malformed_routes_and_control_scopes_never_advance_live_ratchet_or_emit(
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let before = std::fs::read(bd.path().join("ratchet.sessions")).unwrap();
     let conv = super::conversation::dm_conversation_id(&a.identity.public(), &b.identity.public());
     for (scope, body) in [
@@ -4363,9 +4984,9 @@ async fn malformed_routes_and_control_scopes_never_advance_live_ratchet_or_emit(
 async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets() {
     let dir = tempfile::tempdir().unwrap();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let target = ba.account_id();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let target = bob_account.account_id();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(
         dir.path(),
         DeviceIdentity::generate(),
@@ -4434,8 +5055,8 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
 async fn oversized_enqueue_rejects_before_durable_ratchet_or_history() {
     let dir = tempfile::tempdir().unwrap();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(
         dir.path(),
         DeviceIdentity::generate(),
@@ -4444,7 +5065,7 @@ async fn oversized_enqueue_rejects_before_durable_ratchet_or_history() {
     );
     let sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
     assert!(
-        a.enqueue_to_account(&ba.account_id(), &vec![7; 256 * 1024], None)
+        a.enqueue_to_account(&bob_account.account_id(), &vec![7; 256 * 1024], None)
             .await
             .is_err()
     );
@@ -4452,7 +5073,7 @@ async fn oversized_enqueue_rejects_before_durable_ratchet_or_history() {
         std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
         sessions
     );
-    assert!(a.account_history(&ba.account_id(), 10).is_empty());
+    assert!(a.account_history(&bob_account.account_id(), 10).is_empty());
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
 }
 
@@ -4463,11 +5084,11 @@ async fn failed_account_save_preserves_queue_and_successful_adoption_suspends_ol
     let secret = alice.secret_bytes();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(dir.path(), alice, aa, &proof);
     let id = a
-        .enqueue_to_account(&ba.account_id(), b"keep on failed adoption", None)
+        .enqueue_to_account(&bob_account.account_id(), b"keep on failed adoption", None)
         .await
         .unwrap();
     let new_account = Account::generate();
@@ -4485,7 +5106,7 @@ async fn failed_account_save_preserves_queue_and_successful_adoption_suspends_ol
     a.persist_account_adoption(&new_account.account_id(), || Ok(()))
         .unwrap();
     assert!(
-        a.enqueue_to_account(&ba.account_id(), b"old runtime must stop", None)
+        a.enqueue_to_account(&bob_account.account_id(), b"old runtime must stop", None)
             .await
             .is_err()
     );
@@ -4516,11 +5137,11 @@ async fn adoption_marker_before_account_save_reopens_old_queue_and_unmarked_none
     let aa = Account::generate();
     let own_secret = aa.secret_bytes();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let proof = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bob_account = Account::generate();
+    let proof = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(dir.path(), alice, aa, &proof);
     let id = a
-        .enqueue_to_account(&ba.account_id(), b"pre-save crash", None)
+        .enqueue_to_account(&bob_account.account_id(), b"pre-save crash", None)
         .await
         .unwrap();
     let new_account = Account::generate();
@@ -4550,7 +5171,7 @@ async fn adoption_marker_before_account_save_reopens_old_queue_and_unmarked_none
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     assert_eq!(a.delivery.lock().unwrap().retry_messages(8).len(), 1);
-    assert_eq!(a.account_history(&ba.account_id(), 8)[0].id, id);
+    assert_eq!(a.account_history(&bob_account.account_id(), 8)[0].id, id);
     assert!(
         a.delivery
             .lock()
@@ -4624,13 +5245,13 @@ async fn receiver_write_failure_keeps_plaintext_intent_until_restart_and_no_earl
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let secret = bob.secret_bytes();
-    let account = ba.secret_bytes();
+    let account = bob_account.secret_bytes();
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     let id = a
         .enqueue_to_account(&b.account_id(), b"recover recipient", None)
         .await
@@ -4680,14 +5301,14 @@ async fn early_recipient_receipt_preserves_offline_own_fanout_across_sender_rest
     let other = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let secret = alice.secret_bytes();
     let account = aa.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let cp =
         Announce::new_with_account(&other, &aa, "Other Alice", cl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
@@ -4695,7 +5316,7 @@ async fn early_recipient_receipt_preserves_offline_own_fanout_across_sender_rest
         .lock()
         .unwrap()
         .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
-    let (b, mut brx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut brx) = node(bd.path(), bob, bob_account, &ap);
     let (c, mut crx) = node(cd.path(), other, Account::from_secret_bytes(account), &ap);
     let at = tokio::spawn(a.clone().run_accept_loop(al));
     let bt = tokio::spawn(b.clone().run_accept_loop(bl));
@@ -4753,14 +5374,14 @@ async fn private_control_receipt_obeys_current_permission_and_queued_account_bin
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let bob_secret = bob.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, mut arx) = node(ad.path(), alice, aa, &bp);
-    let (b, mut brx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut brx) = node(bd.path(), bob, bob_account, &ap);
     a.configure_privacy(
         ad.path(),
         "pw",
@@ -4846,13 +5467,13 @@ async fn queued_private_file_work_stops_on_permission_revoke_and_exact_account_r
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let keys = bob.secret_bytes();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, _, mut files) = node_with_files(bd.path(), bob, ba, &ap);
+    let (b, _, mut files) = node_with_files(bd.path(), bob, bob_account, &ap);
     for (node, dir, own) in [(&a, ad.path(), &ap), (&b, bd.path(), &bp)] {
         node.configure_privacy(
             dir,
@@ -4916,15 +5537,15 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let bob_secret = bob.secret_bytes();
-    let bob_account = ba.secret_bytes();
+    let bob_account_secret = bob_account.secret_bytes();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     a.configure_privacy(
         ad.path(),
         "pw",
@@ -4964,9 +5585,9 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
     drop(b);
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bob = DeviceIdentity::from_secret_bytes(bob_secret.0, bob_secret.1);
-    let ba = Account::from_secret_bytes(bob_account);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
-    let (b, mut rx) = node(bd.path(), bob, ba, &ap);
+    let bob_account = Account::from_secret_bytes(bob_account_secret);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let (b, mut rx) = node(bd.path(), bob, bob_account, &ap);
     b.configure_privacy(
         bd.path(),
         "pw",
@@ -5068,4 +5689,441 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
     let _ = at.await;
     let _ = bt.await;
     case.finish();
+}
+
+#[tokio::test]
+async fn relay_file_worker_preserves_progress_across_slow_mailbox_exchanges() {
+    retained_relay_file_worker(true, 1).await;
+}
+
+#[tokio::test]
+async fn relay_custody_releases_slots_for_more_than_eight_pending_files() {
+    retained_relay_file_worker(false, 10).await;
+}
+
+async fn retained_relay_file_worker(slow: bool, count: u8) {
+    use crate::eventlog::sync::SyncStore;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let pd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+    // A stale direct endpoint rejects Noise immediately on every OS. A closed
+    // port can consume the full connect budget on Windows, making this batch
+    // measure SYN/refusal timing instead of retained relay scheduling.
+    let rejecting_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rejecting_listener_port = rejecting_listener.local_addr().unwrap().port();
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", rejecting_listener_port);
+    let rejecting = tokio::spawn(async move {
+        while let Ok((stream, _)) = rejecting_listener.accept().await {
+            drop(stream);
+        }
+    });
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _, offers) = node_with_files(bd.path(), bob, bob_account, &ap);
+    let mut recipients = vec![(b, offers, bp)];
+    // Slot fairness needs ten destinations, independently of shared-mailbox
+    // history size. Keep the slow single-file case on its original mailbox.
+    for index in 1..count {
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let proof =
+            Announce::new_with_account(&identity, &account, "Recipient", rejecting_listener_port);
+        let (recipient, _, offers) = node_with_files(
+            &bd.path().join(format!("recipient-{index}")),
+            identity,
+            account,
+            &ap,
+        );
+        a.roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+        recipients.push((recipient, offers, proof));
+    }
+    a.replace_verified_dm_pull_peers(
+        recipients
+            .iter()
+            .map(|(_, _, proof)| proof.user_id.clone())
+            .collect(),
+    );
+    for (recipient, _, _) in &recipients {
+        recipient.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+        recipient.set_attachment_global_auto(false).unwrap();
+        recipient.set_bridge_discovery_enabled(true);
+    }
+    a.set_bridge_discovery_enabled(true);
+    let relay_identity = DeviceIdentity::generate();
+    let keys = relay_identity.secret_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proof = Announce::new_post_office(
+        &relay_identity,
+        "Relay",
+        listener.local_addr().unwrap().port(),
+    );
+    // Observe qualified final-chunk custody while retaining the real relay
+    // admission, durable storage, and reconciliation implementation.
+    struct ObservedRelay {
+        inner: crate::postoffice::PostOffice,
+        final_chunks: Arc<Mutex<std::collections::HashMap<EventId, ConversationId>>>,
+        confirmed_files: Arc<Mutex<std::collections::HashSet<ConversationId>>>,
+        confirmations: Arc<AtomicUsize>,
+    }
+    impl SyncStore for ObservedRelay {
+        fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+            let held = self.inner.durable_have(conversation, id);
+            if held && let Some(file) = self.final_chunks.lock().unwrap().get(id) {
+                self.confirmed_files.lock().unwrap().insert(*file);
+                self.confirmations.fetch_add(1, Ordering::SeqCst);
+            }
+            held
+        }
+        fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+            self.inner.event_ids(conversation)
+        }
+        fn events_excluding(
+            &self,
+            conversation: &ConversationId,
+            have: &std::collections::HashSet<EventId>,
+        ) -> Vec<crate::eventlog::Event> {
+            self.inner.events_excluding(conversation, have)
+        }
+        fn ingest(
+            &mut self,
+            event: crate::eventlog::Event,
+        ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
+            self.inner.ingest(event)
+        }
+    }
+    let final_chunks = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let confirmed_files = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let confirmations = Arc::new(AtomicUsize::new(0));
+    let mut office =
+        crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", relay_identity)
+            .unwrap();
+    office.require_opaque_envelopes();
+    let relay = Arc::new(Mutex::new(ObservedRelay {
+        inner: office,
+        final_chunks: final_chunks.clone(),
+        confirmed_files: confirmed_files.clone(),
+        confirmations: confirmations.clone(),
+    }));
+    let delayed = Arc::new(AtomicBool::new(false));
+    let exchanges = Arc::new(AtomicUsize::new(0));
+    let sender_identity = a.identity.public();
+    let server = tokio::spawn({
+        let relay = relay.clone();
+        let delayed = delayed.clone();
+        let exchanges = exchanges.clone();
+        async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                let relay = relay.clone();
+                let delayed = delayed.clone();
+                let exchanges = exchanges.clone();
+                let sender_identity = sender_identity.clone();
+                connections.spawn(async move {
+                    let Ok(mut channel) = super::transport::secure_accept(stream, &identity).await
+                    else {
+                        return;
+                    };
+                    let mut delayed_exchanges = 0;
+                    while let Ok(bytes) = channel.recv().await {
+                        if delayed.load(Ordering::SeqCst)
+                            && channel.peer_identity() == &sender_identity
+                            && super::session::requests_response(&bytes)
+                            && delayed_exchanges < 5
+                        {
+                            delayed_exchanges += 1;
+                            exchanges.fetch_add(1, Ordering::SeqCst);
+                            // Five exchanges on EACH new sender connection inject 750ms,
+                            // exceeding the unchanged 400ms whole-attempt budget.
+                            // A reconnect resets this count, so retries cannot consume
+                            // a global delay allowance and then pass without the delay.
+                            // Do not also delay recipient drains or every later chunk
+                            // round: those add load unrelated to retained progress.
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        }
+                        match super::session::serve_wire_bytes(&mut channel, &relay, &bytes).await {
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!("delayed relay error: {error}");
+                                break;
+                            }
+                        }
+                    }
+                });
+                while connections.try_join_next().is_some() {}
+            }
+        }
+    });
+    for peer in std::iter::once(&a).chain(recipients.iter().map(|(peer, _, _)| peer)) {
+        peer.roster.lock().unwrap().update(
+            &proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &peer.user_id(),
+        );
+    }
+    let mut files = Vec::new();
+    for index in 0..count {
+        let (b, offers, bp) = &mut recipients[usize::from(index)];
+        let source = ad.path().join(format!("relay-{index}.bin"));
+        // Fair scheduling needs more than eight destinations, not large files.
+        // The separate slow case keeps its two-chunk transfer coverage.
+        let size = if slow {
+            crate::file::CHUNK_SIZE + 31
+        } else {
+            31
+        };
+        let bytes = vec![index + 63; size];
+        std::fs::write(&source, &bytes).unwrap();
+        let (card, file) = a
+            .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let offer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                a.flush_delivery(card).await;
+                b.drain_from_post_office().await;
+                if let Ok(offer) = offers.try_recv() {
+                    break offer;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(offer.file_conv, file);
+        b.decide_attachment(file, true).unwrap();
+        b.drain_from_post_office().await;
+        a.drain_from_post_office().await;
+        let final_chunk = {
+            let id = a
+                .delivery
+                .lock()
+                .unwrap()
+                .file_card(card)
+                .unwrap()
+                .final_chunk
+                .unwrap();
+            a.log.lock().unwrap().get(&id).unwrap().clone()
+        };
+        for mailbox in [
+            crate::postoffice::opaque::RelayMailbox::new(
+                &a.identity,
+                &bp.public(),
+                &proof.public(),
+            )
+            .unwrap(),
+            crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public()).unwrap(),
+        ] {
+            final_chunks
+                .lock()
+                .unwrap()
+                .insert(mailbox.wrap(&final_chunk).unwrap().id, file);
+        }
+        files.push((card, file, bytes, b.clone()));
+    }
+    // All offers/consent were reconciled above. Observe only file-worker
+    // connections here, without unrelated proactive history-recovery pulls.
+    a.replace_verified_dm_pull_peers(Vec::new());
+    delayed.store(slow, Ordering::SeqCst);
+    let worker = tokio::spawn(a.clone().run_delivery_loop());
+    let mut recipient_drains = 0;
+    let custody_started = std::time::Instant::now();
+    let received = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        // First require every sender slot to reach qualified relay custody while
+        // recipients stay offline. Recipient polling must not release sender
+        // slots or hide a relay-custody scheduling failure.
+        while !files
+            .iter()
+            .all(|(_, file, _, _)| confirmed_files.lock().unwrap().contains(file))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        eprintln!(
+            "retained relay qualified custody for {count} files after {:?}",
+            custody_started.elapsed()
+        );
+        assert_eq!(
+            recipient_drains, 0,
+            "custody must not need recipient polling"
+        );
+        assert!(
+            files.iter().all(|(_, file, _, b)| {
+                !b.file_ready_to_save(*file) && b.log.lock().unwrap().events(file).is_empty()
+            }),
+            "recipient must remain without chunks until all relay custody is confirmed"
+        );
+        loop {
+            recipient_drains += 1;
+            for (recipient, _, _) in &recipients {
+                recipient.drain_from_post_office().await;
+            }
+            if files
+                .iter()
+                .all(|(_, file, _, recipient)| recipient.file_ready_to_save(*file))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    let cooldown = if slow && received.is_ok() {
+        let before = confirmations.load(Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        Some((before > 0, before, confirmations.load(Ordering::SeqCst)))
+    } else {
+        None
+    };
+    worker.abort();
+    server.abort();
+    rejecting.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    let _ = rejecting.await;
+    assert!(
+        received.is_ok(),
+        "retained relay worker stranded bytes: custody={}/{} ready={}/{} recipient-drains={} peak-slots={}",
+        confirmed_files.lock().unwrap().len(),
+        files.len(),
+        files
+            .iter()
+            .filter(|(_, file, _, recipient)| recipient.file_ready_to_save(*file))
+            .count(),
+        files.len(),
+        recipient_drains,
+        a.file_transfer_peak.load(Ordering::SeqCst)
+    );
+    if let Some((quiet, before, after)) = cooldown {
+        assert!(quiet, "relay must confirm exact final-chunk custody");
+        assert_eq!(
+            after, before,
+            "held relay custody must cool down across normal worker ticks"
+        );
+    }
+    if slow {
+        assert!(exchanges.load(Ordering::SeqCst) >= 5);
+    }
+    assert!(a.file_transfer_peak.load(Ordering::SeqCst) <= 8);
+    for (card, file, bytes, b) in files {
+        assert_eq!(b.read_file(file).unwrap(), bytes);
+        assert!(
+            !a.outgoing_file_progress(card).unwrap().delivered,
+            "relay custody is not recipient completion"
+        );
+    }
+}
+
+#[tokio::test]
+async fn retained_relay_file_exchange_rechecks_signed_consent_and_relay_role() {
+    for revoke_consent in [true, false] {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let pd = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob = DeviceIdentity::generate();
+        let bob_account = Account::generate();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 1);
+        let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 1);
+        let (a, _) = node(ad.path(), alice, aa, &bp);
+        let (b, _, mut offers) = node_with_files(bd.path(), bob, bob_account, &ap);
+        b.set_attachment_global_auto(false).unwrap();
+        b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+        let identity = DeviceIdentity::generate();
+        let keys = identity.secret_bytes();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proof =
+            Announce::new_post_office(&identity, "Relay", listener.local_addr().unwrap().port());
+        let relay = Arc::new(Mutex::new(
+            crate::postoffice::PostOffice::open(&pd.path().join("relay"), "pw", identity).unwrap(),
+        ));
+        let server = tokio::spawn(super::postbox::run_relay_accept_loop(
+            DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+            listener,
+            relay.clone(),
+        ));
+        for node in [&a, &b] {
+            node.roster.lock().unwrap().update(
+                &proof,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &node.user_id(),
+            );
+        }
+        let source = ad.path().join("revocable.bin");
+        std::fs::write(&source, [91; 64]).unwrap();
+        let (card, file) = a
+            .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        a.flush_delivery(card).await;
+        b.drain_from_post_office().await;
+        assert_eq!(offers.try_recv().unwrap().file_conv, file);
+        b.decide_attachment(file, true).unwrap();
+        for control in b.file_consent_events(&ap.public()).unwrap() {
+            a.accept_file_consent_event(&control, &bp.public()).unwrap();
+        }
+        let card = a.delivery.lock().unwrap().file_card(card).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let mut transfers = std::collections::HashMap::new();
+        // Failed direct dial, authenticated relay dial, then a complete mailbox
+        // fingerprint exchange. The next retained step must recheck authority.
+        for _ in 0..3 {
+            assert!(!a.retry_file_step(&card, &destination, &mut transfers).await);
+        }
+        assert_eq!(transfers.len(), 1);
+        let final_chunk = a
+            .log
+            .lock()
+            .unwrap()
+            .get(&card.final_chunk.unwrap())
+            .unwrap()
+            .clone();
+        let outer = crate::postoffice::opaque::RelayMailbox::new(
+            &a.identity,
+            &bp.public(),
+            &proof.public(),
+        )
+        .unwrap()
+        .wrap(&final_chunk)
+        .unwrap()
+        .id;
+        assert!(!relay.lock().unwrap().has(&outer));
+        if revoke_consent {
+            b.decide_attachment(file, false).unwrap();
+            for control in b.file_consent_events(&ap.public()).unwrap() {
+                a.accept_file_consent_event(&control, &bp.public()).unwrap();
+            }
+        } else {
+            let ordinary = Announce::new(
+                &DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+                "No longer a relay",
+                proof.tcp_port,
+            );
+            a.roster.lock().unwrap().update(
+                &ordinary,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &a.user_id(),
+            );
+        }
+        assert!(!a.retry_file_step(&card, &destination, &mut transfers).await);
+        assert!(
+            transfers.is_empty(),
+            "invalid retained relay socket must be discarded"
+        );
+        assert!(
+            !relay.lock().unwrap().has(&outer),
+            "authority ended before any chunk upload"
+        );
+        assert!(!a.outgoing_file_progress(card.id).unwrap().delivered);
+        server.abort();
+        let _ = server.await;
+    }
 }

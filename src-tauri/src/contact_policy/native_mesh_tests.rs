@@ -132,6 +132,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         .invoke_handler(tauri::generate_handler![
             get_hidden_contacts,
             set_contact_hidden,
+            delete_contact,
             crate::chat_commands::search
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -293,6 +294,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     until("old runtime tasks release their node and stores", || {
         old_node.upgrade().is_none()
     });
+    drop((bob, bob_two, bob_handle));
     let (restarted, _) = start(root.path(), "alice", "Alice", a_port);
     assert_eq!(restarted.account_id(), alice_account);
     assert_eq!(restarted.account_history(&bob_account, 20), before_restart);
@@ -303,7 +305,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             .contacts,
         hidden.contacts
     );
-    drop(restarted);
+    // Keep this offline runtime for the deletion assertion after offline restoration.
     // Check isolation while Alice's policy is nonempty, not after restoring it.
     let mut other = alice_user.clone();
     other.user_id = "other-local-user".into();
@@ -351,5 +353,33 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             .unwrap()
             .contacts
             .is_empty()
+    );
+    assert!(crate::chat_commands::online_account_ids(restarted.peers()).is_empty());
+    let deletion_handle = restarted.handle();
+    let deletion_weak = Arc::downgrade(&deletion_handle);
+    *nodes.0.blocking_lock() = Some(restarted);
+    let deleted = invoke(
+        "delete_contact",
+        serde_json::json!({ "owner": "alice", "account": bob_account }),
+    )
+    .unwrap();
+    assert_eq!(deleted.deleted, vec![bob_account.clone()]);
+    assert!(deletion_handle.account_history(&bob_account, 20).is_empty());
+    nodes.0.blocking_lock().take();
+    drop(deletion_handle);
+    until("deleted runtime releases stores", || {
+        deletion_weak.upgrade().is_none()
+    });
+    let (after_delete, _) = start(root.path(), "alice", "Alice", a_port);
+    assert!(
+        after_delete.account_history(&bob_account, 20).is_empty(),
+        "deleted history must not return after restart"
+    );
+    assert_eq!(
+        HiddenContactsState::new(root.path().to_owned())
+            .get(Some("alice"), "alice")
+            .unwrap()
+            .deleted,
+        vec![bob_account]
     );
 }

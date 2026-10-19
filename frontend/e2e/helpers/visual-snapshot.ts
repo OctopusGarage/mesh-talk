@@ -1,4 +1,40 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
+
+/** Native Windows UI fonts depend on the OS language. Keep reviewed references
+ * for the actual rendered Latin font, with the same strict pixel threshold. */
+export async function windowsSnapshotProfile(sample: Locator) {
+  const page = sample.page();
+  const session = await page.context().newCDPSession(page);
+  await sample.evaluate((element) =>
+    element.setAttribute("data-snapshot-font", ""),
+  );
+  try {
+    await session.send("DOM.enable");
+    await session.send("CSS.enable");
+    const { root } = await session.send("DOM.getDocument");
+    const { nodeId } = await session.send("DOM.querySelector", {
+      nodeId: root.nodeId,
+      selector: "[data-snapshot-font]",
+    });
+    const { fonts } = await session.send("CSS.getPlatformFontsForNode", {
+      nodeId,
+    });
+    const families = fonts
+      .filter((font) => font.glyphCount > 0)
+      .map((font) => font.familyName);
+    if (!families.length)
+      throw new Error("Snapshot sample has no rendered font");
+    console.info("Windows snapshot font:", families.join(", "));
+    return families.some((name) => name.startsWith("Microsoft YaHei"))
+      ? "win32-yahei"
+      : "win32";
+  } finally {
+    await session.detach();
+    await sample.evaluate((element) =>
+      element.removeAttribute("data-snapshot-font"),
+    );
+  }
+}
 
 /**
  * Call before the UI action that opens the surface being snapshotted, then take the snapshot

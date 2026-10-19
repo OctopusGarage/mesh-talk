@@ -1,5 +1,6 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
-import { seedMarketPacks } from "./helpers/packs";
+import { seedMarketPacks, waitForPackBootstrap } from "./helpers/packs";
 const CHANNEL = "chan_team_dddd4444";
 test.use({ viewport: { width: 1100, height: 800 } });
 
@@ -11,7 +12,8 @@ async function login(page: import("@playwright/test").Page) {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
+  await waitForPackBootstrap(page);
 }
 
 test("personal avatar gallery offers the player pack", async ({ page }) => {
@@ -42,6 +44,7 @@ test("personal avatar gallery offers all Cat Acrylic portraits", async ({
 
 test("bundled avatar tabs retain their translated names", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("mesh-talk-lang", "ja"));
+  await seedMarketPacks(page, ["players"]);
   await login(page);
   await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "自分の写真を変更" }).click();

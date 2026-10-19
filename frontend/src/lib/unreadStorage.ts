@@ -111,3 +111,156 @@ export function savePendingUnread(
     // Storage may be unavailable; in-memory discovery still works this session.
   }
 }
+
+const LEDGER_PREFIX = "mesh-talk-reception-v2";
+const LEDGER_SNAPSHOT_LIMIT = 3_000_000;
+import {
+  boundLedger,
+  type ReceptionLedger,
+  type ReceptionEntry,
+} from "@/store/reception";
+
+export function loadReceptionLedger(
+  owner: string,
+  accountId: string,
+): ReceptionLedger {
+  try {
+    const encoded = localStorage.getItem(
+      `${LEDGER_PREFIX}:${owner}:${accountId}`,
+    );
+    if (!encoded || encoded.length > LEDGER_SNAPSHOT_LIMIT) return {};
+    const parsed: unknown = JSON.parse(encoded);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return {};
+    const ledger: ReceptionLedger = {};
+    for (const [conversation, entries] of Object.entries(parsed)) {
+      if (
+        !validEntry(conversation, 1) ||
+        !entries ||
+        typeof entries !== "object" ||
+        Array.isArray(entries)
+      )
+        continue;
+      const valid: Record<string, ReceptionEntry> = Object.create(null);
+      for (const [id, entry] of Object.entries(entries)) {
+        if (!id || id.length > 200 || !entry || typeof entry !== "object")
+          continue;
+        const e = entry as ReceptionEntry;
+        if (typeof e.seen !== "boolean" || typeof e.late !== "boolean")
+          continue;
+        valid[id] = {
+          seen: e.seen,
+          late: e.late,
+          ...(Number.isFinite(e.receivedAt)
+            ? { receivedAt: e.receivedAt }
+            : {}),
+          ...(["live", "catch_up", "history_sync"].includes(e.arrivalKind ?? "")
+            ? { arrivalKind: e.arrivalKind }
+            : {}),
+        };
+      }
+      ledger[conversation] = valid;
+    }
+    return boundLedger(ledger);
+  } catch {
+    return {};
+  }
+}
+export function saveReceptionLedger(
+  owner: string,
+  accountId: string,
+  ledger: ReceptionLedger,
+): void {
+  try {
+    const bounded = boundLedger(ledger);
+    // The entry/identifier caps fit within this bounded snapshot without dropping unread.
+    if (JSON.stringify(bounded).length > LEDGER_SNAPSHOT_LIMIT) return;
+    localStorage.setItem(
+      `${LEDGER_PREFIX}:${owner}:${accountId}`,
+      JSON.stringify(bounded),
+    );
+  } catch {
+    /* Private mode/quota failures must not interrupt reception. */
+  }
+}
+
+const OVERFLOW_PREFIX = "mesh-talk-unread-overflow-v2";
+export function loadUnreadOverflow(
+  owner: string,
+  accountId: string,
+): Record<string, number> {
+  try {
+    const encoded = localStorage.getItem(
+      `${OVERFLOW_PREFIX}:${owner}:${accountId}`,
+    );
+    if (!encoded || encoded.length > MAX_SNAPSHOT_BYTES) return {};
+    const parsed: unknown = JSON.parse(encoded);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return {};
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(
+          ([key, count]) =>
+            validEntry(key, count) && Number(count) <= 1_000_000,
+        )
+        .slice(-4096),
+    );
+  } catch {
+    return {};
+  }
+}
+export function saveUnreadOverflow(
+  owner: string,
+  accountId: string,
+  overflow: Record<string, number>,
+): void {
+  try {
+    const entries = Object.entries(overflow)
+      .filter(([key, count]) => validEntry(key, count) && count <= 1_000_000)
+      .slice(-4096);
+    localStorage.setItem(
+      `${OVERFLOW_PREFIX}:${owner}:${accountId}`,
+      JSON.stringify(Object.fromEntries(entries)),
+    );
+  } catch {
+    /* In-memory overflow remains usable if storage is unavailable. */
+  }
+}
+
+const FULL_BASELINE_PREFIX = "mesh-talk-history-coverage-v2";
+export function loadFullHistoryBaselines(
+  owner: string,
+  accountId: string,
+): string[] {
+  try {
+    const encoded = localStorage.getItem(
+      `${FULL_BASELINE_PREFIX}:${owner}:${accountId}`,
+    );
+    if (!encoded || encoded.length > MAX_SNAPSHOT_BYTES) return [];
+    const parsed: unknown = JSON.parse(encoded);
+    return Array.isArray(parsed)
+      ? parsed
+          .filter(
+            (key): key is string =>
+              typeof key === "string" && validEntry(key, 1),
+          )
+          .slice(-4096)
+      : [];
+  } catch {
+    return [];
+  }
+}
+export function saveFullHistoryBaselines(
+  owner: string,
+  accountId: string,
+  keys: string[],
+): void {
+  try {
+    localStorage.setItem(
+      `${FULL_BASELINE_PREFIX}:${owner}:${accountId}`,
+      JSON.stringify(keys.filter((key) => validEntry(key, 1)).slice(-4096)),
+    );
+  } catch {
+    /* Coverage remains available for this session if storage is unavailable. */
+  }
+}

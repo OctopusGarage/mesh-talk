@@ -1,3 +1,5 @@
+import { waitForChatShell } from "./helpers/session";
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
@@ -12,7 +14,7 @@ async function enterBobDm(page: Page) {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(
     page.getByRole("log").getByText("hey, welcome to the mesh"),
@@ -108,8 +110,12 @@ test("clear chat history (from the history dialog) empties the conversation", as
 test("retention setting persists", async ({ page }) => {
   await enterBobDm(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "history");
   const sel = page.getByTestId("settings-retention-select");
   await expect(sel).toBeVisible();
   await sel.selectOption("30");
+  await page
+    .getByRole("button", { name: "Delete older history", exact: true })
+    .click();
   await expect(sel).toHaveValue("30");
 });

@@ -22,13 +22,27 @@ const peers = [
     addr: "c",
     post_office: false,
   },
+  {
+    user_id: "relay",
+    account_id: "relay-account",
+    name: "Post office",
+    addr: "d",
+    post_office: true,
+  },
 ];
 describe("presentation-only visibility projections", () => {
   it("hides all devices regardless of name/address without altering raw peers", () => {
     expect(visiblePeers(peers, { hidden: {} }).map((p) => p.user_id)).toEqual([
       "visible",
     ]);
-    expect(peers).toHaveLength(3);
+    expect(peers).toHaveLength(4);
+  });
+  it("excludes infrastructure peers from people-facing pickers", () => {
+    expect(visiblePeers(peers, {}).map((p) => p.user_id)).toEqual([
+      "old",
+      "new",
+      "visible",
+    ]);
   });
   it("filters account/device-addressed DM hits but retains shared-group hits", () => {
     const hit = (target: string, is_channel = false) => ({

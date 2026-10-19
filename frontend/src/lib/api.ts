@@ -6,5 +6,11 @@ export { chat } from "./api/chat";
 export { calls } from "./api/calls";
 export { diag, presence, obs, updates } from "./api/diagnostics";
 export { contactPolicy, favorites, avatars } from "./api/contacts";
-export { settings } from "./api/settings";
+import { useAuth } from "@/store/auth";
+import { createSettingsApi } from "./api/settings";
+
+// App composition: low-level IPC modules do not read Zustand state.
+export const settings = createSettingsApi(
+  () => useAuth.getState().user?.id ?? null,
+);
 export { recovery } from "./api/recovery";

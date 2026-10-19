@@ -13,9 +13,9 @@ import { ease, useMotionOK } from "@/lib/motion";
 import { useChat, captureChatOwnership } from "@/store/chat";
 import { useFileStatus } from "@/store/fileAvailability";
 import { ReceiveProgress } from "./ReceiveProgress";
+import { isVideo } from "@/lib/mediaTypes";
 import {
   blobMime,
-  isVideo,
   useFileObjectUrl,
   useVideoPoster,
   withinInlineCap,

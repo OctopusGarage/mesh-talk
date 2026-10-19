@@ -12,12 +12,55 @@ beforeEach(() => {
     generation: 0,
     operation: 0,
     booting: true,
+    loggingOut: false,
     loading: false,
     error: null,
   });
 });
 
 describe("auth store", () => {
+  it("keeps the login screen gated until native logout finishes", async () => {
+    let finishLogout!: () => void;
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "logout"
+        ? new Promise<void>((resolve) => {
+            finishLogout = resolve;
+          })
+        : Promise.resolve(),
+    );
+    useAuth.setState({
+      user: { id: "u1", username: "alice", display_name: "Alice" },
+      booting: false,
+    });
+    const pending = useAuth.getState().logout();
+    expect(useAuth.getState().user).toBeNull();
+    expect(useAuth.getState().loggingOut).toBe(true);
+    finishLogout();
+    await pending;
+    expect(useAuth.getState().loggingOut).toBe(false);
+  });
+
+  it("an old logout cannot release a newer session's logout gate", async () => {
+    const finishes: Array<() => void> = [];
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "logout"
+        ? new Promise<void>((resolve) => finishes.push(resolve))
+        : Promise.resolve({
+            success: true,
+            user: { id: "same", username: "alice", display_name: "Alice" },
+          }),
+    );
+    const oldLogout = useAuth.getState().logout();
+    await useAuth.getState().login("alice", "pw");
+    const newLogout = useAuth.getState().logout();
+    finishes[0]();
+    await oldLogout;
+    expect(useAuth.getState().loggingOut).toBe(true);
+    finishes[1]();
+    await newLogout;
+    expect(useAuth.getState().loggingOut).toBe(false);
+  });
+
   it("clears the OS unread badge when a session logs out", async () => {
     invoke.mockResolvedValue(undefined);
     useAuth.setState({
@@ -85,6 +128,7 @@ describe("auth store", () => {
     finishLogout();
     await logout;
     expect(useAuth.getState().user?.display_name).toBe("new session");
+    expect(useAuth.getState().loggingOut).toBe(false);
     expect(
       invoke.mock.calls.some(([cmd]) => cmd === "clear_saved_session"),
     ).toBe(false);
@@ -188,8 +232,11 @@ describe("auth store", () => {
 
   it("logout clears the session even if the backend errors", async () => {
     useAuth.setState({ user: { id: "u", username: "x", display_name: "x" } });
-    invoke.mockRejectedValueOnce("boom");
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "logout" ? Promise.reject("boom") : Promise.resolve(),
+    );
     await useAuth.getState().logout();
     expect(useAuth.getState().user).toBeNull();
+    expect(useAuth.getState().loggingOut).toBe(false);
   });
 });

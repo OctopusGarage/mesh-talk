@@ -1,3 +1,5 @@
+import { waitForChatShell } from "./helpers/session";
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
@@ -13,10 +15,11 @@ async function login(page: Page, username = "tester") {
   await page.getByTestId("login-username").fill(username);
   await page.getByTestId("login-password").fill("a strong password");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
 }
 async function manage(page: Page) {
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "privacy");
   await page.getByTestId("manage-hidden-contacts").click();
   await expect(page.getByTestId("hidden-contacts-dialog")).toBeVisible();
 }
@@ -277,7 +280,7 @@ test("hide confirmation defaults to safe keyboard cancellation and explains its 
   await page.getByTestId(`hide-contact-menu-${bob}`).click();
   const dialog = page.getByTestId("hide-contact-dialog");
   await expect(dialog).toContainText("Messages and calls can still arrive");
-  await expect(dialog).toContainText("signed-in user on this device");
+  await expect(dialog).toContainText("Linked devices can share this choice");
   await expect(page.getByTestId("hide-contact-cancel")).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(dialog).toHaveCount(0);

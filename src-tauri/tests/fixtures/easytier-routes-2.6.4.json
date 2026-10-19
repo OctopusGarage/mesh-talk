@@ -1,0 +1,21 @@
+{
+  "node_info": {
+    "peer_id": 1,
+    "ipv4_addr": "10.253.77.1/24"
+  },
+  "peer_routes": [
+    {
+      "route": {
+        "peer_id": 2,
+        "cost": 1,
+        "ipv4_addr": {
+          "address": {
+            "addr": 184372482
+          },
+          "network_length": 24
+        },
+        "ipv6_addr": null
+      }
+    }
+  ]
+}

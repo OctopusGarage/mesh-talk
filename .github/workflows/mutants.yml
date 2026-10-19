@@ -4,8 +4,8 @@ name: Mutation Testing
 # equivalent of Stryker). It runs the suite once per mutant, so it is slow:
 #   - on PRs it samples mutants in the changed lines,
 #   - on main, weekly, or on demand it samples the whole workspace.
-# Each run tests one of 256 rotating round-robin shards so the job can finish
-# within its 60-minute limit. The summary states the shard and result count.
+# Each run tests one of 256 rotating round-robin samples, divided across four
+# runners. Each summary states its subshard and result count.
 # Surviving mutants are surfaced as annotations + an artifact but do NOT block
 # (this is an existing codebase; treat results as a coverage-quality signal).
 on:
@@ -28,6 +28,15 @@ jobs:
   mutants:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false # Keep other reports if one runner has a baseline/tool failure.
+      matrix:
+        worker: [0, 1, 2, 3]
+    env:
+      # rust-cache otherwise defaults this to 0, defeating per-mutant rebuild reuse.
+      CARGO_INCREMENTAL: '1'
+      MUTATION_WORKER: ${{ matrix.worker }}
+      MUTATION_WORKERS: '4'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,7 +52,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: '.'
+          key: mutants
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -57,20 +67,18 @@ jobs:
           npm ci
           npm run build
 
-      - name: Install cargo-mutants
+      - name: Install mutation test tools
         uses: taiki-e/install-action@v2.87.28
         with:
-          tool: cargo-mutants@27.1.0
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
 
       - name: Compute PR diff
         if: github.event_name == 'pull_request'
         run: git diff "origin/${{ github.base_ref }}"...HEAD > mutants-diff.patch
 
-      # Surviving mutants are advisory, but a broken baseline is not valid evidence.
-      - name: Validate command forwarding and unmutated baseline
-        run: |
-          node --test scripts/diagnostics/mutants-workflow.test.mjs
-          cargo test --workspace -- --test-threads=2
+      # cargo-mutants runs and validates its own baseline before injecting bugs.
+      - name: Validate mutation runner
+        run: node --test scripts/diagnostics/mutants-workflow.test.mjs scripts/diagnostics/mutation-evidence.test.mjs scripts/release/run-mutants.test.mjs
 
       - name: Mutants (PR diff)
         if: github.event_name == 'pull_request'
@@ -87,6 +95,20 @@ jobs:
         if: always() && hashFiles('mutants.out/**') != ''
         uses: actions/upload-artifact@v7
         with:
-          name: mutants-report
+          name: mutants-report-${{ matrix.worker }}
           path: mutants.out/
           if-no-files-found: error
+
+  # Preserve the stable branch-protection check across matrix size changes.
+  mutation-gate:
+    name: mutants
+    needs: mutants
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all mutation shards
+        env:
+          SHARDS: ${{ needs.mutants.result }}
+        run: |
+          test "$SHARDS" = success

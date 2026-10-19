@@ -46,6 +46,18 @@ impl Node {
         target: EventId,
         account: bool,
     ) -> Result<usize, NodeError> {
+        if account
+            || self
+                .list_channels()
+                .iter()
+                .any(|channel| channel.id == conv)
+        {
+            self.account_suppression
+                .lock()
+                .expect("account suppression mutex not poisoned")
+                .suppress(conv, target)
+                .map_err(NodeError::Log)?;
+        }
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
@@ -179,6 +191,80 @@ impl Node {
         &self,
         should_remove: impl Fn(ConversationId, u64) -> bool,
     ) -> Result<usize, NodeError> {
+        let mut suppressed = Vec::new();
+        let channels: std::collections::HashSet<_> = self
+            .list_channels()
+            .into_iter()
+            .map(|channel| channel.id)
+            .collect();
+        {
+            let received = self.received.lock().expect("received mutex not poisoned");
+            for conv in received.conversations() {
+                for entry in received.entries_ref(&conv) {
+                    if should_remove(conv, entry.wall_clock) {
+                        if channels.contains(&conv) {
+                            suppressed.push((conv, entry.event_id));
+                        } else if let Some(envelope) =
+                            super::dm_envelope::DmEnvelope::decode(&entry.plaintext)
+                        {
+                            suppressed.push((conv, EventId::new(envelope.msg_id)));
+                        }
+                    }
+                }
+            }
+        }
+        {
+            let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
+            for conv in sent.conversations() {
+                for entry in sent.entries_ref(&conv) {
+                    if should_remove(conv, entry.wall_clock)
+                        && let Some(envelope) =
+                            super::dm_envelope::DmEnvelope::decode(&entry.plaintext)
+                    {
+                        suppressed.push((conv, EventId::new(envelope.msg_id)));
+                    }
+                }
+            }
+        }
+        for channel in channels {
+            // A failed projection may have no plaintext row yet. Suppress known
+            // signed content IDs too, so pending retries and startup repair cannot
+            // undo a local clear or retention prune. No pending-queue lock is needed.
+            {
+                let log = self.log.lock().expect("log lock not poisoned");
+                for event in log.events(&channel) {
+                    if matches!(event.kind, EventKind::Message | EventKind::FileManifest)
+                        && should_remove(channel, event.wall_clock)
+                    {
+                        suppressed.push((channel, event.id));
+                    }
+                }
+            }
+            for (id, entry) in self.raw_sent_history(channel) {
+                if should_remove(channel, entry.wall_clock) {
+                    suppressed.push((channel, id));
+                }
+            }
+        }
+        {
+            let files = self.received_files.lock().expect("files lock not poisoned");
+            for conv in files.conversations() {
+                for entry in files.entries_ref(&conv) {
+                    if should_remove(conv, entry.wall_clock) {
+                        suppressed.push((conv, entry.event_id));
+                    }
+                }
+            }
+        }
+        {
+            let mut suppression = self
+                .account_suppression
+                .lock()
+                .expect("account suppression mutex not poisoned");
+            for (conv, id) in suppressed {
+                suppression.suppress(conv, id).map_err(NodeError::Log)?;
+            }
+        }
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;

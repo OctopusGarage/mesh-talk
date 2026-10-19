@@ -123,14 +123,17 @@ impl DmRatchet {
             Some(s) => s,
             None => init_bob(&shared_root(me, peer), my_secret),
         };
+        let established_receiving_chain = state.has_receiving_chain();
         match state.ratchet_decrypt(&header, ct) {
             Ok(pt) => Ok((pt, self.prepared(peer_id, &state))),
             Err(_) => {
                 // Possible simultaneous init: we set up as initiator, but the peer's
                 // message expects us to be the responder. Tie-break: the LOWER user-id
                 // is the canonical initiator. If the PEER is canonical-initiator, drop
-                // our session, re-bootstrap as responder, and retry once.
-                if peer_id < me.public().user_id() {
+                // our initial sending session, re-bootstrap as responder, and retry
+                // once. An established receiving chain must never be reset by an
+                // old ciphertext that still authenticates against fresh bootstrap.
+                if !established_receiving_chain && peer_id < me.public().user_id() {
                     let mut fresh = init_bob(&shared_root(me, peer), my_secret);
                     let pt = fresh
                         .ratchet_decrypt(&header, ct)
@@ -315,5 +318,47 @@ mod tests {
         } else {
             assert_eq!(am.decrypt(&alice, &bob.public(), &wb).unwrap(), b"from-b");
         }
+    }
+
+    #[test]
+    fn replayed_initial_message_cannot_reset_established_responder() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = DeviceIdentity::generate();
+        let second = DeviceIdentity::generate();
+        let (alice, bob) = if first.user_id() < second.user_id() {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let mut am = manager(dir.path(), "a.sess");
+        let mut bm = manager(dir.path(), "b.sess");
+        let w1 = am.encrypt(&alice, &bob.public(), b"first").unwrap();
+        assert_eq!(bm.decrypt(&bob, &alice.public(), &w1).unwrap(), b"first");
+        let w2 = bm.encrypt(&bob, &alice.public(), b"reply").unwrap();
+        assert_eq!(am.decrypt(&alice, &bob.public(), &w2).unwrap(), b"reply");
+        let w3 = am.encrypt(&alice, &bob.public(), b"third").unwrap();
+        assert_eq!(bm.decrypt(&bob, &alice.public(), &w3).unwrap(), b"third");
+        let w4 = bm.encrypt(&bob, &alice.public(), b"fourth").unwrap();
+        assert_eq!(am.decrypt(&alice, &bob.public(), &w4).unwrap(), b"fourth");
+        drop(am);
+        drop(bm);
+        let mut am = manager(dir.path(), "a.sess");
+        let mut bm = manager(dir.path(), "b.sess");
+        let before = std::fs::read(dir.path().join("b.sess")).unwrap();
+        let before_live = bm.sessions.get(&alice.user_id()).unwrap().serialize();
+        let replay = bm.decrypt(&bob, &alice.public(), &w1);
+        let unchanged = std::fs::read(dir.path().join("b.sess")).unwrap() == before;
+        assert!(
+            bm.sessions.get(&alice.user_id()).unwrap().serialize() == before_live,
+            "replay changed the live responder state"
+        );
+        let next = bm.encrypt(&bob, &alice.public(), b"after replay").unwrap();
+        let continued = am.decrypt(&alice, &bob.public(), &next);
+        assert!(
+            replay.is_err(),
+            "established session accepted initial replay"
+        );
+        assert!(unchanged, "replay changed the durable responder state");
+        assert_eq!(continued.unwrap(), b"after replay");
     }
 }
