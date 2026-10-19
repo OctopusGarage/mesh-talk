@@ -88,7 +88,7 @@ impl Node {
             .collect()
     }
 
-    /// The last `limit` messages of a channel (all directions), sorted by wall-clock.
+    /// The last `limit` messages of a channel in deterministic causal order.
     /// Sender-key wire keys are single-use and gone after one decrypt, so history is
     /// served from the stores — our own sent plaintext from the sent sidecar, plus the
     /// plaintext of others' messages we decrypted on receipt (the received store). That
@@ -102,9 +102,6 @@ impl Node {
         {
             return Vec::new();
         }
-        // A channel conversation's history is built exactly like a DM's (sent sidecar +
-        // received store, seq->id mapped, wall-clock + id sorted) — so delegate to `history`
-        // rather than duplicate it.
         self.history(channel, limit)
     }
 
@@ -285,11 +282,27 @@ impl Node {
         }
         // Tie-break equal wall-clocks by the (global, content-addressed) event id so
         // both participants render the same order on a same-millisecond collision.
-        entries.sort_by(|a, b| {
-            a.wall_clock
-                .cmp(&b.wall_clock)
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        if is_channel {
+            let log = self.log.lock().expect("log mutex not poisoned");
+            let events = log.events(&conversation);
+            let archive: Vec<_> = entries
+                .iter()
+                .map(|entry| (entry.id, entry.wall_clock))
+                .collect();
+            let order = super::timeline::ordered_ids(&events, &archive, false);
+            let ranks: std::collections::HashMap<_, _> = order
+                .into_iter()
+                .enumerate()
+                .map(|(rank, id)| (id, rank))
+                .collect();
+            entries.sort_by_key(|entry| ranks.get(&entry.id).copied().unwrap_or(usize::MAX));
+        } else {
+            entries.sort_by(|a, b| {
+                a.wall_clock
+                    .cmp(&b.wall_clock)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+        }
         if entries.len() > limit {
             entries.drain(0..entries.len() - limit);
         }

@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 
 // Regression: a message with a very long unbreakable run (e.g. a ──── rule pasted from a
@@ -24,7 +25,7 @@ test("a very wide message stays inside its bubble (no overflow)", async ({
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await page.getByTestId(`conversation-row-${BOB}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
   await page.getByTestId("composer-input").fill(PAYLOAD);

@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
@@ -16,7 +17,7 @@ async function login(page: import("@playwright/test").Page) {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
 }
 const palette = (page: import("@playwright/test").Page) =>
   page.evaluate(() => document.documentElement.getAttribute("data-palette"));

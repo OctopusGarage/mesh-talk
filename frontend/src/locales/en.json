@@ -231,7 +231,20 @@
     "dropToSend": "Drop to send to {{name}}",
     "clearHistory": "Clear chat history",
     "clearHistoryConfirm": "This permanently erases this conversation's messages on this device. It can't be undone and doesn't affect the other person's copy.",
-    "noPeersHint": "Mesh-Talk searches your local network. Keep both devices on the same LAN."
+    "noPeersHint": "Mesh-Talk searches your local network. Keep both devices on the same LAN.",
+    "earlierMessages": "Earlier messages received",
+    "newMessages": "New messages",
+    "catchingUp": "Catching up with received history…",
+    "waitingForPeer": "Waiting for a reachable peer",
+    "delayedMessage": "Received later",
+    "receivedLocally": "Received on this device: {{time}}",
+    "unreadSummary": "{{count}} unread messages",
+    "unreadSummary_one": "{{count}} unread message",
+    "unreadUnavailable": "This message is outside the history available on this device.",
+    "markConversationRead": "Mark conversation as read",
+    "peerChecked": "Checked an available member",
+    "peerCheckedDetail": "Last checked a reachable member: {{time}}. Offline members may have more messages.",
+    "moreUnread": "More unread messages"
   },
   "presence": {
     "online": "Online",
@@ -567,9 +580,9 @@
   "linkDevice": {
     "syncTitle": "Sync on this device",
     "historySync": "Message history",
-    "historySyncDescription": "Share and receive available direct and channel message history with your linked devices.",
+    "historySyncDescription": "Share and receive available direct and channel messages and file information with your linked devices.",
     "attachmentsSync": "Attachments",
-    "attachmentsSyncDescription": "Copy available older file cards and verified file bytes from linked devices.",
+    "attachmentsSyncDescription": "Share and download available file bytes with linked devices. File information also syncs with message history.",
     "profileSync": "Account avatar",
     "profileSyncDescription": "Receive avatar changes from your linked devices.",
     "appearanceSync": "Appearance",
@@ -605,7 +618,8 @@
     "rotateIdentity": "Rotate to a fresh account identity.",
     "rekey": "Re-key",
     "rekeyed": "Re-keyed. New account: {{id}}…",
-    "rekeyFailed": "Re-key failed: {{error}}"
+    "rekeyFailed": "Re-key failed: {{error}}",
+    "legacyFileMetadata": "Upgrade this linked device to sync file information separately from file downloads."
   },
   "webrtcTest": {
     "trigger": "Voice / video self-test",
@@ -910,6 +924,12 @@
     "endpointHint": "This is the last known network route and may point to a relay. It does not reveal a geographic location.",
     "view": "View profile",
     "viewNamed": "View {{name}}'s profile"
+  },
+  "personal": {
+    "title": "Saved Messages",
+    "description": "Notes and files across your devices",
+    "saved": "Saved on this device",
+    "fileCardSaved": "File card saved on this device"
   },
   "help": {
     "title": "Help",

@@ -550,6 +550,88 @@ mod tests {
     }
 
     #[test]
+    fn queued_contact_commands_leave_session_available_for_runtime_installation() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let auth = crate::services::auth_service::AuthService::new(Arc::new(
+            mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(dir.path().to_owned()),
+            ),
+        ));
+        let app_state = crate::state::AppState::new(auth);
+        let signed_in = session().get().unwrap();
+        app_state
+            .session()
+            .set(signed_in.token, signed_in.user, signed_in.password);
+        let node_state = crate::chat_commands::NodeState::empty();
+        let app = tauri::test::mock_builder()
+            .manage(app_state.clone())
+            .manage(node_state.clone())
+            .manage(HiddenContactsState::new(dir.path().to_owned()))
+            .invoke_handler(tauri::generate_handler![
+                set_contact_hidden,
+                delete_contact,
+                crate::chat_commands::list_accounts
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        for cmd in ["list_accounts", "set_contact_hidden", "delete_contact"] {
+            let runtime_guard = node_state.0.blocking_lock();
+            let (entered, waiting) = channel();
+            *app_state.owner_command_captured.lock().unwrap() = Some(entered);
+            let window = webview.clone();
+            let request = std::thread::spawn(move || {
+                tauri::test::get_ipc_response(
+                    &window,
+                    tauri::webview::InvokeRequest {
+                        cmd: cmd.into(),
+                        callback: tauri::ipc::CallbackFn(0),
+                        error: tauri::ipc::CallbackFn(1),
+                        url: if cfg!(windows) {
+                            "http://tauri.localhost"
+                        } else {
+                            "tauri://localhost"
+                        }
+                        .parse()
+                        .unwrap(),
+                        body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+                            "owner": "alice", "account": A, "hidden": true, "name": "Alice"
+                        })),
+                        headers: Default::default(),
+                        invoke_key: tauri::test::INVOKE_KEY.into(),
+                    },
+                )
+                .is_err()
+            });
+            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+            let session = app_state.session().clone();
+            let (captured, available) = channel();
+            let observer = std::thread::spawn(move || {
+                captured.send(session.capture().is_ok()).unwrap();
+            });
+            let session_available = available.recv_timeout(Duration::from_secs(1));
+            // Release the runtime even on regression, so this test fails without
+            // leaving blocked workers behind in the test process.
+            drop(runtime_guard);
+            observer.join().unwrap();
+            assert!(
+                request.join().unwrap(),
+                "empty runtime must reject the command"
+            );
+            assert_eq!(
+                session_available.ok(),
+                Some(true),
+                "{cmd} locked the session while waiting for the runtime"
+            );
+        }
+    }
+
+    #[test]
     fn registered_ipc_commands_authorize_persist_and_restore_offline() {
         use tauri::Manager;
         let dir = tempfile::tempdir().unwrap();
@@ -812,9 +894,9 @@ impl HiddenContactsState {
         identity: impl FnOnce() -> (Option<(String, String)>, G),
     ) -> Result<HiddenContactsSnapshot, String> {
         self.transaction(session, owner, || {
-            // The provider acquires the live node guard after owner authorization.
-            // Keep that guard until the filesystem transaction has completed, so
-            // account adoption/rekey cannot invalidate the self-contact check.
+            // Read the identity only after authorization. The caller acquires
+            // any runtime guard before entering the policy/session transaction
+            // and retains it through the write, including account adoption.
             let (own, _guard) = identity();
             if hidden && own.as_ref().map(|(namespace, _)| namespace.as_str()) != Some(owner) {
                 return Err("Hiding a contact requires this account's running node".into());
@@ -1071,15 +1153,21 @@ pub async fn set_contact_hidden(
     policy: tauri::State<'_, HiddenContactsState>,
 ) -> Result<HiddenContactsSnapshot, String> {
     let node = node.0.clone();
+    #[cfg(test)]
+    let captured = app.owner_command_captured.clone();
     let session = app.session().clone();
     let policy = policy.inner().clone();
     tokio::task::spawn_blocking(move || {
+        let guard = if hidden {
+            #[cfg(test)]
+            if let Some(entered) = captured.lock().unwrap().as_ref() {
+                let _ = entered.send("contact-runtime-wait");
+            }
+            Some(node.blocking_lock())
+        } else {
+            None
+        };
         policy.update_with_identity(&session, &owner, &account, hidden, &name, || {
-            let guard = if hidden {
-                Some(node.blocking_lock())
-            } else {
-                None
-            };
             let own = guard
                 .as_ref()
                 .and_then(|guard| guard.as_ref())

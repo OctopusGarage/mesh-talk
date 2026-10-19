@@ -273,8 +273,8 @@ impl Node {
             {
                 processed.push(outer_id);
                 self.emit_new_messages(conv);
-                self.process_channel(conv);
-                self.process_file_events(conv);
+                self.process_channel_reception(conv, "catch_up");
+                self.process_file_events_reception(conv, "catch_up");
                 self.process_profile_events(conv);
                 self.persist_media_if_complete(conv);
             }

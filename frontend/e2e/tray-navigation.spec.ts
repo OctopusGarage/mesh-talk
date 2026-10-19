@@ -1,5 +1,5 @@
 import { test, expect } from "./tauri-mock";
-import { enterChat } from "./helpers/session";
+import { waitForChatShell, enterChat } from "./helpers/session";
 
 // Exercises the real React listeners through the Tauri event fixture. Native
 // menu rendering and window activation require a separate desktop check.
@@ -22,7 +22,7 @@ for (const [action, dialog] of [
     await expect(page.getByTestId(dialog)).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByTestId(dialog)).not.toBeVisible();
-    await expect(page.getByTestId("chat-shell")).toBeVisible();
+    await waitForChatShell(page);
   });
 }
 
@@ -36,7 +36,7 @@ test("an unknown tray destination does not open a dialog", async ({ page }) => {
     ).__mockEmit("tray-navigate", "unknown");
   });
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
 });
 
 test("switching tray destinations replaces the open dialog", async ({

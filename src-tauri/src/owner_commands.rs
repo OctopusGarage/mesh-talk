@@ -29,6 +29,7 @@ pub struct NodeIdentity {
     owner: String,
     device_id: String,
     account_id: String,
+    history_revision: u64,
 }
 
 /// Atomically observes Session + runtime identity, including installation authority.
@@ -45,6 +46,7 @@ pub async fn owner_node_identity(
                 owner,
                 device_id: runtime.user_id().into(),
                 account_id: runtime.account_id().into(),
+                history_revision: runtime.account_history_revision(),
             })
         })
         .await
@@ -1595,6 +1597,7 @@ mod tests {
             "owner-sensitive identity command is registered and returns the actual runtime",
         );
         assert_eq!(identity["owner"], "alice");
+        assert_eq!(identity["history_revision"], 0);
         assert!(identity["device_id"].as_str().unwrap().len() == 32);
         app_state
             .session()

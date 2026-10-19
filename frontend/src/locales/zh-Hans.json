@@ -231,7 +231,20 @@
     "dropToSend": "拖放以发送给 {{name}}",
     "clearHistory": "清空聊天记录",
     "clearHistoryConfirm": "这会永久删除本机上这个会话的消息,无法恢复,且不影响对方的记录。",
-    "noPeersHint": "Mesh-Talk 会搜索本地网络。请让两台设备连接到同一个局域网。"
+    "noPeersHint": "Mesh-Talk 会搜索本地网络。请让两台设备连接到同一个局域网。",
+    "earlierMessages": "收到较早的消息",
+    "newMessages": "新消息",
+    "catchingUp": "正在补齐已接收的历史记录…",
+    "waitingForPeer": "等待可连接的节点",
+    "delayedMessage": "稍后收到",
+    "receivedLocally": "本设备接收时间：{{time}}",
+    "unreadSummary": "{{count}} 条未读消息",
+    "unreadSummary_one": "{{count}} 条未读消息",
+    "unreadUnavailable": "此消息不在本设备可用的历史记录中。",
+    "markConversationRead": "将会话标为已读",
+    "peerChecked": "已检查可连接的成员",
+    "peerCheckedDetail": "上次检查可连接的成员：{{time}}。离线成员可能还有其他消息。",
+    "moreUnread": "还有更多未读消息"
   },
   "presence": {
     "online": "在线",
@@ -567,9 +580,9 @@
   "linkDevice": {
     "syncTitle": "在本设备上同步",
     "historySync": "消息历史",
-    "historySyncDescription": "与已关联的设备共享和接收私信与频道消息历史。",
+    "historySyncDescription": "与已关联设备共享和接收现有私聊、群聊消息及文件信息。",
     "attachmentsSync": "附件",
-    "attachmentsSyncDescription": "从已关联的设备复制可用的旧附件和已验证的文件数据。",
+    "attachmentsSyncDescription": "与已关联设备共享和下载现有文件内容。文件信息也随消息历史同步。",
     "profileSync": "账户头像",
     "profileSyncDescription": "接收已关联设备上的头像更改。",
     "appearanceSync": "外观",
@@ -605,7 +618,8 @@
     "rotateIdentity": "轮换到一个全新的账户身份。",
     "rekey": "重置密钥",
     "rekeyed": "已重置密钥。新账户：{{id}}…",
-    "rekeyFailed": "重置密钥失败：{{error}}"
+    "rekeyFailed": "重置密钥失败：{{error}}",
+    "legacyFileMetadata": "升级此已关联设备，以便单独同步文件信息而不下载文件。"
   },
   "webrtcTest": {
     "trigger": "语音/视频自检",
@@ -910,6 +924,12 @@
     "endpointHint": "这是最后已知的网络路径，可能指向中继节点；它不表示地理位置。",
     "view": "查看资料",
     "viewNamed": "查看{{name}}的资料"
+  },
+  "personal": {
+    "title": "收藏消息",
+    "description": "在你的设备之间同步笔记和文件",
+    "saved": "已保存在此设备上",
+    "fileCardSaved": "文件信息已保存在此设备上"
   },
   "help": {
     "title": "帮助",

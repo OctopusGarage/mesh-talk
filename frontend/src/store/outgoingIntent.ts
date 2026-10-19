@@ -1,3 +1,5 @@
+import { reconcileHistory } from "./reception";
+import { receptionPatch } from "./chat";
 import { chat } from "@/lib/api";
 import { errorMessage, sendFailReason } from "@/lib/error";
 import { captureChatOwner } from "./ownership";
@@ -77,10 +79,10 @@ function sendStickerFor(
 
 const HISTORY_LIMIT = 200;
 
-function historyFor(c: Conversation, owner: string) {
+function historyFor(c: Conversation, owner: string, limit = HISTORY_LIMIT) {
   return c.kind === "account"
-    ? chat.ownerHistory(owner, c.id, HISTORY_LIMIT)
-    : chat.channelHistory(c.id, HISTORY_LIMIT);
+    ? chat.ownerHistory(owner, c.id, limit)
+    : chat.channelHistory(c.id, limit);
 }
 function reactionsFor(c: Conversation) {
   return c.kind === "account"
@@ -88,7 +90,11 @@ function reactionsFor(c: Conversation) {
     : chat.channelReactions(c.id);
 }
 
-export async function reloadConversation(rawSet: Set, get: Get) {
+export async function reloadConversation(
+  rawSet: Set,
+  get: Get,
+  discoverChanges = true,
+) {
   const lease = captureChatOwner(get);
   const set: Set = (partial) => {
     if (lease.current()) rawSet(partial);
@@ -110,7 +116,7 @@ export async function reloadConversation(rawSet: Set, get: Get) {
   });
   try {
     const [items, reacts] = await Promise.all([
-      historyFor(c, lease.owner!),
+      historyFor(c, lease.owner!, get().historyLimits[key]),
       reactionsFor(c),
     ]);
     if (
@@ -122,10 +128,37 @@ export async function reloadConversation(rawSet: Set, get: Get) {
     )
       return false;
     set((s) => ({
+      ...receptionPatch(
+        s,
+        reconcileHistory(
+          s,
+          key,
+          items.map((h) => ({ id: h.id, fromMe: h.from_me })),
+          discoverChanges &&
+            s.historyBaselines.includes(key) &&
+            Object.prototype.hasOwnProperty.call(s.ledger, key),
+        ),
+      ),
+      historyBaselines: [
+        ...s.historyBaselines.filter((k) => k !== key),
+        key,
+      ].slice(-4096),
+      ...((s.historyLimits[key] ?? 200) >= 500
+        ? {
+            historyFullBaselines: [
+              ...s.historyFullBaselines.filter((k) => k !== key),
+              key,
+            ].slice(-4096),
+          }
+        : {}),
       messages: {
         ...s.messages,
         [key]: reconcileMessages(
-          items.map(fromHistoryItem),
+          items.map((h) => ({
+            ...fromHistoryItem(h),
+            receivedAt: s.ledger[key]?.[h.id ?? ""]?.receivedAt,
+            arrivalKind: s.ledger[key]?.[h.id ?? ""]?.arrivalKind,
+          })),
           s.messages[key] ?? [],
           Object.values(s.intents).filter(
             (i) => convKey(i.conversation) === key,

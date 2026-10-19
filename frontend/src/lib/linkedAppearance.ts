@@ -1,5 +1,10 @@
 import { chat } from "@/lib/api/chat";
-import { appearanceValues, applyLinkedAppearance, useTheme } from "@/lib/theme";
+import {
+  appearanceValues,
+  savedAppearanceValues,
+  applyLinkedAppearance,
+  useTheme,
+} from "@/lib/theme";
 import { createLinkedPreferencePublisher } from "./linkedPreferencePublisher";
 
 /** Preserve the existing device's saved look before it issues a pairing code. */
@@ -9,7 +14,7 @@ export async function publishAppearanceBeforeLink(): Promise<void> {
       (record) => record.key,
     ),
   );
-  for (const [key, value] of Object.entries(appearanceValues())) {
+  for (const [key, value] of Object.entries(savedAppearanceValues())) {
     if (!existing.has(key))
       await chat.setAccountPreference("appearance", key, value);
   }

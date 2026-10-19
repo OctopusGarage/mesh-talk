@@ -1,5 +1,10 @@
 import { test, expect } from "./tauri-mock";
-import { enterChat, openBobDm, seedThemeBeforeLoad } from "./helpers/session";
+import {
+  waitForChatShell,
+  enterChat,
+  openBobDm,
+  seedThemeBeforeLoad,
+} from "./helpers/session";
 import {
   prepareForScreenshot,
   snapshotName,
@@ -21,8 +26,6 @@ const VIEWPORTS = [
   { width: 1280, height: 800 },
   { width: 760, height: 620 },
 ] as const;
-
-test.describe.configure({ mode: "serial" });
 
 test("first-run sign-in keeps a quiet, bounded surface", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -46,7 +49,7 @@ test("no peers offers a direct connection path", async ({ page }) => {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await expect(page.getByText("Connection help")).toBeVisible();
   await prepareForScreenshot(page);
   await expect(page.getByTestId("chat-shell")).toHaveScreenshot(
@@ -119,8 +122,8 @@ for (const viewport of VIEWPORTS) {
           viewport.width,
           viewport.height,
         );
-        // Compact OLED exposes native font metrics across enough pixels to need
-        // Linux/Windows references; keep the same strict comparison threshold.
+        // Compact shells expose native font metrics across enough pixels to need
+        // reviewed platform references; keep the same strict comparison threshold.
         const profile =
           process.platform === "win32" &&
           theme === "oled" &&
@@ -129,12 +132,14 @@ for (const viewport of VIEWPORTS) {
                 page.getByText("hey, welcome to the mesh", { exact: true }),
               )
             : process.platform;
-        const reference =
-          ["linux", "win32"].includes(process.platform) &&
-          theme === "oled" &&
-          viewport.width === 760
-            ? name.replace(".png", `-${profile}.png`)
-            : name;
+        const needsPlatformReference =
+          viewport.width === 760 &&
+          ((theme === "oled" &&
+            ["linux", "win32"].includes(process.platform)) ||
+            (["light", "dark"].includes(theme) && process.platform === "linux"));
+        const reference = needsPlatformReference
+          ? name.replace(".png", `-${profile}.png`)
+          : name;
         await expect(shell).toHaveScreenshot(
           reference,
           // Detailed artwork rasterizes differently on Linux and macOS at compact size.

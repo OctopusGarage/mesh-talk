@@ -406,6 +406,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Print inbound channel messages as they arrive.
     participant.register_host_task(tokio::spawn(async move {
         while let Some(m) = channel_rx.recv().await {
+            if m.reception_only {
+                continue;
+            }
             // Channel messages are text-only in this CLI; lossy decode is safe here.
             let text = String::from_utf8_lossy(&m.text);
             emit(&format!(

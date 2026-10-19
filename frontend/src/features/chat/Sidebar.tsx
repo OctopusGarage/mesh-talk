@@ -194,8 +194,9 @@ export function Sidebar() {
 
   const { pinnedRows, accountRows, channelRows, hiddenChannels, listSize } =
     useMemo(
-      () => conversationList(accounts, channels, favorites, t),
-      [accounts, channels, favorites, t],
+      () =>
+        conversationList(accounts, channels, favorites, t, myAccountId, ready),
+      [accounts, channels, favorites, t, ready, myAccountId],
     );
   const pinnedCount = pinnedRows.length;
   const {

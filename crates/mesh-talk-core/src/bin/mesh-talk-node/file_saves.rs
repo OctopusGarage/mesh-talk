@@ -11,7 +11,7 @@ const MAX_FILES: usize = 256;
 enum SaveWork {
     Readiness(Vec<(ConversationId, Option<FileProgress>)>),
     Saved(
-        ReceivedFile,
+        Box<ReceivedFile>,
         Result<PathBuf, mesh_talk_core::node::NodeError>,
     ),
 }
@@ -112,7 +112,7 @@ pub(super) async fn run(
                             let saving_node = node.clone(); let destination = directory.clone();
                             if !work.spawn(&mut saves, move || {
                                 let result = saving_node.save_file_into_dir(file.file_conv, &destination);
-                                SaveWork::Saved(file, result)
+                                SaveWork::Saved(Box::new(file), result)
                             }) { break; }
                         }
                     }
@@ -156,6 +156,14 @@ mod tests {
             mime: "text/plain".into(),
             file_conv: ConversationId::new([n; 32]),
             media: false,
+            event_id: mesh_talk_core::eventlog::event::EventId::new([n; 32]),
+            authored_at: 0,
+            received_at: 0,
+            arrival_kind: "live",
+            own_device: false,
+            batch_id: None,
+            batch_complete: true,
+            batch_size: 1,
         }
     }
     async fn participant(node: Arc<Node>) -> mesh_talk_core::node::ParticipantRuntime {

@@ -227,6 +227,19 @@ impl Node {
             }
         }
         for channel in channels {
+            // A failed projection may have no plaintext row yet. Suppress known
+            // signed content IDs too, so pending retries and startup repair cannot
+            // undo a local clear or retention prune. No pending-queue lock is needed.
+            {
+                let log = self.log.lock().expect("log lock not poisoned");
+                for event in log.events(&channel) {
+                    if matches!(event.kind, EventKind::Message | EventKind::FileManifest)
+                        && should_remove(channel, event.wall_clock)
+                    {
+                        suppressed.push((channel, event.id));
+                    }
+                }
+            }
             for (id, entry) in self.raw_sent_history(channel) {
                 if should_remove(channel, entry.wall_clock) {
                     suppressed.push((channel, id));

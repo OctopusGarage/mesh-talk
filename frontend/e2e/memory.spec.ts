@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
 
@@ -45,7 +46,7 @@ async function signIn(page: Page, user = "tester") {
 async function enterChat(page: Page, user = "mem") {
   await register(page, user);
   await signIn(page, user);
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await expect(
     page.getByTestId(`conversation-row-${BOB.account}`),
   ).toBeVisible();

@@ -18,6 +18,7 @@ pub struct ChannelInfo {
     pub dissolved: bool,
     pub left: bool,
     pub pending_invite: bool,
+    pub recovery: Option<mesh_talk_core::node::ChannelRecovery>,
 }
 
 #[tauri::command]
@@ -38,6 +39,7 @@ pub async fn list_channels(
             dissolved: c.dissolved,
             left: c.left,
             pending_invite: c.pending_invite,
+            recovery: rt.channel_recovery(c.id),
         })
         .collect())
 }

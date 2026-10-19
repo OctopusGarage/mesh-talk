@@ -235,6 +235,22 @@ export function appearanceValues(): Record<string, string> {
   };
 }
 
+/** Initial account seeding excludes defaults that have never been saved locally. */
+export function savedAppearanceValues(): Record<string, string> {
+  if (typeof localStorage === "undefined") return {};
+  const values = appearanceValues();
+  const storageKeys = [
+    ["theme", KEY],
+    ["wallpaper_enabled", WALLPAPER_KEY],
+    ["pack_wallpaper_ids", PACK_WALLPAPERS_KEY],
+  ] as const;
+  return Object.fromEntries(
+    storageKeys
+      .filter(([, storageKey]) => localStorage.getItem(storageKey) !== null)
+      .map(([key]) => [key, values[key]]),
+  );
+}
+
 export function applyLinkedAppearance(key: string, value: string | null): void {
   if (value === null) return;
   const state = useTheme.getState();

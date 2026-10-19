@@ -17,6 +17,8 @@ export interface DeviceSyncStatus {
   device_id: string;
   phase: "offline" | "catching_up" | "up_to_date" | "error" | "disabled";
   pending_attachments: number;
+  /** Older cores omit this; V1 peers cannot separate file cards from file bytes. */
+  legacy_file_metadata?: boolean;
   error: string | null;
 }
 import type {
@@ -71,10 +73,12 @@ export const chat = {
       value,
     }),
   ownerIdentity: (owner: string) =>
-    invoke<{ owner: string; device_id: string; account_id: string }>(
-      "owner_node_identity",
-      { owner },
-    ),
+    invoke<{
+      owner: string;
+      device_id: string;
+      account_id: string;
+      history_revision?: number;
+    }>("owner_node_identity", { owner }),
   enqueueText: (
     owner: string,
     account: string,

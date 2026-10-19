@@ -1626,3 +1626,218 @@ fn failed_durable_intent_does_not_install_or_publish_status() {
             .is_empty()
     );
 }
+
+#[test]
+fn personal_message_without_destinations_does_not_starve_remote_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    let personal = personal_message_transaction(dir.path());
+    let metadata = match &personal {
+        DeliveryTransaction::Outgoing { message, .. } => OutboxRecord::Message(message.clone()),
+        _ => unreachable!(),
+    };
+    store.validate_transaction(&personal).unwrap();
+    // Exercise the persisted outbox index directly; WAL recovery has separate
+    // Node-level coverage, including live and reopened projection failures.
+    store.install_record(metadata).unwrap();
+    let remote = outgoing(dir.path(), 8);
+    let remote_metadata = metadata_for(&remote).unwrap();
+    store.validate_transaction(&remote).unwrap();
+    store.install_record(remote_metadata).unwrap();
+    assert_eq!(
+        store.next_destination(None).unwrap().0,
+        EventId::new([8; 32])
+    );
+    drop(store);
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    assert_eq!(
+        store.next_destination(None).unwrap().0,
+        EventId::new([8; 32])
+    );
+}
+
+#[test]
+fn empty_destinations_remain_invalid_for_remote_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    let mut tx = outgoing(dir.path(), 7);
+    if let DeliveryTransaction::Outgoing {
+        message, ratchets, ..
+    } = &mut tx
+    {
+        message.destinations.clear();
+        ratchets.clear();
+    }
+    assert!(store.begin(tx).is_err());
+    assert!(store.pending_transactions().is_empty());
+}
+
+#[test]
+fn personal_message_empty_destinations_require_logical_envelope_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    let mut tx = outgoing(dir.path(), 7);
+    if let DeliveryTransaction::Outgoing {
+        message,
+        sent,
+        ratchets,
+    } = &mut tx
+    {
+        message.recipient_account = Some(message.sender_account.clone());
+        message.conversation = super::super::conversation::account_conversation_id(
+            &message.sender_account,
+            &message.sender_account,
+        );
+        message.destinations.clear();
+        ratchets.clear();
+        sent.conversation = message.conversation;
+        sent.plaintext = b"legacy plaintext is not an account envelope".to_vec();
+    }
+    assert!(store.begin(tx).is_err());
+    assert!(store.pending_transactions().is_empty());
+}
+
+fn personal_message_transaction(dir: &std::path::Path) -> DeliveryTransaction {
+    let mut personal = outgoing(dir, 7);
+    if let DeliveryTransaction::Outgoing {
+        message,
+        sent,
+        ratchets,
+    } = &mut personal
+    {
+        message.recipient_account = Some(message.sender_account.clone());
+        message.conversation = super::super::conversation::account_conversation_id(
+            &message.sender_account,
+            &message.sender_account,
+        );
+        message.destinations.clear();
+        ratchets.clear();
+        sent.conversation = message.conversation;
+        sent.plaintext = DmEnvelope::new(
+            message.sender_account.clone(),
+            message.sender_account.clone(),
+            [7; 32],
+            b"note".to_vec(),
+        )
+        .encode();
+    }
+    personal
+}
+
+#[test]
+fn personal_message_failed_wal_append_does_not_accept_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    let tx = personal_message_transaction(dir.path());
+    store.validate_transaction(&tx).unwrap();
+    store.journal.fail_appends_for_test(true).unwrap();
+    assert!(store.begin(tx).is_err());
+    assert!(store.pending_transactions().is_empty());
+    assert_eq!(store.status(EventId::new([7; 32])), None);
+    store.journal.fail_appends_for_test(false).unwrap();
+    drop(store);
+    let store = DeliveryStore::open(dir.path(), "pw").unwrap();
+    assert!(store.pending_transactions().is_empty());
+    assert_eq!(store.status(EventId::new([7; 32])), None);
+}
+
+#[test]
+fn personal_message_does_not_consume_remote_delivery_capacity() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = DeliveryLimits {
+        messages: 0,
+        completed: 0,
+        outbox_bytes: HEADER_BYTES,
+        ..DeliveryLimits::default()
+    };
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    let tx = personal_message_transaction(dir.path());
+    store
+        .begin(tx)
+        .expect("local notes do not reserve remote delivery slots or outbox bytes");
+    drop(store);
+    let store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    assert_eq!(store.pending_transactions().len(), 1);
+}
+
+#[test]
+fn personal_message_can_be_saved_with_a_full_remote_delivery_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = DeliveryLimits {
+        messages: 1,
+        ..DeliveryLimits::default()
+    };
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    let remote = outgoing(dir.path(), 8);
+    store
+        .install_record(metadata_for(&remote).unwrap())
+        .unwrap();
+    let personal = personal_message_transaction(dir.path());
+    store
+        .begin(personal)
+        .expect("a full remote queue must not block local history");
+    let mut log = PersistentEventLog::open(&dir.path().join("events"), "pw").unwrap();
+    let mut ratchet =
+        DmRatchet::new(RatchetSessions::open(&dir.path().join("sessions"), "pw").unwrap());
+    let mut sent = SentLog::open(&dir.path().join("sent"), "pw").unwrap();
+    let mut received = ReceivedLog::open(&dir.path().join("received"), "pw").unwrap();
+    store
+        .recover_next(&mut ratchet, &mut log, &mut sent, &mut received)
+        .unwrap();
+    assert!(store.pending_transactions().is_empty());
+    assert_eq!(store.status(EventId::new([7; 32])), None);
+    assert_eq!(
+        sent.entries(&super::super::conversation::account_conversation_id(
+            &"a".repeat(32),
+            &"a".repeat(32)
+        ))
+        .len(),
+        1
+    );
+    assert_eq!(
+        store.next_destination(None).unwrap().0,
+        EventId::new([8; 32])
+    );
+    drop(store);
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    assert_eq!(store.status(EventId::new([7; 32])), None);
+    assert_eq!(
+        store.next_destination(None).unwrap().0,
+        EventId::new([8; 32])
+    );
+}
+
+#[test]
+fn pending_personal_message_does_not_reserve_remote_status_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = outgoing(dir.path(), 8);
+    let metadata_size =
+        bincode::serialized_size(&metadata_for(&remote).unwrap()).unwrap() + FRAME_OVERHEAD;
+    let marker_size = bincode::serialized_size(&OutboxRecord::Delivered(CompletedDelivery {
+        logical_id: EventId::new([8; 32]),
+        conversation: account_conv(),
+        wall_clock: 100,
+        recipient_account: None,
+        remaining: Vec::new(),
+    }))
+    .unwrap()
+        + FRAME_OVERHEAD;
+    let cancel_size =
+        bincode::serialized_size(&OutboxRecord::Cancel(account_conv(), EventId::new([8; 32])))
+            .unwrap()
+            + FRAME_OVERHEAD;
+    let limits = DeliveryLimits {
+        outbox_bytes: HEADER_BYTES + metadata_size + marker_size + cancel_size,
+        ..DeliveryLimits::default()
+    };
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    store
+        .begin(personal_message_transaction(dir.path()))
+        .unwrap();
+    drop(store);
+    let mut store = DeliveryStore::open_with_limits(dir.path(), "pw", limits).unwrap();
+    store
+        .begin(remote)
+        .expect("a pending local projection must not reserve remote status bytes");
+    assert_eq!(store.pending_transactions().len(), 2);
+}

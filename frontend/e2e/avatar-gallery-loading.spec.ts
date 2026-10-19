@@ -36,25 +36,45 @@ test("slow avatar selection has readable progress with reduced motion", async ({
   await page.getByText(/Choose from gallery/).click();
   await expect(page.getByTestId("avatar-gallery")).toBeVisible();
 
-  // Delay detached image decoding, which is the work done after choosing a preset.
+  // Hold decoding until progress is inspected; a timed delay can finish between
+  // assertions when the browser is instrumented or the machine is busy.
   await page.evaluate(() => {
     const src = Object.getOwnPropertyDescriptor(
       HTMLImageElement.prototype,
       "src",
     );
     if (!src?.set) throw new Error("Image src setter unavailable");
+    const pending: (() => void)[] = [];
+    const win = window as typeof window & {
+      __releaseAvatarDecode?: () => void;
+    };
+    win.__releaseAvatarDecode = () => {
+      Object.defineProperty(HTMLImageElement.prototype, "src", src);
+      for (const decode of pending) decode();
+      delete win.__releaseAvatarDecode;
+    };
     Object.defineProperty(HTMLImageElement.prototype, "src", {
       configurable: true,
       get: src.get,
       set(this: HTMLImageElement, value: string) {
         if (this.isConnected) src.set!.call(this, value);
-        else window.setTimeout(() => src.set!.call(this, value), 900);
+        else pending.push(() => src.set!.call(this, value));
       },
     });
   });
   const choice = page.getByTestId("avatar-gallery").getByRole("button").first();
-  await choice.click();
-  await expect(choice).toHaveAttribute("aria-busy", "true");
-  await expect(choice.getByText("Loading…")).toBeVisible();
-  await expect(choice.locator("svg")).toBeHidden();
+  try {
+    await choice.click();
+    await expect(choice).toHaveAttribute("aria-busy", "true");
+    await expect(choice.getByText("Loading…")).toBeVisible();
+    await expect(choice.locator("svg")).toBeHidden();
+  } finally {
+    await page.evaluate(() => {
+      const win = window as typeof window & {
+        __releaseAvatarDecode?: () => void;
+      };
+      win.__releaseAvatarDecode?.();
+    });
+  }
+  await expect(page.getByTestId("avatar-gallery")).toHaveCount(0);
 });

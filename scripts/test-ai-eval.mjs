@@ -143,3 +143,33 @@ test("routed discovery eval covers the opt-in bridge and its limits", () => {
   assert.ok(bridge.rubric.some((item) => item.includes("Noise identity")));
   assert.ok(bridge.rubric.some((item) => item.includes("WebRTC")));
 });
+
+
+test("ai eval includes declared supporting sources and records their provenance", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "mesh-context-eval-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const primary = join(tmp, "primary.rs");
+  const support = join(tmp, "validator.rs");
+  const prompt = join(tmp, "prompt.md");
+  const suite = join(tmp, "suite.json");
+  const report = join(tmp, "report.json");
+  const provider = join(tmp, "provider.mjs");
+  writeFileSync(primary, "PRIMARY_SOURCE");
+  writeFileSync(support, "DELEGATED_VALIDATION");
+  writeFileSync(prompt, "Evaluate the supplied production sources.");
+  writeFileSync(suite, JSON.stringify({ evaluator_prompt: prompt, cases: [{
+    id: "MT-CONTEXT-001", name: "delegated validation", subject_file: primary,
+    context_files: [support], min_score: 0.85, scenario: "Check the validator.", rubric: ["Validation exists."],
+  }] }));
+  writeFileSync(provider, `let input=""; process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => {
+  if (!input.includes("PRIMARY_SOURCE") || !input.includes("DELEGATED_VALIDATION")) throw Error("Missing production context");
+  console.log(JSON.stringify({case_id:"MT-CONTEXT-001",pass:true,score:1,findings:[],evidence:[],required_improvements:[]}));
+});`);
+  const result = runEval(["--suite", suite, "--report", report], {
+    AI_EVAL_COMMAND: `"${process.execPath}" "${provider}"`,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(JSON.parse(readFileSync(report, "utf8")).cases[0].context_files, [support]);
+});

@@ -64,6 +64,7 @@ function FileBubble({
   sendKey,
   messageId,
   isChannel,
+  isPersonal,
   readOnly,
 }: {
   file: NonNullable<ChatMessage["file"]>;
@@ -73,6 +74,7 @@ function FileBubble({
   sendKey?: string;
   messageId?: string | null;
   isChannel: boolean;
+  isPersonal: boolean;
   readOnly: boolean;
 }) {
   const { t } = useTranslation();
@@ -87,7 +89,9 @@ function FileBubble({
   const approvalNeeded =
     !mine && (status?.consent === "pending" || status?.consent === "declined");
   const uploadKey =
-    mine && !metadataPending && !isChannel ? messageId || undefined : undefined;
+    mine && !metadataPending && !isChannel && !isPersonal
+      ? messageId || undefined
+      : undefined;
 
   const saveAs = async () => {
     const lease = captureChatOwnership();
@@ -288,6 +292,7 @@ export function MessageBubble({
   grouped,
   showTime,
   isChannel,
+  isPersonal = false,
   readOnly = false,
   authorAvatarId,
   authorName,
@@ -313,6 +318,7 @@ export function MessageBubble({
   showTime?: boolean;
   /** Channel conversations show per-message author avatar + name; DMs don't. */
   isChannel: boolean;
+  isPersonal?: boolean;
   /** Recovered channel history has no sender keys on this device. */
   readOnly?: boolean;
   /** The author's ACCOUNT id (resolved from the roster) for avatar lookup; defaults to
@@ -613,6 +619,7 @@ export function MessageBubble({
                     sendKey={m.clientId}
                     messageId={m.id}
                     isChannel={isChannel}
+                    isPersonal={isPersonal}
                     readOnly={readOnly}
                   />
                 ) : (
@@ -716,7 +723,12 @@ export function MessageBubble({
           </div>
         )}
 
-        <DeliveryFooter message={m} isChannel={isChannel} showTime={showTime} />
+        <DeliveryFooter
+          message={m}
+          isChannel={isChannel}
+          isPersonal={isPersonal}
+          showTime={showTime}
+        />
 
         {m.failed && (
           <span

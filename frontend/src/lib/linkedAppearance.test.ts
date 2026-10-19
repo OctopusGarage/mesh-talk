@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => {
   return {
     listeners,
     values,
+    saved: new Set<string>(),
     getPolicy: vi.fn(),
     getPreferences: vi.fn(),
     setPreference: vi.fn(),
@@ -28,6 +29,10 @@ vi.mock("@/lib/api/chat", () => ({
 }));
 vi.mock("@/lib/theme", () => ({
   appearanceValues: () => ({ ...mocks.values }),
+  savedAppearanceValues: () =>
+    Object.fromEntries(
+      Object.entries(mocks.values).filter(([key]) => mocks.saved.has(key)),
+    ),
   applyLinkedAppearance: mocks.apply,
   useTheme: {
     subscribe: (listener: () => void) => {
@@ -37,12 +42,16 @@ vi.mock("@/lib/theme", () => ({
   },
 }));
 
-import { startLinkedAppearance } from "./linkedAppearance";
+import {
+  publishAppearanceBeforeLink,
+  startLinkedAppearance,
+} from "./linkedAppearance";
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal("window", globalThis);
   mocks.listeners.clear();
+  mocks.saved.clear();
   mocks.values.theme = "dark";
   mocks.values.wallpaper_enabled = "on";
   mocks.values.pack_wallpaper_ids = "{}";
@@ -62,6 +71,35 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
+});
+
+it("does not publish unsaved appearance defaults before pairing", async () => {
+  mocks.getPreferences.mockResolvedValue([]);
+  await publishAppearanceBeforeLink();
+  expect(mocks.setPreference).not.toHaveBeenCalled();
+});
+
+it("publishes only explicitly saved local appearance before pairing", async () => {
+  mocks.getPreferences.mockResolvedValue([]);
+  mocks.values.theme = "oled";
+  mocks.saved.add("theme");
+  await publishAppearanceBeforeLink();
+  expect(mocks.setPreference).toHaveBeenCalledExactlyOnceWith(
+    "appearance",
+    "theme",
+    "oled",
+  );
+});
+
+it("preserves account values while publishing other saved appearance keys", async () => {
+  mocks.saved.add("theme");
+  mocks.saved.add("wallpaper_enabled");
+  await publishAppearanceBeforeLink();
+  expect(mocks.setPreference).toHaveBeenCalledExactlyOnceWith(
+    "appearance",
+    "wallpaper_enabled",
+    "on",
+  );
 });
 
 it("adopts a linked theme without publishing a new device's default", async () => {
