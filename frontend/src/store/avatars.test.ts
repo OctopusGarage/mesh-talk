@@ -27,6 +27,124 @@ it("clears local and received avatars when the signed-in owner changes", () => {
   expect(useAvatars.getState().ownId).toBe("");
 });
 
+it("a linked device's signed own-avatar update replaces the stale local override", async () => {
+  invoke.mockResolvedValue(undefined);
+  useAvatars.setState({ local: { own: "old-local" } });
+  useAvatars.getState().mergeReceived("own", "new-linked-photo");
+  expect(useAvatars.getState().local.own).toBeUndefined();
+  expect(useAvatars.getState().received.own).toBe("new-linked-photo");
+  await vi.waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("set_avatar", {
+      owner: "host",
+      id: "own",
+      dataUrl: null,
+    }),
+  );
+  expect(
+    invoke.mock.calls.some(([command]) => command === "publish_avatar"),
+  ).toBe(false);
+});
+
+it("a linked device's avatar clear removes both own-avatar sources", async () => {
+  invoke.mockResolvedValue(undefined);
+  useAvatars.setState({
+    local: { own: "old-local" },
+    received: { own: "remote" },
+  });
+  useAvatars.getState().mergeReceived("own", null);
+  expect(useAvatars.getState().local.own).toBeUndefined();
+  expect(useAvatars.getState().received.own).toBeUndefined();
+  await vi.waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("set_avatar", {
+      owner: "host",
+      id: "own",
+      dataUrl: null,
+    }),
+  );
+});
+
+it("a durable linked-device clear prevents a stale avatar from being republished on restart", async () => {
+  invoke.mockImplementation((command: string) => {
+    if (command === "peer_avatars") return Promise.resolve({ own: null });
+    if (command === "get_avatars") return Promise.resolve({ own: "old-local" });
+    return Promise.resolve();
+  });
+  await useAvatars.getState().reassertOwn();
+  expect(useAvatars.getState().local.own).toBeUndefined();
+  expect(useAvatars.getState().received.own).toBeUndefined();
+  expect(
+    invoke.mock.calls.some(([command]) => command === "publish_avatar"),
+  ).toBe(false);
+  await vi.waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("set_avatar", {
+      owner: "host",
+      id: "own",
+      dataUrl: null,
+    }),
+  );
+});
+
+it("a stale startup profile load cannot replace a newer live update", async () => {
+  let finishPeers!: (value: Record<string, string | null>) => void;
+  invoke.mockImplementation((command: string) =>
+    command === "peer_avatars"
+      ? new Promise((resolve) => {
+          finishPeers = resolve;
+        })
+      : Promise.resolve(),
+  );
+  const loading = useAvatars.getState().loadPeers();
+  useAvatars.getState().mergeReceived("contact", "new-photo");
+  finishPeers({ contact: "old-photo" });
+  await loading;
+  expect(useAvatars.getState().received.contact).toBe("new-photo");
+});
+
+it("clearing my own avatar removes the previously received sibling photo immediately", async () => {
+  invoke.mockResolvedValue(undefined);
+  useAvatars.setState({
+    received: { own: "sibling-photo" },
+    ownProfileSeen: true,
+  });
+  await useAvatars.getState().setAvatar("own", null);
+  expect(useAvatars.getState().received.own).toBeUndefined();
+  expect(useAvatars.getState().local.own).toBeUndefined();
+  expect(invoke).toHaveBeenCalledWith("publish_avatar", { avatar: null });
+});
+
+it("startup never republishes an older avatar after a newer local edit", async () => {
+  let finishPeers!: (value: Record<string, string | null>) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "get_avatars") return Promise.resolve({ own: "old-photo" });
+    if (command === "peer_avatars")
+      return new Promise((resolve) => {
+        finishPeers = resolve;
+      });
+    return Promise.resolve();
+  });
+  const reassert = useAvatars.getState().reassertOwn();
+  await vi.waitFor(() => expect(finishPeers).toBeDefined());
+  await useAvatars.getState().setAvatar("own", "new-photo");
+  finishPeers({});
+  await reassert;
+  expect(
+    invoke.mock.calls.filter(([command]) => command === "publish_avatar"),
+  ).toEqual([["publish_avatar", { avatar: "new-photo" }]]);
+});
+
+it("startup skips republish when the durable profile load fails", async () => {
+  invoke.mockImplementation((command: string) => {
+    if (command === "get_avatars") return Promise.resolve({ own: "old-photo" });
+    if (command === "peer_avatars")
+      return Promise.reject(new Error("unavailable"));
+    return Promise.resolve();
+  });
+  await useAvatars.getState().reassertOwn();
+  expect(
+    invoke.mock.calls.some(([command]) => command === "publish_avatar"),
+  ).toBe(false);
+});
+
 it("current own-avatar success publishes and current failure reconciles", async () => {
   invoke.mockResolvedValue(undefined);
   await useAvatars.getState().setAvatar("own", "photo");

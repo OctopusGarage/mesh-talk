@@ -1,12 +1,14 @@
 ---
-description: Run the end-to-end multi-process integration tests and report a triaged verdict
+description: Run explicitly requested backend process scenarios and report a triaged verdict
 allowed-tools: Task
 ---
 
-Dispatch the `e2e-runner` subagent to run Mesh-Talk's end-to-end integration tests (real
-`mesh-talk-node` processes over UDP discovery + TCP: two-node DM, history-survives-restart,
-post-office offline delivery) and return its verdict.
+Dispatch the `e2e-runner` subagent with the user's requested scenario and scope.
+It selects affected process tests by default; an explicit comprehensive E2E
+request uses the root `make e2e` target. Do not duplicate its evolving test list
+or assume production KDF cold-start timings for cheap-KDF test binaries.
 
-The subagent runs the slow suite in its own context so the ~5-minute test output stays out of
-this conversation — you get back only the per-test ✅/❌ and, for any failure, the triaged cause
-(test-rig bug vs flaky timeout vs **real product regression** vs environmental). Relay it here.
+Return the exact commands, observed results and feature/topology boundaries.
+Failures must distinguish rig errors, environment/ACL limits, contention and
+reproducible product regressions. Read-only triage does not authorize service
+changes, release publication or a repository-wide optimization loop.

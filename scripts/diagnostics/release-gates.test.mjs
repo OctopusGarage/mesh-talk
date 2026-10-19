@@ -31,6 +31,20 @@ test("publication is opt-in, tag-only and requires verified release evidence", (
   assert.match(publish, /name: verified-release-evidence/);
 });
 
+test("post-office images use verified Linux archives and publish before the release", () => {
+  const build = workflow.split("  build-release:\n")[1]?.split(/^  verify-release:/m)[0];
+  const publish = workflow.split("  publish-release:\n")[1];
+  assert.match(build, /name: Build headless post-office node\n\s+if: matrix\.variant == 'default'/);
+  assert.match(build, /scripts\/release\/package-post-office\.sh/);
+  assert.match(build, /subject-path: "release_zips\/\*\.zip"/);
+  assert.match(publish, /packages: write/);
+  assert.match(publish, /name: verified-release-evidence/);
+  assert.match(publish, /scripts\/release\/prepare-post-office-container\.sh container-input verification\.txt/);
+  assert.match(publish, /platforms: linux\/amd64,linux\/arm64/);
+  assert.match(publish, /org\.opencontainers\.image\.source=/);
+  assert.ok(publish.indexOf("Publish verified multi-platform post-office image") < publish.indexOf("Publish only the verified draft"));
+});
+
 test("release preflight prevents overwriting published versions before building", () => {
   assert.match(workflow, /^  preflight:\n/m);
   assert.match(workflow, /scripts\/release\/preflight\.mjs/);

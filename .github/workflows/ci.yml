@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: '0 6 * * 1' # Preserve the former weekly full-health Rust run.
   workflow_dispatch:
     inputs:
       diagnostic_timing:
@@ -56,7 +58,9 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: . -> target
+          key: workspace-checks
+          cache-on-failure: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -64,8 +68,13 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      # The Tauri build reads frontendDist (../frontend/dist), so build the
-      # frontend before any cargo step.
+      - name: Validate public help and MCP
+        run: |
+          npm ci --prefix tools/help --ignore-scripts
+          node --test tools/help/*.test.mjs
+          npm audit --prefix tools/help --audit-level=high
+
+      # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend
         working-directory: frontend
         run: |
@@ -102,24 +111,21 @@ jobs:
         shell: bash
         run: node --test scripts/diagnostics/*.test.mjs
 
+      - name: Build retention safeguards (all platforms)
+        run: python3 -m unittest discover -s scripts -p test_build_retention.py -v
+
       - name: Validate release checksum generation
         shell: bash
         run: node --test scripts/diagnostics/release-workflow.test.mjs
 
-      - name: Lint frontend (ESLint)
-        if: matrix.os == 'ubuntu-latest'
-        working-directory: frontend
-        run: npm run lint
-
-      - name: Rustfmt (check)
-        if: matrix.os == 'ubuntu-latest'
-        working-directory: src-tauri
-        run: cargo fmt --all -- --check
-
+      # All platforms retain the Clippy and build checks formerly repeated by health.
       - name: Clippy
-        if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build workspace
+        working-directory: src-tauri
+        run: cargo build --workspace --locked
 
       # Linux runs the suite under llvm-cov (below); macOS + Windows run it directly.
       # --workspace so BOTH crates (mesh-talk-core + the app) are tested, not just the app.
@@ -127,6 +133,10 @@ jobs:
         if: matrix.os != 'ubuntu-latest'
         working-directory: src-tauri
         shell: bash
+        env:
+          # Concurrent encrypted file/log rigs exceed loopback deadlines on
+          # shared Windows runners. Keep every assertion and timeout intact.
+          RUST_TEST_THREADS: ${{ matrix.os == 'windows-latest' && '1' || '4' }}
         run: |
           set -o pipefail
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
@@ -190,11 +200,19 @@ jobs:
             cargo llvm-cov --workspace --lcov --output-path lcov.info
           fi
 
-      - name: CLI channel and file coverage (Linux)
+      - name: Multi-process core coverage (Linux)
         if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
         shell: bash
-        run: cargo llvm-cov --no-clean -p mesh-talk-core --test channel_and_file_cli --lcov --output-path cli-lcov.info -- --ignored --test-threads=1
+        run: >-
+          cargo llvm-cov --no-clean -p mesh-talk-core
+          --test two_node_cli
+          --test persistent_history
+          --test post_office_offline
+          --test channel_and_file_cli
+          --test bridge_cross_lan
+          --lcov --output-path e2e-lcov.info
+          -- --ignored --test-threads=1
 
       - name: Upload test timing diagnostics
         if: always() && env.MESH_TALK_TEST_TIMING == '1'
@@ -215,47 +233,9 @@ jobs:
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: frontend/coverage/lcov.info,src-tauri/lcov.info,src-tauri/cli-lcov.info
+          files: frontend/coverage/lcov.info,src-tauri/lcov.info,src-tauri/e2e-lcov.info
           # Branch protection requires codecov/patch; surface upload failures in CI too.
           fail_ci_if_error: true
-
-      - name: Spelling (typos)
-        if: matrix.os == 'ubuntu-latest'
-        uses: crate-ci/typos@v1
-
-      - name: Shellcheck scripts
-        if: matrix.os == 'ubuntu-latest'
-        run: shellcheck --severity=warning scripts/*.sh scripts/release/*.sh .claude/hooks/*.sh hooks/*
-
-      - name: Install Go for workflow validation
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/setup-go@v7
-        with:
-          go-version: '1.25'
-          cache: false
-
-      - name: Validate GitHub Actions workflows
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          "$(go env GOPATH)/bin/actionlint"
-
-      - name: Install supply-chain tools
-        if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2.87.27
-        with:
-          tool: cargo-deny,cargo-machete
-
-      # Unused dependencies (knip's Rust equivalent). Cargo.toml files at root.
-      - name: Unused dependencies (cargo-machete)
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo machete
-
-      # Advisories + licenses + bans + sources (config: deny.toml).
-      - name: Supply-chain policy (cargo-deny)
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo deny check
 
   # Stable name for the branch-protection required check: stays "verify" no
   # matter how the matrix above evolves.

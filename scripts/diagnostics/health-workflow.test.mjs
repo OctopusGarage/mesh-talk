@@ -8,28 +8,31 @@ test("full health builds frontend before Tauri compilation on a fresh checkout",
   assert.equal([...script.matchAll(/npm run build/g)].length, 1, "full health should not build frontend twice");
 });
 
-test("health workflow uses a supported toolchain action and installs required scan tools", () => {
+test("health installs source scanners while Gitleaks owns the full-history scan", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   assert.doesNotMatch(workflow, /actions-rs\/toolchain@/);
   assert.match(workflow, /dtolnay\/rust-toolchain@stable/);
   assert.match(workflow, /tool: cargo-deny,cargo-machete,typos-cli,shellcheck/);
-  assert.match(workflow, /go install github\.com\/zricethezav\/gitleaks\/v8@v8\.30\.1/);
+  const secrets = readFileSync(new URL("../../.github/workflows/gitleaks.yml", import.meta.url), "utf8");
+  assert.match(secrets, /fetch-depth: 0/);
+  assert.match(secrets, /GITLEAKS_VERSION: 8\.30\.1/);
   assert.match(workflow, /go install github\.com\/rhysd\/actionlint\/cmd\/actionlint@v1\.7\.12/);
   assert.match(readFileSync(new URL("../check-health.sh", import.meta.url), "utf8"), /for tool in cargo-deny cargo-machete typos gitleaks shellcheck actionlint/);
 });
 
 test("Windows health and diagnostic gates explicitly execute Bash", () => {
-  for (const [file, name] of [["check-health.yml", "Run unified health check"], ["ci.yml", "Diagnostic and release gate regressions (all platforms)"]]) {
+  for (const [file, name] of [["ci.yml", "Diagnostic and release gate regressions (all platforms)"]]) {
     const workflow = readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8");
     const step = workflow.split(/^      - /m).find((value) => value.startsWith(`name: ${name}\n`));
     assert.ok(step, name);
     assert.match(step, /^        shell: bash$/m, "PowerShell must not treat .sh as a file association or pass test globs literally");
   }
+  assert.match(readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8"), /defaults:\n      run:\n        shell: bash/);
 });
 
-test("full health runs before merging and retains independent platform results", () => {
+test("health runs for every PR and retains independent platform results", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
-  assert.match(workflow, /^  pull_request:\n    branches: \[main\]$/m);
+  assert.match(workflow, /^  pull_request:$/m);
   assert.match(workflow, /^concurrency:\n  group: health-.*\n  cancel-in-progress: true$/m);
   assert.match(workflow, /^      fail-fast: false$/m);
 });

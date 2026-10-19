@@ -9,7 +9,7 @@ resolver = "3"
 # drift apart. Each crate opts in with `<dep>.workspace = true`.
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/OctopusGarage/mesh-talk"
@@ -59,6 +59,13 @@ clap = { version = "4.4", features = ["derive"] }
 lazy_static = "1.4"
 # Dev
 tempfile = "3.8"
+
+# Mutation testing rebuilds once per injected bug; symbols add cost without useful
+# diagnostics for these expected failures. Normal dev/test profiles stay unchanged.
+[profile.mutants]
+inherits = "test"
+debug = "none"
+incremental = true
 
 # Keep the default speed-oriented opt-level while reducing duplicate native code and
 # shipping symbols. Thin LTO limits release build time compared with fat LTO.

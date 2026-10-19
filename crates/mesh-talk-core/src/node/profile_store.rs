@@ -89,6 +89,12 @@ impl ProfileStore {
             .and_then(|e| e.avatar.clone())
     }
 
+    pub fn updated_at(&self, account_id: &str) -> Option<u64> {
+        self.by_account
+            .get(account_id)
+            .map(|entry| entry.updated_at)
+    }
+
     /// Every account's current avatar, as `account_id -> data-URL bytes` (cleared
     /// avatars are omitted). For seeding the frontend on startup.
     pub fn all(&self) -> HashMap<String, Vec<u8>> {

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, ShieldCheck } from "lucide-react";
+import { BookOpen, Loader2, ShieldCheck } from "lucide-react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
+import { listen } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,6 +14,7 @@ import { errorMessage } from "@/lib/error";
 import { isMacOverlay, needsCustomWindowControls } from "@/lib/platform";
 import { useAuth } from "@/store/auth";
 import { RestoreBackup } from "./RestoreBackup";
+import { HelpDialog } from "@/features/help/HelpDialog";
 
 /**
  * The hero. Opening on the most characteristic thing in mesh-talk's world: a
@@ -27,6 +29,23 @@ export function LoginScreen() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("tray-navigate", ({ payload }) => {
+      if (active && payload === "help") setHelpOpen(true);
+    })
+      .then((stop) => {
+        if (active) unlisten = stop;
+        else stop();
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
   // "Stay signed in" reflects the persisted backend setting (default on); the login
   // command reads it server-side, so we persist the toggle as the user flips it.
   const [stay, setStay] = useState(true);
@@ -291,6 +310,21 @@ export function LoginScreen() {
           />
         </div>
 
+        <HelpDialog
+          open={helpOpen}
+          onOpenChange={setHelpOpen}
+          trigger={
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mt-2 w-full text-muted-foreground"
+              data-testid="login-help"
+            >
+              <BookOpen className="h-4 w-4" />
+              {t("help.title")}
+            </Button>
+          }
+        />
         {tab === "signin" && (
           <p className="mt-5 text-center text-xs leading-5 text-muted-foreground">
             {t("redesign.discoveryHint")}

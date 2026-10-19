@@ -5,7 +5,11 @@ import {
   asRingtoneId,
   type RingtoneId,
 } from "@/lib/ringtones";
-import type { AppSettings } from "@/lib/types";
+import {
+  balancedPrivacy,
+  privacyFromSettings,
+  type PrivacySettings,
+} from "@/lib/privacySettings";
 import { captureOwner } from "./ownership";
 
 /** App-setting flags the UI needs reactively (most settings are read in Rust, but a few —
@@ -18,15 +22,7 @@ interface SettingsStore {
   callsEnabled: boolean;
   /** The chosen incoming-call ringtone. */
   ringtone: RingtoneId;
-  privacy: Pick<
-    AppSettings,
-    | "privacy_level"
-    | "notification_preview"
-    | "auto_lock_seconds"
-    | "lock_when_hidden"
-    | "confirm_sensitive_copy"
-    | "clipboard_clear_seconds"
-  >;
+  privacy: PrivacySettings;
   /** Load the persisted flags (called once at app start). */
   load: () => Promise<void>;
   /** Reflect a just-saved toggle without a round-trip. */
@@ -36,14 +32,8 @@ interface SettingsStore {
   setPrivacy: (value: SettingsStore["privacy"]) => void;
 }
 
-export const balancedPrivacy: SettingsStore["privacy"] = {
-  privacy_level: "balanced",
-  notification_preview: true,
-  auto_lock_seconds: 0,
-  lock_when_hidden: false,
-  confirm_sensitive_copy: false,
-  clipboard_clear_seconds: 0,
-};
+// Preserve the existing facade for settings consumers.
+export { balancedPrivacy } from "@/lib/privacySettings";
 
 export const useSettings = create<SettingsStore>((set, get) => ({
   owner: null,
@@ -68,14 +58,7 @@ export const useSettings = create<SettingsStore>((set, get) => ({
       set({
         callsEnabled: s.calls_enabled,
         ringtone: asRingtoneId(s.ringtone),
-        privacy: {
-          privacy_level: s.privacy_level,
-          notification_preview: s.notification_preview,
-          auto_lock_seconds: s.auto_lock_seconds,
-          lock_when_hidden: s.lock_when_hidden,
-          confirm_sensitive_copy: s.confirm_sensitive_copy,
-          clipboard_clear_seconds: s.clipboard_clear_seconds,
-        },
+        privacy: privacyFromSettings(s),
       });
     } catch {
       // Settings unavailable (node not up yet) — keep the safe defaults.

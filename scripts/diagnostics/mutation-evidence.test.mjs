@@ -10,6 +10,26 @@ test("mutation shard rotates across workflow runs and stays within 256 shards", 
   assert.throws(() => mutationShard(0), /invalid workflow run number/);
 });
 
+test("parallel shards partition exactly the original rotating sample", () => {
+  for (const run of [1, 256, 257, 472]) {
+    const original = (run - 1) % 256;
+    const shards = Array.from({ length: 4 }, (_, worker) => mutationShard(run, worker, 4));
+    assert.equal(new Set(shards).size, 4);
+    for (let mutant = 0; mutant < 9000; mutant++) {
+      const matches = shards.filter((shard) => {
+        const [index, count] = shard.split("/").map(Number);
+        return mutant % count === index;
+      }).length;
+      assert.equal(matches, mutant % 256 === original ? 1 : 0);
+    }
+  }
+  assert.equal(mutationShard(472, 0, 4), "215/1024");
+  assert.equal(mutationShard(472, 3, 4), "983/1024");
+  for (const [worker, count] of [[-1, 4], [4, 4], [0.5, 4], [0, 0], [0, 1.5]]) {
+    assert.throws(() => mutationShard(1, worker, count), /invalid mutation worker/);
+  }
+});
+
 const outcome = (summary) => ({ scenario: { Mutant: {} }, summary });
 const report = {
   total_mutants: 3, caught: 1, missed: 1, unviable: 1, timeout: 0, success: 0,

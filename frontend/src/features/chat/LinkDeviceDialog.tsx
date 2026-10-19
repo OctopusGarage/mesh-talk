@@ -12,14 +12,36 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { auth, chat } from "@/lib/api";
+import type {
+  DeviceSyncPolicy,
+  DeviceSyncStatus,
+  SyncCategory,
+} from "@/lib/api/chat";
 import { errorMessage } from "@/lib/error";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { shortId } from "@/lib/format";
+import { isContactPeer } from "@/lib/contactVisibility";
+import { publishAppearanceBeforeLink } from "@/lib/linkedAppearance";
+import { useCopyFeedback } from "./useCopyFeedback";
+import { useSerialPoll } from "./useSerialPoll";
 import { useChat } from "@/store/chat";
+
+const SYNC_OPTIONS = [
+  { category: "history", label: "historySync" },
+  { category: "attachments", label: "attachmentsSync" },
+  { category: "profile", label: "profileSync" },
+  { category: "appearance", label: "appearanceSync" },
+  { category: "contacts", label: "contactsSync" },
+] as const satisfies readonly { category: SyncCategory; label: string }[];
 
 export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
   const { t } = useTranslation();
+  const translate = useRef(t);
+  useEffect(() => {
+    translate.current = t;
+  }, [t]);
   const myAccountId = useChat((s) => s.myAccountId);
   const peers = useChat((s) => s.peers);
   const setError = useChat((s) => s.setError);
@@ -34,10 +56,69 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
   const [creatingCode, setCreatingCode] = useState(false);
   const creatingCodeRef = useRef(false);
   const openRef = useRef(false);
+  const dialogSession = useRef(0);
   const stopRef = useRef<Promise<void> | null>(null);
-  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(
-    null,
+  const { status: copyStatus, copy, reset: resetCopy } = useCopyFeedback();
+  const [syncPolicy, setSyncPolicy] = useState<DeviceSyncPolicy | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<DeviceSyncStatus[]>([]);
+  const [syncStatusError, setSyncStatusError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setSyncPolicy(null);
+    setSyncError(null);
+    setSyncStatus([]);
+    setSyncStatusError(null);
+    void chat.getDeviceSyncPolicy().then(
+      (policy) => {
+        if (active) setSyncPolicy(policy);
+      },
+      (error) => {
+        if (active)
+          setSyncError(
+            translate.current("linkDevice.syncLoadFailed", {
+              error: errorMessage(error),
+            }),
+          );
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [open]);
+
+  useSerialPoll(
+    open,
+    5_000,
+    () => chat.getDeviceSyncStatus(),
+    (statuses) => {
+      setSyncStatus(statuses);
+      setSyncStatusError(null);
+    },
+    (error) => setSyncStatusError(errorMessage(error)),
   );
+
+  const setSyncCategory = async (category: SyncCategory, enabled: boolean) => {
+    if (!syncPolicy || syncBusy) return;
+    const session = dialogSession.current;
+    setSyncBusy(true);
+    setSyncError(null);
+    try {
+      const policy = await chat.setDeviceSyncCategory(category, enabled);
+      if (openRef.current && session === dialogSession.current)
+        setSyncPolicy(policy);
+    } catch (error) {
+      if (openRef.current && session === dialogSession.current)
+        setSyncError(
+          t("linkDevice.syncSaveFailed", { error: errorMessage(error) }),
+        );
+    } finally {
+      setSyncBusy(false);
+    }
+  };
 
   const stopLinking = () => {
     const pending = chat.stopLinking().catch((e) => {
@@ -51,6 +132,7 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
   };
 
   const onOpenChange = (v: boolean) => {
+    if (v !== openRef.current) dialogSession.current++;
     openRef.current = v;
     setOpen(v);
     if (!v) {
@@ -58,7 +140,7 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
       setCode(null);
       setMsg(null);
       setMsgIsError(false);
-      setCopyStatus(null);
+      resetCopy();
       setJoinCode("");
     }
   };
@@ -66,24 +148,30 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
   useEffect(
     () => () => {
       openRef.current = false;
+      dialogSession.current++;
     },
     [],
   );
 
   const showCode = async () => {
     if (creatingCodeRef.current) return;
+    const session = dialogSession.current;
     creatingCodeRef.current = true;
     setCreatingCode(true);
     setMsg(null);
     setMsgIsError(false);
     try {
       if (stopRef.current) await stopRef.current;
-      if (!openRef.current) return;
+      if (!openRef.current || session !== dialogSession.current) return;
+      await publishAppearanceBeforeLink().catch((error) => {
+        console.warn("Could not prepare linked appearance", error);
+      });
       const nextCode = await chat.startLinking();
-      if (openRef.current) setCode(nextCode);
+      if (openRef.current && session === dialogSession.current)
+        setCode(nextCode);
       else await stopLinking();
     } catch (e) {
-      if (openRef.current) {
+      if (openRef.current && session === dialogSession.current) {
         setMsgIsError(true);
         setMsg(errorMessage(e));
       }
@@ -95,49 +183,46 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
 
   const copyCode = async () => {
     if (!code) return;
-    setCopyStatus(null);
-    try {
-      if (!(await copySensitiveText(code, t("settings.confirmCopyPrompt"))))
-        return;
-      setCopyStatus("copied");
-      setTimeout(
-        () =>
-          setCopyStatus((current) => (current === "copied" ? null : current)),
-        1200,
-      );
-    } catch {
-      setCopyStatus("failed");
-    }
+    await copy(() => copySensitiveText(code, t("settings.confirmCopyPrompt")));
   };
 
   const doLink = async () => {
     if (!joinPeer || !joinCode.trim()) return;
+    const session = dialogSession.current;
     setBusy(true);
     setMsg(null);
     setMsgIsError(false);
     try {
       await chat.linkDevice(joinPeer, joinCode.trim());
       await auth.adoptLinkedAccount();
-      setMsg(t("linkDevice.linked"));
-      setJoinCode("");
+      if (openRef.current && session === dialogSession.current) {
+        setMsg(t("linkDevice.linked"));
+        setJoinCode("");
+      }
     } catch (e) {
-      setMsgIsError(true);
-      setMsg(t("linkDevice.linkFailed", { error: errorMessage(e) }));
+      if (openRef.current && session === dialogSession.current) {
+        setMsgIsError(true);
+        setMsg(t("linkDevice.linkFailed", { error: errorMessage(e) }));
+      }
     } finally {
       setBusy(false);
     }
   };
 
   const rekey = async () => {
+    const session = dialogSession.current;
     setBusy(true);
     setMsg(null);
     setMsgIsError(false);
     try {
       const id = await chat.rekeyAccount();
-      setMsg(t("linkDevice.rekeyed", { id: shortId(id, 12) }));
+      if (openRef.current && session === dialogSession.current)
+        setMsg(t("linkDevice.rekeyed", { id: shortId(id, 12) }));
     } catch (e) {
-      setMsgIsError(true);
-      setMsg(t("linkDevice.rekeyFailed", { error: errorMessage(e) }));
+      if (openRef.current && session === dialogSession.current) {
+        setMsgIsError(true);
+        setMsg(t("linkDevice.rekeyFailed", { error: errorMessage(e) }));
+      }
     } finally {
       setBusy(false);
     }
@@ -267,7 +352,7 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
             className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background [@media(hover:none)]:min-h-11"
           >
             <option value="">{t("linkDevice.pickDevice")}</option>
-            {peers.map((p) => (
+            {peers.filter(isContactPeer).map((p) => (
               <option key={p.user_id} value={p.user_id}>
                 {p.name || t("common.unnamed")} ({shortId(p.user_id)})
               </option>
@@ -296,6 +381,77 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
               {t("common.link")}
             </Button>
           </div>
+        </section>
+
+        <section className="space-y-3 rounded-lg border p-4">
+          <p className="font-display text-sm font-semibold tracking-tight">
+            {t("linkDevice.syncTitle")}
+          </p>
+          {SYNC_OPTIONS.map(({ category, label }) => (
+            <div
+              key={category}
+              className="flex items-center justify-between gap-4"
+            >
+              <div className="min-w-0">
+                <p className="text-sm font-medium">
+                  {t(`linkDevice.${label}`)}
+                </p>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  {t(`linkDevice.${label}Description`)}
+                </p>
+              </div>
+              <Switch
+                checked={syncPolicy?.[category] ?? false}
+                disabled={!syncPolicy || syncBusy}
+                aria-label={t(`linkDevice.${label}`)}
+                onCheckedChange={(enabled) =>
+                  void setSyncCategory(category, enabled)
+                }
+              />
+            </div>
+          ))}
+          {syncError && (
+            <p role="alert" className="text-xs text-destructive">
+              {syncError}
+            </p>
+          )}
+          {syncStatus.length > 0 && (
+            <div className="space-y-1 border-t pt-3" aria-live="polite">
+              {syncStatus.map((device) => (
+                <div
+                  key={device.device_id}
+                  className="text-xs text-muted-foreground"
+                >
+                  <span className="font-mono">
+                    {shortId(device.device_id, 8)}
+                  </span>{" "}
+                  <span>{t(`linkDevice.syncPhase.${device.phase}`)}</span>
+                  {device.legacy_file_metadata && (
+                    <p>{t("linkDevice.legacyFileMetadata")}</p>
+                  )}
+                  {device.pending_attachments > 0 && (
+                    <span>
+                      {" "}
+                      ·{" "}
+                      {t("linkDevice.pendingAttachments", {
+                        count: device.pending_attachments,
+                      })}
+                    </span>
+                  )}
+                  {device.error && (
+                    <p role="alert" className="text-destructive">
+                      {device.error}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {syncStatusError && (
+            <p role="alert" className="text-xs text-destructive">
+              {t("linkDevice.syncStatusFailed", { error: syncStatusError })}
+            </p>
+          )}
         </section>
 
         {/* Lost / compromised device — rotate the account identity. */}

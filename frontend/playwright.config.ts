@@ -1,21 +1,38 @@
 import { defineConfig, devices } from "@playwright/test";
+import { createHash } from "node:crypto";
 
-const port = Number(process.env.MESH_TALK_E2E_PORT ?? 5173);
-const url = `http://localhost:${port}`;
+const worktreePort =
+  5200 +
+  (parseInt(createHash("sha256").update(process.cwd()).digest("hex").slice(0, 4), 16) %
+    1000);
+const port = Number(
+  process.env.MESH_TALK_E2E_PORT ?? (process.env.CI ? 5173 : worktreePort),
+);
+// Keep browser navigation and server binding on the same address family.
+const url = `http://127.0.0.1:${port}`;
 
 // Browser E2E for the Mesh-Talk UI. Runs the Vite dev server + drives the real React app in
 // headless Chromium with a mocked Tauri IPC layer (see e2e/tauri-mock.ts).
 export default defineConfig({
   testDir: "./e2e",
-  // A cold Vite transform on Windows can consume most of Playwright's 30s
-  // default before the first page becomes interactive.
-  timeout: process.platform === "win32" ? 90_000 : 30_000,
+  // Cold Windows transforms and browser coverage instrumentation can consume
+  // the 30s default before a multi-step scenario completes.
+  timeout:
+    process.platform === "win32" || process.env.MESH_TALK_E2E_COVERAGE === "1"
+      ? 90_000
+      : 30_000,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  // Eight concurrent WebViews overwhelm the Windows test host and make visual
-  // snapshots unstable; four keep the suite responsive during full E2E runs.
-  workers: process.env.CI ? 1 : process.platform === "win32" ? 4 : undefined,
+  // A single macOS worker avoids Vite asset decode retries and page-load
+  // timeouts seen in the full suite with four concurrent browsers. CI already
+  // uses one; Windows keeps its existing four-worker limit.
+  workers:
+    process.env.CI || process.platform === "darwin"
+      ? 1
+      : process.platform === "win32"
+        ? 4
+        : undefined,
   reporter: process.env.CI ? "list" : "html",
   snapshotPathTemplate: "e2e/{testFileName}-snapshots/{arg}{ext}",
   expect: {
@@ -30,10 +47,12 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    command: `npm run dev -- --port ${port}`,
+    command: `npm run dev -- --host 127.0.0.1 --port ${port}`,
     env: { MESH_TALK_E2E: "1" },
     url,
-    reuseExistingServer: !process.env.CI,
+    // Another worktree may already have Vite on this port. Reusing it can
+    // silently test an older checkout and report a false pass or failure.
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 });

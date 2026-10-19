@@ -36,10 +36,7 @@ fn check_path(path: &Path) -> io::Result<bool> {
     }
 }
 fn valid(announce: &Announce) -> bool {
-    announce.name.len() <= 1024
-        && announce.tcp_port != 0
-        && announce.account_cert.is_some()
-        && announce.verify()
+    announce.valid_presence() && announce.account_cert.is_some()
 }
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
@@ -55,6 +52,8 @@ pub(crate) struct PeerDirectory {
     salt: [u8; SALT_SIZE],
     key: EncryptionKey,
     records: Vec<Announce>,
+    // Reconstructed from the durable local account-device registry at startup.
+    linked_bindings: Vec<super::account_devices::AccountDevice>,
 }
 impl PeerDirectory {
     pub(crate) fn open(path: &Path, password: &str) -> io::Result<Self> {
@@ -65,6 +64,7 @@ impl PeerDirectory {
                 salt,
                 key: EncryptionKey::from_password(password, &salt).map_err(invalid_error)?,
                 records: Vec::new(),
+                linked_bindings: Vec::new(),
             };
             directory.save(&[])?;
             return Ok(directory);
@@ -105,6 +105,7 @@ impl PeerDirectory {
             salt,
             key,
             records: snapshot.records,
+            linked_bindings: Vec::new(),
         })
     }
     pub(crate) fn record(&mut self, announce: &Announce) -> io::Result<()> {
@@ -131,8 +132,70 @@ impl PeerDirectory {
     ) -> io::Result<()> {
         self.record_bound(announce, true)
     }
+    /// A completed, code-authorized pairing may move a known device into our
+    /// account. Keep its full Ed/X identity pinned, and reject the retired account
+    /// immediately. The certificate registry is durable before this is called.
+    pub(in crate::node) fn authorize_linked_device(
+        &mut self,
+        device: super::account_devices::AccountDevice,
+        own_account: &str,
+    ) -> io::Result<()> {
+        if !device.certificate.verify()
+            || device.certificate.device_ed25519_pub != device.public.ed25519_pub
+            || device.certificate.account_id() != own_account
+            || self
+                .by_author(&device.public.ed25519_pub)
+                .is_some_and(|old| old.public() != device.public)
+        {
+            return Err(invalid());
+        }
+        if let Some(existing) = self
+            .linked_bindings
+            .iter()
+            .find(|d| d.public.user_id() == device.public.user_id())
+        {
+            return if existing == &device {
+                Ok(())
+            } else {
+                Err(invalid())
+            };
+        }
+        self.linked_bindings.push(device);
+        Ok(())
+    }
+
+    fn linked_binding(&self, user_id: &str) -> Option<&super::account_devices::AccountDevice> {
+        self.linked_bindings
+            .iter()
+            .find(|d| d.public.user_id() == user_id)
+    }
+
+    /// Shared by passive persistence and authenticated inbound/outbound admission.
+    pub(in crate::node) fn accepts_binding(&self, announce: &Announce) -> bool {
+        if let Some(linked) = self.linked_binding(&announce.user_id) {
+            return announce.public() == linked.public
+                && announce.account_cert.as_ref() == Some(&linked.certificate);
+        }
+        self.by_author(&announce.ed25519_pub).is_none_or(|old| {
+            old.public() == announce.public() && old.account_id() == announce.account_id()
+        })
+    }
+    /// Only the exact prior durable binding of an already enrolled device can
+    /// enter the inbound pairing-retry handler. Normal admission stays denied.
+    pub(in crate::node) fn retired_link_binding(&self, announce: &Announce) -> bool {
+        self.linked_binding(&announce.user_id)
+            .is_some_and(|linked| {
+                linked.public == announce.public() && !self.accepts_binding(announce)
+            })
+            && self.by_author(&announce.ed25519_pub).is_some_and(|old| {
+                old.public() == announce.public() && old.account_id() == announce.account_id()
+            })
+    }
+
     fn record_bound(&mut self, announce: &Announce, accept_account_change: bool) -> io::Result<()> {
-        if !valid(announce) {
+        if !valid(announce)
+            || (self.linked_binding(&announce.user_id).is_some() && !self.accepts_binding(announce))
+        {
             return Err(invalid());
         }
         let mut next = self.records.clone();
@@ -142,6 +205,7 @@ impl PeerDirectory {
                 if existing.ed25519_pub != announce.ed25519_pub
                     || existing.x25519_pub != announce.x25519_pub
                     || (!accept_account_change
+                        && self.linked_binding(&announce.user_id).is_none()
                         && existing
                             .account_cert
                             .as_ref()
@@ -165,11 +229,16 @@ impl PeerDirectory {
                 next.insert(i, announce.clone());
             }
         }
-        self.save(&next)?;
+        // Storage validation failures (for example a replaced cache path) must
+        // remain distinguishable from a rejected device/account binding.
+        self.save(&next).map_err(io::Error::other)?;
         self.records = next;
         Ok(())
     }
     pub(crate) fn account_for(&self, public: &PublicIdentity) -> Option<String> {
+        if let Some(linked) = self.linked_binding(&public.user_id()) {
+            return (linked.public == *public).then(|| linked.certificate.account_id());
+        }
         let i = self
             .records
             .binary_search_by(|a| a.user_id.cmp(&public.user_id()))
@@ -235,6 +304,72 @@ impl PeerDirectory {
 mod tests {
     use super::*;
     use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[test]
+    fn completed_pairing_permits_only_exact_certified_own_account_transition() {
+        use crate::node::account_devices::AccountDevice;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proofs");
+        let device = DeviceIdentity::generate();
+        let old = Account::generate();
+        let own = Account::generate();
+        let outsider = Account::generate();
+        let prior = Announce::new_with_account(&device, &old, "Before", 1234);
+        let adopted = Announce::new_with_account(&device, &own, "After", 1235);
+        let unrelated = Announce::new_with_account(&device, &outsider, "Other", 1236);
+        let mut proofs = PeerDirectory::open(&path, "pw").unwrap();
+        proofs.record(&prior).unwrap();
+        assert!(!proofs.accepts_binding(&adopted));
+        assert!(!proofs.retired_link_binding(&prior));
+        assert!(proofs.record(&adopted).is_err());
+        let enrollment = AccountDevice {
+            public: device.public(),
+            certificate: own.certify(&device.public().ed25519_pub),
+        };
+        let mut forged = enrollment.clone();
+        forged.certificate.signature[0] ^= 1;
+        assert!(
+            proofs
+                .authorize_linked_device(forged, &own.account_id())
+                .is_err()
+        );
+        assert!(
+            proofs
+                .authorize_linked_device(enrollment.clone(), &old.account_id())
+                .is_err()
+        );
+        proofs
+            .authorize_linked_device(enrollment.clone(), &own.account_id())
+            .unwrap();
+        assert_eq!(proofs.account_for(&device.public()), Some(own.account_id()));
+        assert!(!proofs.accepts_binding(&prior));
+        assert!(proofs.retired_link_binding(&prior));
+        assert!(!proofs.retired_link_binding(&unrelated));
+        assert!(proofs.record(&prior).is_err());
+        assert!(proofs.record_explicit_account(&unrelated).is_err());
+        let (ed, _) = device.secret_bytes();
+        let replaced_x =
+            DeviceIdentity::from_secret_bytes(ed, DeviceIdentity::generate().secret_bytes().1);
+        let altered = Announce::new_with_account(&replaced_x, &own, "Wrong X", 1234);
+        assert!(!proofs.accepts_binding(&altered));
+        assert!(proofs.record(&altered).is_err());
+        // Simulate a crash after durable enrollment but before the first new announce.
+        drop(proofs);
+        let mut proofs = PeerDirectory::open(&path, "pw").unwrap();
+        proofs
+            .authorize_linked_device(enrollment, &own.account_id())
+            .unwrap();
+        assert!(proofs.accepts_binding(&adopted));
+        proofs.record(&adopted).unwrap();
+        assert!(
+            !proofs.retired_link_binding(&prior),
+            "new own-account presence permanently retires the retry exception"
+        );
+        drop(proofs);
+        let mut proofs = PeerDirectory::open(&path, "pw").unwrap();
+        assert!(proofs.record(&prior).is_err());
+        assert_eq!(proofs.account_for(&device.public()), Some(own.account_id()));
+    }
 
     #[test]
     fn explicit_account_rehome_preserves_full_identity_and_signature_checks() {

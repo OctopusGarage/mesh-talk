@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { EyeOff, Search } from "lucide-react";
+import { EyeOff, Search, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   Dialog,
@@ -23,6 +23,8 @@ import { useAuth } from "@/store/auth";
 import { useChat } from "@/store/chat";
 import { useContactPolicy } from "@/store/contactPolicy";
 import type { HiddenContact } from "@/lib/types";
+import { usePresenceFor } from "@/store/presence";
+import { DeleteContactDialog } from "./DeleteContactDialog";
 import { shortId } from "@/lib/format";
 
 export function HideContactDialog({
@@ -124,6 +126,9 @@ export function ContactContextMenu({
 }) {
   const { t } = useTranslation();
   const [confirm, setConfirm] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const online = usePresenceFor(account).online;
+  const ready = useChat((s) => s.ready);
   const loaded = useContactPolicy((s) => s.loaded);
   const myAccountId = useChat((s) => s.myAccountId);
   return (
@@ -144,8 +149,26 @@ export function ContactContextMenu({
             <EyeOff className="mr-2 h-4 w-4" />
             {t("contactVisibility.hide")}
           </ContextMenuItem>
+          {!online && account !== myAccountId && (
+            <ContextMenuItem
+              data-testid={`delete-contact-menu-${account}`}
+              disabled={!ready || !loaded}
+              className="text-destructive focus:text-destructive"
+              onSelect={() => setDeleteConfirm(true)}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              {t("contactDeletion.delete")}
+            </ContextMenuItem>
+          )}
         </ContextMenuContent>
       </ContextMenu>
+      {deleteConfirm && (
+        <DeleteContactDialog
+          account={account}
+          name={name}
+          onClose={() => setDeleteConfirm(false)}
+        />
+      )}
       <HideContactDialog
         contact={confirm ? { account_id: account, name } : null}
         onClose={() => setConfirm(false)}

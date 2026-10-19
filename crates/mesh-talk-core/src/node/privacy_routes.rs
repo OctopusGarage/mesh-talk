@@ -38,6 +38,11 @@ fn check(path: &Path) -> io::Result<bool> {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Route {
     public: PublicIdentity,
+    ips: Vec<IpAddr>,
+}
+#[derive(Serialize, Deserialize)]
+struct LegacyRoute {
+    public: PublicIdentity,
     ip: IpAddr,
 }
 #[derive(Serialize, Deserialize)]
@@ -84,13 +89,44 @@ impl RouteCache {
             .map_err(bad)?;
         let key = EncryptionKey::from_password(password, &salt).map_err(bad)?;
         let plaintext = decrypt_data(&bytes[HEADER..], &nonce, &key).map_err(bad)?;
-        let snapshot: Snapshot = codec().deserialize(&plaintext).map_err(bad)?;
-        if snapshot.version != 1
+        let version = plaintext
+            .get(..4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(invalid)?;
+        let snapshot: Snapshot = match version {
+            1 => {
+                let (version, old): (u32, Vec<LegacyRoute>) =
+                    codec().deserialize(&plaintext).map_err(bad)?;
+                Snapshot {
+                    version,
+                    routes: old
+                        .into_iter()
+                        .map(|route| Route {
+                            public: route.public,
+                            ips: vec![route.ip],
+                        })
+                        .collect(),
+                }
+            }
+            2 => codec().deserialize(&plaintext).map_err(bad)?,
+            _ => return Err(invalid()),
+        };
+        if snapshot.version != version
             || snapshot.routes.len() > 1024
             || snapshot
                 .routes
                 .windows(2)
                 .any(|w| w[0].public.user_id() >= w[1].public.user_id())
+            || snapshot.routes.iter().any(|route| {
+                route.ips.is_empty()
+                    || route.ips.len() > 8
+                    || route
+                        .ips
+                        .iter()
+                        .enumerate()
+                        .any(|(i, ip)| route.ips[..i].contains(ip))
+            })
         {
             return Err(invalid());
         }
@@ -104,25 +140,30 @@ impl RouteCache {
     pub(crate) fn record(&mut self, public: &PublicIdentity, ip: IpAddr) -> io::Result<()> {
         let mut next = self.routes.clone();
         let id = public.user_id();
-        let route = Route {
-            public: public.clone(),
-            ip,
-        };
         match next.binary_search_by(|r| r.public.user_id().cmp(&id)) {
             Ok(i) => {
                 if next[i].public != *public {
                     return Err(invalid());
                 }
-                if next[i] == route {
+                if next[i].ips.contains(&ip) {
                     return Ok(());
                 }
-                next[i] = route;
+                next[i].ips.push(ip);
+                if next[i].ips.len() > 8 {
+                    next[i].ips.remove(0);
+                }
             }
             Err(i) => {
                 if next.len() == 1024 {
                     return Err(invalid());
                 }
-                next.insert(i, route);
+                next.insert(
+                    i,
+                    Route {
+                        public: public.clone(),
+                        ips: vec![ip],
+                    },
+                );
             }
         }
         self.save(&next)?;
@@ -132,11 +173,11 @@ impl RouteCache {
     pub(crate) fn routes(&self) -> Vec<(PublicIdentity, IpAddr)> {
         self.routes
             .iter()
-            .map(|r| (r.public.clone(), r.ip))
+            .flat_map(|r| r.ips.iter().map(|ip| (r.public.clone(), *ip)))
             .collect()
     }
     fn save(&self, routes: &[Route]) -> io::Result<()> {
-        let plaintext = codec().serialize(&(1u32, routes)).map_err(bad)?;
+        let plaintext = codec().serialize(&(2u32, routes)).map_err(bad)?;
         let (ciphertext, nonce) = encrypt_data(&plaintext, &self.key).map_err(bad)?;
         if HEADER + ciphertext.len() > MAX_BYTES as usize {
             return Err(invalid());
@@ -204,6 +245,36 @@ pub(in crate::node) async fn stable_listener(
 mod tests {
     use super::*;
     use crate::identity::device::DeviceIdentity;
+    #[test]
+    fn retains_multiple_ips_for_one_identity_and_migrates_v1() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("routes");
+        let public = DeviceIdentity::generate().public();
+        let lan: IpAddr = "192.168.1.20".parse().unwrap();
+        let vpn: IpAddr = "100.101.102.20".parse().unwrap();
+        let salt = generate_salt();
+        let key = EncryptionKey::from_password("pw", &salt).unwrap();
+        let legacy = codec()
+            .serialize(&(1u32, vec![(public.clone(), lan)]))
+            .unwrap();
+        let (ciphertext, nonce) = encrypt_data(&legacy, &key).unwrap();
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend(salt);
+        bytes.extend(nonce);
+        bytes.extend(ciphertext);
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut cache = RouteCache::open(&path, "pw").unwrap();
+        cache.record(&public, vpn).unwrap();
+        assert_eq!(
+            cache.routes(),
+            vec![(public.clone(), lan), (public.clone(), vpn)]
+        );
+        assert_eq!(
+            RouteCache::open(&path, "pw").unwrap().routes(),
+            cache.routes()
+        );
+    }
     #[test]
     fn encrypted_routes_reopen_exact_keys_noops_and_failed_save_preserve_memory() {
         let root = tempfile::tempdir().unwrap();

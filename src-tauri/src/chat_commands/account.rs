@@ -13,17 +13,7 @@ pub async fn my_id(state: tauri::State<'_, NodeState>) -> Result<String, Command
 pub async fn list_peers(state: tauri::State<'_, NodeState>) -> Result<Vec<PeerInfo>, CommandError> {
     let guard = state.0.lock().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(rt
-        .peers()
-        .into_iter()
-        .map(|p| PeerInfo {
-            user_id: p.public.user_id(),
-            name: p.name,
-            addr: p.addr.to_string(),
-            post_office: p.post_office,
-            account_id: p.account_id,
-        })
-        .collect())
+    Ok(rt.peers().into_iter().map(PeerInfo::from).collect())
 }
 
 #[tauri::command]
@@ -49,18 +39,23 @@ pub async fn publish_avatar(
         .map_err(CommandError::from)
 }
 
-/// Every avatar peers have propagated to us, as `account_id -> data-URL`. The frontend
-/// merges these into its avatars store on startup so received avatars survive a relaunch.
+/// Durable signed profiles, including `null` for a cleared avatar. The frontend uses
+/// tombstones so an old local copy cannot reappear after a linked device clears it.
 #[tauri::command]
 pub async fn peer_avatars(
     state: tauri::State<'_, NodeState>,
-) -> Result<std::collections::HashMap<String, String>, CommandError> {
+) -> Result<std::collections::HashMap<String, Option<String>>, CommandError> {
     let guard = state.0.lock().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt
-        .peer_avatars()
+        .peer_profile_states()
         .into_iter()
-        .map(|(id, bytes)| (id, String::from_utf8_lossy(&bytes).into_owned()))
+        .map(|(id, bytes)| {
+            (
+                id,
+                bytes.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+            )
+        })
         .collect())
 }
 
@@ -109,26 +104,78 @@ pub struct AccountInfo {
 
 #[tauri::command]
 pub async fn list_accounts(
+    app: tauri::State<'_, crate::state::AppState>,
+    policy: tauri::State<'_, crate::contact_policy::HiddenContactsState>,
     state: tauri::State<'_, NodeState>,
 ) -> Result<Vec<AccountInfo>, CommandError> {
-    let guard = state.0.lock().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    let live = rt
-        .peers()
-        .into_iter()
-        .filter_map(|p| p.account_id.map(|account_id| (account_id, p.name)))
-        .collect();
-    Ok(merge_account_rows(live, rt.known_account_ids()))
+    let session = app.session().clone();
+    let owner = session
+        .with_owner(|owner| {
+            owner
+                .map(str::to_owned)
+                .ok_or_else(|| "Missing contact owner".to_owned())
+        })
+        .map_err(CommandError::Authorization)?;
+    let node = state.0.clone();
+    #[cfg(test)]
+    let captured = app.owner_command_captured.clone();
+    let policy = policy.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        // Runtime first, matching startup and runtime admission. Never wait for
+        // it while holding the session needed by an installation or producer.
+        #[cfg(test)]
+        if let Some(entered) = captured.lock().unwrap().as_ref() {
+            let _ = entered.send("contact-runtime-wait");
+        }
+        let guard = node.blocking_lock();
+        policy.transaction(&session, &owner, || {
+            // Capture fresh presence inside the policy transaction so an older
+            // poll cannot undo a later contact deletion.
+            let rt = guard.as_ref().ok_or("Node not started")?;
+            if rt.host_account_id() != Some(owner.as_str()) {
+                return Err("Contact roster requires this account's running node".into());
+            }
+            let peers = rt.peers();
+            let online = online_account_ids(peers.clone());
+            let live = peers
+                .into_iter()
+                .filter_map(|p| p.account_id.map(|id| (id, p.name, p.post_office)))
+                .collect();
+            let mut rows = merge_account_rows(live, rt.known_account_ids());
+            let accounts = rows.iter().map(|row| row.account_id.clone()).collect();
+            let visible = policy.visible_accounts(&owner, &online, accounts)?;
+            rows.retain(|row| visible.contains(&row.account_id));
+            Ok(rows)
+        })
+    })
+    .await
+    .map_err(|_| CommandError::Internal("Contact policy task failed".into()))?
+    .map_err(CommandError::from)
 }
 
-fn merge_account_rows(live: Vec<(String, String)>, known: Vec<String>) -> Vec<AccountInfo> {
+pub(crate) fn online_account_ids(
+    peers: Vec<mesh_talk_core::discovery::roster::PeerRecord>,
+) -> Vec<String> {
+    let now = std::time::Instant::now();
+    peers
+        .into_iter()
+        .filter(|p| !p.post_office && !p.presence_evidence(now).is_empty())
+        .filter_map(|p| p.account_id)
+        .collect()
+}
+
+fn merge_account_rows(live: Vec<(String, String, bool)>, known: Vec<String>) -> Vec<AccountInfo> {
     use std::collections::BTreeMap;
     let mut by_account: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for account_id in known {
+        // A durable conversation remains a contact even if its only device currently
+        // discovered is a relay. Live relay discovery alone never creates a row.
         by_account.entry(account_id).or_default();
     }
-    for (account_id, name) in live {
-        by_account.entry(account_id).or_default().push(name);
+    for (account_id, name, post_office) in live {
+        if !post_office {
+            by_account.entry(account_id).or_default().push(name);
+        }
     }
     by_account
         .into_iter()
@@ -145,6 +192,57 @@ mod recovery_accounts_tests {
     use super::merge_account_rows;
 
     #[test]
+    fn deletion_presence_uses_the_same_source_evidence_as_ui() {
+        use mesh_talk_core::{
+            discovery::roster::{PeerEndpoint, PeerRecord, RouteSource},
+            identity::device::DeviceIdentity,
+        };
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let fresh = PeerRecord {
+            public: DeviceIdentity::generate().public(),
+            addr: "127.0.0.1:1234".parse().unwrap(),
+            routes: vec![PeerEndpoint {
+                addr: "127.0.0.1:1234".parse().unwrap(),
+                source: RouteSource::Lan,
+                last_seen: now,
+                last_authenticated: None,
+                presence_expires_at: None,
+            }],
+            name: "Alice".into(),
+            post_office: false,
+            account_id: Some("alice".into()),
+            last_seen: now,
+        };
+        let mut stale = fresh.clone();
+        stale.routes[0].last_seen -= Duration::from_secs(31);
+        assert!(super::online_account_ids(vec![stale.clone()]).is_empty());
+        assert_eq!(
+            super::online_account_ids(vec![stale, fresh.clone()]),
+            vec!["alice"]
+        );
+
+        let mut routed = fresh.clone();
+        routed.last_seen -= Duration::from_secs(60);
+        routed.routes[0].last_seen -= Duration::from_secs(60);
+        routed.routes[0].source = RouteSource::RoutedQuery;
+        assert_eq!(super::online_account_ids(vec![routed]), vec!["alice"]);
+
+        for source in [RouteSource::Gateway, RouteSource::PostOffice] {
+            let mut indirect = fresh.clone();
+            indirect.routes[0].source = source;
+            indirect.routes[0].presence_expires_at = Some(now - Duration::from_secs(1));
+            assert!(super::online_account_ids(vec![indirect]).is_empty());
+        }
+        let mut relay = fresh.clone();
+        relay.post_office = true;
+        assert!(super::online_account_ids(vec![relay]).is_empty());
+        let mut route_only = fresh;
+        route_only.routes.clear();
+        assert!(super::online_account_ids(vec![route_only]).is_empty());
+    }
+
+    #[test]
     fn offline_history_account_is_listed_with_zero_live_devices() {
         let rows = merge_account_rows(vec![], vec!["abcd".into()]);
         assert_eq!(rows.len(), 1);
@@ -155,9 +253,53 @@ mod recovery_accounts_tests {
 
     #[test]
     fn live_and_history_accounts_are_not_duplicated() {
-        let rows = merge_account_rows(vec![("abcd".into(), "Alice".into())], vec!["abcd".into()]);
+        let rows = merge_account_rows(
+            vec![("abcd".into(), "Alice".into(), false)],
+            vec!["abcd".into()],
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].device_count, 1);
         assert_eq!(rows[0].names, vec!["Alice"]);
+    }
+
+    #[test]
+    fn discovered_post_office_is_not_listed_as_a_dm_account() {
+        let rows = merge_account_rows(
+            vec![
+                ("relay-account".into(), "mac2015-post-office".into(), true),
+                ("friend-account".into(), "Alice".into(), false),
+            ],
+            vec![],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account_id, "friend-account");
+        assert_eq!(rows[0].names, vec!["Alice"]);
+    }
+
+    #[test]
+    fn normal_device_sharing_a_relay_account_remains_a_dm_contact() {
+        let rows = merge_account_rows(
+            vec![
+                ("shared-account".into(), "Relay".into(), true),
+                ("shared-account".into(), "Alice".into(), false),
+            ],
+            vec!["shared-account".into()],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account_id, "shared-account");
+        assert_eq!(rows[0].device_count, 1);
+        assert_eq!(rows[0].names, vec!["Alice"]);
+    }
+
+    #[test]
+    fn history_contact_remains_when_only_its_relay_device_is_online() {
+        let rows = merge_account_rows(
+            vec![("shared-account".into(), "Relay".into(), true)],
+            vec!["shared-account".into()],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account_id, "shared-account");
+        assert_eq!(rows[0].device_count, 0);
+        assert!(rows[0].names.is_empty());
     }
 }

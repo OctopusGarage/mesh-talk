@@ -9,7 +9,7 @@ This document provides guidelines for writing and organizing tests in the Mesh-T
 For small, focused tests of individual functions or methods, place tests directly in the same file as the code they're testing, using the `#[cfg(test)]` attribute:
 
 ```rust
-// crates/mesh-talk-core/src/identity/keys.rs
+// crates/mesh-talk-core/src/identity/device.rs
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,14 +38,21 @@ crates/mesh-talk-core/
 └── src/node/node_tests.rs         # node behaviour (unit + integration)
 ```
 
-Run the workspace unit/integration suite:
+During feature development, run only the affected module or integration target:
+
+```bash
+make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync
+make test-focused TEST_PACKAGE=mesh-talk-core TEST_TARGET=decoder_smoke
+```
+
+Run the workspace unit/integration suite before PR submission or in CI:
 
 ```bash
 cargo test --workspace        # or: make test
 ```
 
 The multi-process backend E2E rigs spawn real `mesh-talk-node` processes over UDP
-discovery + TCP and are `#[ignore]`d by default (slow cold starts); run them with:
+discovery + TCP and are `#[ignore]`d by default (shared-port/process isolation); run them explicitly with:
 
 ```bash
 make e2e        # CI: .github/workflows/e2e-backend.yml
@@ -56,6 +63,7 @@ make e2e        # CI: .github/workflows/e2e-backend.yml
 React frontend tests should use Vitest + Testing Library and can be organized in two ways:
 
 1. Place tests alongside the components/modules they test:
+
    ```
    frontend/src/components/UserForm.spec.ts
    frontend/src/store/user.spec.ts
@@ -70,7 +78,13 @@ React frontend tests should use Vitest + Testing Library and can be organized in
        └── user.spec.ts
    ```
 
-Execute frontend unit tests (Vitest) with:
+Execute the affected frontend unit file during development:
+
+```bash
+cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts
+```
+
+Execute the full frontend unit suite before PR submission or in CI:
 
 ```bash
 cd frontend && npm run test

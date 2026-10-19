@@ -1,15 +1,18 @@
 # Privacy controls
 
-Open **Settings → Privacy & security** to choose a privacy level. The presets
+Open **Settings → Privacy & security** to choose and apply a device privacy preset. The presets
 change notification previews, automatic locking, and sensitive copying:
 
-| Level | Message previews | Automatic lock | Lock when hidden | Copy confirmation | Clipboard clear |
-|-------|------------------|----------------|------------------|-------------------|-----------------|
-| Balanced (default) | On | Off | Off | Off | Off |
-| Private | Off | After 10 minutes | Off | Off | After 60 seconds |
-| Strict | Off | After 1 minute | On | On | After 30 seconds |
+| Level              | Message previews | Automatic lock   | Lock when hidden | Copy confirmation | Clipboard clear  |
+| ------------------ | ---------------- | ---------------- | ---------------- | ----------------- | ---------------- |
+| Balanced (default) | On               | Off              | Off              | Off               | Off              |
+| Private            | Off              | After 10 minutes | Off              | Off               | After 60 seconds |
+| Strict             | Off              | After 1 minute   | On               | On                | After 30 seconds |
 
-Changing one of these controls individually switches the level to **Custom**.
+Choose **Apply preset** after selecting a preset. Notification preview has its
+editor in **Notifications & calls**; Privacy & security shows its current value
+and links to the same editor. Changing an individual protection switches the
+level to the derived **Custom** state. Network and relay permissions are unaffected.
 **Lock now** hides chats while background delivery continues. Unlock with the
 account password, or with Touch ID on supported macOS systems when **Stay signed
 in** has a saved credential. Clipboard clearing is best effort and only clears
@@ -17,7 +20,7 @@ text while the clipboard still holds this app's copy.
 
 ## Network privacy and contact lists
 
-**Settings → Network privacy → Invisible mode** stops public presence
+**Settings → Connection & delivery → Invisible mode** stops public presence
 announcements. Accounts you manually allow under **Reply permissions**, and
 accounts you contact first, can reach you while invisible. Existing joined
 groups keep group-only access. The permission list is saved for the signed-in
@@ -25,10 +28,38 @@ user on this device; it does not sync to other devices. Offline relay delivery
 requires a manually allowed trusted relay account. Invisible mode is not IP
 anonymity: old packets and a network port scan can still reveal the device.
 
-**Settings → Contacts → Hidden contacts** removes selected accounts from your
+The same **Connection & delivery** page separates:
+
+- **Use post offices**: master switch for relay data and directory participation.
+- **Send / Receive through post offices**: independent content directions. Sending
+  off also withholds relay receipts and file decisions; receiving off prevents
+  content admission but is not a zero-wire-byte guarantee.
+- **Discover peers through a post office**: opt into public participant introductions.
+- **Device discovery scope → Local network only**: exclude routed public discovery
+  (including Tailscale and EasyTier) and bridge directories, while retaining
+  permitted physical-interface disclosure. **Local and routed networks** allows
+  these optional discovery sources; post-office discovery stays a separate choice.
+- **Preferred post office**: select a known direct LAN/Tailscale candidate and
+  retain alternatives. A known candidate is rechecked when actually connected.
+
+These are device-local choices. Directory opt-out and physical-only discovery do
+not revoke an explicit authorized contact or create an IP firewall. Direct peer
+communication remains independent of relay direction settings. The full matrix
+and startup/live-change contract are in the
+[network baseline](network-design-reference.md#4-settings-and-deployment-configuration).
+
+**Settings → Privacy & security → Hidden contacts** removes selected accounts from your
 local contact lists and direct-message search. It keeps their history and does
 not stop their messages or calls. Shared groups are unchanged. This is a local
 view setting, separate from invisible mode.
+
+Right-click an offline contact and choose **Delete contact** to remove it from
+this device's contact list and permanently erase its local message history after
+confirmation. This cannot be undone; other devices keep their own history.
+Deletion survives restarts and is separate from Hidden contacts. Verified identity
+bindings remain intact. Fresh online discovery adds the contact back without
+restoring deleted history. Deletion does not block new messages or change shared
+groups. The app checks presence again before deleting.
 
 ## Limits
 

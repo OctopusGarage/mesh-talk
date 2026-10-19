@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { PostOfficeGlyph } from "./PostOfficeGlyph";
 import { cn } from "@/lib/utils";
 import { useAvatar } from "@/store/avatars";
 
@@ -42,6 +43,8 @@ const VIEW = GRID * CELL + PAD * 2;
 export interface IdentityGlyphProps {
   /** The id / fingerprint to render. Same seed → same glyph. */
   seed: string;
+  /** Infrastructure gets a postal emblem when no custom avatar is available. */
+  kind?: "person" | "post-office";
   /** Rendered size in px (square). Default 40. */
   size?: number;
   /** Optional verified state — adds a subtle teal/verified ring. */
@@ -52,6 +55,7 @@ export interface IdentityGlyphProps {
 
 export function IdentityGlyph({
   seed,
+  kind = "person",
   size = 40,
   verified = false,
   className,
@@ -101,6 +105,19 @@ export function IdentityGlyph({
           verified && "ring-2 ring-verified",
           className,
         )}
+      />
+    );
+  }
+
+  if (kind === "post-office") {
+    const fingerprint = hashSeed(seed);
+    return (
+      <PostOfficeGlyph
+        variant={(fingerprint ^ (fingerprint >>> 16)) & 3}
+        size={size}
+        title={title}
+        verified={verified}
+        className={className}
       />
     );
   }

@@ -1,6 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { useState } from "react";
 import {
   Activity,
   Copy,
@@ -16,7 +14,6 @@ import {
   Loader2,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
 import {
   Dialog,
   DialogContent,
@@ -30,47 +27,26 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { IdentityGlyph, PresenceDot } from "@/components/identity";
 import { OfflineConnectDialog } from "./OfflineConnectDialog";
-import { diag, obs } from "@/lib/api";
-import { errorMessage } from "@/lib/error";
 import { formatAgo, formatTime, shortId } from "@/lib/format";
+import { isContactPeer } from "@/lib/contactVisibility";
+import { peerAccountKey } from "@/lib/rosterProjection";
 import { useChat } from "@/store/chat";
 import { CONNECTION_LABEL, connectionState } from "./connectionState";
-import type { DiagNetworkInfo, DiagPeerInfo, EnvInfo } from "@/lib/types";
+import { useCopyFeedback } from "./useCopyFeedback";
+import { useDiagnosticsController } from "./diagnostics/useDiagnosticsController";
+import type { DiagNetworkInfo, DiagPeerInfo } from "@/lib/types";
 
-const POLL_MS = 1500;
-const LOG_CAP = 200;
 /** A peer seen within this window reads as "online" (breathing teal). */
 const ONLINE_SECS = 30;
-
-interface LogLine {
-  ts: number;
-  text: string;
-}
 
 /** A monospace value that copies itself to the clipboard when clicked. */
 function CopyValue({ value, label }: { value: string; label?: string }) {
   const { t } = useTranslation();
-  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(
-    null,
-  );
-  const copy = async () => {
-    setCopyStatus(null);
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopyStatus("copied");
-      setTimeout(
-        () =>
-          setCopyStatus((current) => (current === "copied" ? null : current)),
-        1200,
-      );
-    } catch {
-      setCopyStatus("failed");
-    }
-  };
+  const { status: copyStatus, copy } = useCopyFeedback();
   return (
     <button
       type="button"
-      onClick={() => void copy()}
+      onClick={() => void copy(() => navigator.clipboard.writeText(value))}
       title={t("common.copy")}
       className="group inline-flex max-w-full items-center gap-1 font-mono text-xs hover:text-foreground"
     >
@@ -118,39 +94,6 @@ function Panel({
   );
 }
 
-function diffPeers(
-  prev: DiagPeerInfo[],
-  next: DiagPeerInfo[],
-  t: TFunction,
-): LogLine[] {
-  const ts = Date.now();
-  const prevIds = new Set(prev.map((p) => p.user_id));
-  const nextIds = new Set(next.map((p) => p.user_id));
-  const lines: LogLine[] = [];
-  for (const p of next) {
-    if (!prevIds.has(p.user_id)) {
-      lines.push({
-        ts,
-        text: t("diagnostics.peerAppeared", {
-          name: p.name || t("common.unnamed"),
-          ip: p.ip,
-        }),
-      });
-    }
-  }
-  for (const p of prev) {
-    if (!nextIds.has(p.user_id)) {
-      lines.push({
-        ts,
-        text: t("diagnostics.peerDisappeared", {
-          name: p.name || t("common.unnamed"),
-        }),
-      });
-    }
-  }
-  return lines;
-}
-
 export function DiagnosticsDialog({
   open: controlledOpen,
   onOpenChange,
@@ -166,130 +109,30 @@ export function DiagnosticsDialog({
   const [internalOpen, setInternalOpen] = useState(false);
   const open = controlledOpen ?? internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
-  const [info, setInfo] = useState<DiagNetworkInfo | null>(null);
-  const [peers, setPeers] = useState<DiagPeerInfo[]>([]);
-  const [log, setLog] = useState<LogLine[]>([]);
-  const [env, setEnv] = useState<EnvInfo | null>(null);
-  const [networkLoading, setNetworkLoading] = useState(true);
-  const [networkError, setNetworkError] = useState<string | null>(null);
-  const [environmentLoading, setEnvironmentLoading] = useState(true);
-  const [environmentError, setEnvironmentError] = useState<string | null>(null);
-  const [peersLoading, setPeersLoading] = useState(true);
-  const [peersError, setPeersError] = useState<string | null>(null);
-  const [logTail, setLogTail] = useState<string | null>(null);
-  const [error, setLocalError] = useState<string | null>(null);
-  const [rescanned, setRescanned] = useState(false);
-  const prevPeers = useRef<DiagPeerInfo[]>([]);
-
-  const loadNetwork = useCallback(async () => {
-    setNetworkLoading(true);
-    setNetworkError(null);
-    try {
-      setInfo(await diag.networkInfo());
-    } catch (e) {
-      setInfo(null);
-      setNetworkError(errorMessage(e));
-    } finally {
-      setNetworkLoading(false);
-    }
-  }, []);
-
-  const loadEnvironment = useCallback(async () => {
-    setEnvironmentLoading(true);
-    setEnvironmentError(null);
-    try {
-      setEnv(await obs.envInfo());
-    } catch (e) {
-      setEnv(null);
-      setEnvironmentError(errorMessage(e));
-    } finally {
-      setEnvironmentLoading(false);
-    }
-  }, []);
-
-  const rescan = async () => {
-    setLocalError(null);
-    try {
-      await diag.rescan();
-      setRescanned(true);
-      setTimeout(() => setRescanned(false), 1500);
-    } catch (e) {
-      setLocalError(errorMessage(e));
-    }
-  };
-
-  const revealLogs = async () => {
-    setLocalError(null);
-    try {
-      await revealItemInDir(await obs.logFile());
-    } catch (e) {
-      setLocalError(errorMessage(e));
-    }
-  };
-
-  const copyLogTail = async () => {
-    setLocalError(null);
-    try {
-      const tail = await obs.logTail();
-      await navigator.clipboard.writeText(tail);
-    } catch (e) {
-      setLocalError(errorMessage(e));
-    }
-  };
-
-  const showLogTail = async () => {
-    setLocalError(null);
-    try {
-      setLogTail(await obs.logTail());
-    } catch (e) {
-      setLocalError(errorMessage(e));
-    }
-  };
-
-  const saveLogTail = async () => {
-    setLocalError(null);
-    try {
-      const dest = await saveDialog({ defaultPath: "mesh-talk-log.txt" });
-      if (typeof dest === "string") await obs.saveLogTail(dest);
-    } catch (e) {
-      setLocalError(errorMessage(e));
-    }
-  };
-
-  const poll = useCallback(async () => {
-    try {
-      const next = await diag.getPeers();
-      const lines = diffPeers(prevPeers.current, next, t);
-      prevPeers.current = next;
-      setPeers(next);
-      setPeersError(null);
-      if (lines.length > 0) {
-        setLog((l) => [...lines.reverse(), ...l].slice(0, LOG_CAP));
-      }
-    } catch (e) {
-      setPeersError(errorMessage(e));
-    } finally {
-      setPeersLoading(false);
-    }
-  }, [t]);
-
-  useEffect(() => {
-    if (!open) return;
-    // Reset the diff baseline each time the panel opens so we don't replay a stale snapshot.
-    prevPeers.current = [];
-    setInfo(null);
-    setEnv(null);
-    setPeers([]);
-    setPeersLoading(true);
-    setPeersError(null);
-    void loadNetwork();
-    void loadEnvironment();
-    setLogTail(null);
-    setLocalError(null);
-    void poll();
-    const id = setInterval(() => void poll(), POLL_MS);
-    return () => clearInterval(id);
-  }, [open, poll, loadNetwork, loadEnvironment]);
+  const {
+    info,
+    peers,
+    log,
+    env,
+    networkLoading,
+    networkError,
+    environmentLoading,
+    environmentError,
+    peersLoading,
+    peersError,
+    logTail,
+    error,
+    rescanned,
+    loadNetwork,
+    loadEnvironment,
+    rescan,
+    revealLogs,
+    copyLogTail,
+    showLogTail,
+    saveLogTail,
+    clearLog,
+    dismissError,
+  } = useDiagnosticsController(open, t);
 
   // Group discovered peers by account (devices sharing an account_id are one user).
   const grouped = new Map<string, DiagPeerInfo[]>();
@@ -307,11 +150,11 @@ export function DiagnosticsDialog({
     peers
       .filter(
         (p) =>
-          !p.post_office &&
+          isContactPeer(p) &&
           p.last_seen_secs <= ONLINE_SECS &&
           p.account_id !== info?.account_id,
       )
-      .map((p) => p.account_id ?? p.user_id),
+      .map(peerAccountKey),
   ).size;
   const connection = connectionState({
     bootFailed,
@@ -380,7 +223,7 @@ export function DiagnosticsDialog({
             <span>{t("diagnostics.actionFailed", { error })}</span>
             <button
               type="button"
-              onClick={() => setLocalError(null)}
+              onClick={dismissError}
               className="shrink-0 font-medium underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {t("common.dismiss")}
@@ -628,7 +471,7 @@ export function DiagnosticsDialog({
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setLog([])}
+                    onClick={clearLog}
                     disabled={log.length === 0}
                   >
                     <Trash2 className="h-3.5 w-3.5" /> {t("common.clear")}
@@ -714,27 +557,11 @@ export function DiagnosticsDialog({
 /** A copyable shell command block, rendered as a mono code block. */
 function CommandLine({ cmd }: { cmd: string }) {
   const { t } = useTranslation();
-  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(
-    null,
-  );
-  const copy = async () => {
-    setCopyStatus(null);
-    try {
-      await navigator.clipboard.writeText(cmd);
-      setCopyStatus("copied");
-      setTimeout(
-        () =>
-          setCopyStatus((current) => (current === "copied" ? null : current)),
-        1200,
-      );
-    } catch {
-      setCopyStatus("failed");
-    }
-  };
+  const { status: copyStatus, copy } = useCopyFeedback();
   return (
     <button
       type="button"
-      onClick={() => void copy()}
+      onClick={() => void copy(() => navigator.clipboard.writeText(cmd))}
       title={t("common.copy")}
       className="group flex w-full items-start gap-2 rounded-md border bg-muted/50 p-2.5 text-left font-mono text-[11px] leading-relaxed hover:bg-muted"
     >
@@ -831,7 +658,8 @@ export function PeerRow({ p }: { p: DiagPeerInfo }) {
       <div className="flex min-w-0 items-center gap-2.5">
         <div className="relative shrink-0">
           <IdentityGlyph
-            seed={p.account_id ?? p.user_id}
+            seed={peerAccountKey(p)}
+            kind={p.post_office ? "post-office" : "person"}
             size={28}
             title={p.name}
           />
@@ -854,6 +682,7 @@ export function PeerRow({ p }: { p: DiagPeerInfo }) {
           </div>
           <div className="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
             <CopyValue value={p.user_id} label={shortId(p.user_id, 12)} />
+            {p.via_gateway && <span>{t("diagnostics.viaGateway")}</span>}
             <CopyValue value={`${p.ip}:${p.tcp_port}`} />
           </div>
         </div>

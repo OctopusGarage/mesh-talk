@@ -1,6 +1,15 @@
 import { test, expect } from "./tauri-mock";
-import { enterChat, openBobDm, seedThemeBeforeLoad } from "./helpers/session";
-import { prepareForScreenshot, snapshotName } from "./helpers/visual-snapshot";
+import {
+  waitForChatShell,
+  enterChat,
+  openBobDm,
+  seedThemeBeforeLoad,
+} from "./helpers/session";
+import {
+  prepareForScreenshot,
+  snapshotName,
+  windowsSnapshotProfile,
+} from "./helpers/visual-snapshot";
 
 const THEMES = [
   "light",
@@ -17,8 +26,6 @@ const VIEWPORTS = [
   { width: 1280, height: 800 },
   { width: 760, height: 620 },
 ] as const;
-
-test.describe.configure({ mode: "serial" });
 
 test("first-run sign-in keeps a quiet, bounded surface", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -42,7 +49,7 @@ test("no peers offers a direct connection path", async ({ page }) => {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await expect(page.getByText("Connection help")).toBeVisible();
   await prepareForScreenshot(page);
   await expect(page.getByTestId("chat-shell")).toHaveScreenshot(
@@ -109,8 +116,32 @@ for (const viewport of VIEWPORTS) {
 
         const shell = page.getByTestId("chat-shell");
         await expect(shell).toBeVisible();
+        const name = snapshotName(
+          "chat-shell",
+          theme,
+          viewport.width,
+          viewport.height,
+        );
+        // Compact shells expose native font metrics across enough pixels to need
+        // reviewed platform references; keep the same strict comparison threshold.
+        const profile =
+          process.platform === "win32" &&
+          theme === "oled" &&
+          viewport.width === 760
+            ? await windowsSnapshotProfile(
+                page.getByText("hey, welcome to the mesh", { exact: true }),
+              )
+            : process.platform;
+        const needsPlatformReference =
+          viewport.width === 760 &&
+          ((theme === "oled" &&
+            ["linux", "win32"].includes(process.platform)) ||
+            (["light", "dark"].includes(theme) && process.platform === "linux"));
+        const reference = needsPlatformReference
+          ? name.replace(".png", `-${profile}.png`)
+          : name;
         await expect(shell).toHaveScreenshot(
-          snapshotName("chat-shell", theme, viewport.width, viewport.height),
+          reference,
           // Detailed artwork rasterizes differently on Linux and macOS at compact size.
           ["argentina", "barcelona", "messi", "nature", "cat-acrylic"].includes(
             theme,

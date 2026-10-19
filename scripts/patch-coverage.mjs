@@ -69,7 +69,7 @@ export function summarizePatchCoverage(added, reports) {
 
 async function main() {
   const base = process.env.PATCH_COVERAGE_BASE ?? "origin/main";
-  const minimum = Number(process.env.PATCH_COVERAGE_MIN ?? "91");
+  const minimum = Number(process.env.PATCH_COVERAGE_MIN ?? "92");
   if (!Number.isFinite(minimum) || minimum < 0 || minimum > 100)
     throw new Error("PATCH_COVERAGE_MIN must be between 0 and 100");
   const mergeBase = execFileSync("git", ["merge-base", "HEAD", base], {

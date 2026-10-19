@@ -17,7 +17,7 @@ export function analyzeTrayGeometry({ applicationPid, windowId, rounds }) {
     assert.equal(round.applicationPid, applicationPid, "original process must survive");
     assert.equal(round.windowId, windowId, "original X11 window must survive");
     assert.equal(round.tray.ownerPid, applicationPid, "menu must belong to the application");
-    assert.equal(round.tray.label, "Show");
+    assert.equal(round.tray.label, "Open Mesh-Talk");
     assert.equal(round.tray.clicked, true, "actual exported menu must be activated");
     assert.equal(round.before.mapped, true);
     assert.equal(round.hidden.mapped, false, "close-to-tray must unmap the window");

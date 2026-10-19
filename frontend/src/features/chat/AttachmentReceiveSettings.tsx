@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { chat } from "@/lib/api";
@@ -25,20 +25,29 @@ export function AttachmentReceiveSettings({
   const ownerGeneration = useAuth((state) => state.generation);
   const runEpoch = useChat((state) => state.runEpoch);
   const identityEpoch = useChat((state) => state.identityEpoch);
-  const [mode, setMode] = useState<Mode>("ask");
+  const [mode, setMode] = useState<Mode | "">("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const view = useRef({ valid: false });
+  const savePending = useRef(false);
   useEffect(() => {
+    const generation = { valid: true };
+    view.current = generation;
+    savePending.current = false;
+    setMode("");
     if (!enabled) return;
     const lease = captureChatOwnership();
     let current = true;
     setLoading(true);
+    setLoadFailed(false);
     setSaving(false);
     setError(null);
     void chat.attachmentReceivePolicy(account).then(
       (policy) => {
-        if (!current || !lease.current()) return;
+        if (!current || !generation.valid || !lease.current()) return;
         setMode(
           account
             ? policy.contact_auto === null
@@ -53,20 +62,25 @@ export function AttachmentReceiveSettings({
         setLoading(false);
       },
       (reason) => {
-        if (!current || !lease.current()) return;
+        if (!current || !generation.valid || !lease.current()) return;
+        setLoadFailed(true);
         setError(errorMessage(reason));
         setLoading(false);
       },
     );
     return () => {
       current = false;
+      generation.valid = false;
     };
-  }, [account, enabled, ownerGeneration, runEpoch, identityEpoch]);
+  }, [account, enabled, ownerGeneration, runEpoch, identityEpoch, reload]);
 
   const change = async (next: Mode) => {
-    if (saving) return;
+    if (!enabled || loading || loadFailed || !mode || savePending.current)
+      return;
+    const generation = view.current;
     const lease = captureChatOwnership();
     if (!lease.current()) return;
+    savePending.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -76,11 +90,15 @@ export function AttachmentReceiveSettings({
           next === "inherit" ? null : next === "auto",
         );
       else await chat.setAttachmentGlobalAuto(next === "auto");
-      if (lease.current()) setMode(next);
+      if (generation.valid && lease.current()) setMode(next);
     } catch (reason) {
-      if (lease.current()) setError(errorMessage(reason));
+      if (generation.valid && lease.current())
+        setError(t("settings.saveFailed", { error: errorMessage(reason) }));
     } finally {
-      if (lease.current()) setSaving(false);
+      if (generation.valid && lease.current()) {
+        savePending.current = false;
+        setSaving(false);
+      }
     }
   };
 
@@ -92,12 +110,17 @@ export function AttachmentReceiveSettings({
         }
         value={mode}
         onChange={(event) => void change(event.target.value as Mode)}
-        disabled={loading || saving}
+        disabled={!enabled || loading || loadFailed || saving || !mode}
         aria-label={
           account ? t("files.contactReceiveMode") : t("files.globalReceiveMode")
         }
         className="h-9 rounded-md border bg-background px-2 text-sm text-foreground"
       >
+        {!mode && (
+          <option value="">
+            {loading ? t("common.loading") : t("files.receiveUnknown")}
+          </option>
+        )}
         {account && (
           <option value="inherit">{t("files.receiveInherit")}</option>
         )}
@@ -106,8 +129,17 @@ export function AttachmentReceiveSettings({
       </select>
       {error && (
         <p role="alert" className="text-xs text-destructive">
-          {error}
+          {loadFailed ? t("files.receiveLoadFailed", { error }) : error}
         </p>
+      )}
+      {loadFailed && (
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => setReload((value) => value + 1)}
+        >
+          {t("contactVisibility.retry")}
+        </Button>
       )}
     </div>
   );
@@ -131,7 +163,12 @@ export function AttachmentReceiveSettings({
     );
 
   return (
-    <Popover>
+    <Popover
+      onOpenChange={(open) => {
+        view.current.valid = false;
+        if (open) setReload((value) => value + 1);
+      }}
+    >
       <PopoverTrigger asChild>
         <Button
           variant="ghost"

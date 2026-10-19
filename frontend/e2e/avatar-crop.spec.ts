@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 
 // Regression: the avatar crop dialog's main viewport must actually SHOW the picked image
@@ -17,7 +18,7 @@ async function openCrop(page: import("@playwright/test").Page) {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
 
   // Avatar editing now lives in the profile dialog (opened from the identity header).
   await page.getByTestId("open-profile").click();

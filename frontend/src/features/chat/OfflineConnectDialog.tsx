@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Cable, Radar, Wifi } from "lucide-react";
 import {
@@ -9,9 +9,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useMotionOK } from "@/lib/motion";
 import { diag } from "@/lib/api";
-import { errorMessage } from "@/lib/error";
+import { useAsyncFeedback } from "./useAsyncFeedback";
 
 /** The signature mark: two devices joined by a signal arc with nothing between them —
  * mesh-talk needs no router or tower, just a direct link. The arc traces itself once on a
@@ -126,40 +127,21 @@ export function OfflineConnectDialog({
   includeSharedNetwork?: boolean;
 }) {
   const { t } = useTranslation();
-  const [announcing, setAnnouncing] = useState(false);
-  const [announced, setAnnounced] = useState(false);
-  const [announceError, setAnnounceError] = useState<string | null>(null);
+  const announceFeedback = useAsyncFeedback();
   const [showHotspot, setShowHotspot] = useState(false);
-  const announceRequest = useRef(0);
-  const announce = async () => {
-    const request = ++announceRequest.current;
-    setAnnouncing(true);
-    setAnnounced(false);
-    setAnnounceError(null);
-    try {
-      await diag.rescan();
-      if (request === announceRequest.current) setAnnounced(true);
-    } catch (error) {
-      if (request === announceRequest.current)
-        setAnnounceError(errorMessage(error));
-    } finally {
-      if (request === announceRequest.current) setAnnouncing(false);
+  const [endpoint, setEndpoint] = useState("");
+  const probeFeedback = useAsyncFeedback();
+  const resetAnnounce = announceFeedback.reset;
+  const resetProbe = probeFeedback.reset;
+  useEffect(() => {
+    if (!open) {
+      resetAnnounce();
+      resetProbe();
+      setShowHotspot(false);
     }
-  };
+  }, [open, resetAnnounce, resetProbe]);
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        onOpenChange(next);
-        if (!next) {
-          announceRequest.current++;
-          setAnnouncing(false);
-          setAnnounced(false);
-          setAnnounceError(null);
-          setShowHotspot(false);
-        }
-      }}
-    >
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg" data-testid="offline-connect-dialog">
         <DialogHeader>
           <DialogTitle>
@@ -181,6 +163,52 @@ export function OfflineConnectDialog({
         {!includeSharedNetwork && <DirectLinkGlyph />}
 
         <div className="space-y-3">
+          <section className="space-y-2 rounded-lg border p-3">
+            <p className="text-sm font-semibold">
+              {t("offlineConnect.manualTitle")}
+            </p>
+            <p className="text-sm text-muted-foreground">
+              {t("offlineConnect.manualBody")}
+            </p>
+            <form
+              className="flex gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void probeFeedback.run(() =>
+                  diag.probeEndpoint(endpoint.trim()),
+                );
+              }}
+            >
+              <Input
+                aria-label={t("offlineConnect.manualAddress")}
+                placeholder={t("offlineConnect.manualPlaceholder")}
+                value={endpoint}
+                onChange={(event) => {
+                  setEndpoint(event.target.value);
+                  probeFeedback.reset();
+                }}
+              />
+              <Button
+                type="submit"
+                variant="outline"
+                disabled={!endpoint.trim() || probeFeedback.busy}
+              >
+                {probeFeedback.busy
+                  ? t("common.loading")
+                  : t("offlineConnect.manualProbe")}
+              </Button>
+            </form>
+            {probeFeedback.succeeded && (
+              <p role="status" className="text-xs text-muted-foreground">
+                {t("offlineConnect.manualSent")}
+              </p>
+            )}
+            {probeFeedback.error && (
+              <p role="alert" className="break-words text-xs text-destructive">
+                {probeFeedback.error}
+              </p>
+            )}
+          </section>
           {includeSharedNetwork && (
             <section className="space-y-2 rounded-lg border p-3">
               <p className="flex items-center gap-2 text-sm font-semibold">
@@ -195,26 +223,28 @@ export function OfflineConnectDialog({
                 variant="outline"
                 size="sm"
                 data-testid="connect-announce"
-                disabled={announcing}
-                onClick={() => void announce()}
+                disabled={announceFeedback.busy}
+                onClick={() => void announceFeedback.run(() => diag.rescan())}
               >
-                {announcing
+                {announceFeedback.busy
                   ? t("common.loading")
-                  : announced
+                  : announceFeedback.succeeded
                     ? t("diagnostics.rescanned")
                     : t("diagnostics.rescan")}
               </Button>
-              {announced && (
+              {announceFeedback.succeeded && (
                 <p role="status" className="text-xs text-muted-foreground">
                   {t("redesign.announceFeedback")}
                 </p>
               )}
-              {announceError && (
+              {announceFeedback.error && (
                 <p
                   role="alert"
                   className="break-words text-xs text-destructive"
                 >
-                  {t("diagnostics.actionFailed", { error: announceError })}
+                  {t("diagnostics.actionFailed", {
+                    error: announceFeedback.error,
+                  })}
                 </p>
               )}
             </section>

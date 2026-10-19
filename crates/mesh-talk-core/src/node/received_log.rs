@@ -1,10 +1,12 @@
 //! A local-only, password-encrypted sidecar recording the plaintext of DMs this
 //! node RECEIVED. Inbound DMs are decrypted then discarded; this store keeps a
-//! private plaintext copy so history can show both sides. It is never synced,
-//! never served to peers, and holds no signatures. The on-disk framing is the
+//! private plaintext copy so history can show both sides. Certified devices of the
+//! same account may exchange eligible history through account sync; unrelated peers
+//! never receive this sidecar. The records hold no signatures. The on-disk framing is the
 //! shared [`EncryptedRecordLog`] (magic + salt header, then length-prefixed
 //! AES-256-GCM records); this store layers [`ReceivedEntry`] records, a
-//! per-conversation index, and an event-id dedup set on top.
+//! per-conversation index, and an event-id dedup index on top. The file-card
+//! variant permits an identical signed manifest under two host conversations.
 
 use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, EventId};
@@ -30,16 +32,62 @@ pub struct ReceivedEntry {
 pub struct ReceivedLog {
     file: EncryptedRecordLog<ReceivedEntry>,
     by_conversation: HashMap<ConversationId, Vec<ReceivedEntry>>,
-    /// Event ids already stored, so `record` is idempotent — a re-imported backfill (e.g. a
-    /// second `link_device`) or any duplicate write is skipped instead of durably doubling
-    /// the conversation's history.
+    allow_aliases: bool,
+    /// First host for each event ID. Message logs reject another host; file-card
+    /// logs may append a matching alias under another host.
     seen: HashMap<EventId, (ConversationId, usize)>,
+    #[cfg(test)]
+    fail_once_after: Option<usize>,
 }
 
 impl ReceivedLog {
+    /// File cards can have a device-conversation row and an account-conversation
+    /// row for the same signed manifest. Message logs keep event IDs unique.
+    pub(crate) fn open_file_cards(path: &Path, password: &str) -> Result<Self, LogError> {
+        Self::open_inner(path, password, true)
+    }
+
+    pub(crate) fn record_file_alias_durable(
+        &mut self,
+        entry: &ReceivedEntry,
+    ) -> Result<(), LogError> {
+        if !self.allow_aliases {
+            return Err(LogError::CorruptFile("file alias in message log".into()));
+        }
+        if let Some(existing) = self
+            .by_conversation
+            .get(&entry.conversation)
+            .and_then(|entries| entries.iter().find(|row| row.event_id == entry.event_id))
+        {
+            if existing != entry {
+                return Err(LogError::CorruptFile("conflicting file alias".into()));
+            }
+            return self.file.sync();
+        }
+        if let Some(existing) = self.entry(entry.event_id)
+            && !Self::same_alias_content(existing, entry)
+        {
+            return Err(LogError::CorruptFile("conflicting file alias".into()));
+        }
+        self.file.append_durable(entry)?;
+        let entries = self.by_conversation.entry(entry.conversation).or_default();
+        self.seen
+            .entry(entry.event_id)
+            .or_insert((entry.conversation, entries.len()));
+        entries.push(entry.clone());
+        Ok(())
+    }
+
+    fn same_alias_content(a: &ReceivedEntry, b: &ReceivedEntry) -> bool {
+        a.from == b.from && a.wall_clock == b.wall_clock && a.plaintext == b.plaintext
+    }
     #[cfg(test)]
     pub(crate) fn fail_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
         self.file.fail_appends_for_test(enabled)
+    }
+    #[cfg(test)]
+    pub(crate) fn fail_once_after_for_test(&mut self, successful: usize) {
+        self.fail_once_after = Some(successful);
     }
     pub(crate) fn entry(&self, id: EventId) -> Option<&ReceivedEntry> {
         let (conversation, index) = self.seen.get(&id)?;
@@ -67,27 +115,41 @@ impl ReceivedLog {
     }
     /// Open (or create) the received log at `path`, replaying stored entries.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
+        Self::open_inner(path, password, false)
+    }
+
+    fn open_inner(path: &Path, password: &str, allow_aliases: bool) -> Result<Self, LogError> {
         let (file, entries) = EncryptedRecordLog::<ReceivedEntry>::open(path, password, MAGIC)?;
         let mut by_conversation: HashMap<ConversationId, Vec<ReceivedEntry>> = HashMap::new();
-        let mut seen = HashMap::new();
+        let mut seen: HashMap<EventId, (ConversationId, usize)> = HashMap::new();
         for entry in entries {
             if let Some((conversation, index)) = seen.get(&entry.event_id) {
                 let existing = &by_conversation[conversation][*index];
-                if existing != &entry {
+                if existing != &entry
+                    && (!allow_aliases
+                        || existing.conversation == entry.conversation
+                        || !Self::same_alias_content(existing, &entry))
+                {
                     return Err(LogError::CorruptFile(
                         "conflicting received transaction".into(),
                     ));
                 }
-                continue;
+                if existing == &entry {
+                    continue;
+                }
             }
             let entries = by_conversation.entry(entry.conversation).or_default();
-            seen.insert(entry.event_id, (entry.conversation, entries.len()));
+            seen.entry(entry.event_id)
+                .or_insert((entry.conversation, entries.len()));
             entries.push(entry);
         }
         Ok(Self {
             file,
             by_conversation,
             seen,
+            allow_aliases,
+            #[cfg(test)]
+            fail_once_after: None,
         })
     }
 
@@ -100,6 +162,16 @@ impl ReceivedLog {
         plaintext: &[u8],
         event_id: crate::eventlog::event::EventId,
     ) -> Result<(), LogError> {
+        #[cfg(test)]
+        if let Some(remaining) = self.fail_once_after.as_mut() {
+            if *remaining == 0 {
+                self.fail_once_after = None;
+                return Err(LogError::Io(std::io::Error::other(
+                    "injected receive projection failure",
+                )));
+            }
+            *remaining -= 1;
+        }
         // Idempotent on event id: skip a duplicate (e.g. a re-imported account backfill) so it
         // can't durably double the conversation's history.
         if self.seen.contains_key(&event_id) {
@@ -149,7 +221,8 @@ impl ReceivedLog {
         for entry in kept {
             let entries = self.by_conversation.entry(entry.conversation).or_default();
             self.seen
-                .insert(entry.event_id, (entry.conversation, entries.len()));
+                .entry(entry.event_id)
+                .or_insert((entry.conversation, entries.len()));
             entries.push(entry);
         }
         Ok(removed)
@@ -190,6 +263,44 @@ mod tests {
 
     fn conv(n: u8) -> ConversationId {
         ConversationId::new([n; 32])
+    }
+
+    #[test]
+    fn file_aliases_require_identical_signed_content_and_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("files.log");
+        let first = ReceivedEntry {
+            event_id: EventId::new([7; 32]),
+            conversation: conv(1),
+            from: "author".into(),
+            wall_clock: 10,
+            plaintext: b"manifest".to_vec(),
+        };
+        let mut alias = first.clone();
+        alias.conversation = conv(2);
+        let mut files = ReceivedLog::open_file_cards(&path, "pw").unwrap();
+        files.record_durable(&first).unwrap();
+        files.record_file_alias_durable(&alias).unwrap();
+        files.record_file_alias_durable(&alias).unwrap();
+        assert_eq!(files.entries(&conv(2)).len(), 1);
+        let mut altered = alias.clone();
+        altered.plaintext = b"other".to_vec();
+        assert!(files.record_file_alias_durable(&altered).is_err());
+        drop(files);
+        let mut reopened = ReceivedLog::open_file_cards(&path, "pw").unwrap();
+        assert_eq!(reopened.entries(&conv(1)), vec![first]);
+        assert_eq!(reopened.entries(&conv(2)), vec![alias.clone()]);
+        assert!(ReceivedLog::open(&path, "pw").is_err());
+        assert_eq!(
+            reopened
+                .remove_where(|row| row.conversation == conv(1))
+                .unwrap(),
+            1
+        );
+        drop(reopened);
+        let kept = ReceivedLog::open_file_cards(&path, "pw").unwrap();
+        assert!(kept.entries(&conv(1)).is_empty());
+        assert_eq!(kept.entries(&conv(2)), vec![alias]);
     }
 
     #[test]

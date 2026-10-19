@@ -6,6 +6,27 @@ use crate::{
 };
 use std::path::PathBuf;
 
+/// A receiver lends recently downloaded channel ciphertext to other members.
+/// Count encoded chunk bytes rather than file plaintext, so disk growth stays bounded.
+const CHANNEL_FILE_REPLICA_BUDGET: usize = 64 * 1024 * 1024;
+
+fn channel_file_evictions(
+    mut replicas: Vec<(crate::eventlog::ConversationId, u64, usize)>,
+    budget: usize,
+) -> Vec<crate::eventlog::ConversationId> {
+    replicas.sort_unstable_by_key(|(file, newest, _)| (*newest, *file.as_bytes()));
+    let mut used = 0usize;
+    let mut drop = Vec::new();
+    for (file, _, bytes) in replicas.into_iter().rev() {
+        if used.saturating_add(bytes) <= budget {
+            used += bytes;
+        } else {
+            drop.push(file);
+        }
+    }
+    drop
+}
+
 impl Node {
     /// Capture exact original-author ancestry before any saved content replaces chunks.
     pub(in crate::node) fn completion_candidates(
@@ -82,12 +103,83 @@ impl Node {
         if !committed && !self.untracked_file_reclaimable(conversation, &store) {
             return false;
         }
+        if self.is_channel_attachment(conversation) && self.shares_replica(&conversation) {
+            self.prune_channel_file_replicas();
+            return true;
+        }
         let _ = self
             .log
             .lock()
             .expect("log lock not poisoned")
             .drop_conversation(&conversation);
         true
+    }
+
+    fn is_channel_attachment(&self, conversation: ConversationId) -> bool {
+        if self
+            .files
+            .lock()
+            .expect("files lock not poisoned")
+            .manifest(&conversation)
+            .and_then(|manifest| manifest.kind())
+            != Some(crate::file::FileKind::File)
+        {
+            return false;
+        }
+        self.retained_file_rows(conversation).iter().any(|row| {
+            self.channels
+                .lock()
+                .expect("channels lock not poisoned")
+                .state(&row.conversation)
+                .is_some()
+        })
+    }
+
+    /// Keep complete channel files newest-first within a fixed local storage budget.
+    /// Chunk conversations are independent DAGs, so pruning a whole conversation
+    /// cannot orphan a message or another chunk. A peer may later download the file
+    /// again from another source if its local replica has been evicted.
+    fn prune_channel_file_replicas(&self) {
+        let file_convs = self
+            .files
+            .lock()
+            .expect("files lock not poisoned")
+            .file_convs();
+        let mut replicas = Vec::new();
+        for file in file_convs {
+            if !self.is_channel_attachment(file) {
+                continue;
+            }
+            let rows = self.retained_file_rows(file);
+            if rows.is_empty() {
+                continue;
+            }
+            let Some(total) = self
+                .files
+                .lock()
+                .expect("files lock not poisoned")
+                .manifest(&file)
+                .map(|manifest| manifest.chunk_count() as usize)
+            else {
+                continue;
+            };
+            let log = self.log.lock().expect("log lock not poisoned");
+            let chunks = log.events(&file);
+            if chunks.len() != total {
+                continue;
+            }
+            let bytes = chunks
+                .iter()
+                .map(|event| event.ciphertext.len() + 256)
+                .sum::<usize>();
+            let newest = rows.iter().map(|row| row.wall_clock).max().unwrap_or(0);
+            replicas.push((file, newest, bytes));
+        }
+        let drop = channel_file_evictions(replicas, CHANNEL_FILE_REPLICA_BUDGET);
+        let mut log = self.log.lock().expect("log lock not poisoned");
+        for file in drop {
+            let _ = log.drop_conversation(&file);
+        }
     }
 
     /// Own completed fanout and untracked group files have no recipient probe debt.
@@ -193,7 +285,14 @@ impl Node {
                 .lock()
                 .expect("log lock not poisoned")
                 .get(&row.event_id)
-                .cloned();
+                .cloned()
+                .or_else(|| {
+                    self.account_file_proofs
+                        .lock()
+                        .expect("file proofs lock not poisoned")
+                        .get(&row.event_id)
+                        .cloned()
+                });
             let Some(event) = event else {
                 continue;
             };
@@ -205,7 +304,13 @@ impl Node {
                     .expect("channels lock not poisoned")
                     .state(&row.conversation)
                     .is_some();
-            if (own || channel)
+            let sibling_proof = self
+                .account_file_proofs
+                .lock()
+                .expect("file proofs lock not poisoned")
+                .get(&row.event_id)
+                .is_some();
+            if (own || channel || sibling_proof)
                 && event.kind == EventKind::FileManifest
                 && event.author.user_id() == row.from
                 && event.verify_integrity()
@@ -313,5 +418,25 @@ impl Node {
                     .delivery_suspended
                     .load(std::sync::atomic::Ordering::Acquire)
         })
+    }
+}
+
+#[cfg(test)]
+mod replica_tests {
+    use super::*;
+
+    #[test]
+    fn channel_file_budget_keeps_recent_complete_files_and_evicts_older_ones() {
+        let a = ConversationId::new([1; 32]);
+        let b = ConversationId::new([2; 32]);
+        let c = ConversationId::new([3; 32]);
+        assert_eq!(
+            channel_file_evictions(vec![(a, 1, 5), (b, 2, 5), (c, 3, 20)], 9),
+            vec![c, a]
+        );
+        assert_eq!(
+            channel_file_evictions(vec![(a, 1, 5), (b, 2, 5), (c, 3, 5)], 10),
+            vec![a]
+        );
     }
 }

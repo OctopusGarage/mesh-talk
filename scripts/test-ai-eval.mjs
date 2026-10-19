@@ -100,3 +100,76 @@ test("module coverage manifest includes every core module advertised in AGENTS.m
     assert.ok(modules.has(expected), `missing module coverage: ${expected}`);
   }
 });
+
+test("relay privacy eval is registered against the current design document", () => {
+  const suite = JSON.parse(
+    readFileSync(new URL("../docs/evals/ai-eval-suite.json", import.meta.url), "utf8"),
+  );
+  const privacy = suite.cases.find((entry) => entry.id === "MT-AI-006");
+  assert.equal(privacy?.subject_file, "docs/post-office-metadata-privacy.md");
+  assert.ok(privacy.rubric.some((item) => item.includes("authenticated connections")));
+  assert.ok(privacy.rubric.some((item) => item.includes("forward secrecy")));
+});
+
+test("macOS post-office runbook eval covers credentials and delivery", () => {
+  const suite = JSON.parse(
+    readFileSync(new URL("../docs/evals/ai-eval-suite.json", import.meta.url), "utf8"),
+  );
+  const service = suite.cases.find((entry) => entry.id === "MT-AI-007");
+  assert.equal(service?.subject_file, "docs/post-office-macos-service.md");
+  assert.ok(service.rubric.some((item) => item.includes("password")));
+  assert.ok(service.rubric.some((item) => item.includes("sender")));
+  assert.ok(service.rubric.some((item) => item.includes("encrypted file bytes")));
+});
+
+test("Windows post-office runbook eval covers task recovery and delivery", () => {
+  const suite = JSON.parse(
+    readFileSync(new URL("../docs/evals/ai-eval-suite.json", import.meta.url), "utf8"),
+  );
+  const service = suite.cases.find((entry) => entry.id === "MT-AI-008");
+  assert.equal(service?.subject_file, "docs/post-office-windows-service.md");
+  assert.ok(service.rubric.some((item) => item.includes("password")));
+  assert.ok(service.rubric.some((item) => item.includes("stale lock")));
+  assert.ok(service.rubric.some((item) => item.includes("encrypted file bytes")));
+});
+
+test("routed discovery eval covers the opt-in bridge and its limits", () => {
+  const suite = JSON.parse(
+    readFileSync(new URL("../docs/evals/ai-eval-suite.json", import.meta.url), "utf8"),
+  );
+  const bridge = suite.cases.find((entry) => entry.id === "MT-AI-009");
+  assert.equal(bridge?.subject_file, "docs/routed-network-discovery.md");
+  assert.ok(bridge.rubric.some((item) => item.includes("A/B do not need Tailscale")));
+  assert.ok(bridge.rubric.some((item) => item.includes("Noise identity")));
+  assert.ok(bridge.rubric.some((item) => item.includes("WebRTC")));
+});
+
+
+test("ai eval includes declared supporting sources and records their provenance", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "mesh-context-eval-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const primary = join(tmp, "primary.rs");
+  const support = join(tmp, "validator.rs");
+  const prompt = join(tmp, "prompt.md");
+  const suite = join(tmp, "suite.json");
+  const report = join(tmp, "report.json");
+  const provider = join(tmp, "provider.mjs");
+  writeFileSync(primary, "PRIMARY_SOURCE");
+  writeFileSync(support, "DELEGATED_VALIDATION");
+  writeFileSync(prompt, "Evaluate the supplied production sources.");
+  writeFileSync(suite, JSON.stringify({ evaluator_prompt: prompt, cases: [{
+    id: "MT-CONTEXT-001", name: "delegated validation", subject_file: primary,
+    context_files: [support], min_score: 0.85, scenario: "Check the validator.", rubric: ["Validation exists."],
+  }] }));
+  writeFileSync(provider, `let input=""; process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => {
+  if (!input.includes("PRIMARY_SOURCE") || !input.includes("DELEGATED_VALIDATION")) throw Error("Missing production context");
+  console.log(JSON.stringify({case_id:"MT-CONTEXT-001",pass:true,score:1,findings:[],evidence:[],required_improvements:[]}));
+});`);
+  const result = runEval(["--suite", suite, "--report", report], {
+    AI_EVAL_COMMAND: `"${process.execPath}" "${provider}"`,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(JSON.parse(readFileSync(report, "utf8")).cases[0].context_files, [support]);
+});

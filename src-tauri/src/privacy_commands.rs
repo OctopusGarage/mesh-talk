@@ -1,5 +1,8 @@
 //! Owner-scoped invisible-mode settings. Network enforcement lives in the core.
-use crate::{chat_commands::NodeState, state::AppState};
+use crate::{
+    chat_commands::NodeState, commands::CommandError, runtime_admission::RuntimeAdmission,
+    state::AppState,
+};
 use mesh_talk_core::node::PrivacySnapshot;
 use serde::{Deserialize, Serialize};
 
@@ -21,47 +24,65 @@ async fn dispatch(
     owner: String,
     change: Change,
 ) -> Result<PrivacyResponse, String> {
-    let session = app.session().clone();
-    let generation = session.with_owner(|current| {
-        if current != Some(owner.as_str()) {
-            return Err("Unauthorized privacy owner".into());
+    let admission = RuntimeAdmission::capture(app, node, &owner).map_err(|error| match &error {
+        CommandError::Authorization(message)
+            if message == "not logged in" || message == "session owner mismatch" =>
+        {
+            "Unauthorized privacy owner".into()
         }
-        Ok::<_, String>(session.generation())
+        _ => privacy_error(error),
     })?;
-    // Never retain the synchronous session guard across an async network gate.
-    // The generation check is repeated by the core immediately before commit.
-    // That check authorizes the synchronous commit region: logout rejects queued
-    // operations, but need not cancel a commit already started for the old owner.
-    // Keep the runtime lifecycle guard until completion so it can never target
-    // a replacement session's runtime or account directory.
-    let guard = node.0.lock().await;
-    let runtime = guard.as_ref().ok_or("Node not started")?;
-    if runtime.host_account_id() != Some(owner.as_str()) {
-        return Err("Privacy runtime owner mismatch".into());
+    if matches!(change, Change::Read) {
+        return admission
+            .with_runtime(|runtime| {
+                Ok(PrivacyResponse {
+                    owner,
+                    policy: runtime.privacy_snapshot(),
+                })
+            })
+            .await
+            .map_err(privacy_error);
     }
-    let authorize = || {
-        if session.generation() == generation {
-            Ok(())
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "Session changed",
-            ))
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                // Check before waiting; the guarded commit checks again after the gate.
+                admission.checked(runtime, || Ok(()))?;
+                let node = runtime.handle();
+                let authorize = |commit: &mut dyn FnMut() -> std::io::Result<()>| {
+                    admission.authorize_io(runtime, commit)
+                };
+                let result = match change {
+                    Change::Read => unreachable!(),
+                    Change::Mode(value) => node.set_invisible_guarded(value, authorize).await,
+                    Change::Allow(account, allowed) => {
+                        node.set_allowed_guarded(&account, allowed, authorize).await
+                    }
+                    Change::Initiate(account) => {
+                        node.initiate_contact_guarded(&account, authorize).await
+                    }
+                };
+                result.map_err(|error| CommandError::Io(error.to_string()))?;
+                admission.checked(runtime, || {
+                    Ok(PrivacyResponse {
+                        owner,
+                        policy: runtime.privacy_snapshot(),
+                    })
+                })
+            })
+        })
+        .await
+        .map_err(privacy_error)
+}
+
+fn privacy_error(error: CommandError) -> String {
+    match error {
+        CommandError::NotStarted(_) => "Node not started".into(),
+        CommandError::Authorization(message) if message == "runtime owner mismatch" => {
+            "Privacy runtime owner mismatch".into()
         }
-    };
-    let result = match change {
-        Change::Read => authorize(),
-        Change::Mode(value) => runtime.set_invisible_if(value, authorize).await,
-        Change::Allow(account, allowed) => {
-            runtime.set_allowed_if(&account, allowed, authorize).await
-        }
-        Change::Initiate(account) => runtime.initiate_contact_if(&account, authorize).await,
-    };
-    result.map_err(|_| "Could not update network privacy".to_string())?;
-    Ok(PrivacyResponse {
-        owner,
-        policy: runtime.privacy_snapshot(),
-    })
+        _ => "Could not update network privacy".into(),
+    }
 }
 
 #[tauri::command]
@@ -107,6 +128,107 @@ mod tests {
     use crate::services::{auth_service::AuthService, user::User};
     use mesh_talk_core::{identity::manager::IdentityManager, storage::file_manager::FileManager};
     use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_privacy_ipc_retains_lifecycle_until_rejected_commit_finishes() {
+        let root = tempfile::tempdir().unwrap();
+        let app = AppState::new(AuthService::new(Arc::new(IdentityManager::new(
+            FileManager::new(root.path().to_owned()),
+        ))));
+        app.session().set(
+            "token".into(),
+            User {
+                user_id: "alice".into(),
+                name: "alice".into(),
+                display_name: "Alice".into(),
+                address: "fixture".into(),
+                created_at: 0,
+                last_seen: 0,
+                is_online: true,
+            },
+            "pw".into(),
+        );
+        let state = NodeState::empty();
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "alice",
+            "Alice",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let node = runtime.handle();
+        *state.0.lock().await = Some(runtime);
+        let documents = || {
+            ["privacy.policy", "peer-proofs", "peer-routes"]
+                .map(|name| std::fs::read(root.path().join("accounts/alice").join(name)).unwrap())
+        };
+        let before = documents();
+        let (entered, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let holder_node = node.clone();
+        let holder = std::thread::spawn(move || {
+            tauri::async_runtime::block_on(holder_node.set_allowed_if(
+                &"a".repeat(32),
+                false,
+                move || {
+                    entered.send(()).unwrap();
+                    released.recv().unwrap();
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "test holder",
+                    ))
+                },
+            ))
+        });
+        held.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (producer_entered, producer_started) = std::sync::mpsc::channel();
+        *app.owner_command_captured.lock().unwrap() = Some(producer_entered);
+        let caller_app = app.clone();
+        let caller_state = state.clone();
+        let caller = tokio::spawn(async move {
+            dispatch(
+                &caller_app,
+                &caller_state,
+                "alice".into(),
+                Change::Mode(true),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match producer_started.try_recv() {
+                    Ok("owner-producer") => break,
+                    Ok(_) => continue,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
+                    Err(error) => panic!("detached producer did not start: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("detached producer owns the runtime lifecycle before IPC cancellation");
+        *app.owner_command_captured.lock().unwrap() = None;
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        assert!(
+            state.0.try_lock().is_err(),
+            "cancelled IPC released live runtime producer"
+        );
+        app.session().clear();
+        release.send(()).unwrap();
+        assert!(holder.join().unwrap().is_err());
+        let runtime = state.0.lock().await.take().unwrap();
+        assert!(!runtime.privacy_snapshot().invisible);
+        assert_eq!(documents(), before);
+        runtime.stop().await;
+    }
 
     #[test]
     fn registered_privacy_commands_authorize_and_persist_real_runtime() {
