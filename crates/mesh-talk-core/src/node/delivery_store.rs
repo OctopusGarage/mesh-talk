@@ -46,6 +46,12 @@ pub(crate) struct OutgoingDelivery {
     pub(crate) destinations: Vec<DeliveryDestination>,
 }
 
+impl OutgoingDelivery {
+    fn has_transport_work(&self) -> bool {
+        !self.destinations.is_empty()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReceiptDelivery {
     pub(crate) logical_id: EventId,
@@ -315,6 +321,11 @@ struct DeliveryProfile {
 }
 
 impl DeliveryStore {
+    #[cfg(test)]
+    pub(crate) fn fail_journal_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
+        self.journal.fail_appends_for_test(enabled)
+    }
+
     pub(crate) fn bind_profile(
         &mut self,
         log_path: &Path,
@@ -459,8 +470,13 @@ impl DeliveryStore {
         }
         for tx in &self.pending {
             let valid = match tx {
-                DeliveryTransaction::Outgoing { message, .. }
-                | DeliveryTransaction::OutgoingManifest { message, .. } => message_ok(message),
+                DeliveryTransaction::Outgoing { message, .. } => message_ok(message),
+                DeliveryTransaction::OutgoingManifest {
+                    message, received, ..
+                } => {
+                    message_ok(message)
+                        && (message.has_transport_work() || received.from == own.user_id())
+                }
                 DeliveryTransaction::Incoming {
                     sender,
                     original,
@@ -622,6 +638,9 @@ impl DeliveryStore {
     pub(crate) fn begin(&mut self, tx: DeliveryTransaction) -> Result<EventId, LogError> {
         self.sync_replacement()?;
         self.validate_transaction(&tx)?;
+        if let DeliveryTransaction::OutgoingManifest { message, .. } = &tx {
+            self.outgoing_manifest_author(message)?;
+        }
         if let Some(existing) = self
             .pending
             .iter()
@@ -660,7 +679,8 @@ impl DeliveryStore {
             if let Some(record) = metadata_for(self.pending.last().expect("staged reservation")) {
                 self.record_installed(&record)?;
                 self.ensure_outbox_space(&record)?;
-            } else if let DeliveryTransaction::IncomingManifest { file, .. } =
+            } else if let DeliveryTransaction::IncomingManifest { file, .. }
+            | DeliveryTransaction::OutgoingManifest { file, .. } =
                 self.pending.last().expect("staged reservation")
             {
                 self.ensure_outbox_space(&OutboxRecord::FileCard(file.clone()))?;
@@ -792,7 +812,11 @@ impl DeliveryStore {
                 received,
                 file,
             } => {
-                self.validate_staged_file(file, log, &message.destinations[0].event.author)?;
+                let author = self.outgoing_manifest_author(message)?;
+                if received.from != author.user_id() {
+                    return Err(invalid("invalid outgoing manifest recovery author"));
+                }
+                self.validate_staged_file(file, log, &author)?;
                 for destination in &message.destinations {
                     log.append_durable(destination.event.clone())?;
                 }
@@ -1008,7 +1032,11 @@ impl DeliveryStore {
     }
 
     pub(crate) fn file_completed(&self, id: EventId) -> bool {
-        self.file_completions.contains_key(&id)
+        self.file_completion(id).is_some()
+    }
+
+    pub(crate) fn file_completion(&self, id: EventId) -> Option<EventId> {
+        self.file_completions.get(&id).copied()
     }
 
     pub(crate) fn cards_for_file(&self, conversation: ConversationId) -> Vec<FileCard> {
@@ -1181,6 +1209,29 @@ impl DeliveryStore {
         Ok(())
     }
 
+    fn outgoing_manifest_author(
+        &self,
+        message: &OutgoingDelivery,
+    ) -> Result<crate::eventlog::Author, LogError> {
+        if let Some(first) = message.destinations.first() {
+            return Ok(first.event.author);
+        }
+        let (_, owner) = self
+            .profile
+            .as_ref()
+            .ok_or_else(|| invalid("delivery owner is unbound"))?;
+        if message.sender_account != owner.account
+            || message.recipient_account.as_deref() != Some(owner.account.as_str())
+            || message.conversation
+                != super::conversation::account_conversation_id(&owner.account, &owner.account)
+        {
+            return Err(invalid("invalid personal file owner"));
+        }
+        Ok(crate::eventlog::Author::from_ed25519(
+            owner.device.ed25519_pub,
+        ))
+    }
+
     /// Build the immutable local File card, history row and fanout as one
     /// transaction. The store owns their shared identity and chunk binding;
     /// callers only prepare the signed destination events.
@@ -1192,10 +1243,8 @@ impl DeliveryStore {
     ) -> Result<DeliveryTransaction, LogError> {
         let manifest = super::files::validated_manifest(&plaintext)
             .ok_or_else(|| invalid("invalid file manifest"))?;
-        let first = message
-            .destinations
-            .first()
-            .ok_or_else(|| invalid("no file destinations"))?;
+        self.validate_message(&message)?;
+        let author = self.outgoing_manifest_author(&message)?;
         let file = FileCard {
             id: message.logical_id,
             conversation: message.conversation,
@@ -1221,11 +1270,11 @@ impl DeliveryStore {
                 .collect(),
             completion_binding: None,
         };
-        self.validate_staged_file(&file, log, &first.event.author)?;
+        self.validate_staged_file(&file, log, &author)?;
         let received = Box::new(ReceivedEntry {
             event_id: message.logical_id,
             conversation: message.conversation,
-            from: first.event.author.user_id(),
+            from: author.user_id(),
             wall_clock: message.wall_clock,
             plaintext,
         });
@@ -1714,7 +1763,12 @@ impl DeliveryStore {
                     self.work_events.insert(d.event_id, id);
                 }
             }
-            if self.messages.contains_key(&id) || self.completed_work(id).is_some() {
+            if self
+                .messages
+                .get(&id)
+                .is_some_and(OutgoingDelivery::has_transport_work)
+                || self.completed_work(id).is_some()
+            {
                 self.active_work.insert(id);
             } else {
                 self.destination_cursors.remove(&id);
@@ -1909,7 +1963,9 @@ impl DeliveryStore {
         for tx in &self.pending {
             match tx {
                 DeliveryTransaction::Outgoing { message, .. }
-                | DeliveryTransaction::OutgoingManifest { message, .. } => {
+                | DeliveryTransaction::OutgoingManifest { message, .. }
+                    if message.has_transport_work() =>
+                {
                     messages
                         .entry(message.logical_id)
                         .or_insert(DeliveryStatus::Awaiting);
@@ -2007,6 +2063,7 @@ impl DeliveryStore {
         for tx in &self.pending {
             if let DeliveryTransaction::Outgoing { message, .. }
             | DeliveryTransaction::OutgoingManifest { message, .. } = tx
+                && message.has_transport_work()
             {
                 work.entry(message.logical_id)
                     .or_insert_with(|| (true, CompletedDelivery::from(message).remaining));
@@ -2138,7 +2195,9 @@ impl DeliveryStore {
             }
             match tx {
                 DeliveryTransaction::Outgoing { message, .. }
-                | DeliveryTransaction::OutgoingManifest { message, .. } => {
+                | DeliveryTransaction::OutgoingManifest { message, .. }
+                    if message.has_transport_work() =>
+                {
                     messages.insert(message.logical_id);
                 }
                 DeliveryTransaction::Incoming {
@@ -2272,14 +2331,24 @@ impl DeliveryStore {
                 .recipient_account
                 .as_deref()
                 .is_some_and(|a| !valid_account(a))
-            || message.destinations.is_empty()
+            || (message.destinations.is_empty()
+                && (message.recipient_account.as_deref() != Some(message.sender_account.as_str())
+                    || message.conversation
+                        != super::conversation::account_conversation_id(
+                            &message.sender_account,
+                            &message.sender_account,
+                        )))
             || message.destinations.len() > self.limits.destinations
         {
             return Err(invalid("invalid delivery destinations"));
         }
         let mut devices = HashSet::new();
         let mut events = HashSet::new();
-        let first_author = message.destinations[0].event.author;
+        let Some(first) = message.destinations.first() else {
+            // Local account history needs no synthetic device event or ratchet.
+            return Ok(());
+        };
+        let first_author = first.event.author;
         for destination in &message.destinations {
             self.validate_destination(destination)?;
             let author = destination.event.author.ed25519_pub();
@@ -2326,7 +2395,20 @@ impl DeliveryStore {
                 self.validate_record(&OutboxRecord::FileCard(file.clone()))?;
                 let manifest = super::files::validated_manifest(&received.plaintext)
                     .ok_or_else(|| invalid("invalid file manifest"))?;
-                if message.logical_id != message.destinations[0].event.id
+                // On disk, pending transactions are decoded before profile binding.
+                // Admission and replay require the bound owner; validate_owner also
+                // checks this plaintext author before any projection on startup.
+                let expected_from = if let Some(first) = message.destinations.first() {
+                    first.event.author.user_id()
+                } else if self.profile.is_some() {
+                    self.outgoing_manifest_author(message)?.user_id()
+                } else {
+                    received.from.clone()
+                };
+                if message
+                    .destinations
+                    .first()
+                    .is_some_and(|first| message.logical_id != first.event.id)
                     || file.completion_binding.is_some()
                     || file.id != message.logical_id
                     || file.conversation != message.conversation
@@ -2348,7 +2430,7 @@ impl DeliveryStore {
                     || received.event_id != message.logical_id
                     || received.conversation != message.conversation
                     || received.wall_clock != message.wall_clock
-                    || received.from != message.destinations[0].event.author.user_id()
+                    || received.from != expected_from
                     || message.destinations.iter().any(|d| {
                         d.event.kind != EventKind::FileManifest
                             || !super::session::event_fits_frame(&d.event)
@@ -2525,7 +2607,12 @@ fn metadata_for(tx: &DeliveryTransaction) -> Option<OutboxRecord> {
     match tx {
         DeliveryTransaction::Outgoing { message, .. }
         | DeliveryTransaction::OutgoingManifest { message, .. } => {
-            Some(OutboxRecord::Message(message.clone()))
+            // A personal message with no known siblings has no transport work.
+            // The WAL projects it into sent history without retaining an outbox
+            // row or reserving remote delivery capacity indefinitely.
+            message
+                .has_transport_work()
+                .then(|| OutboxRecord::Message(message.clone()))
         }
         DeliveryTransaction::Incoming { receipt, .. }
         | DeliveryTransaction::IncomingManifest { receipt, .. } => {

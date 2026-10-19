@@ -1,7 +1,8 @@
 //! Manual encrypted backup and transactional offline restore.
 
 use crate::chat_commands::{NodeState, RuntimeAuthority};
-use crate::commands::{CommandError, spawn_node_runtime};
+use crate::commands::CommandError;
+use crate::runtime_bootstrap::spawn_node_runtime;
 use crate::state::AppState;
 use mesh_talk_core::identity::{manager::IdentityManager, user::User};
 use mesh_talk_core::node::Node;

@@ -92,6 +92,6 @@ if sys.argv[1] == "host":
     pathlib.Path(sys.argv[2]).write_text("ready", encoding="utf8")
     GLib.MainLoop().run()
 elif sys.argv[1] == "show":
-    activate_menu(int(sys.argv[2]), "Show")
+    activate_menu(int(sys.argv[2]), "Open Mesh-Talk")
 else:
     raise ValueError("Expected host or show")

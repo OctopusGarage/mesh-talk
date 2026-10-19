@@ -217,6 +217,7 @@ pub enum AnyManifest {
 /// (returns `None`) on garbage rather than panicking — old single-blob formats that
 /// don't parse simply don't interoperate.
 pub fn decode_manifest(bytes: &[u8]) -> Option<AnyManifest> {
+    let (_, bytes) = crate::expiry::split(bytes)?;
     if let Some(v4) = FileManifestV4::decode(bytes) {
         return Some(AnyManifest::V4(v4));
     }
@@ -484,6 +485,13 @@ mod tests {
         let mut junk = bytes;
         junk.push(0xAB);
         assert_eq!(FileManifestV2::decode(&junk), None);
+    }
+
+    #[test]
+    fn expiring_manifest_can_be_decoded_without_losing_its_deadline_frame() {
+        let (manifest, _) = seal_file_v2(b"secret");
+        let wire = crate::expiry::wrap(&manifest.encode(), Some(1_700_000_300_000));
+        assert_eq!(decode_manifest(&wire), Some(AnyManifest::V2(manifest)));
     }
 
     #[test]

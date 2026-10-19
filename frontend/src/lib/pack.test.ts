@@ -348,19 +348,20 @@ describe("customization pack", () => {
     ).toThrow(/duplicate sticker id/i);
   });
 
-  it("loads every published marketplace archive and matches its checksum", () => {
-    const catalog = JSON.parse(
-      readFileSync(
-        new URL("../../../site/market/catalog.json", import.meta.url),
-        "utf8",
-      ),
-    ) as {
-      id: string;
-      kind: string;
-      version: string;
-      file: string;
-      sha256: string;
-    }[];
+  const catalog = JSON.parse(
+    readFileSync(
+      new URL("../../../site/market/catalog.json", import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    id: string;
+    kind: string;
+    version: string;
+    file: string;
+    sha256: string;
+  }[];
+
+  it("keeps the published catalog unique and aligned with the bundled lock", () => {
     expect(catalog).toHaveLength(15);
     expect(new Set(catalog.map((item) => item.id)).size).toBe(catalog.length);
     expect(catalog.filter((item) => item.kind !== "sticker")).toHaveLength(13);
@@ -371,7 +372,11 @@ describe("customization pack", () => {
       ),
     ) as { id: string }[];
     expect(lock).toHaveLength(catalog.length);
-    for (const item of catalog) {
+  });
+
+  it.each(catalog)(
+    "loads published archive $id and matches its checksum",
+    (item) => {
       const bytes = readFileSync(
         new URL(`../../../site/market/packs/${item.id}.zip`, import.meta.url),
       );
@@ -381,6 +386,6 @@ describe("customization pack", () => {
       const pack = parsePack(bytes);
       expect(pack.id).toBe(item.id);
       expect(pack.version).toBe(item.version);
-    }
-  });
+    },
+  );
 });

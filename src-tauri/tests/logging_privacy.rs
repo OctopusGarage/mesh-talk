@@ -3,7 +3,7 @@
 
 #[test]
 fn node_startup_log_does_not_include_the_account_identifier() {
-    let source = include_str!("../src/commands.rs");
+    let source = include_str!("../src/runtime_bootstrap.rs");
     let diagnostic = source
         .lines()
         .find(|line| line.contains("log::info!") && line.contains("Node started"))

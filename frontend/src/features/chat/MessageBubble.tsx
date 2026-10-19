@@ -63,6 +63,7 @@ function FileBubble({
   sendKey,
   messageId,
   isChannel,
+  isPersonal,
   readOnly,
 }: {
   file: NonNullable<ChatMessage["file"]>;
@@ -72,6 +73,7 @@ function FileBubble({
   sendKey?: string;
   messageId?: string | null;
   isChannel: boolean;
+  isPersonal: boolean;
   readOnly: boolean;
 }) {
   const { t } = useTranslation();
@@ -86,7 +88,9 @@ function FileBubble({
   const approvalNeeded =
     !mine && (status?.consent === "pending" || status?.consent === "declined");
   const uploadKey =
-    mine && !metadataPending && !isChannel ? messageId || undefined : undefined;
+    mine && !metadataPending && !isChannel && !isPersonal
+      ? messageId || undefined
+      : undefined;
 
   const saveAs = async () => {
     const lease = captureChatOwnership();
@@ -251,6 +255,7 @@ function FileBubble({
       {!readOnly && approvalNeeded && !savedPath && (
         <div className="mt-2 flex gap-2">
           <button
+            data-testid="receive-file"
             type="button"
             onClick={() => void decide(true)}
             className="rounded-md bg-primary px-2.5 py-1 text-xs text-primary-foreground"
@@ -286,9 +291,11 @@ export function MessageBubble({
   grouped,
   showTime,
   isChannel,
+  isPersonal = false,
   readOnly = false,
   authorAvatarId,
   authorName,
+  onViewAuthor,
   fresh,
   mentioned,
   reactions,
@@ -310,6 +317,7 @@ export function MessageBubble({
   showTime?: boolean;
   /** Channel conversations show per-message author avatar + name; DMs don't. */
   isChannel: boolean;
+  isPersonal?: boolean;
   /** Recovered channel history has no sender keys on this device. */
   readOnly?: boolean;
   /** The author's ACCOUNT id (resolved from the roster) for avatar lookup; defaults to
@@ -318,6 +326,8 @@ export function MessageBubble({
   /** The author's display NAME (resolved from the roster/members); falls back to the raw
    *  user-id when unknown. Only used for the channel author label. */
   authorName?: string;
+  /** Opens the author's member card from a channel avatar or name. */
+  onViewAuthor?: () => void;
   /** True only for a genuinely newly-arriving/sent message → plays an entrance. */
   fresh?: boolean;
   /** True when this channel message mentions the current user. */
@@ -459,16 +469,28 @@ export function MessageBubble({
       {/* Avatar gutter only in channels; DMs align flush with no empty gutter. */}
       {isChannel && (
         <div className="w-8 shrink-0">
-          {showAuthor && !mine && (
-            // Seed by the author's ACCOUNT id (resolved from the roster) so a propagated/
-            // custom avatar resolves — avatars are account-keyed, m.who is a device id.
-            // Falls back to m.who when the account isn't known.
-            <IdentityGlyph
-              seed={authorAvatarId ?? m.who}
-              size={32}
-              title={authorLabel}
-            />
-          )}
+          {showAuthor &&
+            !mine &&
+            (onViewAuthor ? (
+              <button
+                type="button"
+                onClick={onViewAuthor}
+                aria-label={t("memberProfile.viewNamed", { name: authorLabel })}
+                className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <IdentityGlyph
+                  seed={authorAvatarId ?? m.who}
+                  size={32}
+                  title={authorLabel}
+                />
+              </button>
+            ) : (
+              <IdentityGlyph
+                seed={authorAvatarId ?? m.who}
+                size={32}
+                title={authorLabel}
+              />
+            ))}
         </div>
       )}
 
@@ -481,16 +503,29 @@ export function MessageBubble({
           mine ? "items-end" : "items-start",
         )}
       >
-        {showAuthor && !mine && (
-          <span
-            className={cn(
-              "mb-1 px-1 text-xs font-medium text-muted-foreground",
-              isIdName ? "font-mono" : "font-display tracking-tight",
-            )}
-          >
-            {authorLabel}
-          </span>
-        )}
+        {showAuthor &&
+          !mine &&
+          (onViewAuthor ? (
+            <button
+              type="button"
+              onClick={onViewAuthor}
+              className={cn(
+                "mb-1 rounded px-1 text-left text-xs font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+                isIdName ? "font-mono" : "font-display tracking-tight",
+              )}
+            >
+              {authorLabel}
+            </button>
+          ) : (
+            <span
+              className={cn(
+                "mb-1 px-1 text-xs font-medium text-muted-foreground",
+                isIdName ? "font-mono" : "font-display tracking-tight",
+              )}
+            >
+              {authorLabel}
+            </span>
+          ))}
 
         {mentioned && !mine && (
           <span className="mb-1 rounded-full bg-signal/10 px-2 py-0.5 text-[11px] font-medium text-signal">
@@ -579,6 +614,7 @@ export function MessageBubble({
                     sendKey={m.clientId}
                     messageId={m.id}
                     isChannel={isChannel}
+                    isPersonal={isPersonal}
                     readOnly={readOnly}
                   />
                 ) : (
@@ -682,7 +718,12 @@ export function MessageBubble({
           </div>
         )}
 
-        <DeliveryFooter message={m} isChannel={isChannel} showTime={showTime} />
+        <DeliveryFooter
+          message={m}
+          isChannel={isChannel}
+          isPersonal={isPersonal}
+          showTime={showTime}
+        />
 
         {m.failed && (
           <span

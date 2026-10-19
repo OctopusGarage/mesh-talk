@@ -24,6 +24,9 @@ coverage/
 dist/
 **/*/dist/
 frontend/dist/
+release_zips/
+docker/post-office/binaries/
+.docker-relay-build/
 
 # Build artifacts
 build/
@@ -60,6 +63,9 @@ pnpm-lock.yaml
 # Temporary files
 tmp/
 temp/
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
 
 # OS generated files
 Thumbs.db
@@ -74,6 +80,7 @@ coverage/
 
 # Playwright: local runs still ignore the generated artifacts; CI uploads them on failure.
 frontend/playwright-report/
+frontend/blob-report/
 frontend/test-results/
 frontend/eval-results/
 site/market/studio/

@@ -1,6 +1,6 @@
 # Chat UI — manual smoke checklist
 
-This is a **supplementary** smoke checklist for the v0.3.0 native-direction desktop UI.
+This is a **supplementary** smoke checklist for the native desktop UI.
 It is meant for a quick human walk-through of the real app; it is *not* the
 primary regression net:
 
@@ -13,9 +13,10 @@ primary regression net:
   other over UDP and talking over TCP, persistence, post-office offline delivery) is
   covered by the end-to-end rigs: `make e2e`.
 
-Run those first. Use the steps below when you want to eyeball the actual desktop app or
-verify something the automated suites can't (real network discovery, native dialogs, look
-and feel).
+Use the steps below when you need to inspect the actual desktop app or verify
+something the automated suites cannot, such as real network discovery and native
+dialogs. Run the comprehensive E2E suites at their PR, review, CI, or release
+triggers; ordinary changes use the affected tests first.
 
 ## Setup (two instances on one machine)
 

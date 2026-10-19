@@ -159,7 +159,7 @@ async fn retirement_waits_for_peer_cache_closure_after_its_caller_is_cancelled()
         release_rx.lock().unwrap().recv().unwrap();
     }));
     let caller = node.clone();
-    runtime.tasks.push(tokio::spawn(async move {
+    runtime.participant.tasks.push(tokio::spawn(async move {
         caller.cached_peer_snapshot_async().await.unwrap();
     }));
     tokio::time::timeout(Duration::from_secs(3), entered_rx)
@@ -201,10 +201,10 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
     let mut bob = start(bob_dir.path()).await;
     // Isolate this explicit probe from discovery, accept/delivery, and periodic
     // probes. Join producers and admitted children without closing admission.
-    for task in &alice.tasks {
+    for task in &alice.participant.tasks {
         task.abort();
     }
-    for task in std::mem::take(&mut alice.tasks) {
+    for task in std::mem::take(&mut alice.participant.tasks) {
         let _ = task.await;
     }
     alice.node.runtime_work.drain().await;
@@ -227,7 +227,7 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
         release_rx.lock().unwrap().recv().unwrap();
     }));
     let probe = node.clone();
-    alice.tasks.push(tokio::spawn(async move {
+    alice.participant.tasks.push(tokio::spawn(async move {
         probe
             .probe_private_routes_with_budget(Duration::from_secs(5))
             .await;
@@ -322,4 +322,66 @@ async fn connection_limit_releases_slots_and_retirement_closes_all_owned_connect
             0
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retirement_waits_for_file_staging_after_adopted_command_cancellation() {
+    use crate::discovery::Announce;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    let dir = tempfile::tempdir().unwrap();
+    let mut runtime = start(dir.path()).await;
+    let node = runtime.handle();
+    let remote = Account::generate();
+    let proof = Announce::new_with_account(&DeviceIdentity::generate(), &remote, "Remote", 1);
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    let account = remote.account_id();
+    let path = dir.path().join("staging.txt");
+    std::fs::write(&path, b"blocking staging must retire before profile reuse").unwrap();
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let sender = node.clone();
+    let target = account.clone();
+    let source = path.clone();
+    runtime
+        .participant
+        .register_host_task(tokio::spawn(async move {
+            let mut entered = Some(entered);
+            let _ = sender
+                .enqueue_file_to_account_progress(
+                    &target,
+                    &source,
+                    crate::file::FileKind::File,
+                    move |_| {
+                        if let Some(entered) = entered.take() {
+                            entered.send(()).unwrap();
+                            released.recv().unwrap();
+                        }
+                    },
+                )
+                .await;
+        }));
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut retirement = tokio::spawn(runtime.stop());
+    let finished_early = tokio::time::timeout(Duration::from_millis(150), &mut retirement)
+        .await
+        .is_ok();
+    release.send(()).unwrap();
+    if !finished_early {
+        retirement.await.unwrap();
+    }
+    assert!(
+        !finished_early,
+        "retirement returned while adopted file staging still wrote"
+    );
+    assert!(
+        node.enqueue_file_to_account_progress(&account, &path, crate::file::FileKind::File, |_| {})
+            .await
+            .is_err()
+    );
 }

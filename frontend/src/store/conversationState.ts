@@ -1,3 +1,4 @@
+import { emptyReception } from "./reception";
 import type { ReactionInfo } from "@/lib/types";
 import type {
   ChatMessage,
@@ -14,6 +15,7 @@ type ConversationSnapshot = Pick<
   | "messages"
   | "reactions"
   | "historyRequests"
+  | "historyLimits"
   | "deleted"
   | "unread"
   | "intents"
@@ -170,6 +172,8 @@ export function reconcileMessages(
       const old = m.id ? known.find((p) => p.id === m.id) : undefined;
       return {
         ...m,
+        receivedAt: old?.receivedAt ?? m.receivedAt,
+        arrivalKind: old?.arrivalKind ?? m.arrivalKind,
         clientId: old?.clientId,
         delivery: old?.delivery,
         pending: false,
@@ -241,6 +245,9 @@ export function openConversationState(
     messages: trimmed.messages,
     reactions: trimmed.reactions,
     cacheOrder: trimmed.order,
+    historyLimits: Object.fromEntries(
+      Object.entries(state.historyLimits).filter(([key]) => retained.has(key)),
+    ),
     historyRequests: Object.fromEntries(
       Object.entries(state.historyRequests).filter(([item]) =>
         retained.has(item),
@@ -326,6 +333,12 @@ export function clearConversationMessages(
 
 export function invalidateConversationIdentity(): Partial<ChatState> {
   return {
+    ...emptyReception(),
+    historyScanBusy: false,
+    historyScanQueue: [],
+    historyScanRevision: null,
+    historyBaselines: [],
+    historyFullBaselines: [],
     ready: false,
     active: null,
     unread: {},
@@ -337,6 +350,7 @@ export function invalidateConversationIdentity(): Partial<ChatState> {
     intents: {},
     deleted: {},
     historyRequests: {},
+    historyLimits: {},
     cacheOrder: [],
     members: [],
     channelOwner: "",

@@ -1,8 +1,10 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./tauri-mock";
 import {
+  waitForChatShell,
   enterChat,
   openBobDm,
   seedThemeBeforeLoad,
@@ -74,6 +76,7 @@ test("settings controls stay legible when privacy cannot load", async ({
   });
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "connection");
   const managePrivacy = page.getByTestId("manage-privacy");
   await expect(managePrivacy).toBeDisabled();
   expect(
@@ -151,7 +154,7 @@ test("empty shell at the minimum desktop size has no detectable WCAG A/AA violat
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await expectNoWcagViolations(page);
 });
 

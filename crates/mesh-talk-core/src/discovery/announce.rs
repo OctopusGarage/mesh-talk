@@ -19,6 +19,7 @@ const CURRENT_VERSION: u8 = 2;
 /// exactly one layout (v2), so MIN == CURRENT; when v3 is added, keep this at 2 (so
 /// v2 peers are still understood) and add a `decode_v3` arm.
 const MIN_SUPPORTED_VERSION: u8 = 2;
+const MAX_NAME_BYTES: usize = 1024;
 
 /// A peer's self-announcement: its identity keys, display name, TCP listen port,
 /// and whether it serves as a post office, signed by its Ed25519 key. `user_id`
@@ -176,6 +177,12 @@ impl Announce {
             ),
             &sig,
         )
+    }
+
+    /// A signed announcement with an endpoint and display name usable by discovery.
+    /// Account binding is a separate requirement imposed by private directories.
+    pub(crate) fn valid_presence(&self) -> bool {
+        self.tcp_port != 0 && self.name.len() <= MAX_NAME_BYTES && self.verify()
     }
 
     /// The advertised public identity (Ed25519 + X25519 keys).

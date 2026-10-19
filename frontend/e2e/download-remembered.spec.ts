@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 
 // Regression: a downloaded attachment is remembered across reload — the row shows Reveal
@@ -22,7 +23,7 @@ async function login(page: import("@playwright/test").Page) {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
 }
 
 test("a downloaded attachment is remembered across reload", async ({

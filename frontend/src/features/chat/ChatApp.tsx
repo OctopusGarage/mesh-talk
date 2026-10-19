@@ -1,3 +1,4 @@
+import { PresenceAvailability } from "./PresenceAvailability";
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CircleAlert, X } from "lucide-react";
@@ -15,6 +16,8 @@ import { useAuth } from "@/store/auth";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { usePrivacy } from "@/store/privacy";
 import { ease, useMotionOK } from "@/lib/motion";
+import { startLinkedAppearance } from "@/lib/linkedAppearance";
+import { startLinkedContacts } from "@/lib/linkedContacts";
 
 export function ChatApp() {
   const { t } = useTranslation();
@@ -23,6 +26,8 @@ export function ChatApp() {
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
   const ready = useChat((s) => s.ready);
+  const presenceRun = useChat((s) => s.runEpoch);
+  const presenceIdentity = useChat((s) => s.identityEpoch);
   const [mediaWarning, setMediaWarning] = useState(false);
   const active = useChat((s) => s.active);
   const peers = useChat((s) => s.peers);
@@ -36,6 +41,12 @@ export function ChatApp() {
     };
   }, [owner, generation]);
   useEffect(() => {
+    if (owner && ready) return startLinkedAppearance();
+  }, [owner, generation, ready]);
+  useEffect(() => {
+    if (owner && ready) return startLinkedContacts(owner);
+  }, [owner, generation, ready]);
+  useEffect(() => {
     if (owner && ready) void usePrivacy.getState().load(owner);
   }, [owner, generation, ready]);
   const startPresence = usePresence((s) => s.start);
@@ -46,11 +57,11 @@ export function ChatApp() {
     error?.startsWith("Couldn't send file: ") ||
     error?.startsWith("This attachment ");
   const unread = useChat((s) => s.unread);
+  const markLegacyActiveRead = useChat((s) => s.markLegacyActiveRead);
   const pendingUnknownUnread = useChat((s) => s.pendingUnknownUnread);
   const totalUnread =
     Object.values(unread).reduce((sum, count) => sum + count, 0) +
     Object.values(pendingUnknownUnread).reduce((sum, count) => sum + count, 0);
-  const markActiveRead = useChat((s) => s.markActiveRead);
 
   useEffect(() => {
     if (owner && owner === unreadOwner && accountId && ready) {
@@ -109,11 +120,9 @@ export function ChatApp() {
     syncBadge();
     // macOS can clear its Dock badge on activation. Restore the sidebar total.
     const onFocus = () => {
-      markActiveRead();
-      // The native activation event may arrive before the webview reports focus.
-      // Try again on the next frame so the already open chat becomes read.
+      markLegacyActiveRead();
       cancelAnimationFrame(focusFrame);
-      focusFrame = requestAnimationFrame(() => markActiveRead());
+      focusFrame = requestAnimationFrame(markLegacyActiveRead);
       const count =
         Object.values(useChat.getState().unread).reduce(
           (sum, value) => sum + value,
@@ -126,11 +135,13 @@ export function ChatApp() {
       void chatApi.setBadge(count, owner).catch(() => {});
     };
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
     return () => {
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
       cancelAnimationFrame(focusFrame);
     };
-  }, [totalUnread, owner, generation, markActiveRead]);
+  }, [totalUnread, owner, generation, markLegacyActiveRead]);
 
   useEffect(() => {
     if (!owner) return;
@@ -141,10 +152,10 @@ export function ChatApp() {
   // Presence polls on its own slow interval into an isolated store — kept apart from the
   // chat store so a presence tick never re-renders the virtualized message list.
   useEffect(() => {
-    if (!owner || !ready) return;
+    if (!owner) return;
     const stop = startPresence();
     return stop;
-  }, [startPresence, owner, generation, ready]);
+  }, [startPresence, owner, generation, presenceRun, presenceIdentity]);
 
   return (
     <div
@@ -154,14 +165,17 @@ export function ChatApp() {
       <Sidebar />
       <ConversationView />
       <CallDialog />
-      {mediaWarning && (
-        <div
-          role="alert"
-          className="absolute inset-x-4 top-3 z-50 rounded-md border border-destructive/40 bg-popover px-4 py-3 text-sm text-foreground shadow-elevation"
-        >
-          {t("settings.mediaMigrationWarning")}
-        </div>
-      )}
+      <div className="absolute inset-x-4 top-3 z-40 flex flex-col gap-2">
+        <PresenceAvailability />
+        {mediaWarning && (
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-popover px-4 py-3 text-sm text-foreground shadow-elevation"
+          >
+            {t("settings.mediaMigrationWarning")}
+          </div>
+        )}
+      </div>
       <AnimatePresence>
         {error && (
           <motion.div

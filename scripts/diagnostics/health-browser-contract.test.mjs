@@ -14,7 +14,9 @@ test("health executes source and E2E type checking, not just transpilation", asy
 });
 test("health uses the CI worker budget without retrying failed UI scenarios", async () => {
   const source = await readFile(new URL("../check-health.sh", import.meta.url), "utf8");
-  assert.match(source, /playwright test --project=chromium --workers=1 --retries=0/);
+  assert.match(source, /browser-full.*--resource heavy.*scripts\/validation\/browser\.mjs full/);
+  const browser = await readFile(new URL("../validation/browser.mjs", import.meta.url), "utf8");
+  for (const flag of ["--project=chromium", "--workers=1", "--retries=0"]) assert(browser.includes(flag));
   const workflow = await readFile(new URL("../../.github/workflows/e2e-ui.yml", import.meta.url), "utf8");
   assert.ok(workflow.includes("npx playwright test --workers=1 --retries=0"), "baseline CI must not turn flaky failures into successful checks");
   const config = await readFile(new URL("../../frontend/playwright.config.ts", import.meta.url), "utf8");

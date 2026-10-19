@@ -1,3 +1,5 @@
+import { reconcileHistory } from "./reception";
+import { receptionPatch } from "./chat";
 import { chat } from "@/lib/api";
 import { errorMessage, sendFailReason } from "@/lib/error";
 import { captureChatOwner } from "./ownership";
@@ -19,9 +21,19 @@ import type { ChatMessage, Conversation, Set, Get } from "./chat";
 
 export const SEND_INTENT_CAP = 256;
 export type SendPayload =
-  | { kind: "text"; text: string; replyTo: string | null }
-  | { kind: "sticker"; stickerId: string; fallback: string }
-  | { kind: "file"; path: string; media: boolean };
+  | {
+      kind: "text";
+      text: string;
+      replyTo: string | null;
+      expiresAtMs?: number | null;
+    }
+  | {
+      kind: "sticker";
+      stickerId: string;
+      fallback: string;
+      expiresAtMs?: number | null;
+    }
+  | { kind: "file"; path: string; media: boolean; expiresAtMs?: number | null };
 export interface SendIntent {
   conversation: Conversation;
   payload: SendPayload;
@@ -44,21 +56,33 @@ function sendFileFor(
   path: string,
   media: boolean,
   progressKey: string,
+  expiresAtMs?: number | null,
 ) {
   return c.kind === "account"
     ? chat.sendFileToAccount(c.id, path, media)
-    : chat.sendFileChannel(c.id, path, media, progressKey);
+    : chat.sendFileChannel(c.id, path, media, progressKey, expiresAtMs);
 }
-function sendStickerFor(c: Conversation, stickerId: string, fallback: string) {
-  return chat.sendSticker(c.id, stickerId, fallback, c.kind === "channel");
+function sendStickerFor(
+  c: Conversation,
+  stickerId: string,
+  fallback: string,
+  expiresAtMs?: number | null,
+) {
+  return chat.sendSticker(
+    c.id,
+    stickerId,
+    fallback,
+    c.kind === "channel",
+    expiresAtMs,
+  );
 }
 
 const HISTORY_LIMIT = 200;
 
-function historyFor(c: Conversation, owner: string) {
+function historyFor(c: Conversation, owner: string, limit = HISTORY_LIMIT) {
   return c.kind === "account"
-    ? chat.ownerHistory(owner, c.id, HISTORY_LIMIT)
-    : chat.channelHistory(c.id, HISTORY_LIMIT);
+    ? chat.ownerHistory(owner, c.id, limit)
+    : chat.channelHistory(c.id, limit);
 }
 function reactionsFor(c: Conversation) {
   return c.kind === "account"
@@ -66,7 +90,11 @@ function reactionsFor(c: Conversation) {
     : chat.channelReactions(c.id);
 }
 
-export async function reloadConversation(rawSet: Set, get: Get) {
+export async function reloadConversation(
+  rawSet: Set,
+  get: Get,
+  discoverChanges = true,
+) {
   const lease = captureChatOwner(get);
   const set: Set = (partial) => {
     if (lease.current()) rawSet(partial);
@@ -88,7 +116,7 @@ export async function reloadConversation(rawSet: Set, get: Get) {
   });
   try {
     const [items, reacts] = await Promise.all([
-      historyFor(c, lease.owner!),
+      historyFor(c, lease.owner!, get().historyLimits[key]),
       reactionsFor(c),
     ]);
     if (
@@ -100,10 +128,37 @@ export async function reloadConversation(rawSet: Set, get: Get) {
     )
       return false;
     set((s) => ({
+      ...receptionPatch(
+        s,
+        reconcileHistory(
+          s,
+          key,
+          items.map((h) => ({ id: h.id, fromMe: h.from_me })),
+          discoverChanges &&
+            s.historyBaselines.includes(key) &&
+            Object.prototype.hasOwnProperty.call(s.ledger, key),
+        ),
+      ),
+      historyBaselines: [
+        ...s.historyBaselines.filter((k) => k !== key),
+        key,
+      ].slice(-4096),
+      ...((s.historyLimits[key] ?? 200) >= 500
+        ? {
+            historyFullBaselines: [
+              ...s.historyFullBaselines.filter((k) => k !== key),
+              key,
+            ].slice(-4096),
+          }
+        : {}),
       messages: {
         ...s.messages,
         [key]: reconcileMessages(
-          items.map(fromHistoryItem),
+          items.map((h) => ({
+            ...fromHistoryItem(h),
+            receivedAt: s.ledger[key]?.[h.id ?? ""]?.receivedAt,
+            arrivalKind: s.ledger[key]?.[h.id ?? ""]?.arrivalKind,
+          })),
           s.messages[key] ?? [],
           Object.values(s.intents).filter(
             (i) => convKey(i.conversation) === key,
@@ -149,11 +204,41 @@ export async function refreshDeliveryStatuses(
     if (lease.current()) rawSet(partial);
   };
   const c = conversation ?? get().active;
-  if (!lease.current() || !c || c.kind !== "account" || get().statusBusy)
-    return;
+  if (!lease.current() || !c || get().statusBusy) return;
   const key = convKey(c);
   set({ statusBusy: true });
   try {
+    if (c.kind === "channel") {
+      const ids = [
+        ...new Set(
+          (get().messages[key] ?? [])
+            .filter((m) => m.fromMe && m.id && !m.file)
+            .map((m) => m.id!),
+        ),
+      ];
+      const replicas = new Map<string, number>();
+      for (let i = 0; i < ids.length; i += 256) {
+        const rows = await chat.channelCustodyStatuses(
+          c.id,
+          ids.slice(i, i + 256),
+        );
+        if (!lease.current()) return;
+        for (const row of rows) replicas.set(row.id, row.replicas);
+      }
+      set((s) => ({
+        messages: s.messages[key]
+          ? {
+              ...s.messages,
+              [key]: s.messages[key].map((m) =>
+                m.id && replicas.has(m.id)
+                  ? { ...m, replicas: replicas.get(m.id) }
+                  : m,
+              ),
+            }
+          : s.messages,
+      }));
+      return;
+    }
     // The shared serial ticker also recovers capacity-fallback accepted intents.
     // reload's status refresh sees statusBusy and cannot recursively poll.
     if (
@@ -328,6 +413,7 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
             c.id,
             payload.text,
             payload.replyTo,
+            payload.expiresAtMs,
           ),
           pending: false,
         };
@@ -339,6 +425,7 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
             c.id,
             payload.stickerId,
             payload.fallback,
+            payload.expiresAtMs,
           ),
           pending: false,
         };
@@ -349,6 +436,7 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
           payload.path,
           payload.media,
           clientId,
+          payload.expiresAtMs,
         );
         accepted = {
           ...message,
@@ -363,10 +451,27 @@ export async function dispatchIntent(set: Set, get: Get, intent: SendIntent) {
       if (!hadIntent) return;
     } else {
       if (payload.kind === "text")
-        await chat.sendChannelMessage(c.id, payload.text, payload.replyTo);
+        await chat.sendChannelMessage(
+          c.id,
+          payload.text,
+          payload.replyTo,
+          payload.expiresAtMs,
+        );
       else if (payload.kind === "sticker")
-        await sendStickerFor(c, payload.stickerId, payload.fallback);
-      else await sendFileFor(c, payload.path, payload.media, clientId);
+        await sendStickerFor(
+          c,
+          payload.stickerId,
+          payload.fallback,
+          payload.expiresAtMs,
+        );
+      else
+        await sendFileFor(
+          c,
+          payload.path,
+          payload.media,
+          clientId,
+          payload.expiresAtMs,
+        );
       if (!lease.current()) return;
       update(null); // Legacy void never claims acceptance/receipt for a placeholder.
     }

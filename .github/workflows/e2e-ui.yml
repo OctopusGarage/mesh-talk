@@ -26,61 +26,151 @@ concurrency:
 
 jobs:
   e2e:
-    name: Full Linux UI regression
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    name: Full UI regression (${{ matrix.os }}, shard ${{ matrix.shard }}/4)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+        shard: [1, 2, 3, 4]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: frontend
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
       - name: Setup Node.js
         uses: actions/setup-node@v7.1.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-
       - name: Install dependencies
         run: npm ci
-
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
-
-      - name: Prepare coverable line map
-        run: npm run test:coverage
-
+      # One browser per runner preserves the existing resource budget. Spread
+      # tests across machines rather than competing with Vite on one runner.
       - name: Run UI E2E
-        run: npx playwright test --workers=1 --retries=0
+        run: npx playwright test --workers=1 --retries=0 --shard=${{ matrix.shard }}/4 --reporter=list,blob
         env:
-          MESH_TALK_E2E_COVERAGE: "1"
+          MESH_TALK_E2E_COVERAGE: ${{ runner.os == 'Linux' && '1' || '0' }}
+      - name: Record Linux coverage identity
+        if: runner.os == 'Linux'
+        run: >-
+          node --input-type=module -e
+          'import { writeFileSync } from "node:fs";
+          writeFileSync("coverage/shard.json", JSON.stringify({ sourceSha: process.env.SOURCE_SHA, shard: Number(process.env.SHARD), total: 4 }));'
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SHARD: ${{ matrix.shard }}
+      - name: Upload Linux coverage parts
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-coverage-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            frontend/coverage/shard.json
+            frontend/coverage/e2e-parts/*.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload UI evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-ui-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          compression-level: 0 # Blob ZIPs, traces and screenshots are already compressed.
+          path: |
+            frontend/blob-report/
+            frontend/test-results/
+          if-no-files-found: error
+          retention-days: 7
 
+  coverage:
+    # This existing name is required by branch protection. It now certifies
+    # successful shards plus their complete current-source coverage upload.
+    name: Full Linux UI regression
+    needs: e2e
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Require all browser shards
+        working-directory: .
+        env:
+          BASELINE: ${{ needs.e2e.result }}
+        run: |
+          test "$BASELINE" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Download every Linux coverage shard
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ui-coverage-*-${{ github.run_attempt }}
+          path: target/ui-coverage
+      - name: Prepare coverable line map once
+        run: npm run test:coverage
+      - name: Validate and collect all coverage parts
+        run: node ../scripts/ci/collect-ui-coverage.mjs ../target/ui-coverage coverage/e2e-parts "$SOURCE_SHA" 4
+        env:
+          SOURCE_SHA: ${{ github.sha }}
       - name: Merge browser coverage
         run: node scripts/merge-e2e-coverage.mjs
-
       - name: Upload browser coverage
-        # Dependabot PRs to dev cannot read the Actions CODECOV_TOKEN secret.
         if: >-
           !(github.event_name == 'pull_request' &&
             github.base_ref == 'dev' &&
             github.event.pull_request.user.login == 'dependabot[bot]')
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v5.5.1
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: frontend/coverage/e2e.lcov
           flags: ui-e2e
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 
-      - name: Upload UI evidence
-        if: always()
-        uses: actions/upload-artifact@v7
+  reports:
+    name: Merged UI report (${{ matrix.os }})
+    needs: e2e
+    if: always() && !cancelled()
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@v7.1.0
         with:
-          name: playwright-ui-artifacts
-          path: |
-            frontend/playwright-report/
-            frontend/test-results/
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: playwright-ui-${{ matrix.os }}-*-${{ github.run_attempt }}
+          path: target/ui-reports
+          merge-multiple: true
+      # Artifact roots include blob-report/ and test-results/. An explicit
+      # testDir in this config also normalizes Windows/macOS source paths.
+      - run: npx playwright merge-reports --config playwright.config.ts --reporter=html ../target/ui-reports/blob-report
+      - uses: actions/upload-artifact@v7
+        with:
+          name: merged-ui-${{ matrix.os }}-${{ github.run_attempt }}
+          path: frontend/playwright-report/
+          if-no-files-found: error
           retention-days: 7
 
   lite:
@@ -203,19 +293,23 @@ jobs:
 
   ui-gate:
     name: Playwright UI E2E
-    needs: [e2e, lite, portable, firefox-extended]
+    needs: [e2e, coverage, reports, lite, portable, firefox-extended]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - name: Require complete selected UI matrices
         env:
           BASELINE: ${{ needs.e2e.result }}
+          COVERAGE: ${{ needs.coverage.result }}
+          REPORTS: ${{ needs.reports.result }}
           LITE: ${{ needs.lite.result }}
           PORTABLE: ${{ needs.portable.result }}
           FIREFOX: ${{ needs.firefox-extended.result }}
           EXTENDED: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended) }}
         run: |
           test "$BASELINE" = success
+          test "$COVERAGE" = success
+          test "$REPORTS" = success
           test "$LITE" = success
           test "$PORTABLE" = success
           if [ "$EXTENDED" = true ]; then

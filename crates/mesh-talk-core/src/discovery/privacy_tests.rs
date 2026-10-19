@@ -213,3 +213,142 @@ async fn public_listener_can_be_disabled_live_while_passive_discovery_continues(
     let _ = handle.await;
     assert!(got.is_err());
 }
+
+#[tokio::test]
+async fn physical_scope_blocks_off_lan_queries_and_raw_announces_then_allows_live_opt_out() {
+    let me = Arc::new(DeviceIdentity::generate());
+    let peer = DeviceIdentity::generate();
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let listener = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let target = listener.local_addr().unwrap();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let visibility = Arc::new(DiscoveryVisibility::with_inventory(true, || {
+        vec![crate::discovery::scope::LanInterface {
+            address: "192.168.3.1".parse().unwrap(),
+            prefix: 24,
+            index: Some(1),
+        }]
+    }));
+    visibility.initialize_physical_lan_only(true).unwrap();
+    let routed = Arc::new(RoutedDiscovery::new({
+        let me = me.clone();
+        Arc::new(move |nonce, announce| query::encode_response(nonce, announce, &me))
+    }));
+    let task = tokio::spawn(run_listen_with_routed(
+        listener,
+        roster.clone(),
+        me.user_id(),
+        shared_announce(&Announce::new(&me, "Scoped", 1)),
+        sender.local_addr().unwrap().port(),
+        visibility.clone(),
+        Some(routed),
+    ));
+    let mut buf = [0; 2048];
+    sender
+        .send_to(&query::encode_query([8; 16]), target)
+        .await
+        .unwrap();
+    sender
+        .send_to(&encode(&Announce::new(&peer, "Off LAN", 2)), target)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), sender.recv_from(&mut buf))
+            .await
+            .is_err()
+    );
+    assert!(roster.lock().unwrap().get(&peer.user_id()).is_none());
+    visibility.set_physical_lan_only(false).await;
+    sender
+        .send_to(&query::encode_query([9; 16]), target)
+        .await
+        .unwrap();
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), sender.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(buf[..n].starts_with(b"MTDR"));
+    visibility.set_physical_lan_only(true).await;
+    sender
+        .send_to(&encode(&Announce::new(&peer, "Off LAN", 2)), target)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), sender.recv_from(&mut buf))
+            .await
+            .is_err()
+    );
+    assert!(roster.lock().unwrap().get(&peer.user_id()).is_none());
+    task.abort();
+}
+
+#[tokio::test]
+async fn physical_scope_on_lan_listener_still_replies() {
+    // The injected inventory treats loopback as the actual LAN and proves LAN
+    // query/reply continues even though generic routed probing is disabled.
+    let me = Arc::new(DeviceIdentity::generate());
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let listener = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let visibility = Arc::new(DiscoveryVisibility::with_inventory(true, || {
+        vec![crate::discovery::scope::LanInterface {
+            address: "127.0.0.1".parse().unwrap(),
+            prefix: 8,
+            index: Some(1),
+        }]
+    }));
+    visibility.initialize_physical_lan_only(true).unwrap();
+    let target = listener.local_addr().unwrap();
+    let routed = Arc::new(RoutedDiscovery::new({
+        let me = me.clone();
+        Arc::new(move |nonce, announce| query::encode_response(nonce, announce, &me))
+    }));
+    let task = tokio::spawn(run_listen_with_routed(
+        listener,
+        Arc::new(Mutex::new(Roster::default())),
+        me.user_id(),
+        shared_announce(&Announce::new(&me, "LAN", 1)),
+        sender.local_addr().unwrap().port(),
+        visibility.clone(),
+        Some(routed),
+    ));
+    sender
+        .send_to(&query::encode_query([4; 16]), target)
+        .await
+        .unwrap();
+    let mut buf = [0; 2048];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), sender.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(buf[..n].starts_with(b"MTDR"));
+    assert!(!visibility.routed_allowed().await);
+    task.abort();
+}
+
+#[tokio::test]
+async fn physical_scope_suppresses_startup_and_manual_announces_to_off_lan_target() {
+    let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let sender = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let visibility = Arc::new(DiscoveryVisibility::with_inventory(true, Vec::new));
+    visibility.initialize_physical_lan_only(true).unwrap();
+    let trigger = Arc::new(Notify::new());
+    let me = DeviceIdentity::generate();
+    let task = tokio::spawn(run_broadcast_with_visibility(
+        sender,
+        shared_announce(&Announce::new(&me, "Scoped", 1)),
+        receiver.local_addr().unwrap(),
+        Duration::from_secs(3600),
+        Some(trigger.clone()),
+        visibility,
+    ));
+    tokio::task::yield_now().await;
+    trigger.notify_one();
+    let mut buf = [0; 2048];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(650), receiver.recv_from(&mut buf))
+            .await
+            .is_err(),
+        "startup offsets and manual trigger must honor persisted scope"
+    );
+    task.abort();
+}

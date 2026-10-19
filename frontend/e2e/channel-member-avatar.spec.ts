@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 
 // Regression: a channel member's propagated/custom avatar must show — both in the members
@@ -17,7 +18,7 @@ test("channel member + message-author avatars resolve (device→account)", async
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await page.getByTestId(`conversation-row-${CHANNEL}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
 

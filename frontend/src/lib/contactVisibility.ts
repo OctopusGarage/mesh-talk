@@ -1,10 +1,16 @@
 import type { PeerInfo, SearchHitInfo } from "./types";
+import {
+  isContactPeer,
+  peerAccountKey,
+  rosterProjection,
+} from "./rosterProjection";
+export { isContactPeer } from "./rosterProjection";
 
 export function visiblePeers(
   peers: PeerInfo[],
   hidden: Record<string, unknown>,
 ) {
-  return peers.filter((p) => !hidden[p.account_id ?? p.user_id]);
+  return peers.filter((p) => isContactPeer(p) && !hidden[peerAccountKey(p)]);
 }
 
 export function visibleSearchHits(
@@ -13,14 +19,11 @@ export function visibleSearchHits(
   hidden: Record<string, unknown>,
   loaded: boolean,
 ) {
+  const roster = rosterProjection(peers);
   return hits.filter(
     (h) =>
       h.is_channel ||
       (loaded &&
-        !hidden[
-          h.account_id ??
-            peers.find((p) => p.user_id === h.target)?.account_id ??
-            h.target
-        ]),
+        !hidden[h.account_id ?? roster.accountForDevice(h.target) ?? h.target]),
   );
 }

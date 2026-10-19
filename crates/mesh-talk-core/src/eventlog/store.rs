@@ -27,6 +27,10 @@ pub struct EventLog {
     /// orders incrementally as events are indexed). `(lamport, id)` is stable per event
     /// (both are content-addressed), so no duplicate/aliasing.
     by_conversation: HashMap<ConversationId, BTreeSet<(u64, EventId)>>,
+    /// Message-only author index for bounded background custody scans.
+    messages_by_author: HashMap<(ConversationId, Author), BTreeSet<(u64, EventId)>>,
+    /// Channels containing a wire kind that older peers cannot decode.
+    replica_v2: HashSet<ConversationId>,
     /// Per-conversation frontier: events not (yet) referenced as a parent.
     heads: HashMap<ConversationId, HashSet<EventId>>,
     /// Per-conversation version vector: author → highest seq seen.
@@ -93,9 +97,10 @@ impl EventLog {
         let conv = event.conversation_id;
         let id = event.id;
 
-        // Profile events are kept OUT of the head frontier: they reference the current heads
-        // (so they're causally anchored + ingestable) but are never themselves referenced as
-        // a parent by future events. That makes a superseded profile an UNREFERENCED leaf,
+        // Profile events are kept OUT of the head frontier. Ordinary peer profiles
+        // reference the current heads; sibling profiles can be independent signed
+        // leaves so paused content does not block profile sync. Neither is referenced
+        // as a parent by future events. A superseded profile is an UNREFERENCED leaf,
         // which `compact_superseded_profiles` can safely drop (dropping an unreferenced event
         // can never dangle a parent) — the only safe way to bound profile-event growth in an
         // append-only DAG. Messages/reactions/files still chain normally.
@@ -121,6 +126,12 @@ impl EventLog {
         self.author_seq.insert((conv, event.author, event.seq), id);
         let set = self.by_conversation.entry(conv).or_default();
         set.insert((event.lamport, id));
+        if event.kind == EventKind::Message {
+            self.messages_by_author
+                .entry((conv, event.author))
+                .or_default()
+                .insert((event.lamport, id));
+        }
         // Observability for unbounded log growth: an append-only DAG can't drop interior
         // events (they're referenced as parents — pruning would dangle them), so a
         // conversation that grows pathologically (e.g. a peer flooding profile/reaction
@@ -134,6 +145,9 @@ impl EventLog {
                 hex::encode(&conv.as_bytes()[..4]),
                 count,
             );
+        }
+        if event.kind == EventKind::ChannelReplica {
+            self.replica_v2.insert(conv);
         }
         self.events.insert(id, event);
     }
@@ -151,6 +165,10 @@ impl EventLog {
         self.events.contains_key(id)
     }
 
+    pub fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+        self.replica_v2.contains(conversation)
+    }
+
     /// All event ids currently held, in arbitrary order.
     pub fn all_event_ids(&self) -> Vec<EventId> {
         self.events.keys().copied().collect()
@@ -163,6 +181,18 @@ impl EventLog {
 
     pub fn get(&self, id: &EventId) -> Option<&Event> {
         self.events.get(id)
+    }
+
+    /// Look up an authored event without allocating a conversation snapshot.
+    pub fn authored_event(
+        &self,
+        conversation: ConversationId,
+        author: Author,
+        seq: u64,
+    ) -> Option<&Event> {
+        self.author_seq
+            .get(&(conversation, author, seq))
+            .and_then(|id| self.events.get(id))
     }
 
     /// All events in a conversation, in deterministic total order `(lamport, id)`.
@@ -183,6 +213,36 @@ impl EventLog {
                 .collect(),
             None => Vec::new(),
         }
+    }
+
+    /// Return at most `limit` authored messages after `cursor`, wrapping once.
+    /// A B-tree range avoids walking or allocating the whole channel history.
+    pub fn message_keys_after(
+        &self,
+        conversation: ConversationId,
+        author: Author,
+        cursor: Option<(u64, EventId)>,
+        limit: usize,
+    ) -> Vec<(u64, EventId)> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let Some(keys) = self.messages_by_author.get(&(conversation, author)) else {
+            return Vec::new();
+        };
+        let target = limit.min(keys.len());
+        let mut result = Vec::with_capacity(target);
+        if let Some(after) = cursor {
+            result.extend(
+                keys.range((Excluded(after), Unbounded))
+                    .take(target)
+                    .copied(),
+            );
+            if result.len() < target {
+                result.extend(keys.iter().take(target - result.len()).copied());
+            }
+        } else {
+            result.extend(keys.iter().take(target).copied());
+        }
+        result
     }
 
     /// The current frontier of a conversation: events not referenced as a
@@ -265,6 +325,42 @@ mod tests {
         let child = mk(&id, 2, vec![root.id], 2, b"child");
         assert_eq!(log.append(child.clone()).unwrap(), AppendOutcome::Appended);
         assert!(log.has(&child.id));
+    }
+
+    #[test]
+    fn authored_message_cursor_is_bounded_and_wraps_without_other_events() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let mut log = EventLog::default();
+        let first = mk(&alice, 1, vec![], 1, b"first");
+        let other = mk(&bob, 1, vec![first.id], 2, b"other");
+        let control = Event::new(
+            &alice,
+            conv(),
+            2,
+            vec![other.id],
+            3,
+            0,
+            EventKind::React,
+            b"control".to_vec(),
+        );
+        let last = mk(&alice, 3, vec![control.id], 4, b"last");
+        for event in [&first, &other, &control, &last] {
+            log.append(event.clone()).unwrap();
+        }
+        let author = Author::from_ed25519(alice.public().ed25519_pub);
+        assert_eq!(
+            log.message_keys_after(conv(), author, None, 1),
+            vec![(1, first.id)]
+        );
+        assert_eq!(
+            log.message_keys_after(conv(), author, Some((1, first.id)), 2),
+            vec![(4, last.id), (1, first.id)]
+        );
+        assert_eq!(
+            log.message_keys_after(conv(), author, Some((4, last.id)), 128),
+            vec![(1, first.id), (4, last.id)]
+        );
     }
 
     #[test]

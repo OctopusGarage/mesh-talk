@@ -224,3 +224,60 @@ export const useTheme = create<ThemeState>((set, get) => ({
     } else apply(current, false, get().packWallpaperIds);
   },
 }));
+
+/** Small, validated values stored in the account preference log for linked devices. */
+export function appearanceValues(): Record<string, string> {
+  const state = useTheme.getState();
+  return {
+    theme: state.theme,
+    wallpaper_enabled: state.wallpaperEnabled ? "on" : "off",
+    pack_wallpaper_ids: JSON.stringify(state.packWallpaperIds),
+  };
+}
+
+/** Initial account seeding excludes defaults that have never been saved locally. */
+export function savedAppearanceValues(): Record<string, string> {
+  if (typeof localStorage === "undefined") return {};
+  const values = appearanceValues();
+  const storageKeys = [
+    ["theme", KEY],
+    ["wallpaper_enabled", WALLPAPER_KEY],
+    ["pack_wallpaper_ids", PACK_WALLPAPERS_KEY],
+  ] as const;
+  return Object.fromEntries(
+    storageKeys
+      .filter(([, storageKey]) => localStorage.getItem(storageKey) !== null)
+      .map(([key]) => [key, values[key]]),
+  );
+}
+
+export function applyLinkedAppearance(key: string, value: string | null): void {
+  if (value === null) return;
+  const state = useTheme.getState();
+  if (key === "theme") {
+    if (/^[a-z0-9][a-z0-9._-]{2,79}$/.test(value) && state.theme !== value)
+      state.set(value);
+  } else if (key === "wallpaper_enabled") {
+    if (value === "on" || value === "off")
+      state.setWallpaperEnabled(value === "on");
+  } else if (key === "pack_wallpaper_ids") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    const selected = Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([packId, wallpaperId]) =>
+          /^[a-z0-9][a-z0-9._-]{2,79}$/.test(packId) &&
+          typeof wallpaperId === "string" &&
+          /^[a-z0-9-]+$/.test(wallpaperId),
+      ),
+    );
+    localStorage.setItem(PACK_WALLPAPERS_KEY, JSON.stringify(selected));
+    apply(state.theme, false, selected);
+    useTheme.setState({ packWallpaperIds: selected });
+  }
+}
