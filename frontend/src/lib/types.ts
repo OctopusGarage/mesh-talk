@@ -355,6 +355,8 @@ export interface OutgoingFileStatus {
 }
 
 export interface FileStatus {
+  /** A previously complete local manifest has expired or been removed. */
+  unavailable?: boolean;
   file_conv: string;
   done: number;
   total: number;

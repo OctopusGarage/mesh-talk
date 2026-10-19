@@ -260,6 +260,7 @@
     "groupSummary": "{{total}} miembros · {{online}} en línea conocidos",
     "groupUpdating": "Actualizando presencia de miembros…",
     "groupUnbound": "{{summary}} · {{count}} dispositivos de miembros sin cuenta vinculada",
+    "queuePersistenceFailed": "No se pueden recordar las descargas automáticas después de reiniciar: {{error}}",
     "unavailable": "No se puede actualizar la presencia. Las observaciones caducarán normalmente; se reintentará automáticamente.",
     "observedDevices": "Dispositivos observados recientemente: {{count}}",
     "source_local": "Descubrimiento en la red local",
@@ -544,6 +545,7 @@
     "nothingReceived": "Todavía no se ha recibido nada.",
     "couldntSave": "No se pudo guardar el archivo: {{error}}",
     "savedTo": "Guardado en {{path}}",
+    "unavailable": "Archivo adjunto no disponible",
     "alreadyDownloaded": "Ya descargado — usa Mostrar para encontrarlo.",
     "couldntOpen": "No se pudo abrir: {{error}}",
     "chooseFolder": "Elegir carpeta de descargas predeterminada",
@@ -912,6 +914,8 @@
     "idConflict": "Otro tipo de biblioteca ya usa este ID de paquete."
   },
   "memberProfile": {
+    "originalName": "Nombre original",
+    "remark": "Alias personal",
     "title": "Perfil del miembro",
     "description": "Identidad y datos de red conocidos de este miembro.",
     "presenceUnavailable": "Presencia no disponible",

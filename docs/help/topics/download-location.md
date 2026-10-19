@@ -11,6 +11,11 @@ Choose a download folder without changing incoming-file approval.
 
 If you have not chosen a destination, attachments use the system Downloads folder. Keep the destination accessible and writable.
 
+Accepted attachments are saved automatically after the complete transfer is
+available. Existing files are preserved by choosing a distinct filename for each
+download. A write failure leaves a retry action instead of asking you to approve
+the transfer again.
+
 ## What this changes
 
 The destination controls where received files are saved. It does not move earlier downloads, approve new transfers, or override a conversation's receiving policy. See [Send and receive files](send-files.md).

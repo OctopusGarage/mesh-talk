@@ -1,6 +1,6 @@
 {
   "name": "mesh-talk",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Mesh-Talk local network chat application",
   "scripts": {
     "tauri": "tauri"

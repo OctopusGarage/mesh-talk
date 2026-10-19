@@ -20,9 +20,17 @@ Open **More → Settings → Files & receiving** to choose the default receiving
 
 Receiving approval and the [download folder](download-location.md) are independent. Choosing a folder does not grant permission to receive a transfer.
 
+After an attachment is accepted, Mesh Talk waits for its complete contents and
+automatically saves it in the configured download folder, or the system Downloads
+folder when no folder is configured. You do not need to press **Save** after
+receiving it. Inline images keep their existing in-app preview behavior.
+
 ## Find received files
 
 Use **Received files** in the sidebar to browse locally known file entries. If a transfer is waiting, check consent and connectivity before looking for a completed file on disk.
+
+Completed downloads provide **Reveal**. If writing the download fails,
+check that the destination is writable, then use the file's retry action.
 
 ## Further reference
 

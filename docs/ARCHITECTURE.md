@@ -828,12 +828,16 @@ protects owner/runtime generations and response ordering, and retains bounded
 session-local last-seen history. Online/Offline are client-relative observations;
 recent history remains secondary to Offline. A global notice reports failed
 presence refresh or terminated discovery producers without asserting an Internet
-or LAN outage. Device presence has independent 30-second local/unscoped signed UDP, 120-second routed,
-300-second public authenticated, and at-most-45-second original directory expiry.
-Private authenticated routing does not contribute. Directory v4 preserves the
+or LAN outage. Public device observations have a 15-second presence lease, separate
+from retained dial routes. Local and routed refreshes and directory registration
+run often enough for the shared two-second UI poll to show a stopped device
+Offline within 20 seconds. Private authenticated routing does not contribute.
+Directory v4 preserves the
 origin expiry across the final relay-to-client boundary; older directory replies
-remain route hints without eligible freshness. Existing wire layouts and capacity
-budgets are unchanged.
+remain route hints without eligible freshness. Routed inventories refresh every
+five seconds with 20 ms candidate pacing; local fallback scans and bridge
+registration also refresh every five seconds. Wire layouts and admission limits
+remain unchanged.
 
 Conversation headers show accepted distinct account counts and known-online
 counts, including self while an accepted local node runs. Pending/removed members

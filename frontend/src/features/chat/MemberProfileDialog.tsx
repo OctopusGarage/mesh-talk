@@ -1,3 +1,4 @@
+import { displayIdentity } from "@/lib/displayIdentity";
 import { MessageCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -48,13 +49,35 @@ function MemberProfileContent({
 }) {
   const { t } = useTranslation();
   const peers = useChat((s) => s.peers);
+  const accounts = useChat((s) => s.accounts);
+  const favorites = useChat((s) => s.favorites);
+  const members = useChat((s) => s.members);
+  const currentMember = members?.find((member) =>
+    target.deviceId
+      ? member.user_id === target.deviceId
+      : !!target.accountId && member.account_id === target.accountId,
+  );
+  const identity = displayIdentity({
+    accountId: target.accountId || currentMember?.account_id,
+    deviceId: target.deviceId,
+    fallbackName:
+      (target.isSelf ? null : currentMember?.name) ||
+      target.canonicalName ||
+      target.name,
+    accounts,
+    peers,
+    favorites,
+  });
   const presence = usePresenceFor(
-    target.accountId ||
+    identity.accountId ||
       (target.deviceId ? `device:${target.deviceId}` : undefined),
   );
-  const devices = memberProfileDevices(target, peers);
-  const name = target.name || t("common.unnamed");
-  const accountId = target.accountId;
+  const devices = memberProfileDevices(
+    { ...target, accountId: identity.accountId },
+    peers,
+  );
+  const name = identity.name;
+  const accountId = identity.accountId;
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
@@ -67,7 +90,7 @@ function MemberProfileContent({
         </DialogHeader>
         <div className="rounded-xl border bg-muted/30 p-4">
           <IdentityCrest
-            id={target.accountId || target.deviceId || name}
+            id={identity.id}
             name={name}
             hideId
             wrapName
@@ -117,6 +140,29 @@ function MemberProfileContent({
           </div>
         )}
         <div className="space-y-3">
+          {identity.alias && identity.alias !== identity.canonicalName && (
+            <dl className="space-y-2 text-sm">
+              <div>
+                <dt className="text-xs text-muted-foreground">
+                  {t("memberProfile.originalName")}
+                </dt>
+                <dd
+                  data-testid="member-profile-original-name"
+                  className="break-words"
+                >
+                  {identity.canonicalName}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-muted-foreground">
+                  {t("memberProfile.remark")}
+                </dt>
+                <dd data-testid="member-profile-remark" className="break-words">
+                  {identity.alias}
+                </dd>
+              </div>
+            </dl>
+          )}
           {accountId && (
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">

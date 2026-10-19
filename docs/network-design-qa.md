@@ -206,7 +206,7 @@ Desktop Tailscale candidate discovery is best effort, and the headless CLI needs
 
 **Proposed wording:** “Trusted, reachable post offices exchange eligible opt-in presence and opaque encrypted mailbox events over authenticated federation sessions.” This gives them equal protocol roles without treating their LANs as a single subnet.
 
-**Current.** Relays advertise **their own** signed presence locally and probe pinned routed seeds. Their federation traffic is authenticated TCP exchange, **not** a LAN broadcast of all users or message contents. Only fresh, self-signed presence from clients that enabled bridge discovery is exported; relay identities and private LAN addresses are not substituted as client entries. The directory expires registrations after about 45 seconds. Federation copies only relay-independent v3 mailboxes, preserving original arrival times and retention limits. A physical or Tailscale relay-to-relay path is still required.
+**Current.** Relays advertise **their own** signed presence locally and probe pinned routed seeds. Their federation traffic is authenticated TCP exchange, **not** a LAN broadcast of all users or message contents. Only fresh, self-signed presence from clients that enabled bridge discovery is exported; relay identities and private LAN addresses are not substituted as client entries. The directory expires registrations after 15 seconds. Federation copies only relay-independent v3 mailboxes, preserving original arrival times and retention limits. A physical or Tailscale relay-to-relay path is still required.
 
 **Recommended decision:** automatically discover relay candidates, but exchange presence or mail only after explicit mutual identity-based trust enrollment. The existing pinned seeds satisfy the trust boundary; a simpler enrollment UX is a separate design task. Automatic contact with every visible relay would weaken that boundary.
 
@@ -378,14 +378,21 @@ when a device's account cannot be verified, the UI explicitly adds “unbound de
 members” separately rather than counting them as people. Those rows remain
 inspectable and use their device-scoped observations without inventing an account.
 
-Local evidence lasts 30 seconds, routed evidence 120 seconds, and permitted public
-authenticated observations 300 seconds. Directory presence lasts at most 45
-seconds from its origin observation, retaining the original expiry through
+Local, routed, and permitted public authenticated observations last 15 seconds.
+Directory presence lasts at most 15 seconds from its origin observation, retaining the original expiry through
 federation and the versioned v4 client directory response. Legacy directory
 responses still provide route hints but cannot establish fresh presence because
-they omit origin expiry. Private authenticated routes do not refresh visible
+they omit origin expiry. Older relays' 45-second metadata remains compatible;
+new clients cap each observation at 15 seconds without renewing repeated identical
+origin expiry. The 20-second logout bound requires upgraded origin relays, since
+an old relay can first introduce a listing after that bound. Private authenticated routes do not refresh visible
 presence. Cached routes, membership, stored contacts, historical messages,
 receipts, relay reachability, and mailbox custody never establish presence.
+
+A stopped desktop loses Online within 20 seconds, including the shared two-second
+UI poll. Dial routes retain their separate, longer lifetimes; transport-only
+authentication cannot renew public presence. Known names and avatars remain
+available after presence expires.
 
 The frontend ages observations even when refreshes fail, shows a global presence
 availability explanation, and retries its normal shared poll. It does not infer

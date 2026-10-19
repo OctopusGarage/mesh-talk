@@ -25,7 +25,7 @@ budget. Results are interleaved, deduplicated, and capped at 256 total addresses
 so neither provider takes the entire candidate budget. Missing clients, denied
 RPC access, timeouts or incompatible JSON make that provider unavailable without
 discarding the other's results. Discovery starts automatically and refreshes
-every 25 seconds; **Connection → Rescan** also refreshes both inventories.
+every five seconds; **Connection → Rescan** also refreshes both inventories.
 
 EasyTier JSON parsing is verified against CLI 2.6.4. Multiple network-instance
 results from the selected management endpoint are supported. A node on a

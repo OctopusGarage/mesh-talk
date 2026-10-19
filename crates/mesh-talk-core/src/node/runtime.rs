@@ -481,7 +481,7 @@ impl NodeRuntime {
                     let mut present_prev: std::collections::HashSet<String> =
                         std::collections::HashSet::new();
                     loop {
-                        let peers: Vec<PeerRecord> = {
+                        let mut peers: Vec<PeerRecord> = {
                             let r = roster.lock().expect("roster mutex not poisoned");
                             r.peers()
                         };
@@ -490,8 +490,17 @@ impl NodeRuntime {
                         // `record` is a no-op when unchanged, so this doesn't grow the log.
                         {
                             let mut dir = names.lock().expect("names mutex not poisoned");
+                            peers.sort_by_key(|peer| peer.last_seen);
                             for p in &peers {
-                                let _ = dir.record(&p.public.user_id(), &p.name);
+                                let _ = dir.record_peer_name(
+                                    &p.public.user_id(),
+                                    if p.post_office {
+                                        None
+                                    } else {
+                                        p.account_id.as_deref()
+                                    },
+                                    &p.name,
+                                );
                             }
                         }
                         // Re-publish our avatar to peers that just (re)appeared (a no-op if we've
@@ -643,6 +652,62 @@ impl NodeRuntime {
     /// currently discoverable device.
     pub fn known_account_ids(&self) -> Vec<String> {
         self.node.known_account_ids()
+    }
+
+    /// Verified historical names for offline account rows; never supplies presence.
+    pub fn known_account_names(&self) -> std::collections::HashMap<String, Vec<String>> {
+        let proofs = self.node.historical_dm_peers();
+        // Record actual observed renames before projecting any UI surface. Old,
+        // unchanged sibling announcements cannot displace the latest account name.
+        let mut live = self
+            .roster
+            .lock()
+            .expect("roster mutex not poisoned")
+            .peers();
+        live.sort_by_key(|peer| peer.last_seen);
+        {
+            let mut directory = self.names.lock().expect("names mutex not poisoned");
+            for peer in live {
+                if proofs.iter().any(|proof| proof.public() == peer.public) {
+                    let _ = directory.record_peer_name(
+                        &peer.public.user_id(),
+                        peer.account_id.as_deref(),
+                        &peer.name,
+                    );
+                }
+            }
+        }
+        let mut names: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut devices: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for proof in proofs {
+            let Some(account) = proof.account_id() else {
+                continue;
+            };
+            let name = self.display_name_for(&proof.user_id).unwrap_or(proof.name);
+            if !name.is_empty() {
+                devices
+                    .entry(account.clone())
+                    .or_default()
+                    .push(proof.user_id);
+                names.entry(account).or_default().push(name);
+            }
+        }
+        let directory = self.names.lock().expect("names mutex not poisoned");
+        for (account, values) in &mut names {
+            values.sort();
+            values.dedup();
+            if let Some(latest) = directory.name_for_account(account).or_else(|| {
+                devices
+                    .get(account)
+                    .and_then(|users| directory.latest_name_for_users(users))
+            }) {
+                values.retain(|name| *name != latest);
+                values.insert(0, latest);
+            }
+        }
+        names
     }
 
     /// The display name for a device `user_id`: the live roster's (freshest) if the peer is

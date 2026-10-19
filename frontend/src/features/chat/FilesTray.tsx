@@ -16,7 +16,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { IdentityGlyph } from "@/components/identity";
 import { chat, settings as settingsApi } from "@/lib/api";
-import { defaultSavePath, effectiveDownloadDir } from "@/lib/download";
+import {
+  retryAutomaticDownload,
+  useAutomaticDownloads,
+} from "@/lib/automaticDownloads";
+import { defaultSavePath } from "@/lib/download";
 import {
   attachmentLabel,
   isDirectoryAttachment,
@@ -29,6 +33,7 @@ import {
   useFileAvailability,
   watchFileAvailability,
   refreshFileAvailability,
+  markUnavailableFileError,
 } from "@/store/fileAvailability";
 import { TransferBar } from "./TransferBar";
 import { ReceiveProgress } from "./ReceiveProgress";
@@ -44,6 +49,8 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
     (f) => !f.media || !f.mime.startsWith("image/"),
   );
   const [query, setQuery] = useState("");
+  const automaticSaving = useAutomaticDownloads((s) => s.saving);
+  const downloadFailures = useAutomaticDownloads((s) => s.failures);
   const [savingFile, setSavingFile] = useState<string | null>(null);
   const visibleFiles = files.filter((f) =>
     `${f.name} ${f.fromName}`
@@ -152,46 +159,6 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
     }
   };
 
-  // Save into the effective download folder with no prompt: the folder the user chose, else
-  // the OS Downloads folder (the common default). Only falls back to a Save-as dialog if no
-  // folder is resolvable at all.
-  const saveToDefault = async (
-    fileConv: string,
-    name: string,
-    mime: string,
-  ) => {
-    const lease = captureChatOwnership();
-    if (
-      !lease.current() ||
-      savingFile !== null ||
-      !useFileAvailability.getState().statuses[fileConv]?.ready
-    )
-      return;
-    try {
-      setSavingFile(fileConv);
-      const dir = await effectiveDownloadDir();
-      if (!lease.current()) return;
-      if (dir) {
-        const path = await chat.saveFileToDir(fileConv, dir);
-        if (lease.current()) rememberSavedDownload(fileConv, path);
-        return;
-      }
-      const dest = isDirectoryAttachment(mime)
-        ? await openDialog({ directory: true })
-        : await save({ defaultPath: name });
-      if (lease.current() && typeof dest === "string") {
-        const path = isDirectoryAttachment(mime)
-          ? await chat.saveFileToDir(fileConv, dest)
-          : (await chat.saveFile(fileConv, dest), dest);
-        if (lease.current()) rememberSavedDownload(fileConv, path);
-      }
-    } catch (e) {
-      if (lease.current()) handleSaveError(e);
-    } finally {
-      setSavingFile(null);
-    }
-  };
-
   // Always-prompt "Save as…" override; the dialog opens at the Downloads folder.
   const saveAs = async (fileConv: string, name: string, mime: string) => {
     const lease = captureChatOwnership();
@@ -209,12 +176,19 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
         ? await openDialog({ directory: true })
         : await save({ defaultPath });
       if (lease.current() && typeof dest === "string") {
+        await refreshFileAvailability([fileConv]);
+        if (
+          !lease.current() ||
+          !useFileAvailability.getState().statuses[fileConv]?.ready
+        )
+          return;
         const path = isDirectoryAttachment(mime)
-          ? await chat.saveFileToDir(fileConv, dest)
+          ? await chat.saveFileToDir(fileConv, dest, lease.owner!)
           : (await chat.saveFile(fileConv, dest), dest);
         if (lease.current()) rememberSavedDownload(fileConv, path);
       }
     } catch (e) {
+      if (lease.current() && markUnavailableFileError(fileConv, e)) return;
       if (lease.current()) handleSaveError(e);
     } finally {
       setSavingFile(null);
@@ -419,13 +393,17 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                       variant="secondary"
                       className="min-h-9"
                       disabled={
-                        !statuses[f.fileConv]?.ready || savingFile !== null
+                        !downloadFailures[f.fileConv] ||
+                        savingFile !== null ||
+                        automaticSaving === f.fileConv
                       }
-                      onClick={() =>
-                        void saveToDefault(f.fileConv, f.name, f.mime)
-                      }
+                      onClick={() => retryAutomaticDownload(f.fileConv)}
                     >
-                      {t("common.save")}
+                      {t(
+                        downloadFailures[f.fileConv]
+                          ? "contactVisibility.retry"
+                          : "common.loading",
+                      )}
                     </Button>
                   )}
                   <button
@@ -438,7 +416,17 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                     <X className="h-3.5 w-3.5" />
                   </button>
                 </div>
-                {!savedPaths[f.fileConv] && (
+                {downloadFailures[f.fileConv] && (
+                  <div
+                    role="alert"
+                    className="mt-1 pl-6 text-xs text-destructive"
+                  >
+                    {t("files.couldntSave", {
+                      error: downloadFailures[f.fileConv],
+                    })}
+                  </div>
+                )}
+                {!savedPaths[f.fileConv] && downloadFailures[f.fileConv] && (
                   <button
                     type="button"
                     disabled={

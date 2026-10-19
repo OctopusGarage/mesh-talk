@@ -29,11 +29,15 @@ pub struct PeerEndpoint {
     pub source: RouteSource,
     pub last_seen: Instant,
     pub last_authenticated: Option<Instant>,
-    /// Origin deadline, only for versioned directory evidence (never a route lease).
+    /// Public observation deadline for authenticated/directory evidence, never a route lease.
     pub presence_expires_at: Option<Instant>,
+    /// Original directory expiry in Unix seconds, retained across repeated old-relay evidence.
+    pub presence_origin_expires_at: Option<u64>,
 }
 
 const MAX_ROUTES_PER_PEER: usize = 8;
+/// Public observations expire promptly after logout, independently of dial-route retention.
+pub const PUBLIC_PRESENCE_TTL: Duration = Duration::from_secs(15);
 
 /// Keep a directly discovered endpoint ahead of a bridge gateway, even when
 /// the gateway refreshes its directory more recently. Routes within each tier
@@ -80,12 +84,12 @@ impl PeerRecord {
             .filter_map(|route| {
                 let age = now.saturating_duration_since(route.last_seen).as_secs();
                 let deadline = match route.source {
-                    RouteSource::Lan | RouteSource::Discovery => {
-                        route.last_seen + Duration::from_secs(30)
+                    RouteSource::Lan | RouteSource::Discovery | RouteSource::RoutedQuery => {
+                        route.last_seen + PUBLIC_PRESENCE_TTL
                     }
-                    RouteSource::RoutedQuery => route.last_seen + Duration::from_secs(120),
-                    RouteSource::Authenticated => route.last_seen + Duration::from_secs(300),
-                    RouteSource::PostOffice => route.presence_expires_at?,
+                    RouteSource::Authenticated | RouteSource::PostOffice => {
+                        route.presence_expires_at?
+                    }
                     RouteSource::Gateway => return None,
                 };
                 (deadline > now).then(|| {
@@ -279,11 +283,31 @@ impl Roster {
     }
 
     /// Attach a directory origin deadline only to the exact staged introduction.
-    pub(crate) fn set_directory_expiry(&mut self, id: &str, relay: SocketAddr, expiry: Instant) {
+    pub(crate) fn set_directory_expiry(
+        &mut self,
+        id: &str,
+        relay: SocketAddr,
+        expiry: Instant,
+        origin_secs: u64,
+    ) {
         if let Some(peer) = self.peers.get_mut(id) {
             for route in &mut peer.routes {
                 if route.addr == relay && route.source == RouteSource::PostOffice {
-                    route.presence_expires_at = Some(expiry);
+                    let now = Instant::now();
+                    let capped = expiry.min(now + PUBLIC_PRESENCE_TTL);
+                    // Only a newer origin registration can renew the shorter public
+                    // lease. Compare original wire seconds, without conversion jitter.
+                    let newer = route
+                        .presence_origin_expires_at
+                        .is_none_or(|old| origin_secs > old);
+                    route.presence_expires_at = Some(if newer {
+                        capped
+                    } else {
+                        route.presence_expires_at.unwrap_or(capped).min(capped)
+                    });
+                    if newer {
+                        route.presence_origin_expires_at = Some(origin_secs);
+                    }
                 }
             }
         }
@@ -355,10 +379,11 @@ impl Roster {
         let route_changed = !routes
             .iter()
             .any(|route| route.addr == relay && route.source == RouteSource::PostOffice);
-        let prior_expiry = routes
+        let prior = routes
             .iter()
-            .find(|route| route.addr == relay && route.source == RouteSource::PostOffice)
-            .and_then(|route| route.presence_expires_at);
+            .find(|route| route.addr == relay && route.source == RouteSource::PostOffice);
+        let prior_expiry = prior.and_then(|route| route.presence_expires_at);
+        let prior_origin = prior.and_then(|route| route.presence_origin_expires_at);
         routes.retain(|route| route.addr != relay || route.source != RouteSource::PostOffice);
         routes.push(PeerEndpoint {
             addr: relay,
@@ -366,6 +391,7 @@ impl Roster {
             last_seen: now,
             last_authenticated: None,
             presence_expires_at: prior_expiry,
+            presence_origin_expires_at: prior_origin,
         });
         if routes.len() > MAX_ROUTES_PER_PEER {
             routes.remove(0);
@@ -561,7 +587,9 @@ impl Roster {
             source,
             last_seen: now,
             last_authenticated: previous_auth,
-            presence_expires_at: None,
+            presence_expires_at: (source == RouteSource::Authenticated)
+                .then_some(now + PUBLIC_PRESENCE_TTL),
+            presence_origin_expires_at: None,
         });
         if routes.len() > MAX_ROUTES_PER_PEER {
             routes.remove(0);
@@ -631,6 +659,7 @@ impl Roster {
                 last_seen: now,
                 last_authenticated: Some(now),
                 presence_expires_at: None,
+                presence_origin_expires_at: None,
             });
             if peer.routes.len() > MAX_ROUTES_PER_PEER {
                 peer.routes.remove(0);
@@ -746,6 +775,41 @@ mod routed_tests {
     use crate::identity::device::DeviceIdentity;
 
     #[test]
+    fn logout_expires_authenticated_presence_without_discarding_routes() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
+        let mut roster = Roster::default();
+        roster.update_authenticated(&proof, "127.0.0.1".parse().unwrap(), "self");
+        let observed = Instant::now();
+        let peer = roster.get(&proof.user_id).unwrap();
+        assert!(!peer.presence_evidence(observed).is_empty());
+        assert!(
+            peer.presence_evidence(observed + Duration::from_secs(20))
+                .is_empty(),
+            "a logged-out desktop must not remain online for the route's five-minute lease"
+        );
+        assert!(peer.has_direct_route());
+    }
+
+    #[test]
+    fn authenticated_route_success_cannot_manufacture_or_extend_public_presence() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
+        let mut roster = Roster::default();
+        roster.update_authenticated(&proof, "127.0.0.1".parse().unwrap(), "self");
+        let past = Instant::now() - Duration::from_secs(16);
+        for route in &mut roster.peers.get_mut(&proof.user_id).unwrap().routes {
+            route.last_seen = past;
+            route.presence_expires_at = Some(past + PUBLIC_PRESENCE_TTL);
+        }
+        roster.mark_authenticated(&device.public(), "127.0.0.1:1".parse().unwrap());
+        roster.mark_authenticated(&device.public(), "127.0.0.2:1".parse().unwrap());
+        let peer = roster.get(&proof.user_id).unwrap();
+        assert!(peer.has_direct_route());
+        assert!(peer.presence_evidence(Instant::now()).is_empty());
+    }
+
+    #[test]
     fn person_presence_observations_expire_at_each_sources_own_deadline() {
         let device = DeviceIdentity::generate();
         let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
@@ -754,10 +818,10 @@ mod routed_tests {
         let template = roster.get(&proof.user_id).unwrap().clone();
         let observed = Instant::now();
         for (source, lifetime) in [
-            (RouteSource::Lan, 30),
-            (RouteSource::Discovery, 30),
-            (RouteSource::RoutedQuery, 120),
-            (RouteSource::Authenticated, 300),
+            (RouteSource::Lan, 15),
+            (RouteSource::Discovery, 15),
+            (RouteSource::RoutedQuery, 15),
+            (RouteSource::Authenticated, 15),
             (RouteSource::PostOffice, 7),
         ] {
             let mut peer = template.clone();
@@ -783,6 +847,48 @@ mod routed_tests {
     }
 
     #[test]
+    fn old_relay_forty_five_second_origin_gets_one_short_public_lease() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
+        let relay = "127.0.0.2:2".parse().unwrap();
+        let mut roster = Roster::default();
+        roster.update_relayed(&proof, relay, "self");
+        let now = Instant::now();
+        let origin = now + Duration::from_secs(45);
+        roster.set_directory_expiry(&proof.user_id, relay, origin, 45);
+        let peer = roster.get(&proof.user_id).unwrap();
+        assert!(!peer.presence_evidence(now).is_empty());
+        assert!(
+            peer.presence_evidence(now + Duration::from_secs(20))
+                .is_empty()
+        );
+        let expired = now - Duration::from_secs(1);
+        roster.peers.get_mut(&proof.user_id).unwrap().routes[0].presence_expires_at = Some(expired);
+        roster.update_relayed(&proof, relay, "self");
+        roster.set_directory_expiry(
+            &proof.user_id,
+            relay,
+            origin + Duration::from_millis(900),
+            45,
+        );
+        assert!(
+            roster
+                .get(&proof.user_id)
+                .unwrap()
+                .presence_evidence(Instant::now())
+                .is_empty()
+        );
+        roster.set_directory_expiry(&proof.user_id, relay, origin + Duration::from_secs(5), 50);
+        assert!(
+            !roster
+                .get(&proof.user_id)
+                .unwrap()
+                .presence_evidence(Instant::now())
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn legacy_directory_refresh_cannot_renew_an_existing_origin_deadline() {
         let device = DeviceIdentity::generate();
         let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
@@ -790,7 +896,7 @@ mod routed_tests {
         let mut roster = Roster::default();
         roster.update_relayed(&proof, relay, "self");
         let deadline = Instant::now() + Duration::from_secs(3);
-        roster.set_directory_expiry(&proof.user_id, relay, deadline);
+        roster.set_directory_expiry(&proof.user_id, relay, deadline, 3);
         for _ in 0..3 {
             roster.update_relayed(&proof, relay, "self");
         }
@@ -816,7 +922,7 @@ mod routed_tests {
         let mut roster = Roster::default();
         roster.update_relayed(&proof, relay, "self");
         let now = Instant::now();
-        roster.set_directory_expiry(&proof.user_id, relay, now + Duration::from_secs(3));
+        roster.set_directory_expiry(&proof.user_id, relay, now + Duration::from_secs(3), 3);
         let peer = roster.get(&proof.user_id).unwrap();
         assert_eq!(peer.presence_evidence(now).len(), 1);
         assert!(!peer.has_direct_route());
@@ -853,7 +959,7 @@ mod routed_tests {
             seen
         );
         assert!(
-            peer.presence_evidence(now + Duration::from_secs(121))
+            peer.presence_evidence(now + Duration::from_secs(14))
                 .iter()
                 .any(|e| e.0 == RouteSource::Authenticated)
         );
@@ -876,10 +982,19 @@ mod routed_tests {
         let now = Instant::now();
         assert_eq!(peer.presence_evidence(now).len(), 2);
         for route in &mut peer.routes {
-            route.last_seen = now - Duration::from_secs(31);
+            route.last_seen = now
+                - Duration::from_secs(if route.source == RouteSource::Lan {
+                    16
+                } else {
+                    10
+                });
         }
         assert_eq!(peer.presence_evidence(now).len(), 1);
         assert_eq!(peer.presence_evidence(now)[0].0, RouteSource::RoutedQuery);
+        assert!(
+            peer.presence_evidence(now + Duration::from_secs(6))
+                .is_empty()
+        );
         peer.routes.clear();
         assert!(peer.presence_evidence(now).is_empty());
         roster.update_relayed(&proof, "127.0.0.2:2".parse().unwrap(), "self");

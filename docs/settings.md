@@ -100,7 +100,10 @@ preference while making it inactive. See [privacy controls](privacy-controls.md)
 Receiving approval and destination are separate decisions. The receiving default
 chooses whether attachment transfers need consent. A conversation's attachment
 settings can override that default. The download destination chooses where files
-are saved; it does not grant transfer consent.
+are saved; it does not grant transfer consent. After an accepted attachment has
+finished transferring, the desktop saves it automatically to the configured
+folder (or the system Downloads folder). Completed file cards reveal the local
+copy; a failed write provides a retry action.
 
 An unavailable receiving policy displays an unknown state with Retry. It does
 not show an assumed Ask/Automatic choice as the persisted setting.

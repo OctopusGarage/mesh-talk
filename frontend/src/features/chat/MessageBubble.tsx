@@ -1,3 +1,7 @@
+import {
+  retryAutomaticDownload,
+  useAutomaticDownloads,
+} from "@/lib/automaticDownloads";
 import { useState } from "react";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -46,6 +50,7 @@ import {
   useFileStatus,
   useFileAvailability,
   refreshFileAvailability,
+  markUnavailableFileError,
 } from "@/store/fileAvailability";
 import { MediaPreview } from "./MediaPreview";
 import { DeliveryFooter } from "./DeliveryFooter";
@@ -84,6 +89,12 @@ function FileBubble({
   );
   const available = !!savedPath || !!status?.ready;
   const [saving, setSaving] = useState(false);
+  const autoFailure = useAutomaticDownloads((s) => s.failures[file.fileConv]);
+  const automatic = useChat(
+    (s) =>
+      !mine &&
+      s.incomingFiles.some((entry) => entry.fileConv === file.fileConv),
+  );
   const directory = isDirectoryAttachment(file.mime);
   const approvalNeeded =
     !mine && (status?.consent === "pending" || status?.consent === "declined");
@@ -107,9 +118,13 @@ function FileBubble({
       const dir = directory ? await effectiveDownloadDir() : "";
       if (!lease.current()) return;
       if (dir) {
-        if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
+        await refreshFileAvailability([file.fileConv]);
+        if (
+          !lease.current() ||
+          !useFileAvailability.getState().statuses[file.fileConv]?.ready
+        )
           return;
-        const path = await chat.saveFileToDir(file.fileConv, dir);
+        const path = await chat.saveFileToDir(file.fileConv, dir, lease.owner!);
         if (lease.current()) rememberSavedDownload(file.fileConv, path);
         return;
       }
@@ -119,14 +134,19 @@ function FileBubble({
         ? await openDialog({ directory: true })
         : await save({ defaultPath });
       if (lease.current() && typeof dest === "string") {
-        if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
+        await refreshFileAvailability([file.fileConv]);
+        if (
+          !lease.current() ||
+          !useFileAvailability.getState().statuses[file.fileConv]?.ready
+        )
           return;
         const path = directory
-          ? await chat.saveFileToDir(file.fileConv, dest)
+          ? await chat.saveFileToDir(file.fileConv, dest, lease.owner!)
           : (await chat.saveFile(file.fileConv, dest), dest);
         if (lease.current()) rememberSavedDownload(file.fileConv, path);
       }
     } catch (e) {
+      if (lease.current() && markUnavailableFileError(file.fileConv, e)) return;
       if (lease.current())
         setError(t("files.couldntSave", { error: errorMessage(e) }));
     } finally {
@@ -210,11 +230,16 @@ function FileBubble({
         </div>
         <button
           type="button"
-          onClick={() => void (savedPath ? reveal() : saveAs())}
+          onClick={() => {
+            if (savedPath) void reveal();
+            else if (automatic) retryAutomaticDownload(file.fileConv);
+            else void saveAs();
+          }}
           disabled={
             metadataPending ||
             !file.fileConv ||
-            (!savedPath && (!available || saving))
+            (!savedPath &&
+              (!available || saving || (automatic && !autoFailure)))
           }
           title={
             metadataPending
@@ -223,9 +248,26 @@ function FileBubble({
                 ? t(readOnly ? "recovery.mediaUnavailable" : "transfer.waiting")
                 : savedPath
                   ? t("files.savedTo", { path: savedPath })
-                  : t("common.save")
+                  : t(
+                      automatic
+                        ? autoFailure
+                          ? "contactVisibility.retry"
+                          : "common.loading"
+                        : "common.save",
+                    )
           }
-          aria-label={savedPath ? t("files.reveal") : t("common.save")}
+          aria-label={
+            savedPath
+              ? t("files.reveal")
+              : t(
+                  automatic
+                    ? autoFailure
+                      ? "contactVisibility.retry"
+                      : "common.loading"
+                    : "common.save",
+                )
+          }
+          data-download-error={autoFailure || undefined}
           className={cn(
             "rounded-md p-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40",
             mine
@@ -248,6 +290,11 @@ function FileBubble({
           transferKey={uploadKey}
           waitingDirection={sendKey ? "send" : undefined}
         />
+      )}
+      {autoFailure && (
+        <div role="alert" className="mt-1 text-xs text-destructive">
+          {t("files.couldntSave", { error: autoFailure })}
+        </div>
       )}
       {!readOnly && !mine && !metadataPending && !savedPath && (
         <ReceiveProgress status={status} />

@@ -6454,3 +6454,166 @@ async fn outgoing_reply_lookup_is_bounded_to_recent_borrowed_records() {
             .is_ok()
     );
 }
+
+#[tokio::test]
+async fn received_manifest_stays_saveable_after_reseed_and_restart() {
+    use crate::eventlog::{Event, EventKind};
+    for compact in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let account = Account::generate();
+        let ap = Announce::new_with_account(&alice, &account, "Alice", 9);
+        let bob = DeviceIdentity::generate();
+        let secrets = bob.secret_bytes();
+        let ba = Account::generate();
+        let account_secret = ba.secret_bytes();
+        let (b, _, mut callbacks) = node_with_files(dir.path(), bob, ba, &ap);
+        let payload = b"received attachment bytes";
+        let key = crate::file::FileKey::generate();
+        let nonce = crate::file::generate_file_nonce();
+        let chunks = vec![crate::file::seal_chunk_indexed(&key, &nonce, 0, payload).unwrap()];
+        let v2 = crate::file::FileManifestV2 {
+            name: String::new(),
+            size: payload.len() as u64,
+            mime: "video/quicktime".into(),
+            checksum: crate::file::file_checksum(payload),
+            file_key: *key.as_bytes(),
+            file_nonce: nonce,
+            file_conv: ConversationId::new([71; 32]),
+            chunk_size: crate::file::CHUNK_SIZE as u32,
+            chunk_count: 1,
+            chunk_hashes: vec![crate::file::chunk_hash(payload)],
+        };
+        let manifest = crate::file::FileManifestV3 {
+            v2,
+            kind: crate::file::FileKind::File,
+        };
+        let mut manifest = manifest;
+        manifest.v2.name = "IMG_9349.MOV".into();
+        let file = manifest.v2.file_conv;
+        let wire = if compact {
+            manifest.v2.chunk_hashes.clear();
+            crate::file::FileManifestV4 { v3: manifest }.encode()
+        } else {
+            manifest.encode()
+        };
+        let conv = super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
+        let event = Event::new(
+            &alice,
+            conv,
+            1,
+            vec![],
+            1,
+            100,
+            EventKind::FileManifest,
+            crate::dm::seal(&alice, &b.identity.public().x25519_pub, &wire).unwrap(),
+        );
+        b.log.lock().unwrap().append_durable(event).unwrap();
+        b.process_file_events(conv);
+        assert_eq!(callbacks.try_recv().unwrap().file_conv, file);
+        for (index, ciphertext) in chunks.into_iter().enumerate() {
+            let chunk = Event::new(
+                &alice,
+                file,
+                index as u64 + 1,
+                vec![],
+                index as u64 + 1,
+                100,
+                EventKind::Message,
+                ciphertext,
+            );
+            b.log.lock().unwrap().append_durable(chunk).unwrap();
+        }
+        assert_eq!(b.read_file(file).unwrap(), payload);
+        b.reseed_live_file_book(&b.delivery.lock().unwrap());
+        assert_eq!(b.read_file(file).unwrap(), payload);
+        drop(b);
+        let (b, _, _) = node_with_files(
+            dir.path(),
+            DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+            Account::from_secret_bytes(account_secret),
+            &ap,
+        );
+        assert_eq!(b.read_file(file).unwrap(), payload);
+        b.save_file(file, &dir.path().join("saved.mov")).unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("saved.mov")).unwrap(),
+            payload
+        );
+    }
+}
+
+#[test]
+fn expired_received_attachment_loses_readiness_after_cleanup() {
+    use crate::eventlog::{Event, EventKind};
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let account = Account::generate();
+    let ap = Announce::new_with_account(&alice, &account, "Alice", 9);
+    let (b, _, mut callbacks) = node_with_files(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &ap,
+    );
+    let payload = b"attachment with five-minute deadline";
+    let key = crate::file::FileKey::generate();
+    let file = ConversationId::new([72; 32]);
+    let manifest = crate::file::FileManifest {
+        name: "IMG_9349.MOV".into(),
+        size: payload.len() as u64,
+        mime: "video/quicktime".into(),
+        checksum: crate::file::file_checksum(payload),
+        file_key: *key.as_bytes(),
+        file_conv: file,
+        chunk_count: 1,
+    };
+    let sent_at = super::node::now_millis();
+    let wire = crate::expiry::wrap(&manifest.encode(), Some(sent_at + 300_000));
+    let conv = super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
+    let event = Event::new(
+        &alice,
+        conv,
+        1,
+        vec![],
+        1,
+        sent_at,
+        EventKind::FileManifest,
+        crate::dm::seal(&alice, &b.identity.public().x25519_pub, &wire).unwrap(),
+    );
+    b.log.lock().unwrap().append_durable(event.clone()).unwrap();
+    b.process_file_events(conv);
+    assert_eq!(callbacks.try_recv().unwrap().file_conv, file);
+    let chunk = Event::new(
+        &alice,
+        file,
+        1,
+        vec![],
+        1,
+        sent_at,
+        EventKind::Message,
+        crate::file::seal_chunk(&key, payload).unwrap(),
+    );
+    b.log.lock().unwrap().append_durable(chunk).unwrap();
+    assert!(b.file_ready_to_save(file));
+    assert_eq!(b.read_file(file).unwrap(), payload);
+    b.expiry_first_seen.lock().unwrap().insert(
+        event.id,
+        std::time::Instant::now() - std::time::Duration::from_secs(301),
+    );
+    assert!(!b.file_ready_to_save(file));
+    let output = dir.path().join("expired.mov");
+    assert!(
+        matches!(b.save_file(file, &output), Err(NodeError::File(reason)) if reason == "file expired")
+    );
+    assert_eq!(b.prune_expired_received().unwrap(), 1);
+    assert!(!b.file_ready_to_save(file));
+    assert!(b.account_history(&account.account_id(), 10).is_empty());
+    // Cleanup deliberately erases the plaintext manifest and its deadline. A stale UI
+    // must refresh readiness rather than offering Save based on the previous result.
+    assert!(
+        matches!(b.save_file(file, &output), Err(NodeError::File(reason)) if reason == "unknown file")
+    );
+    assert!(!output.exists());
+    assert!(!dir.path().join("expired.mov.part").exists());
+}

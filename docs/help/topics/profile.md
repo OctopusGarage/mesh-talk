@@ -15,6 +15,17 @@ Your display name is a nickname. Your login username and account ID remain read-
 
 Use [contact verification](verify-contact.md) for trust decisions. For more pictures and themes, see [Customization packs](customization-packs.md). Installing an avatar library and selecting an avatar are separate actions.
 
+## Recognize contacts while they are offline
+
+The sidebar, conversation header and group member list use the same display rule:
+your private remark takes priority over the contact's latest known name, with a
+short account ID used only when no name is known. Going offline does not remove
+the last known name or avatar.
+
+Open a member's profile to inspect the original name separately from your remark,
+along with the account and device details. A remark changes your local label; it
+does not replace the other person's identity information.
+
 ## Further reference
 
 [Customization packs and avatar libraries](https://github.com/OctopusGarage/mesh-talk/blob/main/docs/CUSTOMIZATION_PACKS.md)

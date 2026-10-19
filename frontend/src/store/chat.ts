@@ -1,3 +1,4 @@
+import { notifyIncomingFileDismissed } from "@/lib/incomingFileDismissal";
 import { create } from "zustand";
 import { chat, contactPolicy, favorites as favoritesApi } from "@/lib/api";
 import { errorMessage, type SendFailReason } from "@/lib/error";
@@ -552,10 +553,12 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }
   },
 
-  dismissFile: (fileConv) =>
+  dismissFile: (fileConv) => {
+    notifyIncomingFileDismissed(fileConv);
     rawSet((s) => ({
       incomingFiles: s.incomingFiles.filter((f) => f.fileConv !== fileConv),
-    })),
+    }));
+  },
 
   start: () => {
     rawSet((s) => ({ runEpoch: s.runEpoch + 1 }));

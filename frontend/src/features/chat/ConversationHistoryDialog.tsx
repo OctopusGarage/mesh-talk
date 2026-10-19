@@ -36,6 +36,8 @@ import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
 import {
   useFileAvailability,
   watchFileAvailability,
+  refreshFileAvailability,
+  markUnavailableFileError,
 } from "@/store/fileAvailability";
 import { errorMessage } from "@/lib/error";
 import { formatDay, formatTime, humanSize } from "@/lib/format";
@@ -239,9 +241,13 @@ export function ConversationHistoryDialog({
       const dir = directory ? await effectiveDownloadDir() : "";
       if (!lease.current()) return;
       if (dir) {
-        if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
+        await refreshFileAvailability([file.fileConv]);
+        if (
+          !lease.current() ||
+          !useFileAvailability.getState().statuses[file.fileConv]?.ready
+        )
           return;
-        const path = await chat.saveFileToDir(file.fileConv, dir);
+        const path = await chat.saveFileToDir(file.fileConv, dir, lease.owner!);
         if (lease.current()) rememberSavedDownload(file.fileConv, path);
         return;
       }
@@ -249,12 +255,19 @@ export function ConversationHistoryDialog({
         ? await openDialog({ directory: true })
         : await saveDialog({ defaultPath: file.name });
       if (lease.current() && typeof dest === "string") {
+        await refreshFileAvailability([file.fileConv]);
+        if (
+          !lease.current() ||
+          !useFileAvailability.getState().statuses[file.fileConv]?.ready
+        )
+          return;
         const path = directory
-          ? await chat.saveFileToDir(file.fileConv, dest)
+          ? await chat.saveFileToDir(file.fileConv, dest, lease.owner!)
           : (await chat.saveFile(file.fileConv, dest), dest);
         if (lease.current()) rememberSavedDownload(file.fileConv, path);
       }
     } catch (e) {
+      if (lease.current() && markUnavailableFileError(file.fileConv, e)) return;
       if (lease.current())
         setHistory((previous) =>
           previous?.key === key

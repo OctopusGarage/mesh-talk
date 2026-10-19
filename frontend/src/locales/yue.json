@@ -260,6 +260,7 @@
     "groupSummary": "{{total}} 位成員 · 已知在線 {{online}} 人",
     "groupUpdating": "更新緊成員在線資訊…",
     "groupUnbound": "{{summary}} · 另有 {{count}} 個未綁定帳戶嘅成員裝置",
+    "queuePersistenceFailed": "無法儲存自動下載佇列，重新啟動後可能需要重新接收：{{error}}",
     "unavailable": "暫時更新唔到在線狀態，已有資訊會正常過期；自動重試緊。",
     "observedDevices": "發現 {{count}} 部在線裝置",
     "source_local": "本地網絡發現",
@@ -544,6 +545,7 @@
     "nothingReceived": "目前尚未收到任何檔案。",
     "couldntSave": "無法儲存檔案：{{error}}",
     "savedTo": "已儲存至 {{path}}",
+    "unavailable": "附件已無法使用",
     "alreadyDownloaded": "已經下載過了——點選「顯示」即可找到。",
     "couldntOpen": "無法開啟：{{error}}",
     "chooseFolder": "選擇預設下載資料夾",
@@ -912,6 +914,8 @@
     "idConflict": "另一種資源庫已經用咗呢個資源包 ID。"
   },
   "memberProfile": {
+    "originalName": "原始名稱",
+    "remark": "備註",
     "title": "成員資料",
     "description": "呢位成員嘅身份同已知網絡資料。",
     "presenceUnavailable": "在線狀態不可用",

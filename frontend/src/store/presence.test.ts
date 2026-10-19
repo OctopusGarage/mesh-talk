@@ -4,7 +4,7 @@ const { getPresence } = vi.hoisted(() => ({ getPresence: vi.fn() }));
 vi.mock("@/lib/api", () => ({ presence: { get: getPresence } }));
 
 import { useAuth } from "./auth";
-import { presenceStatus, usePresence } from "./presence";
+import { agePresence, presenceStatus, usePresence } from "./presence";
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -221,4 +221,10 @@ it("keeps a newer failure authoritative over an older successful response", asyn
   } finally {
     stop();
   }
+});
+
+it("expires compatibility snapshots within the twenty-second logout budget", () => {
+  expect(
+    agePresence({ bob: { online: true, last_seen_secs: 0 } }, 20).bob.online,
+  ).toBe(false);
 });

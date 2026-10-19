@@ -53,7 +53,7 @@ export function agePresence(
     next[key] = {
       ...value,
       // Compatibility snapshots also have a bounded lease; no frozen green dots.
-      online: devices ? devices.length > 0 : value.online && elapsed < 30,
+      online: devices ? devices.length > 0 : value.online && elapsed < 15,
       last_seen_secs:
         value.last_seen_secs == null ? null : value.last_seen_secs + elapsed,
       ...(devices ? { devices } : {}),

@@ -11,7 +11,12 @@ import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
 import { ease, useMotionOK } from "@/lib/motion";
 import { useChat, captureChatOwnership } from "@/store/chat";
-import { useFileStatus } from "@/store/fileAvailability";
+import {
+  useFileStatus,
+  refreshFileAvailability,
+  markUnavailableFileError,
+  useFileAvailability,
+} from "@/store/fileAvailability";
 import { ReceiveProgress } from "./ReceiveProgress";
 import { isVideo } from "@/lib/mediaTypes";
 import {
@@ -91,10 +96,17 @@ export function MediaPreview({
       if (!lease.current()) return;
       const dest = await save({ defaultPath });
       if (lease.current() && typeof dest === "string") {
+        await refreshFileAvailability([fileConv]);
+        if (
+          !lease.current() ||
+          !useFileAvailability.getState().statuses[fileConv]?.ready
+        )
+          return;
         await chat.saveFile(fileConv, dest);
         if (lease.current()) rememberSavedDownload(fileConv, dest);
       }
     } catch (e) {
+      if (lease.current() && markUnavailableFileError(fileConv, e)) return;
       if (lease.current())
         setError(t("files.couldntSave", { error: errorMessage(e) }));
     } finally {

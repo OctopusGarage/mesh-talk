@@ -81,27 +81,27 @@ test("incoming folder waits for approval and can be declined or received", async
   await expect(
     bubble.getByText("Waiting for your approval to receive this attachment."),
   ).toBeVisible();
-  await expect(bubble.getByRole("button", { name: "Save" })).toBeDisabled();
+  await expect(bubble.getByRole("button", { name: "Loading" })).toBeDisabled();
   await bubble.getByRole("button", { name: "Decline" }).click();
   await expect(bubble.getByText("You declined this attachment.")).toBeVisible();
   await page.getByTestId("sidebar-action-files").click();
   const tray = page.getByTestId("files-tray");
   await expect(
-    tray.getByRole("button", { name: "Save", exact: true }),
+    tray.getByRole("button", { name: "Loading…", exact: true }),
   ).toBeDisabled();
   await tray.getByRole("button", { name: "Receive" }).click();
   await expect(
     tray.getByText("Waiting for your approval to receive this attachment."),
   ).toHaveCount(0);
   await expect(
-    tray.getByRole("button", { name: "Save", exact: true }),
+    tray.getByRole("button", { name: "Loading…", exact: true }),
   ).toBeDisabled();
   await page.evaluate(() => {
     (window as unknown as { __ready: boolean }).__ready = true;
   });
   await expect(
-    tray.getByRole("button", { name: "Save", exact: true }),
-  ).toBeEnabled();
+    tray.getByRole("button", { name: "Reveal", exact: true }),
+  ).toBeVisible();
 });
 
 test("global and per-contact automatic receive controls persist their selection", async ({
@@ -187,9 +187,71 @@ test("video media requires approval and appears in Received files", async ({
     .getByTestId("message-bubble")
     .filter({ hasText: "clip.mp4" });
   await expect(bubble.getByRole("button", { name: "Receive" })).toBeVisible();
-  await expect(bubble.getByRole("button", { name: "Save" })).toBeDisabled();
+  await expect(bubble.getByRole("button", { name: "Loading" })).toBeDisabled();
   await page.getByTestId("sidebar-action-files").click();
   await expect(
     page.getByTestId("files-tray").getByText("clip.mp4"),
   ).toBeVisible();
+});
+
+test("an expired previously ready attachment becomes unavailable", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(({ account, device }) => {
+    const win = window as unknown as {
+      __expired: boolean;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    win.__expired = false;
+    const original = win.__TAURI_INTERNALS__.invoke;
+    win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "file_statuses")
+        return (args.fileConvs as string[]).map((file_conv) => ({
+          file_conv,
+          ready: !win.__expired,
+          done: win.__expired ? 0 : 1,
+          total: win.__expired ? 0 : 1,
+        }));
+      const result = await original(cmd, args);
+      if (cmd === "owner_account_history" && args.account === account)
+        return [
+          ...(result as unknown[]),
+          {
+            id: "expired-file",
+            from_me: false,
+            who: device,
+            text: "",
+            wall_clock: Date.now(),
+            file: {
+              file_conv: "fc_expiring",
+              name: "expires.pdf",
+              size: 42,
+              mime: "application/pdf",
+              media: false,
+            },
+          },
+        ];
+      return result;
+    };
+  }, BOB);
+  await openBobDm(page);
+  const bubble = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "expires.pdf" });
+  await expect(
+    bubble.getByRole("button", { name: "Save", exact: true }),
+  ).toBeEnabled();
+  await page.evaluate(() => {
+    (window as unknown as { __expired: boolean }).__expired = true;
+  });
+  await expect(
+    bubble.getByRole("button", { name: "Save", exact: true }),
+  ).toBeDisabled();
+  await expect(bubble.getByRole("status")).toContainText(/unavailable/i);
 });

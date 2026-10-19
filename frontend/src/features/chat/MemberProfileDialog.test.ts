@@ -6,7 +6,16 @@ import { afterEach, expect, it, vi } from "vitest";
 import { setLanguage } from "@/lib/i18n";
 import type { PresenceInfo } from "@/lib/types";
 
-const { peers } = vi.hoisted(() => ({
+const { peers, identityState } = vi.hoisted(() => ({
+  identityState: {
+    members: [] as Array<{ user_id: string; account_id: string; name: string }>,
+    accounts: [] as Array<{
+      account_id: string;
+      device_count: number;
+      names: string[];
+    }>,
+    favorites: {} as Record<string, { custom_alias: string }>,
+  },
   peers: [
     {
       user_id: "device-a",
@@ -19,7 +28,7 @@ const { peers } = vi.hoisted(() => ({
 }));
 vi.mock("@/store/chat", () => ({
   useChat: (select: (s: { peers: typeof peers }) => unknown) =>
-    select({ peers }),
+    select({ peers, ...identityState }),
 }));
 const presenceState = vi.hoisted(() => ({
   value: { online: true, last_seen_secs: 0 } as PresenceInfo,
@@ -30,6 +39,9 @@ vi.mock("@/store/presence", async (importOriginal) => ({
 }));
 afterEach(() => {
   presenceState.value = { online: true, last_seen_secs: 0 };
+  identityState.accounts = [];
+  identityState.members = [];
+  identityState.favorites = {};
   setLanguage("en");
 });
 vi.mock("@/components/identity", () => ({
@@ -161,4 +173,63 @@ it("renders Offline as the primary state with local observation history", () => 
   expect(neverSeen).toContain("离线");
   expect(neverSeen).not.toContain("状态未知");
   expect(neverSeen).not.toContain("分钟前发现");
+});
+
+it("shows the remark and latest original name separately with offline account and device details", () => {
+  identityState.accounts = [
+    { account_id: "account-a", device_count: 0, names: ["Canonical Alice"] },
+  ];
+  identityState.favorites = { "account-a": { custom_alias: "My colleague" } };
+  presenceState.value = { online: false, last_seen_secs: null };
+  const html = renderToStaticMarkup(
+    createElement(MemberProfileDialog, {
+      target: {
+        name: "Old remark",
+        canonicalName: "Old Alice",
+        accountId: "account-a",
+        deviceId: "device-a",
+      },
+      onOpenChange: () => {},
+    }),
+  );
+  expect(html).toContain("My colleague");
+  expect(html).toContain('data-testid="member-profile-original-name"');
+  expect(html).toContain("Canonical Alice");
+  expect(html).toContain("account-a");
+  expect(html).toContain("device-a");
+  expect(html).not.toContain("Old Alice");
+});
+it("does not repeat identical remark and original-name fields", () => {
+  identityState.accounts = [
+    { account_id: "account-a", device_count: 0, names: ["Alice"] },
+  ];
+  identityState.favorites = { "account-a": { custom_alias: "Alice" } };
+  const html = renderToStaticMarkup(
+    createElement(MemberProfileDialog, {
+      target: { name: "Alice", accountId: "account-a" },
+      onOpenChange: () => {},
+    }),
+  );
+  expect(html).not.toContain('data-testid="member-profile-original-name"');
+  expect(html).not.toContain('data-testid="member-profile-remark"');
+});
+
+it("uses current group-member identity in an open profile when no direct-contact account exists", () => {
+  identityState.favorites = { "account-z": { custom_alias: "Group friend" } };
+  identityState.members = [
+    { user_id: "device-z", account_id: "account-z", name: "Fresh group name" },
+  ];
+  const html = renderToStaticMarkup(
+    createElement(MemberProfileDialog, {
+      target: {
+        name: "Group friend",
+        canonicalName: "Captured old name",
+        accountId: "account-z",
+        deviceId: "device-z",
+      },
+      onOpenChange: () => {},
+    }),
+  );
+  expect(html).toContain("Fresh group name");
+  expect(html).not.toContain("Captured old name");
 });

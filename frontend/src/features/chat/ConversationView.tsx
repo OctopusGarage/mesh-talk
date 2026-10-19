@@ -1,3 +1,4 @@
+import { displayIdentity } from "@/lib/displayIdentity";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { AnimatePresence, motion } from "framer-motion";
@@ -111,6 +112,7 @@ export function ConversationView() {
   const myId = useChat((s) => s.myId);
   const members = useChat((s) => s.members);
   const peers = useChat((s) => s.peers);
+  const accounts = useChat((s) => s.accounts);
   const roster = rosterProjection(peers);
   // Resolve a channel author's device user_id → display name, so bubbles show names, not raw
   // ids. Channel members win over the general roster (channel-specific naming).
@@ -314,7 +316,15 @@ export function ConversationView() {
   // Alias (if set) overrides the conversation's announced name in the header + composer.
   const headerName = isPersonal
     ? t("personal.title")
-    : displayName(favorites, active.id, active.name);
+    : active.kind === "account"
+      ? displayIdentity({
+          accountId: active.id,
+          fallbackName: active.name,
+          accounts,
+          peers,
+          favorites,
+        }).name
+      : displayName(favorites, active.id, active.name);
 
   return (
     // min-w-0 lets this flex child shrink below its content's intrinsic width, so a wide
@@ -524,11 +534,18 @@ export function ConversationView() {
               const mentioned =
                 isChannel && !m.fromMe && mentionsName(m.text, myName);
               const authorMember = memberByDevice.get(m.who);
-              const authorName =
-                authorMember?.name || roster.nameForDevice(m.who) || undefined;
-              const authorAccount = roster.accountForMember(
-                authorMember ?? { user_id: m.who },
-              );
+              const authorIdentity = displayIdentity({
+                accountId: roster.accountForMember(
+                  authorMember ?? { user_id: m.who },
+                ),
+                deviceId: m.who,
+                fallbackName: authorMember?.name,
+                accounts,
+                peers,
+                favorites,
+              });
+              const authorName = authorIdentity.name;
+              const authorAccount = authorIdentity.accountId;
               return (
                 <div
                   data-message-id={messageRowKey(m, i)}
@@ -552,7 +569,8 @@ export function ConversationView() {
                     authorName={authorName}
                     onViewAuthor={() =>
                       setMemberProfile({
-                        name: authorName || m.who,
+                        name: authorName,
+                        canonicalName: authorIdentity.canonicalName,
                         accountId: authorAccount,
                         deviceId: m.who,
                       })
