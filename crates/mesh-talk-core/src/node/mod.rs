@@ -122,3 +122,6 @@ pub use runtime::{NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents, Runti
 
 mod outgoing_message;
 pub use outgoing_message::{MessageAcceptance, MessageDestination, OutgoingMessageRequest};
+mod timeline;
+
+pub use channels::ChannelRecovery;

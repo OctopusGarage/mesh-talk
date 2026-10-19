@@ -30,6 +30,10 @@ offices extend delivery without changing who can read the content.
 </p>
 <p align="center"><sub>Desktop interface shown with deterministic demo identities and messages.</sub></p>
 
+Read the [user guide](docs/help/README.md) for task-based instructions, or open
+**Help** in the app for offline search. [AI documentation and MCP](tools/help/README.md)
+let your own assistant query the same public manual.
+
 ## Conversations that stay with you
 
 - **Talk naturally.** Send one-to-one messages or create group channels. Replies, reactions,

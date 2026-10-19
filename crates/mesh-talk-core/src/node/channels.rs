@@ -87,7 +87,57 @@ fn select_custody_peer(mut peers: Vec<PeerRecord>, cycle: usize) -> Option<PeerR
     (len > 0).then(|| peers.swap_remove(cycle % len))
 }
 
+/// Local bounded recovery observations. A successful peer exchange never proves
+/// that offline members have no additional events.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChannelRecovery {
+    pub phase: &'static str,
+    pub checked_at: Option<u64>,
+}
+
 impl Node {
+    pub fn channel_recovery(&self, channel: ConversationId) -> Option<ChannelRecovery> {
+        let me = self.user_id();
+        let book = self.channels.lock().expect("channels mutex not poisoned");
+        let state = book.state(&channel)?;
+        if !state.is_accepted_member(&me) || state.is_dissolved() || state.members().len() <= 1 {
+            return None;
+        }
+        self.channel_recovery
+            .lock()
+            .expect("channel recovery lock not poisoned")
+            .get(&channel)
+            .cloned()
+    }
+
+    fn record_channel_recovery(&self, channel: ConversationId, phase: &'static str, checked: bool) {
+        let mut observations = self
+            .channel_recovery
+            .lock()
+            .expect("channel recovery lock not poisoned");
+        let previous = observations.get(&channel).and_then(|item| item.checked_at);
+        if observations.len() >= 4096 && !observations.contains_key(&channel) {
+            let oldest = observations
+                .iter()
+                .min_by_key(|(id, item)| (item.checked_at.unwrap_or(0), *id.as_bytes()))
+                .map(|(id, _)| *id);
+            if let Some(oldest) = oldest {
+                observations.remove(&oldest);
+            }
+        }
+        observations.insert(
+            channel,
+            ChannelRecovery {
+                phase,
+                checked_at: if checked {
+                    Some(now_millis())
+                } else {
+                    previous
+                },
+            },
+        );
+    }
+
     /// Pick one verified account sibling for an owner-signed channel invitation.
     /// Discovery and the durable route cache only expose account ids from verified
     /// device certificates; never infer account ownership from display names.
@@ -214,6 +264,7 @@ impl Node {
                 _ = self.channel_recovery_notify.notified() => true,
                 _ = tick.tick() => false,
             };
+            self.retry_channel_plaintext();
             if let Err(error) = self.auto_enroll_one_channel_sibling().await {
                 log::warn!("linked channel invitation failed; will retry: {error}");
             }
@@ -1234,6 +1285,9 @@ impl Node {
         }
         let channel_count = channels.len();
         let (channel_id, members) = &channels[cursor % channel_count];
+        // Local projection repair is independent of a reachable remote holder.
+        self.process_channel_reception(*channel_id, "catch_up");
+        self.process_file_events_reception(*channel_id, "catch_up");
         let peers: Vec<_> = members
             .iter()
             .filter(|member| member.user_id() != me)
@@ -1243,8 +1297,10 @@ impl Node {
             })
             .collect();
         if peers.is_empty() {
+            self.record_channel_recovery(*channel_id, "waiting_for_peer", false);
             return;
         }
+        self.record_channel_recovery(*channel_id, "catching_up", false);
         // Identity/channel-specific rotation spreads simultaneous gossip wakes
         // across replicas while the cursor still visits every known member.
         let own = self.identity.public();
@@ -1268,18 +1324,25 @@ impl Node {
                 };
                 let report = request_round(&mut conn, &store, *channel_id).await.ok()?;
                 self.recycle_sync_channel(conn);
-                Some(report.applied)
+                Some((report.applied, report.rejected.is_empty()))
             })
             .await;
-            if let Ok(Some(applied)) = result {
-                self.process_channel(*channel_id);
-                self.process_file_events(*channel_id);
+            if let Ok(Some((applied, clean))) = result {
+                self.record_channel_recovery(
+                    *channel_id,
+                    if clean { "peer_checked" } else { "catching_up" },
+                    true,
+                );
+                self.process_channel_reception(*channel_id, "catch_up");
+                self.process_file_events_reception(*channel_id, "catch_up");
                 // A reachable peer can itself be behind. Try another replica in this
                 // tick if it had nothing new, instead of treating connectivity as
                 // evidence that this channel is current.
                 if applied > 0 {
                     break;
                 }
+            } else {
+                self.record_channel_recovery(*channel_id, "waiting_for_peer", false);
             }
         }
     }
@@ -1291,6 +1354,33 @@ mod fanout_tests {
     use crate::identity::device::DeviceIdentity;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::Instant;
+
+    #[test]
+    fn group_reception_recovery_observations_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(std::sync::Mutex::new(
+                crate::discovery::roster::Roster::default(),
+            )),
+            dm,
+            channel,
+            file,
+            &dir.path().join("node.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        for id in 0..4100u64 {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&id.to_be_bytes());
+            node.record_channel_recovery(ConversationId::new(bytes), "waiting_for_peer", false);
+        }
+        assert_eq!(node.channel_recovery.lock().unwrap().len(), 4096);
+    }
 
     #[test]
     fn large_channel_limits_and_rotates_initial_targets() {

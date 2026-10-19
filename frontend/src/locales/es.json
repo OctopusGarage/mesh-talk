@@ -231,7 +231,20 @@
     "dropToSend": "Suelta para enviar a {{name}}",
     "clearHistory": "Borrar historial",
     "clearHistoryConfirm": "Esto borra permanentemente los mensajes de esta conversación en este dispositivo. No se puede deshacer y no afecta la copia de la otra persona.",
-    "noPeersHint": "Mesh-Talk busca en tu red local. Mantén ambos dispositivos en la misma red LAN."
+    "noPeersHint": "Mesh-Talk busca en tu red local. Mantén ambos dispositivos en la misma red LAN.",
+    "earlierMessages": "Se recibieron mensajes anteriores",
+    "newMessages": "Mensajes nuevos",
+    "catchingUp": "Recuperando el historial recibido…",
+    "waitingForPeer": "Esperando un par accesible",
+    "delayedMessage": "Recibido más tarde",
+    "receivedLocally": "Recibido en este dispositivo: {{time}}",
+    "unreadSummary": "{{count}} mensajes sin leer",
+    "unreadSummary_one": "{{count}} mensaje sin leer",
+    "unreadUnavailable": "Este mensaje está fuera del historial disponible en este dispositivo.",
+    "markConversationRead": "Marcar conversación como leída",
+    "peerChecked": "Miembro disponible consultado",
+    "peerCheckedDetail": "Última consulta a un miembro accesible: {{time}}. Los miembros sin conexión pueden tener más mensajes.",
+    "moreUnread": "Más mensajes sin leer"
   },
   "presence": {
     "online": "En línea",
@@ -567,9 +580,9 @@
   "linkDevice": {
     "syncTitle": "Sincronización en este dispositivo",
     "historySync": "Historial de mensajes",
-    "historySyncDescription": "Comparte y recibe el historial disponible de mensajes directos y de canales con tus dispositivos vinculados.",
+    "historySyncDescription": "Comparte y recibe mensajes e información de archivos de conversaciones directas y de grupo con tus dispositivos vinculados.",
     "attachmentsSync": "Archivos adjuntos",
-    "attachmentsSyncDescription": "Copia tarjetas de archivos anteriores y archivos verificados de dispositivos vinculados.",
+    "attachmentsSyncDescription": "Comparte y descarga archivos disponibles con tus dispositivos vinculados. Su información también se sincroniza con el historial de mensajes.",
     "profileSync": "Avatar de la cuenta",
     "profileSyncDescription": "Recibe cambios de avatar de tus dispositivos vinculados.",
     "appearanceSync": "Apariencia",
@@ -605,7 +618,8 @@
     "rotateIdentity": "Cambia a una identidad de cuenta nueva.",
     "rekey": "Regenerar claves",
     "rekeyed": "Claves regeneradas. Nueva cuenta: {{id}}…",
-    "rekeyFailed": "Error al regenerar claves: {{error}}"
+    "rekeyFailed": "Error al regenerar claves: {{error}}",
+    "legacyFileMetadata": "Actualiza este dispositivo vinculado para sincronizar la información de los archivos por separado de sus descargas."
   },
   "webrtcTest": {
     "trigger": "Autodiagnóstico de voz/vídeo",
@@ -910,5 +924,26 @@
     "endpointHint": "Esta es la última ruta de red conocida y puede apuntar a un repetidor. No indica una ubicación geográfica.",
     "view": "Ver perfil",
     "viewNamed": "Ver perfil de {{name}}"
+  },
+  "personal": {
+    "title": "Mensajes guardados",
+    "description": "Notas y archivos entre tus dispositivos",
+    "saved": "Guardado en este dispositivo",
+    "fileCardSaved": "Ficha del archivo guardada en este dispositivo"
+  },
+  "help": {
+    "title": "Ayuda",
+    "description": "Versión {{version}} · Disponible sin conexión",
+    "search": "Buscar ayuda",
+    "clearSearch": "Borrar búsqueda",
+    "topicCount_one": "{{count}} tema",
+    "topicCount_other": "{{count}} temas",
+    "topics": "Temas de ayuda",
+    "noResults": "No hay temas coincidentes. Prueba una frase más corta o borra la búsqueda para ver todas las guías.",
+    "englishFallback": "Los artículos están disponibles en inglés. La búsqueda también reconoce términos habituales en chino.",
+    "openSettings": "Abrir {{category}}",
+    "openDiagnostics": "Abrir Conexión",
+    "online": "Leer en línea",
+    "linkFailed": "No se pudo abrir el enlace. Inténtalo de nuevo o abre el manual en tu navegador."
   }
 }

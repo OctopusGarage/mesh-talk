@@ -657,7 +657,12 @@ export function PeerRow({ p }: { p: DiagPeerInfo }) {
     <div className="flex items-center justify-between gap-2 py-1.5">
       <div className="flex min-w-0 items-center gap-2.5">
         <div className="relative shrink-0">
-          <IdentityGlyph seed={peerAccountKey(p)} size={28} title={p.name} />
+          <IdentityGlyph
+            seed={peerAccountKey(p)}
+            kind={p.post_office ? "post-office" : "person"}
+            size={28}
+            title={p.name}
+          />
           <PresenceDot
             status={status}
             size="sm"

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Bookmark } from "lucide-react";
 import { AvatarEditMenu, IdentityCrest } from "@/components/identity";
 import { GroupAvatar } from "@/components/GroupAvatar";
 import { chat as chatApi } from "@/lib/api";
@@ -13,6 +14,28 @@ import {
   usePresenceFor,
 } from "@/store/presence";
 import { MemberProfileDialog } from "./MemberProfileDialog";
+
+export function PersonalHeader() {
+  const { t } = useTranslation();
+  return (
+    <div className="flex min-w-0 items-center gap-3">
+      <span
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-signal/10 text-signal"
+        aria-hidden="true"
+      >
+        <Bookmark className="h-5 w-5" />
+      </span>
+      <div className="min-w-0">
+        <div className="truncate font-display font-semibold tracking-tight">
+          {t("personal.title")}
+        </div>
+        <div className="text-xs text-muted-foreground">
+          {t("personal.description")}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /** DM header — the large IdentityCrest (glyph + name + presence + verified), with the
  *  safety number reachable via the verify dialog rendered alongside in the header. */

@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { test, expect } from "./tauri-mock";
 
 // Less frequent composer actions are available from an explicit tools control.
@@ -12,7 +13,7 @@ test("composer reveals secondary actions on demand", async ({ page }) => {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await page.getByTestId(`conversation-row-${BOB}`).click();
   await expect(page.getByTestId("composer-input")).toBeVisible();
   await expect(page.getByTestId("composer-more-tools")).toHaveAttribute(

@@ -231,7 +231,20 @@
     "dropToSend": "拖放以傳送給 {{name}}",
     "clearHistory": "清空聊天記錄",
     "clearHistoryConfirm": "這會永久刪除本機上這個對話的訊息,無法復原,且不影響對方的記錄。",
-    "noPeersHint": "Mesh-Talk 會搜尋區域網路。請讓兩部裝置連接同一個區域網路。"
+    "noPeersHint": "Mesh-Talk 會搜尋區域網路。請讓兩部裝置連接同一個區域網路。",
+    "earlierMessages": "收到較早的訊息",
+    "newMessages": "新訊息",
+    "catchingUp": "正在補齊已接收的歷史記錄…",
+    "waitingForPeer": "等待可連線的節點",
+    "delayedMessage": "稍後收到",
+    "receivedLocally": "本裝置接收時間：{{time}}",
+    "unreadSummary": "{{count}} 則未讀訊息",
+    "unreadSummary_one": "{{count}} 則未讀訊息",
+    "unreadUnavailable": "此訊息不在本裝置可用的歷史記錄中。",
+    "markConversationRead": "將對話標為已讀",
+    "peerChecked": "已檢查可連線的成員",
+    "peerCheckedDetail": "上次檢查可連線的成員：{{time}}。離線成員可能還有其他訊息。",
+    "moreUnread": "還有更多未讀訊息"
   },
   "presence": {
     "online": "上線",
@@ -567,9 +580,9 @@
   "linkDevice": {
     "syncTitle": "在本裝置上同步",
     "historySync": "訊息歷史",
-    "historySyncDescription": "與已連結的裝置分享及接收私訊與頻道訊息歷史。",
+    "historySyncDescription": "與已連結裝置分享及接收現有私訊、群組訊息與檔案資訊。",
     "attachmentsSync": "附件",
-    "attachmentsSyncDescription": "從已連結的裝置複製可用的舊附件和已驗證的檔案資料。",
+    "attachmentsSyncDescription": "與已連結裝置分享及下載現有檔案內容。檔案資訊也隨訊息歷史同步。",
     "profileSync": "帳戶頭像",
     "profileSyncDescription": "接收已連結裝置上的頭像變更。",
     "appearanceSync": "外觀",
@@ -605,7 +618,8 @@
     "rotateIdentity": "輪替至全新的帳號身分。",
     "rekey": "重設金鑰",
     "rekeyed": "已重設金鑰。新帳號：{{id}}…",
-    "rekeyFailed": "重設金鑰失敗：{{error}}"
+    "rekeyFailed": "重設金鑰失敗：{{error}}",
+    "legacyFileMetadata": "升級此已連結裝置，以便單獨同步檔案資訊而不下載檔案。"
   },
   "webrtcTest": {
     "trigger": "語音/視訊自我檢測",
@@ -910,5 +924,26 @@
     "endpointHint": "這是最後已知的網絡路徑，可能指向中繼節點；它不表示地理位置。",
     "view": "查看資料",
     "viewNamed": "查看{{name}}的資料"
+  },
+  "personal": {
+    "title": "收藏訊息",
+    "description": "在你的裝置之間同步筆記和檔案",
+    "saved": "已儲存在此裝置上",
+    "fileCardSaved": "檔案資訊已儲存在此裝置上"
+  },
+  "help": {
+    "title": "說明",
+    "description": "版本 {{version}} · 可離線閱讀",
+    "search": "搜尋使用說明",
+    "clearSearch": "清除搜尋",
+    "topicCount_one": "{{count}} 個主題",
+    "topicCount_other": "{{count}} 個主題",
+    "topics": "說明主題",
+    "noResults": "找不到相關主題。請嘗試更簡短的關鍵字，或清除搜尋以瀏覽所有指南。",
+    "englishFallback": "說明文章目前為英文，也支援常用中文關鍵字搜尋。",
+    "openSettings": "開啟{{category}}",
+    "openDiagnostics": "開啟連線診斷",
+    "online": "線上閱讀",
+    "linkFailed": "無法開啟連結。請重試，或在瀏覽器中開啟線上手冊。"
   }
 }

@@ -18,6 +18,7 @@ export interface ConversationListRow {
   channel: boolean;
   subtitle: string;
   prioritizeSubtitle: boolean;
+  personal?: boolean;
   /** Rename edits the announced name, not the displayed personal alias. */
   renameName: string;
 }
@@ -32,13 +33,28 @@ export function conversationList(
   channels: readonly ChannelInfo[],
   favorites: Favorites,
   t: TFunction,
+  ownAccount?: string,
+  personalReady = true,
 ) {
   const pinnedRows: ConversationListRow[] = [];
   const accountRows: ConversationListRow[] = [];
   const channelRows: ConversationListRow[] = [];
   const hiddenChannels: ConversationListRow[] = [];
+  if (ownAccount && personalReady) {
+    accountRows.push({
+      id: ownAccount,
+      conv: { kind: "account", id: ownAccount, name: t("personal.title") },
+      renameName: t("personal.title"),
+      channel: false,
+      personal: true,
+      pinned: false,
+      subtitle: t("personal.description"),
+      prioritizeSubtitle: false,
+    });
+  }
   for (const a of accounts) {
     const id = a.account_id;
+    if (id === ownAccount) continue;
     const renameName = a.names[0] || shortId(id);
     const row: ConversationListRow = {
       id,

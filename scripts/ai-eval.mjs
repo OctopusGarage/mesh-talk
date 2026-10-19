@@ -55,6 +55,9 @@ function readText(path) {
 function buildPrompt(suite, testCase) {
   const evaluatorPrompt = readText(suite.evaluator_prompt);
   const subject = readText(testCase.subject_file);
+  const context = (testCase.context_files ?? []).map((file) =>
+    `Supporting production file: ${file}\n\n--- SUPPORTING SOURCE START ---\n${readText(file)}\n--- SUPPORTING SOURCE END ---`,
+  ).join("\n\n");
 
   return `${evaluatorPrompt}
 
@@ -73,6 +76,8 @@ Subject file: ${testCase.subject_file}
 --- SUBJECT START ---
 ${subject}
 --- SUBJECT END ---
+
+${context}
 
 Return only the JSON object for this case.`;
 }
@@ -163,6 +168,7 @@ function main() {
       id: testCase.id,
       name: testCase.name,
       subject_file: testCase.subject_file,
+      context_files: testCase.context_files ?? [],
       errors,
     });
   }

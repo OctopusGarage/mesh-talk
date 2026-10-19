@@ -36,6 +36,8 @@ pub struct ReceivedLog {
     /// First host for each event ID. Message logs reject another host; file-card
     /// logs may append a matching alias under another host.
     seen: HashMap<EventId, (ConversationId, usize)>,
+    #[cfg(test)]
+    fail_once_after: Option<usize>,
 }
 
 impl ReceivedLog {
@@ -82,6 +84,10 @@ impl ReceivedLog {
     #[cfg(test)]
     pub(crate) fn fail_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
         self.file.fail_appends_for_test(enabled)
+    }
+    #[cfg(test)]
+    pub(crate) fn fail_once_after_for_test(&mut self, successful: usize) {
+        self.fail_once_after = Some(successful);
     }
     pub(crate) fn entry(&self, id: EventId) -> Option<&ReceivedEntry> {
         let (conversation, index) = self.seen.get(&id)?;
@@ -142,6 +148,8 @@ impl ReceivedLog {
             by_conversation,
             seen,
             allow_aliases,
+            #[cfg(test)]
+            fail_once_after: None,
         })
     }
 
@@ -154,6 +162,16 @@ impl ReceivedLog {
         plaintext: &[u8],
         event_id: crate::eventlog::event::EventId,
     ) -> Result<(), LogError> {
+        #[cfg(test)]
+        if let Some(remaining) = self.fail_once_after.as_mut() {
+            if *remaining == 0 {
+                self.fail_once_after = None;
+                return Err(LogError::Io(std::io::Error::other(
+                    "injected receive projection failure",
+                )));
+            }
+            *remaining -= 1;
+        }
         // Idempotent on event id: skip a duplicate (e.g. a re-imported account backfill) so it
         // can't durably double the conversation's history.
         if self.seen.contains_key(&event_id) {

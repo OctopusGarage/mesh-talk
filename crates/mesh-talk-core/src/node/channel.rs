@@ -144,6 +144,8 @@ impl SealedPayload {
     }
 }
 
+pub(in crate::node) const CHANNEL_PENDING_BYTES: usize = 8 * 1024 * 1024;
+
 /// A decrypted channel message surfaced to the application. Carries the source
 /// event's id + wall-clock and the decoded plaintext body so the node can persist it
 /// to the received store (sender-key wire keys are single-use, so history is served
@@ -159,6 +161,46 @@ pub struct ReceivedChannelMessage {
     pub wall_clock: u64,
     /// The wrapped `MessageBody` plaintext (text + reply_to), for the received store.
     pub wrapped: Vec<u8>,
+    /// Local first successful decryption observation; not persisted in signed events.
+    pub received_at: u64,
+    pub arrival_kind: &'static str,
+    pub own_device: bool,
+    pub batch_id: Option<String>,
+    pub batch_complete: bool,
+    pub batch_size: usize,
+    /// Metadata-only batch terminal; never render as a message or count unread.
+    pub reception_only: bool,
+}
+
+impl ReceivedChannelMessage {
+    pub(in crate::node) fn terminal(&self, batch_id: Option<String>, batch_size: usize) -> Self {
+        Self {
+            channel_id: self.channel_id,
+            channel_name: self.channel_name.clone(),
+            from: self.from.clone(),
+            text: Vec::new(),
+            reply_to: None,
+            event_id: self.event_id,
+            wall_clock: self.wall_clock,
+            wrapped: Vec::new(),
+            received_at: self.received_at,
+            arrival_kind: "catch_up",
+            own_device: self.own_device,
+            batch_id,
+            batch_complete: true,
+            batch_size,
+            reception_only: true,
+        }
+    }
+
+    pub(in crate::node) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.wrapped.capacity()
+            + self.text.capacity()
+            + self.from.capacity()
+            + self.channel_name.capacity()
+            + self.batch_id.as_ref().map_or(0, String::capacity)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +227,33 @@ pub struct ChannelBook {
     activity_emitted: HashSet<EventId>,
     lineage_owner: HashMap<ConversationId, String>,
     replica_preferences: HashMap<(ConversationId, String), (u64, EventId, bool)>,
+}
+
+/// One validated snapshot traversal, resumed across bounded plaintext batches.
+/// Ordering and ancestry indices are built once, independent of batch count.
+pub(in crate::node) struct ChannelReplay<'a> {
+    events: Vec<&'a Event>,
+    by_id: HashMap<EventId, &'a Event>,
+    cursor: usize,
+    after_accept: HashSet<EventId>,
+    dissolved: bool,
+}
+
+impl<'a> ChannelReplay<'a> {
+    pub(in crate::node) fn new(events: &[&'a Event]) -> Self {
+        let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
+        let events = super::timeline::ordered_ids(events, &[], true)
+            .iter()
+            .filter_map(|id| by_id.get(id).copied())
+            .collect();
+        Self {
+            events,
+            by_id,
+            cursor: 0,
+            after_accept: HashSet::new(),
+            dissolved: false,
+        }
+    }
 }
 
 /// A Lamport timestamp cannot establish whether an owner observed a leave: an
@@ -327,7 +396,12 @@ impl ChannelBook {
         events: &[&Event],
     ) -> Option<Vec<PublicIdentity>> {
         let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
-        let (state, _) = Self::membership_view(channel_id, events, None, &by_id);
+        let order = super::timeline::ordered_ids(events, &[], true);
+        let ordered: Vec<_> = order
+            .iter()
+            .filter_map(|id| by_id.get(id).copied())
+            .collect();
+        let (state, _) = Self::membership_view(channel_id, &ordered, None, &by_id);
         state.map(|state| state.members().to_vec())
     }
 
@@ -424,20 +498,77 @@ impl ChannelBook {
     /// `MembershipChange` under out-of-order delivery) is recovered on the next
     /// full-log replay, where the prerequisite is processed first. The caller dedups
     /// the returned messages across calls (the live node uses an emitted-id set).
+    #[cfg(test)]
     pub fn process(
         &mut self,
         me: &DeviceIdentity,
         channel_id: ConversationId,
         events: &[&Event],
     ) -> Vec<ReceivedChannelMessage> {
-        let my_author = Author::from_ed25519(me.public().ed25519_pub);
-        let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
-        let mut out = Vec::new();
-        let mut dissolved_on_replay = false;
-        let mut after_accept = HashSet::new();
+        self.process_limited(me, channel_id, events, usize::MAX)
+    }
 
-        for event in events {
-            if dissolved_on_replay {
+    /// The node bounds decrypted plaintext awaiting durable projection. Replaying
+    /// later skips emitted IDs and resumes messages left encrypted by this limit.
+    #[cfg(test)]
+    pub(in crate::node) fn process_limited(
+        &mut self,
+        me: &DeviceIdentity,
+        channel_id: ConversationId,
+        events: &[&Event],
+        limit: usize,
+    ) -> Vec<ReceivedChannelMessage> {
+        self.process_bounded(me, channel_id, events, limit, CHANNEL_PENDING_BYTES)
+            .0
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn process_bounded(
+        &mut self,
+        me: &DeviceIdentity,
+        channel_id: ConversationId,
+        events: &[&Event],
+        limit: usize,
+        byte_budget: usize,
+    ) -> (Vec<ReceivedChannelMessage>, bool) {
+        self.process_replay(
+            me,
+            channel_id,
+            &mut ChannelReplay::new(events),
+            limit,
+            byte_budget,
+        )
+    }
+
+    pub(in crate::node) fn process_replay(
+        &mut self,
+        me: &DeviceIdentity,
+        channel_id: ConversationId,
+        replay: &mut ChannelReplay<'_>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> (Vec<ReceivedChannelMessage>, bool) {
+        let my_author = Author::from_ed25519(me.public().ed25519_pub);
+        let ChannelReplay {
+            events,
+            by_id,
+            cursor,
+            after_accept,
+            dissolved,
+        } = replay;
+        let events = events.as_slice();
+        let by_id: &HashMap<EventId, &Event> = by_id;
+        let mut out = Vec::new();
+        let mut retained_upper_bound = 0usize;
+        let mut limited = false;
+        while *cursor < events.len() {
+            let event = events[*cursor];
+            if out.len() >= limit {
+                limited = true;
+                break;
+            }
+            *cursor += 1;
+            if *dissolved {
                 continue;
             }
             if let Some(accepted) = self
@@ -460,14 +591,14 @@ impl ChannelBook {
                         && event.author.user_id() == state.owner()
                     {
                         state.dissolve();
-                        dissolved_on_replay = true;
+                        *dissolved = true;
                     }
                 }
                 EventKind::MembershipChange => {
                     if let Some(mut meta) = ChannelMeta::decode(&event.ciphertext) {
                         let author_uid = event.author.user_id();
                         let prior_view = (!self.states.contains_key(&channel_id)).then(|| {
-                            Self::membership_view(channel_id, events, Some(event.id), &by_id)
+                            Self::membership_view(channel_id, events, Some(event.id), by_id)
                         });
                         let prior_pending: Vec<_> = prior_view
                             .as_ref()
@@ -487,7 +618,7 @@ impl ChannelBook {
                                 prior_view.as_ref().is_some_and(|(_, leaves)| {
                                     leaves.iter().any(|(uid, leave_id)| {
                                         uid == &member.user_id()
-                                            && !descends_from(event, *leave_id, &by_id)
+                                            && !descends_from(event, *leave_id, by_id)
                                     })
                                 });
                             !departed_before_join
@@ -495,7 +626,7 @@ impl ChannelBook {
                                     leave.kind == EventKind::ChannelLeave
                                         && self.applied_leaves.contains(&leave.id)
                                         && leave.author.user_id() == member.user_id()
-                                        && !descends_from(event, leave.id, &by_id)
+                                        && !descends_from(event, leave.id, by_id)
                                 })
                         });
                         if event.parents.is_empty()
@@ -710,6 +841,31 @@ impl ChannelBook {
                     {
                         continue;
                     }
+                    // Sender-key encryption does not compress. Wrapped + decoded
+                    // retained allocations are conservatively bounded by four times
+                    // the ciphertext (including decoder capacity), plus metadata.
+                    // Check before advancing a receive key. A single legacy record
+                    // larger than half the global budget stays encrypted, allowing
+                    // terminal metadata plus at least one next row without a spin.
+                    let upper = event
+                        .ciphertext
+                        .len()
+                        .saturating_mul(4)
+                        .saturating_add(state.name().len().saturating_mul(2))
+                        .saturating_add(
+                            2 * std::mem::size_of::<ReceivedChannelMessage>() + 64 + 192,
+                        );
+                    if upper > CHANNEL_PENDING_BYTES / 2 {
+                        log::warn!(
+                            "channel message exceeds local reception byte budget; retaining encrypted event"
+                        );
+                        continue;
+                    }
+                    if retained_upper_bound.saturating_add(upper) > byte_budget {
+                        *cursor -= 1;
+                        limited = true;
+                        break;
+                    }
                     if let Some(plaintext) =
                         state.open_sender_message(&event.author.user_id(), &event.ciphertext)
                     {
@@ -723,7 +879,15 @@ impl ChannelBook {
                             event_id: event.id,
                             wall_clock: event.wall_clock,
                             wrapped: plaintext,
+                            received_at: 0,
+                            arrival_kind: "live",
+                            own_device: false,
+                            batch_id: None,
+                            batch_complete: true,
+                            batch_size: 1,
+                            reception_only: false,
                         };
+                        retained_upper_bound += upper;
                         self.emitted.insert(event.id);
                         out.push(msg);
                     }
@@ -744,7 +908,7 @@ impl ChannelBook {
                     });
             }
         }
-        out
+        (out, limited)
     }
 }
 
@@ -789,6 +953,265 @@ mod tests {
         let mut state = ChannelState::from_meta(channel, meta.clone());
         state.set_identity(author.public().user_id());
         state
+    }
+
+    #[test]
+    fn group_reception_replays_4097_messages_with_one_ordered_cursor() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let meta = ChannelMeta {
+            name: "replay benchmark".into(),
+            members: vec![alice.public(), bob.public()],
+            epoch: 0,
+            owner: alice.public().user_id(),
+        };
+        let mut log = EventLog::default();
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            meta.encode(),
+        );
+        let mut sender = author_state(&alice, channel, &meta);
+        let keys =
+            seal_keys_for(&alice, &meta.members, &sender.my_sender_distribution(), 0).unwrap();
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::KeyRotation,
+            keys.encode(),
+        );
+        for index in 0..4097 {
+            append(
+                &mut log,
+                &alice,
+                channel,
+                EventKind::Message,
+                sender
+                    .seal_sender_message(format!("message {index}").as_bytes())
+                    .unwrap(),
+            );
+        }
+        let events = collect(&log, &channel);
+        let started = std::time::Instant::now();
+        let mut replay = ChannelReplay::new(&events);
+        let mut book = ChannelBook::default();
+        let mut identities = HashSet::new();
+        let mut batches = 0;
+        loop {
+            let (messages, limited) =
+                book.process_replay(&bob, channel, &mut replay, 64, CHANNEL_PENDING_BYTES);
+            batches += 1;
+            assert!(messages.len() <= 64);
+            assert!(
+                messages
+                    .iter()
+                    .map(ReceivedChannelMessage::retained_bytes)
+                    .sum::<usize>()
+                    <= CHANNEL_PENDING_BYTES
+            );
+            for message in messages {
+                assert!(identities.insert(message.event_id));
+            }
+            if !limited {
+                break;
+            }
+        }
+        assert_eq!(identities.len(), 4097);
+        assert_eq!(batches, 65);
+        assert_eq!(replay.cursor, events.len());
+        eprintln!(
+            "group reception ordered replay: 4097 messages, 65 bounded batches, {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn group_reception_byte_budget_checks_before_consuming_receive_keys() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let meta = ChannelMeta {
+            name: "bytes".into(),
+            members: vec![alice.public(), bob.public()],
+            epoch: 0,
+            owner: alice.public().user_id(),
+        };
+        let mut log = EventLog::default();
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            meta.encode(),
+        );
+        let mut sender = author_state(&alice, channel, &meta);
+        let keys =
+            seal_keys_for(&alice, &meta.members, &sender.my_sender_distribution(), 0).unwrap();
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::KeyRotation,
+            keys.encode(),
+        );
+        let large = sender
+            .seal_sender_message(&vec![b'x'; 2 * 1024 * 1024])
+            .unwrap();
+        append(&mut log, &alice, channel, EventKind::Message, large.clone());
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::Message,
+            sender.seal_sender_message(b"after").unwrap(),
+        );
+        let events = collect(&log, &channel);
+        let mut book = ChannelBook::default();
+        let (messages, limited) =
+            book.process_bounded(&bob, channel, &events, 64, CHANNEL_PENDING_BYTES);
+        assert!(
+            !limited,
+            "an oversized trusted legacy row must not cause a retry spin"
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, b"after");
+        assert!(messages[0].retained_bytes() <= CHANNEL_PENDING_BYTES);
+        let recovered = book
+            .state_mut(&channel)
+            .unwrap()
+            .open_sender_message(&alice.public().user_id(), &large)
+            .unwrap();
+        assert_eq!(
+            recovered.len(),
+            2 * 1024 * 1024,
+            "skipping the oversized row must preserve its receive key"
+        );
+
+        let mut fresh = ChannelBook::default();
+        let (messages, limited) = fresh.process_bounded(&bob, channel, &events, 64, 1);
+        assert!(messages.is_empty());
+        assert!(limited);
+        let (messages, limited) =
+            fresh.process_bounded(&bob, channel, &events, 64, CHANNEL_PENDING_BYTES);
+        assert_eq!(messages.len(), 1);
+        assert!(!limited);
+    }
+
+    #[test]
+    fn group_reception_bounded_processing_does_not_skip_messages_before_dissolution() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let meta = ChannelMeta {
+            name: "bounded".into(),
+            members: vec![alice.public(), bob.public()],
+            epoch: 0,
+            owner: alice.public().user_id(),
+        };
+        let mut log = EventLog::default();
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::MembershipChange,
+            meta.encode(),
+        );
+        let mut sender = author_state(&alice, channel, &meta);
+        let keys =
+            seal_keys_for(&alice, &meta.members, &sender.my_sender_distribution(), 0).unwrap();
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::KeyRotation,
+            keys.encode(),
+        );
+        for text in [b"one".as_slice(), b"two".as_slice()] {
+            append(
+                &mut log,
+                &alice,
+                channel,
+                EventKind::Message,
+                sender.seal_sender_message(text).unwrap(),
+            );
+        }
+        append(
+            &mut log,
+            &alice,
+            channel,
+            EventKind::ChannelDissolve,
+            vec![],
+        );
+        let events = collect(&log, &channel);
+        let mut book = ChannelBook::default();
+        assert_eq!(
+            book.process_limited(&bob, channel, &events, 1)[0].text,
+            b"one"
+        );
+        assert!(!book.state(&channel).unwrap().is_dissolved());
+        assert_eq!(
+            book.process_limited(&bob, channel, &events, 1)[0].text,
+            b"two"
+        );
+        assert!(book.process_limited(&bob, channel, &events, 1).is_empty());
+        assert!(book.state(&channel).unwrap().is_dissolved());
+    }
+
+    #[test]
+    fn group_reception_projection_removal_respects_signed_ancestry_with_backward_lamport() {
+        let owner = DeviceIdentity::generate();
+        let removed = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let genesis = Event::new(
+            &owner,
+            channel,
+            1,
+            vec![],
+            900,
+            1000,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "skew".into(),
+                members: vec![owner.public(), removed.public()],
+                epoch: 0,
+                owner: owner.public().user_id(),
+            }
+            .encode(),
+        );
+        let removal = Event::new(
+            &owner,
+            channel,
+            2,
+            vec![genesis.id],
+            1,
+            1,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "skew".into(),
+                members: vec![owner.public()],
+                epoch: 1,
+                owner: owner.public().user_id(),
+            }
+            .encode(),
+        );
+        let mut log = EventLog::default();
+        log.append(genesis).unwrap();
+        log.append(removal).unwrap();
+        let events = collect(&log, &channel);
+        let members = ChannelBook::projected_members(channel, &events).unwrap();
+        assert_eq!(members, vec![owner.public()]);
+        let mut book = ChannelBook::default();
+        book.process(&owner, channel, &events);
+        assert!(
+            !book
+                .state(&channel)
+                .unwrap()
+                .is_member(&removed.public().user_id())
+        );
     }
 
     #[test]

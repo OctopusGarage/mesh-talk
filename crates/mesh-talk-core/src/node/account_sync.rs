@@ -3,7 +3,7 @@
 use super::account_preferences::AccountPreference;
 use super::account_sync_policy::{DeviceSyncPolicy, SyncCategory};
 use super::account_sync_wire::{
-    AccountHistoryFrame, HistoryCursor, MAX_CHUNK, MAX_RECORD, VERSION,
+    AccountHistoryFrame, AccountSyncVersion, HistoryCursor, MAX_CHUNK, MAX_RECORD,
 };
 use super::conversation::account_conversation_id;
 use super::dm_envelope::DmEnvelope;
@@ -25,7 +25,12 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 
+#[cfg(test)]
+use super::account_sync_wire::VERSION;
+
 mod page;
+#[cfg(test)]
+mod selection_tests;
 #[cfg(test)]
 use page::PendingRecord;
 use page::{ChannelRecord, FileCardRecord, HistoryPageAssembler, HistoryRecord, PageBuilder};
@@ -49,6 +54,7 @@ pub struct DeviceSyncStatus {
     pub device_id: String,
     pub phase: SyncPhase,
     pub pending_attachments: usize,
+    pub legacy_file_metadata: bool,
     pub error: Option<String>,
 }
 
@@ -78,15 +84,42 @@ fn transport(error: crate::transport::TransportError) -> NodeError {
 
 async fn send_frame(
     channel: &mut SecureChannel<TcpStream>,
+    version: AccountSyncVersion,
     frame: &AccountHistoryFrame,
 ) -> Result<(), NodeError> {
     let bytes = frame
-        .encode()
+        .encode_version(version)
         .ok_or_else(|| NodeError::Channel("invalid account-history frame".into()))?;
     channel.send(&bytes).await.map_err(transport)
 }
 
 impl Node {
+    async fn send_account_frame(
+        &self,
+        channel: &mut SecureChannel<TcpStream>,
+        version: AccountSyncVersion,
+        revision: u64,
+        frame: &AccountHistoryFrame,
+    ) -> Result<(), NodeError> {
+        if self.device_sync_policy_snapshot().1 != revision {
+            return Err(NodeError::Authorization(
+                "account sync policy changed".into(),
+            ));
+        }
+        send_frame(channel, version, frame).await
+    }
+
+    /// Process-local revision of durable history projections for host polling.
+    pub fn account_history_revision(&self) -> u64 {
+        self.account_history_revision
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(in crate::node) fn note_account_history_change(&self) {
+        self.account_history_revision
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn device_sync_status(&self) -> Vec<DeviceSyncStatus> {
         let policy = self.device_sync_policy();
         let current = self
@@ -103,6 +136,7 @@ impl Node {
                     device_id: id,
                     phase: SyncPhase::Offline,
                     pending_attachments: 0,
+                    legacy_file_metadata: false,
                     error: None,
                 });
                 if !policy.history && !policy.attachments && !policy.appearance && !policy.contacts
@@ -150,7 +184,16 @@ impl Node {
         self.device_sync_policy_snapshot().0
     }
 
-    fn device_sync_policy_snapshot(&self) -> (DeviceSyncPolicy, u64) {
+    pub(in crate::node) fn certified_sibling(&self, public: &PublicIdentity) -> bool {
+        self.linked_devices().iter().any(|device| {
+            device.public == *public
+                && device.certificate.verify()
+                && device.certificate.account_id() == self.account_id()
+                && device.certificate.device_ed25519_pub == public.ed25519_pub
+        })
+    }
+
+    pub(in crate::node) fn device_sync_policy_snapshot(&self) -> (DeviceSyncPolicy, u64) {
         let store = self
             .account_sync_policy
             .lock()
@@ -178,6 +221,17 @@ impl Node {
         {
             self.account_sync_notify.notify_one();
         }
+        if category == SyncCategory::History && enabled {
+            let conversations = self
+                .log
+                .lock()
+                .expect("log mutex not poisoned")
+                .conversations();
+            for conversation in conversations {
+                self.emit_new_messages(conversation);
+            }
+            self.delivery_notify.notify_one();
+        }
         if category == SyncCategory::Profile && enabled {
             let conversations = self
                 .log
@@ -197,6 +251,7 @@ impl Node {
         after: Option<HistoryCursor>,
         include_history: bool,
         include_files: bool,
+        version: AccountSyncVersion,
     ) -> (Vec<HistoryRecord>, Option<HistoryCursor>, [u8; 32]) {
         let own = self.account_id();
         let mut page = PageBuilder::new(after);
@@ -210,7 +265,7 @@ impl Node {
                     book.state(id).is_some_and(|state| {
                         !state.is_dissolved()
                             && state.is_accepted_member(&me)
-                            && state.is_member(&requester_id)
+                            && state.is_accepted_member(&requester_id)
                     })
                 })
                 .collect::<Vec<_>>()
@@ -370,6 +425,9 @@ impl Node {
             for &channel in &channels {
                 allowed_hosts.insert(channel, None);
             }
+            if version == AccountSyncVersion::V2 {
+                allowed_hosts.insert(account_conversation_id(&own, &own), Some(own.clone()));
+            }
             for other in self.known_account_ids() {
                 allowed_hosts.insert(account_conversation_id(&own, &other), Some(other));
             }
@@ -455,6 +513,7 @@ impl Node {
     pub(in crate::node) async fn serve_account_history(
         &self,
         channel: &mut SecureChannel<TcpStream>,
+        version: AccountSyncVersion,
         account_id: &str,
         cursor: Option<HistoryCursor>,
         known_digest: [u8; 32],
@@ -472,15 +531,21 @@ impl Node {
         }) {
             return;
         }
+        let (offered, revision) = self.device_sync_policy_snapshot();
         for device in self.linked_devices() {
-            if send_frame(channel, &AccountHistoryFrame::Device { device })
+            if self
+                .send_account_frame(
+                    channel,
+                    version,
+                    revision,
+                    &AccountHistoryFrame::Device { device },
+                )
                 .await
                 .is_err()
             {
                 return;
             }
         }
-        let offered = self.device_sync_policy();
         let mut preferences = Vec::new();
         {
             let store = self
@@ -503,7 +568,11 @@ impl Node {
                     &peer,
                     cursor,
                     offered.history && wanted.history,
-                    offered.attachments && wanted.attachments,
+                    version.includes_file_cards(
+                        offered.history && wanted.history,
+                        offered.attachments && wanted.attachments,
+                    ),
+                    version,
                 )
             } else {
                 PageBuilder::new(None).finish()
@@ -527,19 +596,28 @@ impl Node {
         }
         let digest: [u8; 32] = digest_hasher.finalize().into();
         if cursor.is_none() && known_digest == digest {
-            let _ = send_frame(
-                channel,
-                &AccountHistoryFrame::Complete {
-                    next_cursor: None,
-                    digest,
-                },
-            )
-            .await;
+            let _ = self
+                .send_account_frame(
+                    channel,
+                    version,
+                    revision,
+                    &AccountHistoryFrame::Complete {
+                        next_cursor: None,
+                        digest,
+                    },
+                )
+                .await;
             return;
         }
         if cursor.is_none() {
             for record in preferences {
-                if send_frame(channel, &AccountHistoryFrame::Preference { record })
+                if self
+                    .send_account_frame(
+                        channel,
+                        version,
+                        revision,
+                        &AccountHistoryFrame::Preference { record },
+                    )
                     .await
                     .is_err()
                 {
@@ -581,38 +659,52 @@ impl Node {
                     &record.payload,
                 ),
             };
-            if send_frame(channel, &header).await.is_err() {
+            if self
+                .send_account_frame(channel, version, revision, &header)
+                .await
+                .is_err()
+            {
                 return;
             }
             for chunk in plaintext.chunks(MAX_CHUNK) {
-                if send_frame(
-                    channel,
-                    &AccountHistoryFrame::RecordChunk {
-                        bytes: chunk.to_vec(),
-                    },
-                )
-                .await
-                .is_err()
+                if self
+                    .send_account_frame(
+                        channel,
+                        version,
+                        revision,
+                        &AccountHistoryFrame::RecordChunk {
+                            bytes: chunk.to_vec(),
+                        },
+                    )
+                    .await
+                    .is_err()
                 {
                     return;
                 }
             }
         }
-        let _ = send_frame(
-            channel,
-            &AccountHistoryFrame::Complete {
-                next_cursor,
-                digest,
-            },
-        )
-        .await;
+        let _ = self
+            .send_account_frame(
+                channel,
+                version,
+                revision,
+                &AccountHistoryFrame::Complete {
+                    next_cursor,
+                    digest,
+                },
+            )
+            .await;
     }
 
-    fn import_account_file_card(&self, record: &FileCardRecord) -> Result<(), NodeError> {
+    fn import_account_file_card(
+        &self,
+        record: &FileCardRecord,
+        version: AccountSyncVersion,
+    ) -> Result<(), NodeError> {
         let host = ConversationId::new(record.host);
         let event_id = EventId::new(record.event_id);
         if let Some(other) = &record.peer_account {
-            if other == &self.account_id()
+            if (other == &self.account_id() && version != AccountSyncVersion::V2)
                 || account_conversation_id(&self.account_id(), other) != host
             {
                 return Err(NodeError::Authorization(
@@ -642,6 +734,25 @@ impl Node {
             wall_clock: record.wall_clock,
             plaintext: payload.manifest,
         };
+        let personal = record.peer_account.as_deref() == Some(self.account_id().as_str());
+        if personal
+            && (!super::files::personal_file_proof_matches(&row, &payload.proof)
+                || !self.linked_devices().iter().any(|device| {
+                    device.public.ed25519_pub == *payload.proof.author.ed25519_pub()
+                        && device.certificate.verify()
+                        && device.certificate.account_id() == self.account_id()
+                        && device.certificate.device_ed25519_pub == device.public.ed25519_pub
+                }))
+        {
+            return Err(NodeError::Authorization(
+                "invalid certified personal file proof".into(),
+            ));
+        }
+        if !personal && super::files::is_personal_file_proof(&payload.proof) {
+            return Err(NodeError::Authorization(
+                "personal file proof has another host".into(),
+            ));
+        }
         if self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock) {
             return Ok(());
         }
@@ -687,17 +798,32 @@ impl Node {
             .received_files
             .lock()
             .expect("files mutex not poisoned");
+        let fresh = !files
+            .entries_ref(&host)
+            .iter()
+            .any(|entry| entry.event_id == event_id);
         files
             .record_file_alias_durable(&row)
             .map_err(NodeError::Log)?;
         drop(files);
         let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
         self.reseed_live_file_book(&delivery);
+        if fresh {
+            self.note_account_history_change();
+        }
         Ok(())
     }
 
     fn has_live_local_file_card(&self, file_conv: ConversationId) -> bool {
         let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
+        self.has_live_local_file_card_with(file_conv, &delivery)
+    }
+
+    fn has_live_local_file_card_with(
+        &self,
+        file_conv: ConversationId,
+        delivery: &super::delivery_store::DeliveryStore,
+    ) -> bool {
         let rows = self
             .received_files
             .lock()
@@ -733,6 +859,7 @@ impl Node {
         let me = self.user_id();
         let requester_id = requester.user_id();
         let mut hosts = HashSet::new();
+        hosts.insert(account_conversation_id(&own, &own));
         for other in self.known_account_ids() {
             hosts.insert(account_conversation_id(&own, &other));
         }
@@ -742,7 +869,7 @@ impl Node {
                 if book.state(&channel).is_some_and(|state| {
                     !state.is_dissolved()
                         && state.is_accepted_member(&me)
-                        && state.is_member(&requester_id)
+                        && state.is_accepted_member(&requester_id)
                 }) {
                     hosts.insert(channel);
                 }
@@ -784,13 +911,12 @@ impl Node {
     pub(in crate::node) async fn serve_account_attachment(
         &self,
         channel: &mut SecureChannel<TcpStream>,
+        version: AccountSyncVersion,
         account_id: &str,
         file_conv: ConversationId,
     ) {
-        if account_id != self.account_id()
-            || !channel.io_admitted()
-            || !self.device_sync_policy().attachments
-        {
+        let (offered, revision) = self.device_sync_policy_snapshot();
+        if account_id != self.account_id() || !channel.io_admitted() || !offered.attachments {
             return;
         }
         let peer = channel.peer_identity();
@@ -815,17 +941,20 @@ impl Node {
         let Ok(mut source) = tokio::fs::File::open(&path).await else {
             return;
         };
-        if send_frame(
-            channel,
-            &AccountHistoryFrame::AttachmentStart {
-                file_conv: *file_conv.as_bytes(),
-                name: manifest.name().to_string(),
-                size: manifest.size(),
-                sha256: manifest.checksum(),
-            },
-        )
-        .await
-        .is_err()
+        if self
+            .send_account_frame(
+                channel,
+                version,
+                revision,
+                &AccountHistoryFrame::AttachmentStart {
+                    file_conv: *file_conv.as_bytes(),
+                    name: manifest.name().to_string(),
+                    size: manifest.size(),
+                    sha256: manifest.checksum(),
+                },
+            )
+            .await
+            .is_err()
         {
             return;
         }
@@ -841,21 +970,31 @@ impl Node {
             }
             total += read as u64;
             hasher.update(&buffer[..read]);
-            if send_frame(
-                channel,
-                &AccountHistoryFrame::AttachmentChunk {
-                    bytes: buffer[..read].to_vec(),
-                },
-            )
-            .await
-            .is_err()
+            if self
+                .send_account_frame(
+                    channel,
+                    version,
+                    revision,
+                    &AccountHistoryFrame::AttachmentChunk {
+                        bytes: buffer[..read].to_vec(),
+                    },
+                )
+                .await
+                .is_err()
             {
                 return;
             }
         }
         let actual: [u8; 32] = hasher.finalize().into();
         if total == manifest.size() && actual == manifest.checksum() {
-            let _ = send_frame(channel, &AccountHistoryFrame::AttachmentComplete).await;
+            let _ = self
+                .send_account_frame(
+                    channel,
+                    version,
+                    revision,
+                    &AccountHistoryFrame::AttachmentComplete,
+                )
+                .await;
         }
     }
 
@@ -863,8 +1002,10 @@ impl Node {
         &self,
         peer: &PeerRecord,
         file_conv: ConversationId,
+        version: AccountSyncVersion,
     ) -> Result<(), NodeError> {
-        if !self.device_sync_policy().attachments {
+        let (wanted, revision) = self.device_sync_policy_snapshot();
+        if !wanted.attachments {
             return Ok(());
         }
         let own = self.account_id();
@@ -893,8 +1034,9 @@ impl Node {
             .map_err(transport)?;
         send_frame(
             &mut channel,
+            version,
             &AccountHistoryFrame::AttachmentRequest {
-                version: VERSION,
+                version: version.number(),
                 account_id: own,
                 file_conv: *file_conv.as_bytes(),
             },
@@ -909,8 +1051,11 @@ impl Node {
                 .await
                 .map_err(|_| NodeError::File("attachment read timed out".into()))?
                 .map_err(transport)?;
-            let frame = AccountHistoryFrame::decode(&bytes)
+            let (response_version, frame) = AccountHistoryFrame::decode_versioned(&bytes)
                 .ok_or_else(|| NodeError::File("invalid attachment frame".into()))?;
+            if response_version != version {
+                return Err(NodeError::File("attachment codec changed".into()));
+            }
             match frame {
                 AccountHistoryFrame::AttachmentStart {
                     file_conv: claimed,
@@ -957,14 +1102,20 @@ impl Node {
                         .sync_all()
                         .map_err(|e| NodeError::File(format!("attachment staging: {e}")))?;
                     let dir = staging.take().unwrap();
-                    if !self.device_sync_policy().attachments
+                    let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
+                    let policy = self
+                        .account_sync_policy
+                        .lock()
+                        .expect("account sync policy mutex not poisoned");
+                    if policy.revision() != revision
+                        || !policy.current().attachments
                         || self
                             .files
                             .lock()
                             .expect("files mutex not poisoned")
                             .manifest(&file_conv)
                             .is_none()
-                        || !self.has_live_local_file_card(file_conv)
+                        || !self.has_live_local_file_card_with(file_conv, &delivery)
                     {
                         return Err(NodeError::File("attachment was removed during sync".into()));
                     }
@@ -972,6 +1123,7 @@ impl Node {
                     self.media
                         .store_from_path(file_conv, manifest.name(), &dir.path().join("incoming"))
                         .map_err(|e| NodeError::File(format!("attachment save: {e}")))?;
+                    self.note_account_history_change();
                     return Ok(());
                 }
                 _ => return Err(NodeError::File("unexpected attachment frame".into())),
@@ -1010,7 +1162,11 @@ impl Node {
         Ok(true)
     }
 
-    fn apply_account_history_page(&self, page: &[HistoryRecord]) -> Result<(), NodeError> {
+    fn apply_account_history_page(
+        &self,
+        page: &[HistoryRecord],
+        version: AccountSyncVersion,
+    ) -> Result<(), NodeError> {
         let policy = self.device_sync_policy();
         if policy.history {
             {
@@ -1092,13 +1248,14 @@ impl Node {
                             plaintext: record.plaintext.clone(),
                         })
                         .map_err(NodeError::Log)?;
+                    self.note_account_history_change();
                 }
             }
         }
-        if policy.attachments {
+        if version.includes_file_cards(policy.history, policy.attachments) {
             for record in page {
                 if let HistoryRecord::FileCard(record) = record {
-                    self.import_account_file_card(record)?;
+                    self.import_account_file_card(record, version)?;
                 }
             }
         }
@@ -1110,6 +1267,42 @@ impl Node {
         peer: &PeerRecord,
         cursor: Option<HistoryCursor>,
         known_digest: [u8; 32],
+    ) -> Result<(Option<HistoryCursor>, [u8; 32], AccountSyncVersion), NodeError> {
+        let mut rejected_before_reply = false;
+        let result = self
+            .pull_account_history_version(
+                peer,
+                cursor,
+                known_digest,
+                AccountSyncVersion::V2,
+                &mut rejected_before_reply,
+            )
+            .await;
+        match result {
+            Ok((next, digest)) => Ok((next, digest, AccountSyncVersion::V2)),
+            Err(_) if rejected_before_reply => {
+                let mut ignored = false;
+                self.pull_account_history_version(
+                    peer,
+                    cursor,
+                    known_digest,
+                    AccountSyncVersion::V1,
+                    &mut ignored,
+                )
+                .await
+                .map(|(next, digest)| (next, digest, AccountSyncVersion::V1))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn pull_account_history_version(
+        &self,
+        peer: &PeerRecord,
+        cursor: Option<HistoryCursor>,
+        known_digest: [u8; 32],
+        version: AccountSyncVersion,
+        rejected_before_reply: &mut bool,
     ) -> Result<(Option<HistoryCursor>, [u8; 32]), NodeError> {
         let (wanted, revision) = self.device_sync_policy_snapshot();
         if !wanted.history && !wanted.attachments && !wanted.appearance && !wanted.contacts {
@@ -1134,8 +1327,9 @@ impl Node {
             .map_err(transport)?;
         send_frame(
             &mut channel,
+            version,
             &AccountHistoryFrame::Request {
-                version: VERSION,
+                version: version.number(),
                 account_id: own.clone(),
                 cursor: if wanted.history || wanted.attachments {
                     cursor
@@ -1151,13 +1345,23 @@ impl Node {
         let mut seen_devices = HashSet::new();
         let mut seen_preferences = HashSet::new();
         let mut started_records = false;
+        let mut valid_reply = false;
         loop {
             let bytes = tokio::time::timeout(READ_TIMEOUT, channel.recv())
                 .await
                 .map_err(|_| NodeError::Channel("account-history read timed out".into()))?
-                .map_err(transport)?;
-            let frame = AccountHistoryFrame::decode(&bytes)
+                .map_err(|error| {
+                    *rejected_before_reply = !valid_reply && matches!(&error,
+                        crate::transport::TransportError::Io(io) if matches!(io.kind(),
+                            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe));
+                    transport(error)
+                })?;
+            let (response_version, frame) = AccountHistoryFrame::decode_versioned(&bytes)
                 .ok_or_else(|| NodeError::Channel("invalid account-history response".into()))?;
+            if response_version != version {
+                return Err(NodeError::Channel("account-history codec changed".into()));
+            }
+            valid_reply = true;
             match frame {
                 AccountHistoryFrame::Device { device }
                     if !started_records && page.is_idle() && seen_devices.len() < 64 =>
@@ -1215,7 +1419,7 @@ impl Node {
                         if self.device_sync_policy_snapshot().1 != revision {
                             return Ok((None, [0; 32]));
                         }
-                        self.apply_account_history_page(&complete.records)?;
+                        self.apply_account_history_page(&complete.records, version)?;
                         return Ok((complete.next_cursor, complete.digest));
                     }
                 }
@@ -1259,6 +1463,7 @@ impl Node {
                                 device_id: id,
                                 phase: SyncPhase::Offline,
                                 pending_attachments: 0,
+                                legacy_file_metadata: false,
                                 error: None,
                             },
                         );
@@ -1274,6 +1479,7 @@ impl Node {
                                 device_id: id,
                                 phase: SyncPhase::Error,
                                 pending_attachments: 0,
+                                legacy_file_metadata: false,
                                 error: Some("discovered device identity changed".into()),
                             },
                         );
@@ -1284,6 +1490,7 @@ impl Node {
                     device_id: id.clone(),
                     phase: SyncPhase::CatchingUp,
                     pending_attachments: 0,
+                    legacy_file_metadata: false,
                     error: None,
                 };
                 if !policy.history && !policy.attachments {
@@ -1293,7 +1500,8 @@ impl Node {
                     .pull_account_history_page(&peer, state.next, state.known_digest)
                     .await
                 {
-                    Ok((next, digest)) => {
+                    Ok((next, digest, version)) => {
+                        status.legacy_file_metadata = version == AccountSyncVersion::V1;
                         match next {
                             Some(next) if state.next.is_none() => {
                                 state.next = Some(next);
@@ -1337,7 +1545,18 @@ impl Node {
                         state.next_file = state.next_file.wrapping_add(1);
                         let result = match self.preserve_available_attachment(file) {
                             Ok(true) => Ok(()),
-                            Ok(false) => self.pull_account_attachment(&peer, file).await,
+                            Ok(false) => {
+                                self.pull_account_attachment(
+                                    &peer,
+                                    file,
+                                    if status.legacy_file_metadata {
+                                        AccountSyncVersion::V1
+                                    } else {
+                                        AccountSyncVersion::V2
+                                    },
+                                )
+                                .await
+                            }
                             Err(error) => Err(error),
                         };
                         match result {
@@ -1472,6 +1691,7 @@ mod tests {
                     server_remote
                         .serve_account_history(
                             &mut channel,
+                            AccountSyncVersion::V2,
                             &account_id,
                             cursor,
                             known_digest,

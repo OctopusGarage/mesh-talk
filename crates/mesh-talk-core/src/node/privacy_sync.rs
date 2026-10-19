@@ -1041,7 +1041,30 @@ impl SyncStore for GuardedSyncStore<'_> {
         if self.pull_only {
             return Vec::new();
         }
-        let events = self.visible(conversation);
+        let mut events = self.visible(conversation);
+        if self.node.certified_sibling(&self.peer)
+            && *conversation
+                == super::conversation::dm_conversation_id(&self.node.identity.public(), &self.peer)
+        {
+            let policy = self.node.device_sync_policy();
+            let mut available = have.clone();
+            events.retain(|event| {
+                let selected = match event.kind {
+                    EventKind::Message => policy.history,
+                    EventKind::FileManifest => policy.attachments,
+                    _ => true,
+                };
+                let allowed = selected
+                    && event
+                        .parents
+                        .iter()
+                        .all(|parent| available.contains(parent));
+                if allowed {
+                    available.insert(event.id);
+                }
+                allowed
+            });
+        }
         if !self.inbound && !self.node.shares_replica(conversation) {
             // Share-off applies to outbound retries and explicit sends too.
             // Own records can advance only across parents the receiver already

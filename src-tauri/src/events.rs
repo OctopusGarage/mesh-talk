@@ -11,7 +11,10 @@ use tauri_plugin_notification::NotificationExt;
 const PREVIEW_LEN: usize = 80;
 
 #[derive(Clone, Default)]
-pub struct NotificationContextState(Arc<Mutex<NotificationContext>>);
+pub struct NotificationContextState(
+    Arc<Mutex<NotificationContext>>,
+    Arc<Mutex<crate::channel_reception::ReceptionLedger>>,
+);
 
 #[derive(Clone, Default)]
 struct NotificationContext {
@@ -228,6 +231,16 @@ pub struct ChannelMessageEvent {
     pub from: String,
     pub text: String,
     pub reply_to: Option<String>, // hex EventId of the parent message, if any
+    pub event_id: String,
+    pub authored_at: u64,
+    /// First successful local decryption observation, not a sender clock.
+    pub received_at: u64,
+    pub arrival_kind: &'static str,
+    pub own_device: bool,
+    pub batch_id: Option<String>,
+    pub batch_complete: bool,
+    pub batch_size: usize,
+    pub reception_only: bool,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -297,6 +310,14 @@ pub struct FileReceivedEvent {
     pub mime: String,      // so the UI can decide image/video/other
     pub file_conv: String, // hex — pass to save
     pub media: bool,       // inline media (media button) vs attachment (attach button), by intent
+    pub event_id: String,
+    pub authored_at: u64,
+    pub received_at: u64,
+    pub arrival_kind: &'static str,
+    pub own_device: bool,
+    pub batch_id: Option<String>,
+    pub batch_complete: bool,
+    pub batch_size: usize,
 }
 
 /// Emit a received DM to the frontend (text decoded lossily for display).
@@ -329,26 +350,67 @@ pub fn emit_dm_received<R: Runtime>(
 
 pub fn emit_channel_message<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    channel_id: String,
-    channel_name: String,
-    from: String,
-    text: Vec<u8>,
-    reply_to: Option<EventId>,
+    owner: &str,
+    msg: mesh_talk_core::node::ReceivedChannelMessage,
 ) {
+    use crate::channel_reception::Alert;
     let event = ChannelMessageEvent {
-        channel_id,
-        channel_name,
-        from,
-        text: String::from_utf8_lossy(&text).into_owned(),
-        reply_to: reply_to.map(|id| hex::encode(id.as_bytes())),
+        channel_id: hex::encode(msg.channel_id.as_bytes()),
+        channel_name: msg.channel_name,
+        from: msg.from,
+        text: String::from_utf8_lossy(&msg.text).into_owned(),
+        reply_to: msg.reply_to.map(|id| hex::encode(id.as_bytes())),
+        event_id: msg.event_id.to_hex(),
+        authored_at: msg.wall_clock,
+        received_at: msg.received_at,
+        arrival_kind: msg.arrival_kind,
+        own_device: msg.own_device,
+        batch_id: msg.batch_id,
+        batch_complete: msg.batch_complete,
+        batch_size: msg.batch_size,
+        reception_only: msg.reception_only,
     };
-    notify_if_unfocused(
-        app_handle,
-        NotificationTarget::Channel(&event.channel_id),
-        &format!("# {}", event.channel_name),
-        &event.text,
-    );
-    if crate::app_lock::app_locked(app_handle) {
+    let alert = app_handle
+        .try_state::<NotificationContextState>()
+        .and_then(|state| {
+            let mut ledger = state.1.lock().ok()?;
+            Some(if event.reception_only {
+                ledger.complete(
+                    owner,
+                    &event.channel_id,
+                    event.batch_id.as_deref().unwrap_or(&event.event_id),
+                )
+            } else {
+                ledger.accept(
+                    owner,
+                    &event.channel_id,
+                    &event.event_id,
+                    event.arrival_kind,
+                    event.own_device,
+                    event.batch_id.as_deref(),
+                    event.batch_complete,
+                )
+            })
+        });
+    let Some(decision) = alert else {
+        return;
+    };
+    match decision.alert {
+        Alert::Live => notify_if_unfocused(
+            app_handle,
+            NotificationTarget::Channel(&event.channel_id),
+            &format!("# {}", event.channel_name),
+            &event.text,
+        ),
+        Alert::Summary(count) => notify_if_unfocused(
+            app_handle,
+            NotificationTarget::Channel(&event.channel_id),
+            &format!("# {}", event.channel_name),
+            &format!("{count} messages received while catching up"),
+        ),
+        Alert::Silent => {}
+    }
+    if !decision.emit || crate::app_lock::app_locked(app_handle) {
         return;
     }
     if let Err(e) = app_handle.emit(EVENT_CHANNEL_MESSAGE, event) {
@@ -358,32 +420,60 @@ pub fn emit_channel_message<R: Runtime>(
 
 pub fn emit_file_received<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    conv: String,
-    is_channel: bool,
-    from: String,
-    name: String,
-    size: u64,
-    mime: String,
-    file_conv: String,
-    media: bool,
+    owner: &str,
+    file: mesh_talk_core::node::ReceivedFile,
 ) {
+    use crate::channel_reception::Alert;
     let event = FileReceivedEvent {
-        conv,
-        is_channel,
-        from,
-        name,
-        size,
-        mime,
-        file_conv,
-        media,
+        conv: hex::encode(file.conv.as_bytes()),
+        is_channel: file.is_channel,
+        from: file.from,
+        name: file.name,
+        size: file.size,
+        mime: file.mime,
+        file_conv: hex::encode(file.file_conv.as_bytes()),
+        media: file.media,
+        event_id: file.event_id.to_hex(),
+        authored_at: file.authored_at,
+        received_at: file.received_at,
+        arrival_kind: file.arrival_kind,
+        own_device: file.own_device,
+        batch_id: file.batch_id,
+        batch_complete: file.batch_complete,
+        batch_size: file.batch_size,
     };
-    notify_if_unfocused(
-        app_handle,
-        NotificationTarget::File,
-        &event.from,
-        "sent a file",
-    );
-    if crate::app_lock::app_locked(app_handle) {
+    let decision = app_handle
+        .try_state::<NotificationContextState>()
+        .and_then(|state| {
+            Some(state.1.lock().ok()?.accept(
+                owner,
+                &event.conv,
+                &event.event_id,
+                event.arrival_kind,
+                event.own_device,
+                event.batch_id.as_deref(),
+                event.batch_complete,
+            ))
+        });
+    let Some(decision) = decision else {
+        return;
+    };
+    let target = if event.is_channel {
+        NotificationTarget::Channel(&event.conv)
+    } else {
+        NotificationTarget::File
+    };
+    match decision.alert {
+        Alert::Live => notify_if_unfocused(app_handle, target, &event.from, "sent a file"),
+        Alert::Summary(count) => notify_if_unfocused(
+            app_handle,
+            target,
+            "Mesh-Talk",
+            &format!("{count} file messages received while catching up"),
+        ),
+        Alert::Silent => {}
+    }
+    if !decision.emit || crate::app_lock::app_locked(app_handle) {
         return;
     }
     if let Err(e) = app_handle.emit(EVENT_FILE_RECEIVED, event) {

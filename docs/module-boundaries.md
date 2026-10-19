@@ -195,3 +195,12 @@ the Rust module/public-export structure, host adapters, and the feature owners
 above. It is not an exhaustive line-by-line audit or proof that all bugs have
 been eliminated. The historical [boundary audit](evals/architecture-boundaries-2026-10-15.md)
 records earlier findings and fixes; this file is the maintained ownership guide.
+
+## Public help
+
+`docs/help/` owns the English task manual and stable feature catalog.
+`frontend/src/features/help/` renders bundled offline help and resolves explicit
+reading-to-settings navigation. `tools/help/` owns shared search, restricted
+Markdown rendering, static publication and read-only documentation MCP. These
+modules consume no private messaging state and introduce no core protocol
+responsibility. See [help system maintenance](help-system.md).

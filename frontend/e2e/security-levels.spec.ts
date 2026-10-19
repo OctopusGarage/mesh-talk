@@ -1,6 +1,6 @@
 import { selectSettingsCategory } from "./helpers/settings";
 import { expect, test } from "./tauri-mock";
-import { enterChat } from "./helpers/session";
+import { waitForChatShell, enterChat } from "./helpers/session";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 
 test("privacy presets remain editable and manual lock requires reauthentication", async ({
@@ -27,5 +27,5 @@ test("privacy presets remain editable and manual lock requires reauthentication"
   await expect(page.getByTestId("lock-screen")).toBeVisible();
   await page.getByPlaceholder("Password").fill("password123");
   await page.getByRole("button", { name: "Unlock", exact: true }).click();
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
 });

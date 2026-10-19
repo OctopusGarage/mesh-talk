@@ -111,7 +111,12 @@ export interface HiddenContactsSnapshot {
   contacts: HiddenContact[];
 }
 
+export interface ChannelRecovery {
+  phase: "waiting_for_peer" | "catching_up" | "peer_checked";
+  checked_at?: number | null;
+}
 export interface ChannelInfo {
+  recovery?: ChannelRecovery | null;
   channel_id: string;
   name: string;
   member_count: number;
@@ -295,7 +300,21 @@ export interface DmReceivedEvent {
   reply_to: string | null;
 }
 
-export interface ChannelMessageEvent {
+export type ArrivalKind = "live" | "catch_up" | "history_sync";
+export interface ReceptionMetadata {
+  event_id?: string;
+  authored_at?: number;
+  received_at?: number;
+  arrival_kind?: ArrivalKind;
+  batch_id?: string | null;
+  /** Batch control only: never index, reload, or count this as a message. */
+  reception_only?: boolean;
+  batch_complete?: boolean;
+  batch_size?: number;
+  own_device?: boolean;
+}
+
+export interface ChannelMessageEvent extends ReceptionMetadata {
   channel_id: string;
   channel_name: string;
   from: string;
@@ -310,7 +329,7 @@ export interface IntegrationMessageAcceptedEvent {
   destination: { kind: "account" | "channel"; id: string };
 }
 
-export interface FileReceivedEvent {
+export interface FileReceivedEvent extends ReceptionMetadata {
   conv: string;
   is_channel: boolean; // emitted by the same installed native app, not over the network
   from: string;

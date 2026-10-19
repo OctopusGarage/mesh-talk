@@ -57,11 +57,11 @@ export function ChatApp() {
     error?.startsWith("Couldn't send file: ") ||
     error?.startsWith("This attachment ");
   const unread = useChat((s) => s.unread);
+  const markLegacyActiveRead = useChat((s) => s.markLegacyActiveRead);
   const pendingUnknownUnread = useChat((s) => s.pendingUnknownUnread);
   const totalUnread =
     Object.values(unread).reduce((sum, count) => sum + count, 0) +
     Object.values(pendingUnknownUnread).reduce((sum, count) => sum + count, 0);
-  const markActiveRead = useChat((s) => s.markActiveRead);
 
   useEffect(() => {
     if (owner && owner === unreadOwner && accountId && ready) {
@@ -120,11 +120,9 @@ export function ChatApp() {
     syncBadge();
     // macOS can clear its Dock badge on activation. Restore the sidebar total.
     const onFocus = () => {
-      markActiveRead();
-      // The native activation event may arrive before the webview reports focus.
-      // Try again on the next frame so the already open chat becomes read.
+      markLegacyActiveRead();
       cancelAnimationFrame(focusFrame);
-      focusFrame = requestAnimationFrame(() => markActiveRead());
+      focusFrame = requestAnimationFrame(markLegacyActiveRead);
       const count =
         Object.values(useChat.getState().unread).reduce(
           (sum, value) => sum + value,
@@ -137,11 +135,13 @@ export function ChatApp() {
       void chatApi.setBadge(count, owner).catch(() => {});
     };
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
     return () => {
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
       cancelAnimationFrame(focusFrame);
     };
-  }, [totalUnread, owner, generation, markActiveRead]);
+  }, [totalUnread, owner, generation, markLegacyActiveRead]);
 
   useEffect(() => {
     if (!owner) return;

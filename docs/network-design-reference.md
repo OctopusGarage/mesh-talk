@@ -158,6 +158,14 @@ Role classification and route classification are separate. A post office belongs
 
 ### User-facing identity, membership and network details
 
+The [group reception contract](group-conversation-reception.md) separates author
+time, causal conversation order and local arrival observation. Recovery status
+must describe only local work and checked reachable peers; it cannot certify
+global history completeness. Catch-up and own-device replication must not replay
+live-message notifications. Group custody, recipient delivery, reading and file
+byte availability remain distinct evidence. Legacy archive rows without signed
+ancestry use an explicit compatible fallback rather than invented causal proof.
+
 The [member profile](../frontend/src/features/chat/MemberProfileDialog.tsx) uses [shared profile projection](../frontend/src/features/chat/memberProfileDetails.ts) to show the account ID, known device IDs and observed network endpoints. A device that is no longer in the live roster can still appear as a historical/profile target with an unavailable endpoint. Displayed endpoints are observations, not proof of physical location, a unique machine or a directly usable remote listener.
 
 Sidebar contacts, group invite candidates and counts must use the shared person/role projection. Raw connection diagnostics may include post offices because their role and endpoint matter for routing. Group membership is owned by signed channel state, not rebuilt from whoever is currently discoverable. A member can be offline without leaving the group; a discovered relay cannot become a member through a UI picker.
@@ -484,6 +492,12 @@ Current `send_call_signal` is ephemeral, device-addressed and uses a fresh live 
 A one-time 128-bit code authorizes a specific device identity to obtain the account secret/certificate and eligible backfill over Noise. Enrollment is durable before use. It permits only the exact certified Ed25519/X25519 identity to adopt the account; fresh signed announcements alone cannot rebind a historical identity.
 
 The enrollment transition serializes current-code validation and durable authority changes, invalidates pre-transition managed session guards, clears idle reuse and refreshes only its current pairing exchange. Code consumption is atomic. After a lost response/adoption failure, a new valid code can authorize a restricted incoming pairing-only retry for the exact prior enrolled binding; that channel cannot enter ordinary sync, calls or attachment/history protocols before code validation. New account presence permanently retires the old-binding retry exception.
+
+Upgraded pairing uses `MTPQ2` to authenticate the requested history choice before any backfill crosses the channel. A strict no-history request requires this capability; it does not retry the legacy request. History-enabled clients may retry legacy pairing once, only before any valid response. Ongoing `MTAHS2` reconciliation separates file cards from file bytes; frozen `MTAHS1` retains its attachment-coupled behavior. Source and receiver category intersections and process-local policy revisions guard selected exports and durable imports. These changes keep the existing bounded page/frame budgets.
+
+Channel archive, file-card and attachment-byte exports require both source and requester to be accepted channel members. A pending invitation alone is not read permission.
+
+Saved Messages is the self-account route. With no siblings, acceptance commits local history and encrypted file retention without reserving remote delivery capacity. A later certified sibling can reconcile retained records with their original logical IDs. Signed personal file evidence binds the exact manifest to its personal host; it does not grant access to unrelated account or channel files. Local acceptance and a completed selected exchange are distinct facts, and neither promises indefinite availability.
 
 After restart, the account-device registry reconstructs expected bindings and obsolete roster presence stays retired. Certified siblings use their own live authenticated account-sync path and device-local category controls for ongoing history/settings/media catch-up. Ordinary message fanout or directory visibility does not replace that protocol. Pairing/replay must retain original logical IDs and avoid duplicating local history.
 

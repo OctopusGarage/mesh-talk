@@ -102,11 +102,13 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                     let _ = channel_authority.current(|_| {
                         crate::events::emit_channel_message(
                             &app_handle_for_channel,
-                            hex::encode(msg.channel_id.as_bytes()),
-                            msg.channel_name,
-                            msg.from,
-                            msg.text,
-                            msg.reply_to,
+                            &format!(
+                                "{}:{}:{}",
+                                channel_authority.lease.owner(),
+                                channel_authority.lease.generation(),
+                                channel_authority.ticket
+                            ),
+                            msg,
                         );
                     });
                 }),
@@ -114,14 +116,13 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                     let _ = file_authority.current(|_| {
                         crate::events::emit_file_received(
                             &app_handle_for_file,
-                            hex::encode(f.conv.as_bytes()),
-                            f.is_channel,
-                            f.from,
-                            f.name,
-                            f.size,
-                            f.mime,
-                            hex::encode(f.file_conv.as_bytes()),
-                            f.media,
+                            &format!(
+                                "{}:{}:{}",
+                                file_authority.lease.owner(),
+                                file_authority.lease.generation(),
+                                file_authority.ticket
+                            ),
+                            f,
                         );
                     });
                 }),

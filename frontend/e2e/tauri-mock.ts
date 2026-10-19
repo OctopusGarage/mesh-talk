@@ -622,7 +622,7 @@ export const test = base.extend({
         name: p.name,
         ip: p.addr.split(":")[0],
         tcp_port: 47100,
-        post_office: false,
+        post_office: p.post_office,
         account_id: p.account_id,
         last_seen_secs: i === 0 ? 3 : 90,
       }));
@@ -805,8 +805,13 @@ export const test = base.extend({
           // history
           history: (a) => msgs[`dm:${a.peer}`] ?? [],
           account_history: (a) => msgs[`acc:${a.account}`] ?? [],
-          channel_history: (a) =>
-            dataMode === "invite" ? [] : (msgs[`ch:${a.channelId}`] ?? []),
+          channel_history: (a) => {
+            const history =
+              dataMode === "invite" ? [] : (msgs[`ch:${a.channelId}`] ?? []);
+            return dataMode === "group-reception-window"
+              ? history.slice(-Number(a.limit ?? 200))
+              : history;
+          },
 
           // reactions
           reactions: (a) => reacts[`dm:${a.peer}`] ?? [],
@@ -1386,8 +1391,14 @@ export const test = base.extend({
         conv: string,
         text: string,
         who: string,
+        metadata?: { id?: string; index?: number; wall_clock?: number },
       ) => {
-        (msgs[conv] ||= []).push(msg({ from_me: false, who, text }));
+        const entry = msg({ from_me: false, who, text, ...metadata });
+        const history = (msgs[conv] ||= []);
+        if (metadata?.index !== undefined)
+          history.splice(metadata.index, 0, entry);
+        else history.push(entry);
+        return entry.id;
       };
 
       Object.defineProperty(window, "__TAURI_INTERNALS__", {

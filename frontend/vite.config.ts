@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import { fileURLToPath, URL } from "node:url";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { loadHelp } from "../tools/help/load.mjs";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
@@ -40,6 +41,14 @@ export default defineConfig(({ command, mode }) => {
     publicDir: false,
     plugins: [
       react(),
+      {
+        name: "mesh-talk-help-content",
+        async buildStart() {
+          await loadHelp({
+            root: fileURLToPath(new URL("../", import.meta.url)),
+          });
+        },
+      },
       {
         name: "mesh-talk-bundled-packs",
         configureServer(server) {

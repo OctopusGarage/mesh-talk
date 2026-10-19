@@ -262,6 +262,52 @@ test("diagnostics copy controls report clipboard failure", async ({ page }) => {
   await expect(dialog.getByRole("alert")).toContainText("Couldn't copy");
 });
 
+for (const theme of [null, "oled"] as const) {
+  test(`pairing publishes ${theme ? "saved appearance only" : "no fresh appearance defaults"}`, async ({
+    page,
+  }) => {
+    await page.addInitScript((savedTheme) => {
+      if (savedTheme) localStorage.setItem("mesh-talk-theme", savedTheme);
+    }, theme);
+    await enterChat(page);
+    await page.evaluate(() => {
+      const win = window as typeof window & {
+        __appearanceWrites: { key: unknown; value: unknown }[];
+        __TAURI_INTERNALS__: {
+          invoke: (
+            command: string,
+            args: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      };
+      win.__appearanceWrites = [];
+      const original = win.__TAURI_INTERNALS__.invoke;
+      win.__TAURI_INTERNALS__.invoke = (command, args) => {
+        if (
+          command === "set_account_preference" &&
+          args.category === "appearance"
+        ) {
+          win.__appearanceWrites.push({ key: args.key, value: args.value });
+        }
+        return original(command, args);
+      };
+    });
+    await page.getByTestId("sidebar-overflow").click();
+    await page.getByTestId("sidebar-action-link").click();
+    await page.getByTestId("link-show-code").click();
+    await expect(page.getByTestId("pairing-code")).toBeVisible();
+    const writes = await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __appearanceWrites: { key: unknown; value: unknown }[];
+          }
+        ).__appearanceWrites,
+    );
+    expect(writes).toEqual(theme ? [{ key: "theme", value: theme }] : []);
+  });
+}
+
 test("closing during code generation cleans up the late pairing session", async ({
   page,
 }) => {

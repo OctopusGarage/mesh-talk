@@ -231,7 +231,20 @@
     "dropToSend": "ドロップして {{name}} に送信",
     "clearHistory": "履歴を消去",
     "clearHistoryConfirm": "この端末のこの会話のメッセージを完全に消去します。元に戻せません。相手の端末には影響しません。",
-    "noPeersHint": "Mesh-Talk はローカルネットワーク上の相手を探します。両方の端末を同じ LAN に接続してください。"
+    "noPeersHint": "Mesh-Talk はローカルネットワーク上の相手を探します。両方の端末を同じ LAN に接続してください。",
+    "earlierMessages": "以前のメッセージを受信",
+    "newMessages": "新しいメッセージ",
+    "catchingUp": "受信した履歴を取得中…",
+    "waitingForPeer": "接続可能なピアを待機中",
+    "delayedMessage": "後から受信",
+    "receivedLocally": "この端末での受信日時: {{time}}",
+    "unreadSummary": "{{count}}件の未読メッセージ",
+    "unreadSummary_one": "{{count}}件の未読メッセージ",
+    "unreadUnavailable": "このメッセージはこの端末で利用可能な履歴の範囲外です。",
+    "markConversationRead": "会話を既読にする",
+    "peerChecked": "接続可能なメンバーを確認済み",
+    "peerCheckedDetail": "接続可能なメンバーの最終確認: {{time}}。オフラインのメンバーに他のメッセージがある可能性があります。",
+    "moreUnread": "他にも未読メッセージがあります"
   },
   "presence": {
     "online": "オンライン",
@@ -567,9 +580,9 @@
   "linkDevice": {
     "syncTitle": "この端末で同期",
     "historySync": "メッセージ履歴",
-    "historySyncDescription": "リンクした端末とダイレクトメッセージとチャンネルの履歴を送受信します。",
+    "historySyncDescription": "リンク済みデバイスと、個人・グループのメッセージやファイル情報を共有します。",
     "attachmentsSync": "添付ファイル",
-    "attachmentsSyncDescription": "リンクした端末から利用可能な過去のファイルと検証済みのデータをコピーします。",
+    "attachmentsSyncDescription": "リンク済みデバイスとファイルの実データを共有・ダウンロードします。ファイル情報はメッセージ履歴でも同期されます。",
     "profileSync": "アカウントのアバター",
     "profileSyncDescription": "リンクした端末からアバターの変更を受信します。",
     "appearanceSync": "外観",
@@ -605,7 +618,8 @@
     "rotateIdentity": "新しいアカウントIDに切り替えます。",
     "rekey": "鍵を再生成",
     "rekeyed": "鍵を再生成しました。新しいアカウント：{{id}}…",
-    "rekeyFailed": "鍵の再生成に失敗しました：{{error}}"
+    "rekeyFailed": "鍵の再生成に失敗しました：{{error}}",
+    "legacyFileMetadata": "リンク済みデバイスを更新すると、ファイル情報をダウンロードと別に同期できます。"
   },
   "webrtcTest": {
     "trigger": "音声・ビデオの自己テスト",
@@ -910,5 +924,26 @@
     "endpointHint": "最後に確認されたネットワーク経路です。中継ノードを指す場合があり、地理的な位置は示しません。",
     "view": "プロフィールを見る",
     "viewNamed": "{{name}}のプロフィールを見る"
+  },
+  "personal": {
+    "title": "保存済みメッセージ",
+    "description": "デバイス間で共有するメモとファイル",
+    "saved": "このデバイスに保存済み",
+    "fileCardSaved": "ファイル情報をこのデバイスに保存済み"
+  },
+  "help": {
+    "title": "ヘルプ",
+    "description": "バージョン {{version}} · オフラインで利用可能",
+    "search": "ヘルプを検索",
+    "clearSearch": "検索をクリア",
+    "topicCount_one": "{{count}} 件のトピック",
+    "topicCount_other": "{{count}} 件のトピック",
+    "topics": "ヘルプのトピック",
+    "noResults": "一致するトピックがありません。短い語句で検索するか、検索をクリアしてすべてのガイドをご覧ください。",
+    "englishFallback": "記事は現在英語で提供されています。一般的な中国語の検索語にも対応しています。",
+    "openSettings": "{{category}}を開く",
+    "openDiagnostics": "接続診断を開く",
+    "online": "オンラインで読む",
+    "linkFailed": "リンクを開けませんでした。再試行するか、ブラウザーでオンラインマニュアルを開いてください。"
   }
 }

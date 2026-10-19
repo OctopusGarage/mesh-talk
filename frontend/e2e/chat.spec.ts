@@ -3,7 +3,11 @@ import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { seedMarketPacks } from "./helpers/packs";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
-import { revealComposerTools } from "./helpers/session";
+import {
+  waitForChatShell,
+  enterChat,
+  revealComposerTools,
+} from "./helpers/session";
 
 // Stable scenario ids — mirror e2e/tauri-mock.ts.
 const BOB = { account: "acc_bob_bbbb2222" };
@@ -25,17 +29,6 @@ async function signIn(page: Page, user = "tester") {
   await page.getByTestId("login-submit").click();
 }
 
-/** Full path to a rendered, ready chat shell with the roster loaded. */
-async function enterChat(page: Page, user = "tester", path = "/") {
-  await register(page, user, path);
-  await signIn(page, user);
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
-  // Roster has loaded once the seeded contact row is present (node boot resolved).
-  await expect(
-    page.getByTestId(`conversation-row-${BOB.account}`),
-  ).toBeVisible();
-}
-
 /** Open Bob's DM and wait for its (seeded) history to render. */
 async function openBobDm(page: Page) {
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
@@ -52,7 +45,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByText("Account created")).toBeVisible();
     await signIn(page);
 
-    await expect(page.getByTestId("chat-shell")).toBeVisible();
+    await waitForChatShell(page);
     // Identity is present (the glyph + own name), and no blank/black screen regression.
     await expect(page.getByTestId("self-identity")).toBeVisible();
     await expect(page.locator("#root")).not.toBeEmpty();
@@ -65,7 +58,7 @@ test.describe("Mesh-Talk UI flow", () => {
   }) => {
     await enterChat(page, "guard");
     await expect(page.locator("#root")).not.toBeEmpty();
-    await expect(page.getByTestId("chat-shell")).toBeVisible();
+    await waitForChatShell(page);
     await expect(page.getByText("Something went wrong")).toHaveCount(0);
   });
 
@@ -151,12 +144,12 @@ test.describe("Mesh-Talk UI flow", () => {
 
     const log = page.getByRole("log");
     await expect(log.getByText("latest-after-reading")).toBeInViewport();
-    await log.evaluate((element) => {
-      element.scrollTop = 80;
-    });
+    await log.hover();
+    await page.mouse.wheel(0, -600);
     const jump = page.getByRole("button", { name: "Jump to latest messages" });
     await expect(jump).toBeVisible();
     const before = await log.evaluate((element) => element.scrollTop);
+    expect(before).toBeGreaterThan(0);
 
     await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
     await page.getByTestId(`conversation-row-${BOB.account}`).click();
