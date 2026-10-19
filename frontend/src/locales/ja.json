@@ -260,6 +260,7 @@
     "groupSummary": "メンバー {{total}} 人 · オンライン確認 {{online}} 人",
     "groupUpdating": "メンバーの状態を更新中…",
     "groupUnbound": "{{summary}} · アカウント未関連付けのメンバー端末 {{count}} 台",
+    "queuePersistenceFailed": "自動ダウンロードの待機リストを再起動後に復元できません：{{error}}",
     "unavailable": "オンライン状態を更新できません。既存の観測情報は通常どおり期限切れになります。自動で再試行しています。",
     "observedDevices": "新しく確認したオンライン端末：{{count}} 台",
     "source_local": "ローカルネットワークで検出",
@@ -544,6 +545,7 @@
     "nothingReceived": "まだ何も受信していません。",
     "couldntSave": "ファイルを保存できませんでした：{{error}}",
     "savedTo": "保存先: {{path}}",
+    "unavailable": "添付ファイルは利用できません",
     "alreadyDownloaded": "ダウンロード済みです —「表示」で見つけられます。",
     "couldntOpen": "開けませんでした：{{error}}",
     "chooseFolder": "既定のダウンロードフォルダを選択",
@@ -912,6 +914,8 @@
     "idConflict": "別の種類のライブラリがこのパックIDを使用しています。"
   },
   "memberProfile": {
+    "originalName": "元の名前",
+    "remark": "メモ名",
     "title": "メンバープロフィール",
     "description": "このメンバーの識別情報と既知のネットワーク情報。",
     "presenceUnavailable": "在席情報なし",

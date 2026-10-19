@@ -128,3 +128,29 @@ it("ignores malformed saved paths for an account", () => {
   expect(savedDownloadPath("file")).toBeUndefined();
   vi.unstubAllGlobals();
 });
+
+it("records a completed old-owner export without exposing it to a replacement owner", async () => {
+  const { rememberSavedDownloadForOwner } = await import("./savedDownloads");
+  const store = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => store.set(key, value),
+  });
+  useAuth.setState({
+    user: {
+      id: "replacement",
+      username: "replacement",
+      display_name: "Replacement",
+    },
+  });
+  rememberSavedDownloadForOwner(
+    "original",
+    "completed",
+    "/Downloads/completed.pdf",
+  );
+  expect(savedDownloadPath("completed")).toBeUndefined();
+  expect(JSON.parse(store.get("mesh-talk-downloads:original")!).completed).toBe(
+    "/Downloads/completed.pdf",
+  );
+  vi.unstubAllGlobals();
+});

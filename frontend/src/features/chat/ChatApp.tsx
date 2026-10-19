@@ -1,3 +1,7 @@
+import {
+  startAutomaticDownloads,
+  useAutomaticDownloads,
+} from "@/lib/automaticDownloads";
 import { PresenceAvailability } from "./PresenceAvailability";
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -28,6 +32,9 @@ export function ChatApp() {
   const ready = useChat((s) => s.ready);
   const presenceRun = useChat((s) => s.runEpoch);
   const presenceIdentity = useChat((s) => s.identityEpoch);
+  const downloadPersistenceError = useAutomaticDownloads(
+    (s) => s.persistenceError,
+  );
   const [mediaWarning, setMediaWarning] = useState(false);
   const active = useChat((s) => s.active);
   const peers = useChat((s) => s.peers);
@@ -149,6 +156,10 @@ export function ChatApp() {
     return stop;
   }, [start, owner, generation]);
 
+  useEffect(() => {
+    if (owner && ready) return startAutomaticDownloads();
+  }, [owner, generation, ready, presenceRun, presenceIdentity]);
+
   // Presence polls on its own slow interval into an isolated store — kept apart from the
   // chat store so a presence tick never re-renders the virtualized message list.
   useEffect(() => {
@@ -167,6 +178,16 @@ export function ChatApp() {
       <CallDialog />
       <div className="absolute inset-x-4 top-3 z-40 flex flex-col gap-2">
         <PresenceAvailability />
+        {downloadPersistenceError && (
+          <div
+            role="alert"
+            className="rounded-md border border-destructive/40 bg-popover px-4 py-3 text-sm text-foreground shadow-elevation"
+          >
+            {t("files.queuePersistenceFailed", {
+              error: downloadPersistenceError,
+            })}
+          </div>
+        )}
         {mediaWarning && (
           <div
             role="alert"

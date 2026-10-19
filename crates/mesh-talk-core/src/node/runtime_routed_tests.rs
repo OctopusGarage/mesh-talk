@@ -472,3 +472,88 @@ async fn startup_network_options_precede_discovery_and_delivery_launch() {
     );
     runtime.stop().await;
 }
+
+#[tokio::test]
+async fn offline_account_names_survive_roster_expiry_and_restart_without_presence() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = NodeRuntime::start(
+        dir.path(),
+        "owner",
+        "Owner",
+        "pw",
+        0,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let device = crate::identity::device::DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let older = crate::identity::device::DeviceIdentity::generate();
+    let old_proof = crate::discovery::Announce::new_with_account(&older, &account, "Old name", 1);
+    runtime.roster.lock().unwrap().update(
+        &old_proof,
+        "127.0.0.2".parse().unwrap(),
+        runtime.user_id(),
+    );
+    runtime.handle().cached_peer_snapshot().unwrap();
+    assert_eq!(
+        runtime.known_account_names()[&account.account_id()][0],
+        "Old name"
+    );
+    let proof = crate::discovery::Announce::new_with_account(&device, &account, "Messi10", 1);
+    runtime
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, "127.0.0.1".parse().unwrap(), runtime.user_id());
+    runtime.handle().cached_peer_snapshot().unwrap();
+    assert_eq!(
+        runtime.known_account_names()[&account.account_id()][0],
+        "Messi10"
+    );
+    runtime.roster.lock().unwrap().update(
+        &old_proof,
+        "127.0.0.2".parse().unwrap(),
+        runtime.user_id(),
+    );
+    runtime.handle().cached_peer_snapshot().unwrap();
+    assert_eq!(
+        runtime.known_account_names()[&account.account_id()][0],
+        "Messi10"
+    );
+    runtime.roster.lock().unwrap().evict_stale(Duration::ZERO);
+    assert!(runtime.peers().is_empty());
+    assert_eq!(
+        runtime.known_account_names()[&account.account_id()][0],
+        "Messi10"
+    );
+    drop(runtime);
+    let reopened = NodeRuntime::start(
+        dir.path(),
+        "owner",
+        "Owner",
+        "pw",
+        0,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reopened.known_account_names()[&account.account_id()][0],
+        "Messi10"
+    );
+    assert!(
+        reopened
+            .peers()
+            .iter()
+            .all(|peer| peer.presence_evidence(std::time::Instant::now()).is_empty())
+    );
+}

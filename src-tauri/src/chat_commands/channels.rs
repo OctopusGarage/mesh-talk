@@ -57,6 +57,7 @@ pub async fn channel_members(
     // been evicted from the roster) still shows the last name we saw, not a raw hex id.
     // Ourselves: we're never in our own roster, so use our own advertised name.
     let self_uid = rt.user_id();
+    let known_names = rt.known_account_names();
     let pending: std::collections::HashSet<_> =
         rt.channel_pending_members(channel).into_iter().collect();
     let members = rt
@@ -64,16 +65,21 @@ pub async fn channel_members(
         .into_iter()
         .map(|p| {
             let user_id = p.user_id();
-            let name = if user_id == self_uid {
-                rt.display_name().to_string()
-            } else {
-                rt.display_name_for(&user_id)
-                    .unwrap_or_else(|| user_id.clone())
-            };
             let account_id = if user_id == self_uid {
                 Some(rt.account_id().to_string())
             } else {
                 rt.account_id_for_device(&p)
+            };
+            let name = if user_id == self_uid {
+                rt.display_name().to_string()
+            } else {
+                account_id
+                    .as_ref()
+                    .and_then(|id| known_names.get(id))
+                    .and_then(|names| names.first())
+                    .cloned()
+                    .or_else(|| rt.display_name_for(&user_id))
+                    .unwrap_or_else(|| user_id.clone())
             };
             ChannelMemberInfo {
                 pending: pending.contains(&user_id),

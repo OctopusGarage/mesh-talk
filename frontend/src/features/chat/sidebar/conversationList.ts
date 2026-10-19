@@ -7,7 +7,7 @@ import type {
   PresenceMap,
 } from "@/lib/types";
 import { isContactPeer, peerAccountKey } from "@/lib/rosterProjection";
-import { shortId } from "@/lib/format";
+import { displayIdentity } from "@/lib/displayIdentity";
 import type { Conversation } from "@/store/chat";
 
 /** The same row contract drives pinned, ordinary and virtualized sections. */
@@ -55,7 +55,8 @@ export function conversationList(
   for (const a of accounts) {
     const id = a.account_id;
     if (id === ownAccount) continue;
-    const renameName = a.names[0] || shortId(id);
+    const identity = displayIdentity({ accountId: id, accounts, favorites });
+    const renameName = identity.canonicalName;
     const row: ConversationListRow = {
       id,
       renameName,
@@ -63,7 +64,7 @@ export function conversationList(
       conv: {
         kind: "account",
         id,
-        name: favorites[id]?.custom_alias || renameName,
+        name: identity.name,
       },
       pinned: favorites[id]?.pinned ?? false,
       subtitle: t("sidebar.devices", { count: a.device_count }),

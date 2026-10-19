@@ -308,8 +308,12 @@ export const chat = {
     invoke<void>("set_attachment_contact_auto", { account, auto }),
   decideAttachment: (fileConv: string, accept: boolean) =>
     invoke<void>("decide_attachment", { fileConv, accept }),
-  saveFileToDir: (fileConv: string, dir: string) =>
-    invoke<string>("save_file_to_dir", { fileConv, dir }),
+  saveFileToDir: (fileConv: string, dir: string, expectedOwner?: string) =>
+    invoke<string>("save_file_to_dir", {
+      fileConv,
+      dir,
+      ...(expectedOwner ? { expectedOwner } : {}),
+    }),
   /** The platform's standard Downloads folder (macOS ~/Downloads, Windows Downloads, Linux
    * XDG_DOWNLOAD_DIR → ~/Downloads). The default save location when none is configured. */
   defaultDownloadDir: () => invoke<string | null>("default_download_dir"),

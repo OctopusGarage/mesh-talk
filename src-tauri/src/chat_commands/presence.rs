@@ -138,7 +138,7 @@ pub async fn get_presence(
         evidence: vec![PresenceEvidence {
             source: "self",
             last_seen_secs: 0,
-            expires_in_secs: 30,
+            expires_in_secs: mesh_talk_core::discovery::roster::PUBLIC_PRESENCE_TTL.as_secs(),
         }],
     });
     for person in out.values_mut() {
@@ -222,7 +222,7 @@ mod tests {
     fn presence_deduplicates_people_and_paths_and_does_not_gossip() {
         let account = Account::generate();
         let mut roster = Roster::default();
-        for (index, age) in [(1, 0), (2, 60)] {
+        for (index, age) in [(1, 0), (2, 10)] {
             let device = DeviceIdentity::generate();
             let proof = Announce::new_with_account(&device, &account, "same name", 1);
             roster.update(&proof, format!("127.0.0.{index}").parse().unwrap(), "self");

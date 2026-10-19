@@ -1,3 +1,4 @@
+import { notifyIncomingFileDismissed } from "@/lib/incomingFileDismissal";
 import { saveAttachment } from "@/lib/attachmentSave";
 import { create } from "zustand";
 import { createChannelActions, type ChannelActions } from "./channelActions";
@@ -491,10 +492,12 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }
   },
 
-  dismissFile: (fileConv) =>
+  dismissFile: (fileConv) => {
+    notifyIncomingFileDismissed(fileConv);
     rawSet((s) => ({
       incomingFiles: s.incomingFiles.filter((f) => f.fileConv !== fileConv),
-    })),
+    }));
+  },
 
   start: () => {
     rawSet((s) => ({ runEpoch: s.runEpoch + 1 }));

@@ -33,6 +33,8 @@ struct NameEntry {
 pub struct NameDirectory {
     file: EncryptedRecordLog<NameEntry>,
     by_user: HashMap<String, String>,
+    last_changed: HashMap<String, u64>,
+    next_change: u64,
 }
 
 impl NameDirectory {
@@ -41,10 +43,18 @@ impl NameDirectory {
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, entries) = EncryptedRecordLog::<NameEntry>::open(path, password, MAGIC)?;
         let mut by_user = HashMap::new();
-        for entry in entries {
+        let mut last_changed = HashMap::new();
+        let next_change = entries.len() as u64;
+        for (index, entry) in entries.into_iter().enumerate() {
+            last_changed.insert(entry.user_id.clone(), index as u64);
             by_user.insert(entry.user_id, entry.name);
         }
-        Ok(Self { file, by_user })
+        Ok(Self {
+            file,
+            by_user,
+            last_changed,
+            next_change,
+        })
     }
 
     /// Record the name a peer announced. No-op (returns `false`, no write) when we already
@@ -62,7 +72,39 @@ impl NameDirectory {
             name: name.to_string(),
         })?;
         self.by_user.insert(user_id.to_string(), name.to_string());
+        self.last_changed
+            .insert(user_id.to_string(), self.next_change);
+        self.next_change = self.next_change.saturating_add(1);
         Ok(true)
+    }
+
+    /// Persist the latest account name before recording its device update.
+    /// An unchanged older device cannot overwrite a rename observed on another device.
+    pub fn record_peer_name(
+        &mut self,
+        user_id: &str,
+        account_id: Option<&str>,
+        name: &str,
+    ) -> Result<(), LogError> {
+        let changed = self.name_for_user(user_id).as_deref() != Some(name);
+        if changed && let Some(account) = account_id {
+            self.record(&format!("account:{account}"), name)?;
+        }
+        self.record(user_id, name)?;
+        Ok(())
+    }
+
+    /// Upgrade fallback: recover the latest actual name update from old device-only logs.
+    pub fn latest_name_for_users(&self, users: &[String]) -> Option<String> {
+        users
+            .iter()
+            .filter_map(|user| self.last_changed.get(user).map(|revision| (user, revision)))
+            .max_by_key(|(_, revision)| **revision)
+            .and_then(|(user, _)| self.name_for_user(user))
+    }
+
+    pub fn name_for_account(&self, account_id: &str) -> Option<String> {
+        self.name_for_user(&format!("account:{account_id}"))
     }
 
     /// The last-known display name for a device `user_id`, if we've ever seen it announce.
@@ -103,5 +145,60 @@ mod tests {
         assert!(!d.record("u2", &"x".repeat(MAX_NAME_BYTES + 1)).unwrap());
         assert_eq!(d.name_for_user("u1"), None);
         assert_eq!(d.name_for_user("u2"), None);
+    }
+}
+
+#[cfg(test)]
+mod account_name_tests {
+    use super::*;
+    #[test]
+    fn latest_account_name_survives_offline_restart_and_unchanged_old_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("names.log");
+        let mut names = NameDirectory::open(&path, "pw").unwrap();
+        names
+            .record_peer_name("old-device", Some("account"), "Old name")
+            .unwrap();
+        names
+            .record_peer_name("new-device", Some("account"), "Messi10")
+            .unwrap();
+        names
+            .record_peer_name("old-device", Some("account"), "Old name")
+            .unwrap();
+        assert_eq!(
+            names.name_for_account("account").as_deref(),
+            Some("Messi10")
+        );
+        names
+            .record_peer_name("new-device", Some("account"), "Messi11")
+            .unwrap();
+        drop(names);
+        let names = NameDirectory::open(&path, "pw").unwrap();
+        assert_eq!(
+            names.name_for_account("account").as_deref(),
+            Some("Messi11")
+        );
+    }
+}
+
+#[cfg(test)]
+mod legacy_account_name_tests {
+    use super::*;
+    #[test]
+    fn legacy_device_only_log_recovers_latest_name_in_append_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("names.log");
+        let mut names = NameDirectory::open(&path, "pw").unwrap();
+        names.record("first", "Z old name").unwrap();
+        names.record("second", "A new name").unwrap();
+        names.record("first", "Z old name").unwrap();
+        drop(names);
+        let names = NameDirectory::open(&path, "pw").unwrap();
+        assert_eq!(
+            names
+                .latest_name_for_users(&["first".into(), "second".into()])
+                .as_deref(),
+            Some("A new name")
+        );
     }
 }

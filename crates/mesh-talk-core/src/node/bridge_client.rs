@@ -13,12 +13,12 @@ use std::time::{Duration, Instant};
 type BridgeResponse = (
     Vec<Announce>,
     Option<(String, u16)>,
-    HashMap<String, Instant>,
+    HashMap<String, bridge_directory::PresenceDeadline>,
 );
 
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_DIRECTORY_QUERIES: usize = 8;
-const DIRECTORY_MEMBERSHIP_TTL: Duration = Duration::from_secs(45);
+const DIRECTORY_MEMBERSHIP_TTL: Duration = crate::discovery::roster::PUBLIC_PRESENCE_TTL;
 
 /// Results staged in the roster are rolled back if persistence, policy checks,
 /// or cancellation prevent publication to the bridge recovery set.
@@ -203,7 +203,7 @@ impl Node {
         gateway: Option<(String, u16)>,
         received: Instant,
         policy: &BridgePolicyStamp,
-        expiries: HashMap<String, Instant>,
+        expiries: HashMap<String, bridge_directory::PresenceDeadline>,
     ) -> Option<Vec<String>> {
         if !policy.current(self) || !self.relay_allowed(&relay.public) {
             return None;
@@ -245,7 +245,12 @@ impl Node {
             let mut roster = self.roster.lock().expect("roster lock not poisoned");
             for id in staged.peers.keys() {
                 if let Some(expiry) = expiries.get(id) {
-                    roster.set_directory_expiry(id, relay.addr, *expiry);
+                    roster.set_directory_expiry(
+                        id,
+                        relay.addr,
+                        expiry.expires_at,
+                        expiry.origin_secs,
+                    );
                 }
             }
         }
@@ -442,7 +447,10 @@ mod tests {
             let policy = BridgePolicyStamp::capture(&node);
             let expiries = HashMap::from([(
                 proof.user_id.clone(),
-                Instant::now() + Duration::from_secs(45),
+                bridge_directory::PresenceDeadline {
+                    expires_at: Instant::now() + DIRECTORY_MEMBERSHIP_TTL,
+                    origin_secs: 15,
+                },
             )]);
             let publish = tokio::spawn(async move {
                 client

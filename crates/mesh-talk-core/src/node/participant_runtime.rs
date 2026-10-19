@@ -112,7 +112,7 @@ impl PreparedParticipant {
             let routed = Arc::clone(&routed);
             let trigger = Arc::clone(&discovery_trigger);
             tasks.push(tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(25));
+                let mut tick = tokio::time::interval(Duration::from_secs(5));
                 loop {
                     tokio::select! {
                         _ = tick.tick() => {},
@@ -138,7 +138,7 @@ impl PreparedParticipant {
                             {
                                 let _ = routed.probe(sender, endpoint).await;
                             }
-                            tokio::time::sleep(Duration::from_millis(63)).await;
+                            tokio::time::sleep(Duration::from_millis(20)).await;
                         }
                     }
                 }
@@ -169,7 +169,7 @@ impl PreparedParticipant {
                 loop {
                     node.refresh_bridge_directory().await;
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(10)) => {},
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {},
                         _ = node.bridge_notify.notified() => {},
                     }
                 }

@@ -8,6 +8,11 @@ import "@/lib/i18n";
 
 const { chatState, avatars, dialog, channelApi } = vi.hoisted(() => ({
   chatState: {
+    accounts: [] as Array<{
+      account_id: string;
+      device_count: number;
+      names: string[];
+    }>,
     members: [
       {
         user_id: "owner-device",
@@ -121,6 +126,7 @@ beforeEach(() => {
   chatState.active = { ...defaultActive };
   chatState.peers = defaultPeers.map((peer) => ({ ...peer }));
   chatState.favorites = {};
+  chatState.accounts = [];
   chatState.myId = "owner-device";
   chatState.myAccountId = "owner-account";
   chatState.removeMember.mockReset().mockResolvedValue(true);
@@ -556,4 +562,46 @@ it("blocks closing confirmation while dissolution is pending", async () => {
   } finally {
     await act(async () => root.unmount());
   }
+});
+
+it("uses the latest durable account name instead of a stale member snapshot offline", () => {
+  chatState.members = [
+    ...defaultMembers,
+    {
+      user_id: "peer-device",
+      account_id: "peer-account",
+      name: "Old Alice",
+      replica_enabled: true,
+    },
+  ];
+  chatState.peers = [];
+  chatState.accounts = [
+    { account_id: "peer-account", device_count: 0, names: ["Renamed Alice"] },
+  ];
+  let html = renderToStaticMarkup(createElement(MembersDialog));
+  expect(html).toContain("Renamed Alice");
+  expect(html).not.toContain("Old Alice");
+  expect(html).toContain('src="data:image/png;base64,AAAA"');
+  chatState.accounts = [{ ...chatState.accounts[0], names: ["Newest Alice"] }];
+  html = renderToStaticMarkup(createElement(MembersDialog));
+  expect(html).toContain("Newest Alice");
+  expect(html).not.toContain("Renamed Alice");
+});
+it("uses a personal remark in the member list without replacing the canonical account name", () => {
+  chatState.members = [
+    ...defaultMembers,
+    {
+      user_id: "peer-device",
+      account_id: "peer-account",
+      name: "Old Alice",
+      replica_enabled: true,
+    },
+  ];
+  chatState.accounts = [
+    { account_id: "peer-account", device_count: 0, names: ["Canonical Alice"] },
+  ];
+  chatState.favorites = { "peer-account": { custom_alias: "My colleague" } };
+  const html = renderToStaticMarkup(createElement(MembersDialog));
+  expect(html).toContain('aria-label="My colleague"');
+  expect(chatState.accounts[0].names).toEqual(["Canonical Alice"]);
 });

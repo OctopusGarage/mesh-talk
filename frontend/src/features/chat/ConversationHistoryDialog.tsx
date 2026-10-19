@@ -33,6 +33,7 @@ import { useSavedDownloads } from "@/lib/savedDownloads";
 import {
   useFileAvailability,
   watchFileAvailability,
+  markUnavailableFileError,
 } from "@/store/fileAvailability";
 import { errorMessage } from "@/lib/error";
 import { formatDay, formatTime, humanSize } from "@/lib/format";
@@ -207,6 +208,7 @@ export function ConversationHistoryDialog({
         mode: isDirectoryAttachment(file.mime) ? "default" : "as",
       });
     } catch (e) {
+      if (lease.current() && markUnavailableFileError(file.fileConv, e)) return;
       if (lease.current())
         setHistory((previous) =>
           previous?.key === key

@@ -188,12 +188,14 @@ when a device's account cannot be verified, the UI explicitly adds “unbound de
 members” separately rather than counting them as people. Those rows remain
 inspectable and use their device-scoped observations without inventing an account.
 
-Local evidence lasts 30 seconds, routed evidence 120 seconds, and permitted public
-authenticated observations 300 seconds. Directory presence lasts at most 45
-seconds from its origin observation, retaining the original expiry through
+Local, routed, and permitted public authenticated observations last 15 seconds.
+Directory presence lasts at most 15 seconds from its origin observation, retaining the original expiry through
 federation and the versioned v4 client directory response. Legacy directory
 responses still provide route hints but cannot establish fresh presence because
-they omit origin expiry. Private authenticated routes do not refresh visible
+they omit origin expiry. Older relays' 45-second metadata remains compatible;
+new clients cap each observation at 15 seconds without renewing repeated identical
+origin expiry. The 20-second logout bound requires upgraded origin relays, since
+an old relay can first introduce a listing after that bound. Private authenticated routes do not refresh visible
 presence. Cached routes, membership, stored contacts, historical messages,
 receipts, relay reachability, and mailbox custody never establish presence.
 
@@ -220,18 +222,35 @@ identities rather than invented account associations.
 
 | Eligible public observation                                | Presence lifetime                          | Boundary                                                                                                                |
 | ---------------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| Local signed discovery within the observed interface scope | 30 seconds                                 | No TCP success required; no physical co-location claim.                                                                 |
-| Signed UDP discovery with undetermined scope               | 30 seconds                                 | Show signed discovery only; do not infer local or cross-network location.                                               |
-| Routed signed discovery                                    | 120 seconds                                | A permitted Tailscale candidate alone is insufficient.                                                                  |
-| Public authenticated contact                               | 300 seconds                                | No inferred LAN scope or continuing connection. Private route knowledge remains excluded.                               |
-| Directory/federation introduction                          | Original origin expiry, at most 45 seconds | v4 client response preserves expiry; forwarding and re-querying cannot renew it. Legacy responses provide routing only. |
+| Local signed discovery within the observed interface scope | 15 seconds                                 | No TCP success required; no physical co-location claim.                                                                 |
+| Signed UDP discovery with undetermined scope               | 15 seconds                                 | Show signed discovery only; do not infer local or cross-network location.                                               |
+| Routed signed discovery                                    | 15 seconds                                | A permitted Tailscale candidate alone is insufficient.                                                                  |
+| Public authenticated contact                               | 15 seconds                                | No inferred LAN scope or continuing connection. Private route knowledge remains excluded.                               |
+| Directory/federation introduction                          | Original origin expiry, at most 15 seconds | v4 client response preserves expiry; forwarding and re-querying cannot renew it. Legacy responses provide routing only. |
+
+Public observation leases are 15 seconds. The frontend's shared two-second poll
+ages those leases locally, so a stopped desktop loses Online within 20 seconds
+without needing a logout packet. Route retention is independent: authenticated
+routes remain dial candidates for 300 seconds and routed candidates for 120 seconds.
+Transport-only authentication cannot renew the public observation deadline.
+Routed probes and the local fallback scan run every five seconds; routed candidate
+pacing is 20 ms (at most 256 candidates per sweep). Bridge registration refreshes
+five seconds after each exchange. Existing admission and per-source response limits
+remain unchanged. Packet loss or long exchanges can show a still-running peer Offline;
+expired evidence is never retained to smooth over missing observations.
+Known names and signed avatars persist independently of these observation leases.
 
 The explicitly negotiated `MTBD4Q`/`MTBD4R` directory extension carries the
 existing self-signed identity proof with the trusted directory's origin expiry.
 It preserves bounded pagination, gateway provenance, policy generation checks,
 and staged rollback. v1–v3 request/response layouts and resource budgets remain
 unchanged. New clients try v4 first and retain legacy fallback for route hints;
-legacy clients retain their existing behavior. Federation's existing fixed
+legacy clients retain their existing behavior. Existing 45-second origin metadata
+remains accepted for mixed-version routing compatibility. A new client caps its
+public lease at 15 seconds and repeated identical origin expiry cannot renew it;
+only a newer origin registration can. An old relay can still introduce an already
+stale listing for the first time, so the 20-second logout bound requires upgraded
+origin relays. Federation's existing fixed
 expiry remains authoritative. No group presence propagation protocol is added.
 
 Group summaries count accepted current verified accounts once, including self
@@ -1212,7 +1231,7 @@ A deleted local record or recalled event does not recall already copied data fro
 | Modern directory snapshot            | Up to 1,024 entries.                                                                                                                  | Only eligible fresh registrations; not a guarantee of all Internet users or a 1,024-member group benchmark.                                                                                |
 | Legacy directory/federation snapshot | 128 entries.                                                                                                                          | Explicit version negotiation/fallback retains legacy limits on compatible fresh sessions.                                                                                                  |
 | Client directory scheduling          | At most eight concurrent queries; overlapping refresh suppressed.                                                                     | Later eligible relays are visited, not permanently skipped after the first eight. Successful results publish without waiting for every stalled candidate.                                  |
-| Directory presence                   | Approximately 45 seconds.                                                                                                             | Origin freshness is not renewed by forwarding. Refresh and network delays can still affect observed liveness.                                                                              |
+| Directory presence                   | At most 15 seconds.                                                                                                             | Origin freshness is not renewed by forwarding. Refresh and network delays can still affect observed liveness.                                                                              |
 | Relay seed probes / reconciliation   | Eight concurrent probes and eight relay sync operations, separately. A new round follows the previous round plus a five-second sleep. | Not a fixed five-second end-to-end convergence promise or a global eight-socket cap for the relay process.                                                                                 |
 | Relay storage                        | Soft limits of 100,000 events and 512 MiB, with 5,000-event / 16 MiB compaction slack.                                                | Storage can temporarily exceed soft limits; capacity may evict younger copies before their age limit.                                                                                      |
 | Maximum relay event age              | Thirty days from retained original arrival semantics.                                                                                 | Upper age bound, not minimum guaranteed retention. Forwarding/restart must preserve expiry behavior.                                                                                       |
