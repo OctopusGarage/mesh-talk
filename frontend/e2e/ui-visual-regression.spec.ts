@@ -124,8 +124,8 @@ for (const viewport of VIEWPORTS) {
           viewport.width,
           viewport.height,
         );
-        // Compact OLED exposes native font metrics across enough pixels to need
-        // Linux/Windows references; keep the same strict comparison threshold.
+        // Compact shells expose native font metrics across enough pixels to need
+        // reviewed platform references; keep the same strict comparison threshold.
         const profile =
           process.platform === "win32" &&
           theme === "oled" &&
@@ -134,12 +134,14 @@ for (const viewport of VIEWPORTS) {
                 page.getByText("hey, welcome to the mesh", { exact: true }),
               )
             : process.platform;
-        const reference =
-          ["linux", "win32"].includes(process.platform) &&
-          theme === "oled" &&
-          viewport.width === 760
-            ? name.replace(".png", `-${profile}.png`)
-            : name;
+        const needsPlatformReference =
+          viewport.width === 760 &&
+          ((theme === "oled" &&
+            ["linux", "win32"].includes(process.platform)) ||
+            (theme === "light" && process.platform === "linux"));
+        const reference = needsPlatformReference
+          ? name.replace(".png", `-${profile}.png`)
+          : name;
         await expect(shell).toHaveScreenshot(
           reference,
           // Detailed artwork rasterizes differently on Linux and macOS at compact size.
