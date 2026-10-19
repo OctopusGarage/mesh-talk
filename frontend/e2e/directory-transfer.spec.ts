@@ -43,7 +43,7 @@ test("folder picker sends its path as an attachment", async ({ page }) => {
     .toEqual({ path: "/tmp/family photos", media: false });
 });
 
-test("received folder stays disabled until ready and extracts through save-to-dir", async ({
+test("received folder waits until ready and automatically extracts through save-to-dir", async ({
   page,
 }) => {
   await enterChat(page);
@@ -116,19 +116,20 @@ test("received folder stays disabled until ready and extracts through save-to-di
   await expect(
     bubble.getByText("family photos", { exact: true }),
   ).toBeVisible();
-  await expect(bubble.getByRole("button", { name: "Save" })).toBeDisabled();
+  await expect(bubble.getByRole("button", { name: "Loading…" })).toBeDisabled();
   await page.getByTestId("sidebar-action-files").click();
   const tray = page.getByTestId("files-tray");
   await expect(
-    tray.getByRole("button", { name: "Save", exact: true }),
+    tray.getByRole("button", { name: "Loading…", exact: true }),
   ).toBeDisabled();
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { __folderSave: unknown }).__folderSave,
+    ),
+  ).toBeNull();
   await page.evaluate(() => {
     (window as unknown as { __folderReady: boolean }).__folderReady = true;
   });
-  await expect(
-    tray.getByRole("button", { name: "Save", exact: true }),
-  ).toBeEnabled();
-  await tray.getByRole("button", { name: "Save", exact: true }).click();
   await expect
     .poll(() =>
       page.evaluate(
@@ -139,7 +140,7 @@ test("received folder stays disabled until ready and extracts through save-to-di
   await expect(tray.getByRole("button", { name: "Reveal" })).toBeVisible();
 });
 
-test("folder Save in chat and history uses Downloads without a directory picker", async ({
+test("folders automatically use Downloads and expose Reveal in chat and history", async ({
   page,
 }) => {
   await enterChat(page);
@@ -207,22 +208,26 @@ test("folder Save in chat and history uses Downloads without a directory picker"
       });
   }, BOB);
   const bubble = page.getByTestId("message-bubble").filter({ hasText: "chat" });
-  await bubble.getByRole("button", { name: "Save" }).click();
+  await expect(bubble.getByRole("button", { name: "Reveal" })).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(
         () => (window as unknown as { __folderSaves: unknown[] }).__folderSaves,
       ),
     )
-    .toEqual([{ fileConv: "fc_folder_chat", dir: "/home/tester/Downloads" }]);
+    .toEqual([
+      { fileConv: "fc_folder_chat", dir: "/home/tester/Downloads" },
+      { fileConv: "fc_folder_history", dir: "/home/tester/Downloads" },
+    ]);
   await page.getByTestId("conversation-history-trigger").click();
   const history = page.getByTestId("conversation-history-dialog");
   await history.getByTestId("history-tab-files").click();
-  await history
-    .getByTestId("history-file-item")
-    .filter({ hasText: "history" })
-    .getByRole("button", { name: "Save" })
-    .click();
+  await expect(
+    history
+      .getByTestId("history-file-item")
+      .filter({ hasText: "history" })
+      .getByRole("button", { name: "Reveal" }),
+  ).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(

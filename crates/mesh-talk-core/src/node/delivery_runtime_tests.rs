@@ -6465,9 +6465,9 @@ async fn received_manifest_stays_saveable_after_reseed_and_restart() {
         let ap = Announce::new_with_account(&alice, &account, "Alice", 9);
         let bob = DeviceIdentity::generate();
         let secrets = bob.secret_bytes();
-        let ba = Account::generate();
-        let account_secret = ba.secret_bytes();
-        let (b, _, mut callbacks) = node_with_files(dir.path(), bob, ba, &ap);
+        let bob_account = Account::generate();
+        let account_secret = bob_account.secret_bytes();
+        let (b, _, mut callbacks) = node_with_files(dir.path(), bob, bob_account, &ap);
         let payload = b"received attachment bytes";
         let key = crate::file::FileKey::generate();
         let nonce = crate::file::generate_file_nonce();
