@@ -12,6 +12,8 @@ import { useTranslation } from "react-i18next";
 import { needsCustomWindowControls } from "@/lib/platform";
 import { ReceptionStatus } from "./ReceptionStatus";
 import { Composer } from "./Composer";
+import { ConversationDrafts } from "./conversationDrafts";
+import { useDmLanguagePolicy } from "./useDmLanguagePolicy";
 import {
   EmptyState,
   StartupFailureState,
@@ -73,12 +75,20 @@ export function ConversationView() {
   const { t } = useTranslation();
   const motionOK = useMotionOK();
   const active = useChat((s) => s.active);
+  const owner = useAuth((s) => s.user?.id ?? null);
+  const authGeneration = useAuth((s) => s.generation);
+  const dmLanguagePolicy = useDmLanguagePolicy(
+    owner,
+    authGeneration,
+    active?.kind === "account" ? active.id : null,
+  );
   const receptionScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
   const myAccountId = useChat((s) => s.myAccountId);
   const isPersonal = active?.kind === "account" && active.id === myAccountId;
   const channels = useChat((s) => s.channels);
   const favorites = useChat((s) => s.favorites);
   const admitText = useChat((s) => s.admitText);
+  const admitTextAndWait = useChat((s) => s.admitTextAndWait);
   const retry = useChat((s) => s.retry);
   const [expiryDurationMs, setExpiryDurationMs] = useState<number | null>(
     300_000,
@@ -119,7 +129,9 @@ export function ConversationView() {
   useEffect(() => {
     setPendingDelete(null);
   }, [key]);
-  const drafts = useRef(new Map<string, string>());
+  const drafts = useRef(new ConversationDrafts());
+  const [, refreshDraftAdmissions] = useState(0);
+  const draftKey = `${owner}:${authGeneration}:${key}`;
   const messages = useChat((s) =>
     active ? (s.messages[key] ?? NO_MESSAGES) : NO_MESSAGES,
   );
@@ -195,6 +207,7 @@ export function ConversationView() {
     key: string;
     text: string;
     n: number;
+    applyIf?: () => boolean;
   } | null>(null);
   // `showJump` reveals the jump-to-bottom button whenever the user has scrolled up.
   // Virtuoso's `followOutput` only sticks to the newest message while already at the
@@ -405,6 +418,18 @@ export function ConversationView() {
         }}
       />
 
+      {dmLanguagePolicy.language && (
+        <p
+          role="status"
+          data-testid="dm-language-notice"
+          className="border-b bg-card px-5 py-2 text-[12px] leading-5 text-muted-foreground"
+        >
+          {t("dmLanguage.notice", {
+            language: t(`dmLanguage.languages.${dmLanguagePolicy.language}`),
+            percent: 80,
+          })}
+        </p>
+      )}
       <div className="conversation-log-surface relative flex-1 overflow-hidden">
         {!loading && historyError && (
           <div
@@ -564,7 +589,7 @@ export function ConversationView() {
                     onRecall={(msg) => msg.id && void recallMessage(msg.id)}
                     onReEdit={(text) =>
                       setPrefill((p) => ({
-                        key,
+                        key: draftKey,
                         text,
                         n: (p?.n ?? 0) + 1,
                       }))
@@ -668,11 +693,12 @@ export function ConversationView() {
           onExpiryDurationChange={isPersonal ? undefined : setExpiryDurationMs}
           screenshotAvailable={attachments.screenshotAvailable}
           stagedScreenshot={attachments.stagedScreenshot}
-          key={key}
-          initialDraft={drafts.current.get(key) ?? ""}
+          key={`${owner}:${authGeneration}:${key}`}
+          validateText={dmLanguagePolicy.validateText}
+          admissionPending={drafts.current.isPending(draftKey)}
+          initialDraft={drafts.current.get(draftKey)}
           onDraftChange={(text) => {
-            if (text) drafts.current.set(key, text);
-            else drafts.current.delete(key);
+            drafts.current.set(draftKey, text);
           }}
           placeholder={
             isChannel
@@ -682,7 +708,7 @@ export function ConversationView() {
           mentionNames={mentionNames}
           myName={myName}
           replyTo={replyTo}
-          prefill={prefill?.key === key ? prefill : null}
+          prefill={prefill?.key === draftKey ? prefill : null}
           onSendSticker={(id, fallback) => {
             void sendSticker(id, fallback, expiresAtSend());
             setExpiryDurationMs(300_000);
@@ -691,14 +717,51 @@ export function ConversationView() {
           onAttach={attachments.attachFile}
           onAttachDirectory={attachments.attachDirectory}
           onImage={attachments.pickMedia}
-          onSend={(t) => {
-            const accepted = admitText(t, replyTo?.id ?? null, expiresAtSend());
-            if (accepted) {
-              setExpiryDurationMs(300_000);
-              setReply(null);
-              setPrefill(null);
-            }
-            return accepted;
+          onSend={(text) => {
+            const current = () => {
+              const auth = useAuth.getState();
+              const conversation = useChat.getState().active;
+              return (
+                auth.user?.id === owner &&
+                auth.generation === authGeneration &&
+                conversation !== null &&
+                convKey(conversation) === key
+              );
+            };
+            const finish = (
+              accepted: boolean,
+              cleared = true,
+              resetDraft = false,
+            ) => {
+              if (accepted && cleared && current()) {
+                setExpiryDurationMs(300_000);
+                setReply(null);
+                if (resetDraft)
+                  setPrefill((previous) => ({
+                    key: draftKey,
+                    text: "",
+                    n: (previous?.n ?? 0) + 1,
+                    applyIf: () =>
+                      current() && drafts.current.get(draftKey) === "",
+                  }));
+                else setPrefill(null);
+              }
+              return accepted;
+            };
+            if (!current()) return false;
+            if (active.kind !== "account")
+              return finish(
+                admitText(text, replyTo?.id ?? null, expiresAtSend()),
+              );
+            const admission = drafts.current.admit(draftKey, text, () =>
+              admitTextAndWait(text, replyTo?.id ?? null, expiresAtSend()),
+            );
+            if (!admission) return false;
+            refreshDraftAdmissions((version) => version + 1);
+            return admission.then(({ accepted, cleared }) => {
+              refreshDraftAdmissions((version) => version + 1);
+              return finish(accepted, cleared, true);
+            });
           }}
           onPasteFiles={attachments.pasteFiles}
           onScreenshot={attachments.captureScreenshot}

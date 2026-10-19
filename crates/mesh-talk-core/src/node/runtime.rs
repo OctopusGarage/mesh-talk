@@ -153,6 +153,24 @@ pub struct NodeRuntime {
 }
 
 impl NodeRuntime {
+    /// Include host producers in this profile's shutdown and join boundary.
+    pub fn register_host_task(&mut self, task: tokio::task::JoinHandle<()>) {
+        self.participant.register_host_task(task);
+    }
+
+    /// Keep a host's asynchronous child cleanup inside profile retirement.
+    pub fn register_graceful_host_task(
+        &mut self,
+        shutdown: tokio::sync::oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<()>,
+    ) {
+        self.participant.register_graceful_host_task(shutdown, task);
+    }
+
+    pub fn blocking_work(&self) -> super::participant_runtime::ParticipantWork {
+        self.participant.blocking_work()
+    }
+
     /// Retire runtime producers before a host reopens this profile. Admission
     /// closes first, then task futures are cancelled and joined, and admitted
     /// blocking operations finish. No timeout permits a live writer to escape.

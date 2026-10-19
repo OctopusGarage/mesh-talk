@@ -1,7 +1,7 @@
 use mesh_talk_core::identity::account::Account;
 use mesh_talk_core::recovery::snapshot::{
-    SnapshotError, SnapshotHeaderV1, SnapshotRecordV1, SnapshotValidator, SnapshotWriter,
-    read_snapshot, write_snapshot,
+    SNAPSHOT_SCHEMA_VERSION, SnapshotError, SnapshotHeaderV1, SnapshotRecordV1, SnapshotValidator,
+    SnapshotWriter, read_snapshot, write_snapshot,
 };
 use std::io::Cursor;
 
@@ -29,9 +29,13 @@ fn received() -> SnapshotRecordV1 {
 
 #[test]
 fn valid_history_snapshot_completes() {
-    let mut validator = SnapshotValidator::new(header()).unwrap();
-    validator.accept(&received()).unwrap();
-    validator.finish().unwrap();
+    for schema_version in [1, SNAPSHOT_SCHEMA_VERSION] {
+        let mut header = header();
+        header.schema_version = schema_version;
+        let mut validator = SnapshotValidator::new(header).unwrap();
+        validator.accept(&received()).unwrap();
+        validator.finish().unwrap();
+    }
 }
 
 #[test]
@@ -47,7 +51,7 @@ fn account_fingerprint_must_match_secret() {
 #[test]
 fn incompatible_or_ambiguous_snapshot_header_is_rejected() {
     let mut future = header();
-    future.schema_version += 1;
+    future.schema_version = SNAPSHOT_SCHEMA_VERSION + 1;
     assert_eq!(
         SnapshotValidator::new(future).unwrap_err(),
         SnapshotError::UnsupportedVersion

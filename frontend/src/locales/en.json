@@ -945,5 +945,31 @@
     "openDiagnostics": "Open Connection",
     "online": "Read online",
     "linkFailed": "The link could not be opened. Try again or open the online manual in your browser."
+  },
+  "dmLanguage": {
+    "title": "Direct-message language",
+    "help": "Require each incoming direct message to use your selected language for at least 80% of its text. Other languages may make up at most 20%. Group chats are unaffected.",
+    "localOnly": "Language checks run on this device. Messages are never sent to a translation service.",
+    "unrestricted": "Any language",
+    "loadFailed": "Couldn’t load your language preference.",
+    "saveFailed": "Couldn’t save your language preference. Your previous choice is still active.",
+    "validationFailed": "Couldn’t check the message language. Your draft is saved; please try again.",
+    "notice": "Use at least {{percent}}% {{language}} in each message. Other languages may make up at most 20%.",
+    "rejected": "Use at least {{percent}}% {{language}} in this message (at most 20% other languages). Your draft is saved.",
+    "languages": {
+      "en": "English",
+      "zh": "Chinese",
+      "ja": "Japanese",
+      "es": "Spanish",
+      "fr": "French",
+      "de": "German",
+      "ko": "Korean",
+      "pt": "Portuguese",
+      "ru": "Russian",
+      "ar": "Arabic"
+    },
+    "checking": "Checking message language…",
+    "resourceLimit": "This message is too long or complex to check. Split it into shorter messages.",
+    "hidden": "Message hidden by your language setting"
   }
 }

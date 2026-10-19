@@ -367,6 +367,11 @@ impl Node {
     ) -> Result<bool, NodeError> {
         let mut transaction = Some(transaction);
         authorize(&mut || {
+            self.log
+                .lock()
+                .expect("log lock")
+                .sync()
+                .map_err(NodeError::Log)?;
             store
                 .begin(transaction.take().expect("accept is single-use"))
                 .map(|_| ())
@@ -630,7 +635,7 @@ impl Node {
             Some(proof) => proof.account_id(),
             None => Some(account.clone()),
         };
-        let (conversation, from, _body) = if plain.starts_with(b"MTDE1") {
+        let (conversation, from, body) = if plain.starts_with(b"MTDE1") {
             let env = DmEnvelope::decode(&plain)?;
             let valid_account = |id: &str| {
                 id.len() == 32
@@ -660,6 +665,8 @@ impl Node {
                 MessageBody::decode(&plain),
             )
         };
+        self.classify_incoming_language(event.id, &from, &body)
+            .ok()?;
         let received = ReceivedEntry {
             event_id: event.id,
             conversation,
@@ -850,18 +857,29 @@ impl Node {
                         },
                     );
             }
+            let channel_snapshot =
+                store
+                    .pending_transactions()
+                    .first()
+                    .and_then(|tx| match tx.body() {
+                        DeliveryTransaction::ChannelOutgoing { sent, senders, .. } => {
+                            Some((sent.conversation, senders.clone()))
+                        }
+                        _ => None,
+                    });
             let installed = {
                 let mut ratchet = self.dm_ratchet.lock().expect("ratchet lock not poisoned");
                 let mut log = self.log.lock().expect("log lock not poisoned");
                 let mut received = self.received.lock().expect("received lock not poisoned");
                 let mut sent = self.sentlog.lock().expect("sent lock not poisoned");
                 let mut files = self.received_files.lock().expect("files lock not poisoned");
-                store.recover_next_with_files(
+                store.recover_next_with_channels(
                     &mut ratchet,
                     &mut log,
                     &mut sent,
                     &mut received,
                     Some(&mut files),
+                    Some(&mut self.channel_senders.lock().expect("sender store lock")),
                 )
             };
             let removed = transaction_id.is_some_and(|id| {
@@ -870,6 +888,20 @@ impl Node {
                     .first()
                     .is_none_or(|tx| tx.id() != id)
             });
+            if (installed.is_ok() || removed)
+                && let Some((channel, senders)) = channel_snapshot
+                && let Some(state) = self
+                    .channels
+                    .lock()
+                    .expect("channels lock")
+                    .state_mut(&channel)
+            {
+                for (epoch, bytes) in senders {
+                    if let Some(key) = crate::channel::sender_key::SenderKey::deserialize(&bytes) {
+                        state.import_my_sender(epoch, key);
+                    }
+                }
+            }
             if removed && let Some((sender, original_conv, entry, file, incoming)) = notification {
                 self.note_account_history_change();
                 if file {
@@ -943,6 +975,7 @@ impl Node {
                         || MessageBody::decode(&entry.plaintext),
                         |env| MessageBody::decode(&env.body),
                     );
+                    let hidden = self.hidden_by_language(entry.event_id);
                     let from_name = self
                         .historical_author(&sender.ed25519_pub)
                         .map_or_else(|| sender.user_id(), |proof| proof.name);
@@ -950,8 +983,12 @@ impl Node {
                         let _ = self.incoming.send(ReceivedDm {
                             from: sender.user_id(),
                             from_name,
-                            text: body.text,
-                            reply_to: body.reply_to,
+                            text: if hidden {
+                                super::language_io::HIDDEN_TEXT.to_vec()
+                            } else {
+                                body.text
+                            },
+                            reply_to: if hidden { None } else { body.reply_to },
                         });
                     }
                 }
@@ -1069,7 +1106,7 @@ impl Node {
             .expect("sent lock not poisoned")
             .entries(&conversation);
         for tx in store.pending_transactions() {
-            if let DeliveryTransaction::Outgoing { message, sent, .. } = tx
+            if let DeliveryTransaction::Outgoing { message, sent, .. } = tx.body()
                 && sent.conversation == conversation
             {
                 ids.insert(sent.seq, message.logical_id);
@@ -1108,7 +1145,7 @@ impl Node {
             .expect("sent lock not poisoned")
             .entries(&conversation);
         for tx in store.pending_transactions() {
-            if let DeliveryTransaction::Outgoing { sent, .. } = tx
+            if let DeliveryTransaction::Outgoing { sent, .. } = tx.body()
                 && sent.conversation == conversation
                 && !entries.iter().any(|e| e == sent)
             {

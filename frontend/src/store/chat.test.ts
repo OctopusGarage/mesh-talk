@@ -2268,6 +2268,180 @@ describe("offline contact deletion", () => {
   });
 });
 
+describe("externally accepted messages", () => {
+  for (const kind of ["account", "channel"] as const) {
+    it(`reloads the active ${kind} history without unread changes`, async () => {
+      const history = [
+        {
+          id: "external-1",
+          from_me: true,
+          who: "you",
+          text: "Alert from agent",
+          wall_clock: 1,
+          reply_to: null,
+        },
+      ];
+      invoke.mockImplementation((command: string) => {
+        if (command === "owner_node_identity")
+          return Promise.resolve({
+            owner: "host",
+            account_id: "myacct",
+            device_id: "me",
+          });
+        if (
+          command ===
+          (kind === "account" ? "owner_account_history" : "channel_history")
+        )
+          return Promise.resolve(history);
+        return Promise.resolve([]);
+      });
+      const stop = useChat.getState().start();
+      try {
+        await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+        useChat.setState({
+          active: { kind, id: "target", name: "Target" },
+          unread: { "account:other": 3 },
+        });
+        captured.current!.onIntegrationMessageAccepted({
+          owner: "host",
+          account_id: "myacct",
+          destination: { kind, id: "target" },
+        });
+        await vi.waitFor(() =>
+          expect(useChat.getState().messages[`${kind}:target`]?.[0]?.text).toBe(
+            "Alert from agent",
+          ),
+        );
+        expect(useChat.getState().unread).toEqual({
+          "account:other": 3,
+          [`${kind}:target`]: 0,
+        });
+      } finally {
+        stop();
+      }
+    });
+  }
+
+  it("ignores unrelated, unready, and retired-session integration events", async () => {
+    invoke.mockImplementation((command: string) =>
+      command === "owner_node_identity"
+        ? Promise.resolve({
+            owner: "host",
+            account_id: "myacct",
+            device_id: "me",
+          })
+        : Promise.resolve([]),
+    );
+    const stop = useChat.getState().start();
+    try {
+      await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+      useChat.setState({
+        active: { kind: "account", id: "target", name: "Target" },
+      });
+      invoke.mockClear();
+      const accepted = {
+        owner: "host",
+        account_id: "myacct",
+        destination: { kind: "account", id: "target" },
+      };
+      const handler = captured.current!.onIntegrationMessageAccepted;
+      handler({ ...accepted, owner: "other-owner" });
+      handler({ ...accepted, account_id: "other-account" });
+      handler({ ...accepted, destination: { kind: "account", id: "other" } });
+      handler({ ...accepted, destination: { kind: "channel", id: "target" } });
+      useChat.setState({ ready: false });
+      handler(accepted);
+      useChat.setState({ ready: true });
+      useAuth.setState({ generation: useAuth.getState().generation + 1 });
+      handler(accepted);
+      useAuth.setState({ user: null });
+      handler(accepted);
+      expect(invoke).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+});
+
+describe("durable text admission", () => {
+  beforeEach(() =>
+    useChat.setState({
+      active: { kind: "account", id: "target", name: "Target" },
+      ready: true,
+    }),
+  );
+  it("returns false when the final policy check rejects after preflight", async () => {
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "owner_enqueue_text"
+        ? Promise.reject(new Error("language policy changed"))
+        : Promise.resolve([]),
+    );
+    expect(
+      await useChat.getState().admitTextAndWait("Keep this draft.", null),
+    ).toBe(false);
+    const messages = useChat.getState().messages["account:target"];
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      pending: false,
+      failed: true,
+      text: "Keep this draft.",
+    });
+    expect(
+      invoke.mock.calls.filter(([cmd]) => cmd === "owner_enqueue_text"),
+    ).toHaveLength(1);
+  });
+  it("returns true once an ID is accepted even when history hydration fails", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "owner_enqueue_text") return Promise.resolve("durable-id");
+      if (cmd === "owner_account_history")
+        return Promise.reject(new Error("history unavailable"));
+      return Promise.resolve([]);
+    });
+    expect(
+      await useChat.getState().admitTextAndWait("Accepted message.", null),
+    ).toBe(true);
+    expect(useChat.getState().messages["account:target"][0]).toMatchObject({
+      id: "durable-id",
+      pending: false,
+    });
+  });
+  it("does not report admission to a replacement owner", async () => {
+    let finish!: (id: string) => void;
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "owner_enqueue_text"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : Promise.resolve([]),
+    );
+    const admission = useChat.getState().admitTextAndWait("Owned draft.", null);
+    useAuth.setState({ generation: useAuth.getState().generation + 1 });
+    finish("old-owner-id");
+    expect(await admission).toBe(false);
+  });
+});
+
+it("durable text admission settles before optional history hydration", async () => {
+  useChat.setState({
+    active: { kind: "account", id: "target", name: "Target" },
+    ready: true,
+  });
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === "owner_enqueue_text")
+      return Promise.resolve("accepted-immediately");
+    if (cmd === "owner_account_history") return new Promise(() => {});
+    return Promise.resolve([]);
+  });
+  let admitted: boolean | undefined;
+  void useChat
+    .getState()
+    .admitTextAndWait("Accepted without waiting for history.", null)
+    .then((value) => {
+      admitted = value;
+    });
+  await vi.waitFor(() => expect(admitted).toBe(true), { timeout: 100 });
+});
+
 it("deduplicates identified group arrivals and only marks actually viewed rows read", async () => {
   invoke.mockImplementation((command: string) =>
     command === "owner_node_identity"

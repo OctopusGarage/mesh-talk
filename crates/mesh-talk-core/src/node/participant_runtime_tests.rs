@@ -168,3 +168,64 @@ async fn stop_waits_for_owned_blocking_work_after_host_cancellation() {
     stop.await.unwrap();
     assert!(!after_stop.spawn(&mut tokio::task::JoinSet::new(), || ()));
 }
+
+#[tokio::test]
+async fn graceful_host_task_joins_children_before_stop_returns() {
+    struct ChildDropped(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Drop for ChildDropped {
+        fn drop(&mut self) {
+            if let Some(signal) = self.0.take() {
+                let _ = signal.send(());
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut running = PreparedParticipant::prepare(
+        node,
+        listener,
+        Arc::new(DiscoveryVisibility::new(false)),
+        ParticipantConfig {
+            discovery_port: 0,
+            candidate_source: None,
+        },
+    )
+    .unwrap()
+    .launch("Owner");
+    let (shutdown, stopped) = tokio::sync::oneshot::channel();
+    let (child_started, started) = tokio::sync::oneshot::channel();
+    let (child_dropped, dropped) = tokio::sync::oneshot::channel();
+    let (cleanup_started, cleanup) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut children = tokio::task::JoinSet::new();
+        children.spawn(async move {
+            let _observer = ChildDropped(Some(child_dropped));
+            child_started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let _ = stopped.await;
+        children.abort_all();
+        while children.join_next().await.is_some() {}
+        cleanup_started.send(()).unwrap();
+        let _ = released.await;
+    });
+    running.register_graceful_host_task(shutdown, task);
+    started.await.unwrap();
+    let mut stopping = tokio::spawn(running.stop());
+    tokio::time::timeout(Duration::from_secs(1), cleanup)
+        .await
+        .unwrap()
+        .unwrap();
+    dropped
+        .await
+        .expect("child destructors finish during graceful cleanup");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut stopping)
+            .await
+            .is_err()
+    );
+    release.send(()).unwrap();
+    stopping.await.unwrap();
+}

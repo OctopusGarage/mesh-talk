@@ -91,9 +91,10 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
         type="button"
         onClick={() => setProfileOpen(true)}
         data-testid="conversation-member-profile"
-        aria-label={t("memberProfile.viewNamed", { name })}
+        title={t("memberProfile.viewNamed", { name })}
         className="min-w-0 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
+        <span className="sr-only">{t("memberProfile.view")}</span>
         <IdentityCrest
           id={id}
           name={name}

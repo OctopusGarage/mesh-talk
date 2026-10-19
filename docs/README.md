@@ -34,6 +34,8 @@ the read-only [documentation MCP](../tools/help/README.md).
 | [`docs/routed-network-discovery.md`](routed-network-discovery.md)                   | Optional routed discovery over existing Tailscale, EasyTier or manually supplied addresses, identity boundary, route selection, and release checks.         |
 | [`docs/routed-network-discovery-research.md`](routed-network-discovery-research.md) | Historical cited research and design options behind routed discovery; see the implementation guide for current behavior.                                    |
 | [`docs/easytier-compatibility-research.md`](easytier-compatibility-research.md)     | Dated EasyTier feasibility research, discovery integration options, source evidence, and validation limits.                                                 |
+| [Incoming DM language](dm-language-restrictions.md)                                 | Configure incoming message languages, 80/20 mixed-language tolerance, local detection, and device compatibility.                                            |
+| [DM language restriction research](dm-language-restriction-research.md)             | Proposed selectable DM language restrictions, 80/20 mixed-language tolerance, local validation, and compatibility boundaries; translation is excluded.      |
 | [`docs/network-design-reference.md`](network-design-reference.md)                   | Network Topology and Communication Architecture: principles, module contracts, settings, 34 illustrated scenarios, resource limits and acceptance evidence. |
 | [`docs/network-topologies.md`](network-topologies.md)                               | Review baseline: network/data planes, switch matrix, LAN/Tailscale/federation diagrams, synchronization paths, and evidence limits.                         |
 | [`docs/network-design-qa.md`](network-design-qa.md)                                 | Focused questions and current answers; remote-relay participation, group chains and links to the architectural baseline.                                    |
@@ -48,6 +50,22 @@ the read-only [documentation MCP](../tools/help/README.md).
 | [`docs/settings.md`](settings.md)                                                   | Seven category pages, automatic saving, permission dependencies, local retention confirmation and settings ownership.                                       |
 | [`docs/privacy-controls.md`](privacy-controls.md)                                   | Privacy presets, app lock, invisible mode, hidden contacts, and limits.                                                                                     |
 | [`specifications/TODO.md`](../specifications/TODO.md)                               | Current capability index, deliberate design boundaries and separately unverified acceptance cases.                                                          |
+
+## Bots and local agents
+
+[Bot integrations](bot-integrations.md) explains the dedicated headless bot host,
+opt-in desktop delegation, scoped CLI credentials and local MCP tools. Text/reply
+sending is implemented; interactive subscriptions and HTTP ingress are later stages.
+
+## Proposed features and research
+
+These documents distinguish implemented initial capabilities from investigated
+options and proposed later stages. The usage guide above owns current behavior.
+
+| Doc                                                                    | What it covers                                                                                                                                                       |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Bots and MCP architecture proposal](bot-mcp-architecture-research.md) | Bot identities, group installations, desktop and headless hosting, shared integration service, reliable sending, MCP/webhook adapters, security and staged delivery. |
+| [Feishu/Lark and MCP source research](bot-mcp-source-research.md)      | Official bot/API/SDK references, current MCP version and transport requirements, and evidence limits.                                                                |
 
 ## Contributor workflow and design
 
@@ -82,6 +100,8 @@ establish shipped capabilities or completed validation.
 | [Synchronization implementation plan](multi-device-sync-plan.md) | Sequenced work packages, file owners, focused tests, compatibility and release gates. |
 
 ## Evaluation records
+
+[Bot integration implementation evidence, 2026-10-19](evals/bot-integrations-2026-10-19.md) records focused test commands, standalone binary checks and platform limits.
 
 These dated reports record what was tested and the limits of that evidence. Use
 the current guides above for commands and implementation behavior.

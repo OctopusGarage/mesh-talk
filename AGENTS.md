@@ -2,12 +2,15 @@
 
 ## Project Structure & Module Organization
 
-- Two-crate Rust workspace. `crates/mesh-talk-core/` is the UI-free protocol core (lib
+- Four-crate Rust workspace. `crates/mesh-talk-core/` is the UI-free protocol core (lib
   `mesh_talk_core` + the `mesh-talk-node` CLI bin in `src/bin/`): feature modules `node/`,
   `identity/`, `transport/`, `discovery/`, `eventlog/`, `ratchet/`, `channel/`, `dm.rs`,
   `file/`, `postoffice/`, `storage/`. `src-tauri/` is the Tauri desktop app: entry
   `src/main.rs` → `lib.rs`, IPC glue in `commands.rs` (auth) + `chat_commands/` (messaging)
   - `events.rs`, plus `state.rs`, `tray.rs`, `services/` (auth only).
+- `crates/mesh-talk-integrations/` owns scoped local messaging grants, private IPC,
+  and the dedicated bot host/admin CLI; `crates/mesh-talk-mcp/` adapts its four
+  send/context/status tools to the official MCP SDK. Neither owns mesh crypto.
 - Integration/e2e suites live in `crates/mesh-talk-core/tests/` (`two_node_cli`,
   `persistent_history`, `post_office_offline`, `decoder_smoke`); keep unit tests inline via
   `mod tests` (e.g. `node/node_tests.rs`).

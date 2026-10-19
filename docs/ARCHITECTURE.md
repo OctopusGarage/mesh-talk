@@ -950,17 +950,52 @@ visible and is counted as missing media in the preview. Messages newer than the
 backup require a later peer sync. Recovery cannot revoke an old certified device;
 the UI sends users who suspect compromise to new identity creation.
 
+## Local bot and agent integrations
+
+`crates/mesh-talk-integrations` owns a transport-independent service for scoped
+text/reply sends, encrypted profile-bound grants and recent metadata-only audit.
+The desktop supplies exact-session admission; a dedicated headless host supplies
+profile/lifecycle admission. Private Unix sockets or Windows named pipes expose
+a closed local API. The MCP adapter in `crates/mesh-talk-mcp` translates four
+context/send/status tools using the official SDK. See the
+[setup and limits](bot-integrations.md) and [design rationale](bot-mcp-architecture-research.md).
+
+Core `node/outgoing_message.rs` accepts retry keys through guarded enqueue.
+New bot direct messages apply the same recipient language checks as desktop
+sends, including the final synchronous acceptance check. Duplicate retries
+return the original acceptance without sending again after a policy change.
+Request mapping and prepared DM/group state share the encrypted delivery WAL.
+Appended journal variants preserve old positional tags; a pending new variant
+requires a compatible binary for recovery. Group messages, sender distributions
+and group file manifests use serialized sender snapshots and durable replay,
+so failures cannot reuse an older sending chain. Duplicate requests return the
+original message reference; changed content conflicts. Retry records are bounded
+by seven days, 100,000 records and existing outbox budgets. Local acceptance is
+separate from network distribution and recipient confirmation.
+
+Local endpoint manifests let scoped credentials survive host restarts without
+exposing profile keys. Runtime retirement signals graceful service shutdown and
+joins nested request tasks before profile reuse. Administrators separately enroll
+bot devices through ordinary signed group invitation acceptance. A send-only
+client grant does not remove the hosting member's decryption capability. Bot
+badges and authenticated delegated-send attribution are later wire extensions;
+existing participants see an ordinary signed account/device author.
+
 ## 6. Binaries
 
 - `mesh-talk` (`main.rs` → `lib.rs::run_tauri`) — the desktop app.
 - `mesh-talk-node` (`bin/mesh-talk-node.rs`) — headless node CLI; `--post-office`
   runs relay mode.
+- `mesh-talk-integrations` — dedicated bot host, scoped credential administration,
+  local send/status and explicit enrollment CLI.
+- `mesh-talk-mcp` — private-client-file MCP stdio adapter.
 
 ## 7. Build, test, CI
 
-- **Workspace** (two layered crates): `crates/mesh-talk-core/` — the UI-free protocol
+- **Workspace** (four layered crates): `crates/mesh-talk-core/` — the UI-free protocol
   core / SDK foundation (lib `mesh_talk_core` + the `mesh-talk-node` CLI bin) — and
-  `src-tauri/` — the Tauri desktop shell, a thin layer that depends on the core. Shared
+  `src-tauri/` — the Tauri desktop shell. `crates/mesh-talk-integrations/` owns
+  scoped local messaging, and `crates/mesh-talk-mcp/` owns the MCP adapter. Shared
   dependency versions live in the root `[workspace.dependencies]`. The app references the
   core as `mesh_talk_core::…`; a third party can depend on `mesh-talk-core` alone (no Tauri).
 - **Windows runtime**: `src-tauri/tauri.conf.json` selects static Visual C++ runtime
@@ -1021,3 +1056,28 @@ traffic timing. The mailbox wrapping has no forward secrecy against later
 device-key compromise. Previously stored V1 events remain readable until
 evicted. Details and operational limits are in
 [`post-office-metadata-privacy.md`](post-office-metadata-privacy.md).
+
+## Incoming DM language policy
+
+The core owns an opt-in, account-signed incoming language preference and local
+80/20 content validation. `node/language_policy.rs` bundles ten language models
+and measures alphabetic grapheme spans with bounded work; no translation service
+is contacted. `MTPF2` carries the complete avatar and language state so existing
+profile compaction retains both. Avatar-only `MTPF1` remains byte-compatible.
+Policy-aware profile decoding requires an updated peer; text and event-kind wire
+formats are unchanged.
+
+`node/language_state.rs` durably stores verified preferences and immutable receive
+decisions against signed transport-event IDs. Core outgoing admission rechecks
+policy at synchronous WAL acceptance; incoming classification precedes receive
+WAL acceptance without changing ratchet transitions or receipt semantics. History,
+live callbacks, search and linked-device plaintext export apply the persisted
+filter. Trusted direct-history imports are classified before installation. Hidden
+content remains encrypted locally under existing retention.
+
+Desktop `language_commands.rs` uses the existing runtime/session admission guards.
+The UI separates the language selector from display language and validates draft
+content before durable enqueue. Snapshot schema 2 includes preferences and
+receive decisions while accepting schema 1 for restoration. See
+[incoming DM language](dm-language-restrictions.md) for product behavior, processing
+limits, asynchronous policy propagation, and old-client compatibility.

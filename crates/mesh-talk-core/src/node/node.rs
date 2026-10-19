@@ -212,6 +212,7 @@ pub struct FileHistoryInfo {
 pub enum NodeError {
     /// Caller-supplied local data cannot be accepted.
     InvalidInput(String),
+    RequestConflict,
     /// The host rejected a local operation under its owner guard.
     Authorization(String),
     /// `send_dm` to a `user_id` not in the roster.
@@ -232,6 +233,9 @@ pub enum NodeError {
 impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            NodeError::RequestConflict => {
+                write!(f, "message request conflicts with prior acceptance")
+            }
             NodeError::InvalidInput(m) => write!(f, "invalid input: {m}"),
             NodeError::Authorization(m) => write!(f, "authorization: {m}"),
             NodeError::UnknownPeer(u) => write!(f, "unknown peer: {u}"),
@@ -256,6 +260,7 @@ type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
 /// The node: identity + event log + shared roster + an outbound stream of
 /// received DMs. Construct with [`Node::open`]; share as `Arc<Node>`.
 pub struct Node {
+    pub(in crate::node) outgoing_requests_gate: tokio::sync::Mutex<()>,
     pub(in crate::node) sessions: super::session_pool::SessionPool,
     pub(in crate::node) expiry_clock_start: (std::time::Instant, u64),
     pub(in crate::node) expiry_first_seen: Mutex<HashMap<EventId, std::time::Instant>>,
@@ -393,6 +398,7 @@ pub struct Node {
     /// account, newest-wins, durable). Read by `peer_avatar`/`peer_avatars` and surfaced
     /// live on `profile_incoming`.
     pub(in crate::node) profiles: Mutex<crate::node::profile_store::ProfileStore>,
+    pub(in crate::node) language_state: Mutex<super::language_state::LanguageState>,
     /// Live stream of received peer profiles (avatar updates), surfaced to the app. The
     /// node owns BOTH ends (created in `open_with_account`) so the constructor signature
     /// is unchanged across its many call sites; the runtime claims the receiver once via
@@ -490,6 +496,7 @@ impl Node {
             custody_res,
             recv_files_res,
             profiles_res,
+            language_res,
             recalls_res,
             consent_res,
             consent_controls_res,
@@ -511,6 +518,9 @@ impl Node {
             let h_files =
                 s.spawn(|| ReceivedLog::open_file_cards(&dir.join("received_files.log"), password));
             // Durable store of avatars peers propagated to us (one per account, newest-wins).
+            let h_language = s.spawn(|| {
+                super::language_state::LanguageState::open(&dir.join("language.log"), password)
+            });
             let h_profiles = s.spawn(|| {
                 crate::node::profile_store::ProfileStore::open(&dir.join("profiles.log"), password)
             });
@@ -557,6 +567,7 @@ impl Node {
                 h_custody.join(),
                 h_files.join(),
                 h_profiles.join(),
+                h_language.join(),
                 h_recalls.join(),
                 h_consent.join(),
                 h_consent_controls.join(),
@@ -571,10 +582,12 @@ impl Node {
         let mut sentlog = sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut received = received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let channel_custody = custody_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let language_state =
+            language_res.unwrap_or_else(|error| std::panic::resume_unwind(error))?;
         let my_profile = profiles
             .snapshot_entries()
             .into_iter()
@@ -582,6 +595,17 @@ impl Node {
             .map(|(_, updated_at, avatar)| {
                 crate::node::profile::ProfilePayload::new(&account, avatar, updated_at)
             });
+        let my_profile = match (my_profile, language_state.profile(&account.account_id())) {
+            (Some(avatar), Some(policy)) => {
+                Some(crate::node::profile::ProfilePayload::new_with_language(
+                    &account,
+                    avatar.avatar,
+                    avatar.updated_at.max(policy.updated_at),
+                    policy.language,
+                ))
+            }
+            (avatar, policy) => policy.or(avatar),
+        };
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -603,12 +627,13 @@ impl Node {
         )?;
         delivery.validate_owner(&identity.public(), &account.account_id())?;
         while delivery
-            .recover_next_with_files(
+            .recover_next_with_channels(
                 &mut dm_ratchet,
                 &mut log,
                 &mut sentlog,
                 &mut received,
                 Some(&mut received_files),
+                Some(&mut channel_senders),
             )?
             .is_some()
         {}
@@ -785,6 +810,7 @@ impl Node {
             account_history_revision: std::sync::atomic::AtomicU64::new(0),
             account_sync_status: Mutex::new(std::collections::HashMap::new()),
             profiles: Mutex::new(profiles),
+            language_state: Mutex::new(language_state),
             profile_incoming: profile_tx,
             profile_rx: Mutex::new(Some(profile_rx)),
             call_signal_incoming: call_signal_tx,
@@ -804,6 +830,7 @@ impl Node {
             recovery_origins,
             recovery_contacts,
             recovered_sent_ids: Mutex::new(recovered_sent_ids),
+            outgoing_requests_gate: tokio::sync::Mutex::new(()),
             channel_senders: Mutex::new(channel_senders),
             channel_custody: Mutex::new(channel_custody),
             channel_projection_cache: Mutex::new(Default::default()),

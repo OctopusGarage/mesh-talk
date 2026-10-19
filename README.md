@@ -148,14 +148,19 @@ Protect the password file; on Unix, use mode `0600`. For post-office flags, serv
 deployment, and release builds, follow the
 [deployment guide](specifications/deployment_guide.md).
 
+Bots and local AI agents can send through scoped credentials. See the
+[bot integration guide](docs/bot-integrations.md) for desktop and headless setup.
+
 ## Develop and contribute
 
-| Directory                     | What lives there                                                                    |
-| ----------------------------- | ----------------------------------------------------------------------------------- |
-| `crates/mesh-talk-core/`      | Identity, transport, discovery, event sync, messaging, files, post office, and CLI. |
-| `src-tauri/`                  | Desktop shell, session state, and IPC commands.                                     |
-| `frontend/`                   | React interface and Playwright UI tests.                                            |
-| `docs/` and `specifications/` | Architecture, operation guides, test evidence, and conventions.                     |
+| Directory                        | What lives there                                                                    |
+| -------------------------------- | ----------------------------------------------------------------------------------- |
+| `crates/mesh-talk-core/`         | Identity, transport, discovery, event sync, messaging, files, post office, and CLI. |
+| `crates/mesh-talk-integrations/` | Scoped local messaging service and dedicated bot/admin CLI.                         |
+| `crates/mesh-talk-mcp/`          | Local MCP adapter for agent messaging tools.                                        |
+| `src-tauri/`                     | Desktop shell, session state, and IPC commands.                                     |
+| `frontend/`                      | React interface and Playwright UI tests.                                            |
+| `docs/` and `specifications/`    | Architecture, operation guides, test evidence, and conventions.                     |
 
 The core is independent of the desktop UI. Start with an affected test during development,
 then run the relevant end-to-end layer and the full gate before a PR:

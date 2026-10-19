@@ -2,7 +2,7 @@
 //! Session authority and runtime installation stay together at this boundary.
 
 use crate::chat_commands::RuntimeAuthority;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 // ---------------------------------------------------------------------------
 // Node lifecycle bridge
@@ -35,6 +35,8 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
     node_handle: crate::chat_commands::NodeState,
     session: crate::state::SessionState,
 ) {
+    let integration_lease = lease.clone();
+    let integration_state = app_handle.state::<crate::state::AppState>().inner().clone();
     let Ok(authority) = RuntimeAuthority::request(session, lease, node_handle.clone()) else {
         return;
     };
@@ -165,7 +167,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 // in-memory allowlist with an older trust-file snapshot. Read
                 // the relay preference under the same runtime lock so startup
                 // cannot overwrite a setting changed after publication.
-                let guard = node_handle.0.lock().await;
+                let mut guard = node_handle.0.lock().await;
                 if let Some(runtime) = guard
                     .as_ref()
                     .filter(|runtime| runtime.host_account_id() == Some(&account_id))
@@ -186,6 +188,29 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                     {
                         log::warn!("Ignored invalid bridge hub setting: {error}");
                     }
+                }
+                if std::env::var_os("MESH_TALK_INTEGRATIONS").as_deref()
+                    == Some(std::ffi::OsStr::new("1"))
+                    && let Some(runtime) = guard
+                        .as_mut()
+                        .filter(|runtime| runtime.host_account_id() == Some(&account_id))
+                    && let Err(error) = crate::integrations::start(
+                        &integration_state,
+                        &node_handle,
+                        &integration_lease,
+                        runtime,
+                        &base_dir,
+                        &password,
+                        std::sync::Arc::new({
+                            let handle = app_handle.clone();
+                            move |event| {
+                                let _ = handle.emit("integration-message-accepted", event);
+                            }
+                        }),
+                    )
+                    .await
+                {
+                    log::warn!("Desktop integrations failed to start: {}", error.code);
                 }
                 // Keep lifecycle diagnostics without persisting an account identifier.
                 log::info!("Node started");

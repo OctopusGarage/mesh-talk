@@ -396,9 +396,10 @@ export function Sidebar() {
           type="button"
           data-testid="open-profile"
           onClick={() => setProfileOpen(true)}
-          aria-label={t("profile.open")}
+          title={t("profile.open")}
           className="mb-1 flex min-h-10 w-full items-center gap-2.5 rounded-md px-1 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
+          <span className="sr-only">{t("profile.open")}</span>
           <span className="relative shrink-0">
             <IdentityGlyph
               seed={myAccountId || myId || username}

@@ -197,6 +197,7 @@ impl PreparedParticipant {
             discovery_trigger,
             discovery_health,
             tasks,
+            graceful_host_tasks: Vec::new(),
         }
     }
 }
@@ -215,6 +216,12 @@ pub struct ParticipantRuntime {
     discovery_trigger: Arc<Notify>,
     discovery_health: Vec<tokio::task::AbortHandle>,
     pub(super) tasks: Vec<JoinHandle<()>>,
+    graceful_host_tasks: Vec<GracefulHostTask>,
+}
+
+struct GracefulHostTask {
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    task: JoinHandle<()>,
 }
 
 impl ParticipantRuntime {
@@ -227,6 +234,22 @@ impl ParticipantRuntime {
     pub fn register_host_task(&mut self, task: JoinHandle<()>) {
         self.tasks.retain(|task| !task.is_finished());
         self.tasks.push(task);
+    }
+
+    /// Register a producer that owns child tasks or other async cleanup. On
+    /// retirement it receives shutdown and must join its children before exiting.
+    /// Unlike an ordinary host task, stop waits for this cleanup without aborting it.
+    pub fn register_graceful_host_task(
+        &mut self,
+        shutdown: tokio::sync::oneshot::Sender<()>,
+        task: JoinHandle<()>,
+    ) {
+        self.graceful_host_tasks
+            .retain(|owner| !owner.task.is_finished());
+        self.graceful_host_tasks.push(GracefulHostTask {
+            shutdown: Some(shutdown),
+            task,
+        });
     }
 
     pub fn blocking_work(&self) -> ParticipantWork {
@@ -287,11 +310,19 @@ impl ParticipantRuntime {
     /// blocking work. Externally held Node handles remain the host's responsibility.
     pub async fn stop(mut self) {
         self.node.runtime_work.close();
+        for owner in &mut self.graceful_host_tasks {
+            if let Some(shutdown) = owner.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+        }
         for task in &self.tasks {
             task.abort();
         }
         for task in std::mem::take(&mut self.tasks) {
             let _ = task.await;
+        }
+        for owner in std::mem::take(&mut self.graceful_host_tasks) {
+            let _ = owner.task.await;
         }
         self.node.runtime_work.drain().await;
     }
@@ -300,6 +331,12 @@ impl ParticipantRuntime {
 impl Drop for ParticipantRuntime {
     fn drop(&mut self) {
         self.node.runtime_work.close();
+        for owner in &mut self.graceful_host_tasks {
+            if let Some(shutdown) = owner.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            owner.task.abort();
+        }
         for task in &self.tasks {
             task.abort();
         }

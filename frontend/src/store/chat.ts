@@ -307,6 +307,11 @@ export interface ChatState extends ReceptionState {
   reload: () => Promise<boolean>;
   refreshStatuses: (conversation?: Conversation) => Promise<void>;
   send: (text: string, replyTo: string | null) => Promise<void>;
+  admitTextAndWait: (
+    text: string,
+    replyTo: string | null,
+    expiresAtMs?: number | null,
+  ) => Promise<boolean>;
   admitText: (
     text: string,
     replyTo: string | null,
@@ -595,6 +600,23 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }, 2000);
 
     const unlisten = subscribeNodeEvents({
+      onIntegrationMessageAccepted: (e) => {
+        const state = get();
+        if (
+          !lease.current() ||
+          !state.ready ||
+          e.owner !== lease.owner ||
+          e.account_id !== state.myAccountId ||
+          !state.active ||
+          e.destination.kind !== state.active.kind ||
+          e.destination.id !== state.active.id
+        )
+          return;
+        // Outgoing delegated sends do not count as inbound notifications. Fetch
+        // their content through the same guarded history path as ordinary sends.
+        void state.reload();
+      },
+
       onDm: (e) => {
         if (lease.current()) get_handleDm(set, get, e);
       },
@@ -1042,6 +1064,28 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!dispatch) return false;
     void dispatch;
     return true;
+  },
+
+  // Account composers retain the draft until the core has durably accepted it.
+  admitTextAndWait: async (text, replyTo, expiresAtMs) => {
+    const lease = captureChat(get);
+    if (!lease.current()) return false;
+    const c = get().active;
+    if (!get().ready || !c || !text.trim()) return false;
+    return (
+      beginSendIntent(
+        guardedSet(rawSet, lease.current),
+        get,
+        c,
+        {
+          kind: "text",
+          text,
+          replyTo,
+          expiresAtMs,
+        },
+        { waitForHydration: false },
+      ) ?? false
+    );
   },
 
   // Re-send a previously-failed optimistic bubble (reusing its clientId/text/replyTo).

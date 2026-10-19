@@ -24,6 +24,15 @@ const native = vi.hoisted(() => ({
 let editor: ComponentProps<typeof ScreenshotEditor> | null;
 let composer: ComponentProps<typeof Composer>;
 vi.mock("@tauri-apps/api/core", () => ({ invoke: native.invoke }));
+vi.mock("@/lib/api/language", () => ({
+  dmLanguage: {
+    get: async () => ({
+      language: null,
+      min_target_percent: 80,
+      supported_languages: ["en"],
+    }),
+  },
+}));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: native.open }));
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({

@@ -381,9 +381,9 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                     }
                     data-testid={`member-profile-${m.user_id}`}
                     title={t("memberProfile.view")}
-                    aria-label={t("memberProfile.viewNamed", { name })}
                     className="min-w-0 flex-1 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
+                    <span className="sr-only">{t("memberProfile.view")}</span>
                     <IdentityCrest
                       id={crestId}
                       name={name}

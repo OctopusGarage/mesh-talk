@@ -17,6 +17,7 @@ custom-protocol = ["tauri/custom-protocol"]
 [dependencies]
 # The protocol core (the SDK layer this app is built on).
 mesh-talk-core = { path = "../crates/mesh-talk-core" }
+mesh-talk-integrations = { path = "../crates/mesh-talk-integrations" }
 # Tauri shell
 # NOTE: do NOT enable the "devtools" feature — it ships the webview inspector (right-click
 # → Inspect / console) in RELEASE builds too. Debug builds still get devtools automatically

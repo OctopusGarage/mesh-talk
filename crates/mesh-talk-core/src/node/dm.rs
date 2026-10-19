@@ -42,13 +42,22 @@ impl Node {
         let peer = self
             .routing_peer(recipient)
             .ok_or_else(|| NodeError::UnknownPeer(recipient.to_string()))?;
+        if let Some(account) = &peer.account_id {
+            self.check_dm_language(account, text)?;
+        }
         self.initiate_device(&peer.public)
             .await
             .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
-        let id = self.enqueue_encoded(
+        let account = peer.account_id.clone();
+        let id = self.enqueue_encoded_if(
             vec![peer],
             None,
             MessageBody::new(text.to_vec(), reply_to).encode(),
+            None,
+            &mut |accept| match &account {
+                Some(account) => self.authorize_dm_language(account, text, accept),
+                None => accept(),
+            },
             None,
         )?;
         self.flush_delivery(id).await;
@@ -90,16 +99,18 @@ impl Node {
         text: &[u8],
         reply_to: Option<EventId>,
         expires_at_ms: Option<u64>,
-        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<EventId, NodeError> {
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        self.check_dm_language(target, text)?;
         self.enqueue_account_inner(
             target,
             crate::expiry::wrap(
                 &MessageBody::new(text.to_vec(), reply_to).encode(),
                 expires_at_ms,
             ),
-            authorize,
+            None,
+            |accept| authorize(&mut || self.authorize_dm_language(target, text, accept)),
         )
         .await
     }
@@ -144,6 +155,7 @@ impl Node {
                 &MessageBody::sticker(sticker_id.to_owned(), fallback.to_vec()).encode(),
                 expires_at_ms,
             ),
+            None,
             authorize,
         )
         .await
@@ -173,10 +185,11 @@ impl Node {
         Ok(())
     }
 
-    async fn enqueue_account_inner(
+    pub(in crate::node) async fn enqueue_account_inner(
         &self,
         target: &str,
         inner: Vec<u8>,
+        request: Option<super::delivery_store::RequestRecord>,
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<EventId, NodeError> {
         authorize(&mut || Ok(()))?;
@@ -209,17 +222,8 @@ impl Node {
             envelope,
             Some(EventId::new(msg_id)),
             &mut authorize,
+            request,
         )
-    }
-
-    fn enqueue_encoded(
-        &self,
-        dests: Vec<PeerRecord>,
-        target: Option<String>,
-        plaintext: Vec<u8>,
-        logical: Option<EventId>,
-    ) -> Result<EventId, NodeError> {
-        self.enqueue_encoded_if(dests, target, plaintext, logical, &mut |accept| accept())
     }
 
     fn enqueue_encoded_if(
@@ -229,9 +233,10 @@ impl Node {
         plaintext: Vec<u8>,
         logical: Option<EventId>,
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+        request: Option<super::delivery_store::RequestRecord>,
     ) -> Result<EventId, NodeError> {
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
-        self.recover_delivery(&mut store).map_err(NodeError::Log)?;
+        authorize(&mut || self.recover_delivery(&mut store).map_err(NodeError::Log))?;
         store
             .check_capacity(dests.len(), plaintext.len() as u64)
             .map_err(NodeError::Log)?;
@@ -304,7 +309,6 @@ impl Node {
         } else {
             destinations[0].event.seq
         };
-        log.sync().map_err(NodeError::Log)?;
         drop(log);
         drop(ratchet);
         let transaction = DeliveryTransaction::Outgoing {
@@ -323,6 +327,16 @@ impl Node {
                 plaintext,
             },
             ratchets: prepared,
+        };
+        let transaction = if let Some(mut record) = request {
+            record.message_id = id;
+            record.accepted_at_ms = now_millis();
+            DeliveryTransaction::Requested {
+                request: record,
+                transaction: Box::new(transaction),
+            }
+        } else {
+            transaction
         };
         // WAL acceptance cannot turn into a failed send inviting duplicates.
         if !self.accept_outgoing_transaction(&mut store, transaction, authorize)? {

@@ -945,5 +945,31 @@
     "openDiagnostics": "Abrir Conexión",
     "online": "Leer en línea",
     "linkFailed": "No se pudo abrir el enlace. Inténtalo de nuevo o abre el manual en tu navegador."
+  },
+  "dmLanguage": {
+    "title": "Idioma de los mensajes directos",
+    "help": "Cada mensaje directo que recibas debe contener al menos un 80% del idioma elegido. Los demás idiomas pueden ocupar como máximo un 20%. No afecta a los grupos.",
+    "localOnly": "El idioma se comprueba en este dispositivo. Los mensajes nunca se envían a un servicio de traducción.",
+    "unrestricted": "Cualquier idioma",
+    "loadFailed": "No se pudo cargar tu preferencia de idioma.",
+    "saveFailed": "No se pudo guardar tu preferencia de idioma. Sigue activa la elección anterior.",
+    "validationFailed": "No se pudo comprobar el idioma. Tu borrador se conserva; inténtalo de nuevo.",
+    "notice": "Usa al menos un {{percent}}% de {{language}} en cada mensaje. Los demás idiomas pueden ocupar como máximo un 20%.",
+    "rejected": "Usa al menos un {{percent}}% de {{language}} en este mensaje (como máximo un 20% de otros idiomas). Tu borrador se conserva.",
+    "languages": {
+      "en": "inglés",
+      "zh": "chino",
+      "ja": "japonés",
+      "es": "español",
+      "fr": "francés",
+      "de": "alemán",
+      "ko": "coreano",
+      "pt": "portugués",
+      "ru": "ruso",
+      "ar": "árabe"
+    },
+    "checking": "Comprobando el idioma…",
+    "resourceLimit": "Este mensaje es demasiado largo o complejo para comprobarlo. Divídelo en mensajes más cortos.",
+    "hidden": "Mensaje oculto por tu configuración de idioma"
   }
 }

@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use zeroize::Zeroize;
 
-pub const SNAPSHOT_SCHEMA_VERSION: u16 = 1;
+pub const SNAPSHOT_SCHEMA_VERSION: u16 = 2;
 const MAGIC: &[u8; 8] = b"MTSNAP1\0";
 const MAX_RECORDS: u64 = 10_000_000;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
@@ -91,7 +91,9 @@ pub enum SnapshotRecordV1 {
     },
     /// Original signed ciphertext keeps channel metadata and file-card
     /// provenance verifiable without importing the old device's secrets.
-    SignedEvent { event: Event },
+    SignedEvent {
+        event: Event,
+    },
     FileCard {
         conversation: [u8; 32],
         event_id: [u8; 32],
@@ -100,7 +102,17 @@ pub enum SnapshotRecordV1 {
         manifest: Vec<u8>,
     },
     /// Account identity for a conversation represented only by file cards.
-    AccountContact { account_id: String },
+    AccountContact {
+        account_id: String,
+    },
+    /// V2 additions; older readers reject the header before interpreting records.
+    DmLanguageProfile {
+        payload: Vec<u8>,
+    },
+    DmLanguageDecision {
+        id: [u8; 32],
+        hidden: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,6 +280,9 @@ impl std::error::Error for SnapshotError {}
 #[derive(Debug)]
 pub struct SnapshotValidator {
     own_account_id: String,
+    schema_version: u16,
+    language_profiles: HashSet<String>,
+    language_decisions: HashSet<[u8; 32]>,
     expected: u64,
     accepted: u64,
     sent_ids: HashSet<([u8; 32], [u8; 32])>,
@@ -308,7 +323,7 @@ struct FileCardInfo {
 
 impl SnapshotValidator {
     pub fn new(header: SnapshotHeaderV1) -> Result<Self, SnapshotError> {
-        if header.schema_version != SNAPSHOT_SCHEMA_VERSION {
+        if !(1..=SNAPSHOT_SCHEMA_VERSION).contains(&header.schema_version) {
             return Err(SnapshotError::UnsupportedVersion);
         }
         if header.record_count > MAX_RECORDS {
@@ -331,6 +346,9 @@ impl SnapshotValidator {
         }
         Ok(Self {
             own_account_id: header.account_id.clone(),
+            schema_version: header.schema_version,
+            language_profiles: HashSet::new(),
+            language_decisions: HashSet::new(),
             expected: header.record_count,
             accepted: 0,
             sent_ids: HashSet::new(),
@@ -396,6 +414,25 @@ impl SnapshotValidator {
                     return Err(SnapshotError::SizeLimit);
                 }
                 if !self.profiles.insert(account_id.clone()) {
+                    return Err(SnapshotError::DuplicateRecord);
+                }
+            }
+            SnapshotRecordV1::DmLanguageProfile { payload } => {
+                if self.schema_version < 2 {
+                    return Err(SnapshotError::UnsupportedVersion);
+                }
+                let profile = crate::node::profile::ProfilePayload::decode(payload)
+                    .filter(|profile| profile.language_supported && profile.verify())
+                    .ok_or(SnapshotError::InvalidEncoding)?;
+                if !self.language_profiles.insert(profile.account_id()) {
+                    return Err(SnapshotError::DuplicateRecord);
+                }
+            }
+            SnapshotRecordV1::DmLanguageDecision { id, .. } => {
+                if self.schema_version < 2 {
+                    return Err(SnapshotError::UnsupportedVersion);
+                }
+                if !self.language_decisions.insert(*id) {
                     return Err(SnapshotError::DuplicateRecord);
                 }
             }

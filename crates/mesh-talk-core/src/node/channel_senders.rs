@@ -55,7 +55,22 @@ impl ChannelSenderStore {
             .unwrap_or_default()
     }
 
+    pub(crate) fn put_durable(
+        &mut self,
+        channel: &ConversationId,
+        senders: &[(u64, Vec<u8>)],
+    ) -> Result<(), LogError> {
+        let channel_hex = hex::encode(channel.as_bytes());
+        self.file.append_durable(&SenderRecord {
+            channel: channel_hex.clone(),
+            senders: senders.to_vec(),
+        })?;
+        self.latest.insert(channel_hex, senders.to_vec());
+        Ok(())
+    }
+
     /// Persist `senders` for `channel` (append a record; update the index).
+    #[cfg(test)]
     pub fn put(
         &mut self,
         channel: &ConversationId,

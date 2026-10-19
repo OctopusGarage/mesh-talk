@@ -5,7 +5,9 @@ vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
 import { subscribeNodeEvents } from "./events";
 
-beforeEach(() => listen.mockReset());
+beforeEach(() => {
+  listen.mockReset();
+});
 
 it("forwards only subscribed event payloads and releases every listener", async () => {
   const subscriptions = new Map<
@@ -40,5 +42,26 @@ it("releases a listener even when registration resolves after cleanup", async ()
 
   stop();
   finish(unlisten);
+  await vi.waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
+});
+
+it("forwards content-free integration acceptance events and releases the listener", async () => {
+  let forward!: (event: { payload: unknown }) => void;
+  const unlisten = vi.fn();
+  listen.mockImplementation((name, callback) => {
+    expect(name).toBe("integration-message-accepted");
+    forward = callback;
+    return Promise.resolve(unlisten);
+  });
+  const onIntegrationMessageAccepted = vi.fn();
+  const stop = subscribeNodeEvents({ onIntegrationMessageAccepted });
+  const payload = {
+    owner: "host",
+    account_id: "account",
+    destination: { kind: "channel", id: "team" },
+  };
+  forward({ payload });
+  expect(onIntegrationMessageAccepted).toHaveBeenCalledWith(payload);
+  stop();
   await vi.waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
 });

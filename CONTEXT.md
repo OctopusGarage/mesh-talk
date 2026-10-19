@@ -10,6 +10,11 @@ CLI (`mesh-talk-node`, with a `--post-office` relay mode) drives the same core.
 
 ## Layers (frontend → IPC → node → crypto/sync/transport → storage)
 
+Scoped bot/agent sending lives in `crates/mesh-talk-integrations/`;
+`crates/mesh-talk-mcp/` supplies the local MCP adapter. Hosts retain session/profile
+authority; adapters cannot bypass signed membership or core acceptance. See the
+[bot integration guide](docs/bot-integrations.md).
+
 The protocol core lives in the `mesh-talk-core` crate (`crates/mesh-talk-core/src/`); the
 Tauri app (`src-tauri/src/`) is a thin shell over it.
 
