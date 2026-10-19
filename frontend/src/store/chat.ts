@@ -307,6 +307,11 @@ export interface ChatState extends ReceptionState {
   reload: () => Promise<boolean>;
   refreshStatuses: (conversation?: Conversation) => Promise<void>;
   send: (text: string, replyTo: string | null) => Promise<void>;
+  admitTextAndWait: (
+    text: string,
+    replyTo: string | null,
+    expiresAtMs?: number | null,
+  ) => Promise<boolean>;
   admitText: (
     text: string,
     replyTo: string | null,
@@ -1059,6 +1064,28 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!dispatch) return false;
     void dispatch;
     return true;
+  },
+
+  // Account composers retain the draft until the core has durably accepted it.
+  admitTextAndWait: async (text, replyTo, expiresAtMs) => {
+    const lease = captureChat(get);
+    if (!lease.current()) return false;
+    const c = get().active;
+    if (!get().ready || !c || !text.trim()) return false;
+    return (
+      beginSendIntent(
+        guardedSet(rawSet, lease.current),
+        get,
+        c,
+        {
+          kind: "text",
+          text,
+          replyTo,
+          expiresAtMs,
+        },
+        { waitForHydration: false },
+      ) ?? false
+    );
   },
 
   // Re-send a previously-failed optimistic bubble (reusing its clientId/text/replyTo).

@@ -218,6 +218,9 @@ impl Node {
                         e.event_id,
                     )
                 };
+                if !from_me && self.hidden_by_language(e.event_id) {
+                    continue;
+                }
                 lines.push(ScanMatch {
                     from_me,
                     who,

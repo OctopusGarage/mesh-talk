@@ -1,3 +1,4 @@
+import { messageDisplayText } from "@/lib/messageDisplayText";
 import { useState } from "react";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -347,6 +348,7 @@ export function MessageBubble({
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
   const installedPacks = usePacks((s) => s.packs);
+  const displayedText = messageDisplayText(m.text, t);
   const mine = m.fromMe;
   const isFile = !!m.file;
   // Sticker messages render bubble-less (Telegram-style): just the animation. Fall back to
@@ -361,7 +363,7 @@ export function MessageBubble({
     const lease = captureChatOwnership();
     if (!m.text) return;
     try {
-      await copySensitiveText(m.text, t("settings.confirmCopyPrompt"));
+      await copySensitiveText(displayedText, t("settings.confirmCopyPrompt"));
     } catch (e) {
       if (lease.current()) setError(errorMessage(e));
     }
@@ -379,7 +381,9 @@ export function MessageBubble({
     : m.failed
       ? t(`message.fail.${m.failReason ?? "unknown"}`)
       : "";
-  const body = isFile ? t("files.sentFile", { name: m.file!.name }) : m.text;
+  const body = isFile
+    ? t("files.sentFile", { name: m.file!.name })
+    : displayedText;
   const ariaLabel = `${speaker}: ${body} · ${formatTime(m.wallClock)}${
     status ? ` · ${status}` : ""
   }`;
@@ -582,7 +586,8 @@ export function MessageBubble({
                   >
                     <CornerUpLeft className="h-3 w-3 shrink-0 opacity-70" />
                     <span className="truncate opacity-80">
-                      {parent.text || t("composer.message")}
+                      {messageDisplayText(parent.text, t) ||
+                        t("composer.message")}
                     </span>
                   </div>
                 )}
@@ -602,7 +607,7 @@ export function MessageBubble({
                       data-testid="message-sticker-fallback"
                       className="text-6xl"
                     >
-                      {m.text}
+                      {displayedText}
                     </span>
                   )
                 ) : isFile ? (
@@ -619,7 +624,7 @@ export function MessageBubble({
                   />
                 ) : (
                   <span className="cursor-text select-text whitespace-pre-wrap [overflow-wrap:anywhere]">
-                    {renderWithMentions(m.text, { ownBubble: mine })}
+                    {renderWithMentions(displayedText, { ownBubble: mine })}
                   </span>
                 )}
               </div>

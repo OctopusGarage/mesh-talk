@@ -4,7 +4,6 @@
 //! replicated to the post office — so it converges like a message, not via a fragile
 //! one-shot push. Split out of `node.rs` (one `impl Node` block per domain).
 
-use super::node::now_millis;
 use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
@@ -43,33 +42,7 @@ impl Node {
         {
             return Ok(());
         }
-        let payload = {
-            let mut profiles = self.profiles.lock().expect("profiles mutex not poisoned");
-            let updated_at = now_millis().max(
-                profiles
-                    .updated_at(&self.account_id())
-                    .unwrap_or(0)
-                    .saturating_add(1),
-            );
-            let payload = ProfilePayload::new(&self.account, avatar.clone(), updated_at);
-            profiles
-                .record(&self.account_id(), updated_at, avatar)
-                .map_err(NodeError::Log)?;
-            payload
-        };
-        // Hold it so on-discovery re-publish sends the current version.
-        {
-            let mut current = self
-                .my_profile
-                .lock()
-                .expect("my_profile mutex not poisoned");
-            if current
-                .as_ref()
-                .is_none_or(|held| held.updated_at <= payload.updated_at)
-            {
-                *current = Some(payload.clone());
-            }
-        }
+        let payload = self.prepare_own_profile(avatar, None)?;
         self.publish_profile_to_peers(&payload).await;
         Ok(())
     }
@@ -197,24 +170,17 @@ impl Node {
                     .remove(&event.id);
                 continue;
             }
-            // Newest-wins, durable. A stale update returns false (don't surface it).
-            let applied = self
-                .profiles
-                .lock()
-                .expect("profiles mutex not poisoned")
-                .record(
-                    &payload.account_id(),
-                    payload.updated_at,
-                    payload.avatar.clone(),
-                )
-                .unwrap_or(false);
-            if applied {
-                if payload.account_id() == self.account_id() {
-                    *self
-                        .my_profile
+            let applied = match self.apply_received_profile(&payload) {
+                Ok(applied) => applied,
+                Err(_) => {
+                    self.profiles_emitted
                         .lock()
-                        .expect("my_profile mutex not poisoned") = Some(payload.clone());
+                        .expect("profiles_emitted mutex not poisoned")
+                        .remove(&event.id);
+                    continue;
                 }
+            };
+            if applied {
                 let _ = self.profile_incoming.send(ReceivedProfile {
                     account_id: payload.account_id(),
                     avatar: payload.avatar,
@@ -228,6 +194,52 @@ impl Node {
             .lock()
             .expect("log mutex not poisoned")
             .request_profile_compaction(conv);
+    }
+
+    /// Serialize own incoming updates with local edits, using the same lock order.
+    /// A legacy avatar update is merged and persisted as a complete modern profile
+    /// so the local preference and what we republish cannot disagree on revision.
+    fn apply_received_profile(
+        &self,
+        payload: &ProfilePayload,
+    ) -> Result<bool, crate::eventlog::LogError> {
+        let own = payload.account_id() == self.account_id();
+        let mut current = own.then(|| {
+            self.my_profile
+                .lock()
+                .expect("my_profile mutex not poisoned")
+        });
+        let mut language = self
+            .language_state
+            .lock()
+            .expect("language state mutex not poisoned");
+        let mut avatars = self.profiles.lock().expect("profiles mutex not poisoned");
+        if payload.language_supported {
+            language.record_profile(payload)?;
+        }
+        let applied = avatars.record(
+            &payload.account_id(),
+            payload.updated_at,
+            payload.avatar.clone(),
+        )?;
+        if let Some(current) = current.as_mut() {
+            let revision = avatars.updated_at(&self.account_id()).unwrap_or(0);
+            let avatar = avatars.avatar(&self.account_id());
+            let merged = match language.profile(&self.account_id()) {
+                Some(policy) => ProfilePayload::new_with_language(
+                    &self.account,
+                    avatar,
+                    revision.max(policy.updated_at),
+                    policy.language,
+                ),
+                None => ProfilePayload::new(&self.account, avatar, revision),
+            };
+            if merged.language_supported {
+                language.record_profile(&merged)?;
+            }
+            **current = Some(merged);
+        }
+        Ok(applied)
     }
 
     /// Drain one deferred profile compaction without holding any async/network state.

@@ -1053,3 +1053,28 @@ traffic timing. The mailbox wrapping has no forward secrecy against later
 device-key compromise. Previously stored V1 events remain readable until
 evicted. Details and operational limits are in
 [`post-office-metadata-privacy.md`](post-office-metadata-privacy.md).
+
+## Incoming DM language policy
+
+The core owns an opt-in, account-signed incoming language preference and local
+80/20 content validation. `node/language_policy.rs` bundles ten language models
+and measures alphabetic grapheme spans with bounded work; no translation service
+is contacted. `MTPF2` carries the complete avatar and language state so existing
+profile compaction retains both. Avatar-only `MTPF1` remains byte-compatible.
+Policy-aware profile decoding requires an updated peer; text and event-kind wire
+formats are unchanged.
+
+`node/language_state.rs` durably stores verified preferences and immutable receive
+decisions against signed transport-event IDs. Core outgoing admission rechecks
+policy at synchronous WAL acceptance; incoming classification precedes receive
+WAL acceptance without changing ratchet transitions or receipt semantics. History,
+live callbacks, search and linked-device plaintext export apply the persisted
+filter. Trusted direct-history imports are classified before installation. Hidden
+content remains encrypted locally under existing retention.
+
+Desktop `language_commands.rs` uses the existing runtime/session admission guards.
+The UI separates the language selector from display language and validates draft
+content before durable enqueue. Snapshot schema 2 includes preferences and
+receive decisions while accepting schema 1 for restoration. See
+[incoming DM language](dm-language-restrictions.md) for product behavior, processing
+limits, asynchronous policy propagation, and old-client compatibility.
