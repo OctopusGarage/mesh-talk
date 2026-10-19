@@ -91,8 +91,11 @@ impl Node {
         };
         let message_id = match &request.destination {
             MessageDestination::Account(target) => {
-                self.enqueue_account_inner(target, wrapped, Some(record), authorize)
-                    .await?
+                self.check_dm_language(target, &request.text)?;
+                self.enqueue_account_inner(target, wrapped, Some(record), |accept| {
+                    authorize(&mut || self.authorize_dm_language(target, &request.text, accept))
+                })
+                .await?
             }
             MessageDestination::Channel(channel) => {
                 self.enqueue_channel_body_if(*channel, wrapped, Some(record), &mut authorize)?

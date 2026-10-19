@@ -226,23 +226,6 @@ impl Node {
         )
     }
 
-    fn enqueue_encoded(
-        &self,
-        dests: Vec<PeerRecord>,
-        target: Option<String>,
-        plaintext: Vec<u8>,
-        logical: Option<EventId>,
-    ) -> Result<EventId, NodeError> {
-        self.enqueue_encoded_if(
-            dests,
-            target,
-            plaintext,
-            logical,
-            &mut |accept| accept(),
-            None,
-        )
-    }
-
     fn enqueue_encoded_if(
         &self,
         dests: Vec<PeerRecord>,

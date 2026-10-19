@@ -380,3 +380,46 @@ async fn language_legacy_sibling_avatar_keeps_modern_preference() {
         Some("en")
     );
 }
+
+#[tokio::test]
+async fn language_integration_requests_obey_recipient_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let peer = DeviceIdentity::generate();
+    let account = Account::generate();
+    let proof = Announce::new_with_account(&peer, &account, "peer", 9);
+    let (node, _, _) = test_support::node_with_files(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let profile =
+        profile::ProfilePayload::new_with_language(&account, None, 100, Some("en".into()));
+    node.language_state
+        .lock()
+        .unwrap()
+        .record_profile(&profile)
+        .unwrap();
+    let request = OutgoingMessageRequest {
+        request_id: [42; 32],
+        destination: MessageDestination::Account(account.account_id()),
+        text: "你好，我们明天一起出去吃午饭吧。".as_bytes().to_vec(),
+        reply_to: None,
+        expires_at_ms: None,
+    };
+    let result = node
+        .enqueue_message_once_if(&request, |accept| accept())
+        .await;
+    assert!(
+        result.is_err(),
+        "integration send bypassed the recipient language policy"
+    );
+    assert!(node.account_history(&account.account_id(), 10).is_empty());
+    assert!(
+        node.delivery
+            .lock()
+            .unwrap()
+            .request(&request.request_id)
+            .is_none()
+    );
+}

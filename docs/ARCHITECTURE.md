@@ -961,6 +961,9 @@ context/send/status tools using the official SDK. See the
 [setup and limits](bot-integrations.md) and [design rationale](bot-mcp-architecture-research.md).
 
 Core `node/outgoing_message.rs` accepts retry keys through guarded enqueue.
+New bot direct messages apply the same recipient language checks as desktop
+sends, including the final synchronous acceptance check. Duplicate retries
+return the original acceptance without sending again after a policy change.
 Request mapping and prepared DM/group state share the encrypted delivery WAL.
 Appended journal variants preserve old positional tags; a pending new variant
 requires a compatible binary for recovery. Group messages, sender distributions
