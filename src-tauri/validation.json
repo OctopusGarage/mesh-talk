@@ -152,6 +152,7 @@
     {
       "id": "desktop-discovery",
       "paths": [
+        "src-tauri/src/background_command.rs",
         "src-tauri/src/routed_discovery.rs",
         "src-tauri/src/easytier_discovery.rs",
         "src-tauri/src/tailscale_discovery.rs",
@@ -168,6 +169,7 @@
           ]
         }
       ],
+      "node": ["scripts/diagnostics/background-command.test.mjs"],
       "consumers": ["desktop-session"],
       "escalation": [
         "Discovery inventories/fixtures and routing require focused native live-network acceptance; nonignored parser tests do not execute ignored physical client tests."

@@ -36,6 +36,9 @@ test("every tracked Rust source, crate manifest and test fixture has executable 
 });
 
 test("protocol dependencies reach Node, desktop and integration consumers transitively", () => {
+  const background = plan("src-tauri/src/background_command.rs");
+  assert.ok(background.owners.some(owner => owner.id === "desktop-discovery"));
+  assert.ok(background.node.includes("scripts/diagnostics/background-command.test.mjs"));
   for (const module of [
     "channel",
     "discovery",

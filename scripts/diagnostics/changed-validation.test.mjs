@@ -409,7 +409,14 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
     const data = JSON.parse(await readFile(path.join(f.root, manifest), "utf8"));
     data.contracts[0].rust = [{ package: "core", filters: ["fixture::"] }];
     f.write(manifest, JSON.stringify(data));
-    if (managed) f.write("scripts/build-retention.py", "import pathlib,subprocess,sys,time\npathlib.Path('target/managed-wrapper-entered').write_text('waiting')\nwhile not pathlib.Path('target/allow-managed').exists(): time.sleep(.05)\nsys.exit(subprocess.call(sys.argv[sys.argv.index('--')+1:]))\n");
+    if (managed) {
+      f.write("scripts/build-retention.py", "import pathlib,subprocess,sys,time\npathlib.Path('target/managed-wrapper-entered').write_text('waiting')\nwhile not pathlib.Path('target/allow-managed').exists(): time.sleep(.05)\nsys.exit(subprocess.call(sys.argv[sys.argv.index('--')+1:]))\n");
+      // This is fixture infrastructure, not a retention implementation change.
+      // Keep it in the baseline so selection cannot add an unrelated Python
+      // test stage before the formatting marker this regression observes.
+      f.git(["add", "scripts/build-retention.py"]);
+      f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "configure managed wrapper"]);
+    }
     await mkdir(path.join(f.root, "target/bin"), { recursive: true });
     const cargo = path.join(f.root, "target/bin/cargo");
     f.write("target/bin/cargo", `#!/usr/bin/env node\nconst fs=require('node:fs'); if(process.argv[2]==='--version'){console.log('cargo fixture');}else if(process.argv[2]==='fmt'){fs.writeFileSync('target/fast-static-ran','yes');}else{fs.writeFileSync('target/heavy-command-ran','yes');process.exit(9);}`);
