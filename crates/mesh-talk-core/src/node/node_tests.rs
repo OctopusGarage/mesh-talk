@@ -3596,7 +3596,7 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
     )
     .unwrap();
 
-    tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
+    let alice_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
     tokio::spawn(Arc::clone(&carol_node).run_accept_loop(carol_listener));
 
@@ -3748,9 +3748,15 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         .transfer_channel_owner(channel, &alice_uid)
         .await
         .unwrap();
-    // The final push can miss an offline owner. The signed leave remains in the
-    // durable log and the retry path must deliver it when the route returns.
-    add_peer(&bob_node.roster, &alice_node.identity, "Alice", 9, &bob_uid);
+    // Stop Alice's listener AND recovery loops. Replacing only Bob's dial route
+    // leaves Alice online: she can still pull Bob's leave from Bob or Carol.
+    alice_task.abort();
+    assert!(alice_task.await.unwrap_err().is_cancelled());
+    alice_node.sessions.clear();
+    tokio::time::timeout(Duration::from_secs(5), alice_node.runtime_work.drain())
+        .await
+        .expect("offline owner's accepted work must stop");
+    // The signed leave remains durable while its owner is actually offline.
     bob_node.leave_channel(channel).await.unwrap();
     assert!(
         bob_node
@@ -3764,11 +3770,14 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
             .iter()
             .any(|member| member.user_id() == bob_uid)
     );
+    let resumed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let resumed_addr = resumed_listener.local_addr().unwrap();
+    let resumed_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(resumed_listener));
     add_peer(
         &bob_node.roster,
         &alice_node.identity,
         "Alice",
-        alice_addr.port(),
+        resumed_addr.port(),
         &bob_uid,
     );
     bob_node.retry_channel_departures().await;
@@ -3778,6 +3787,10 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
             .iter()
             .all(|member| member.user_id() != bob_uid)
     );
+    resumed_task.abort();
+    assert!(resumed_task.await.unwrap_err().is_cancelled());
+    alice_node.sessions.clear();
+    alice_node.runtime_work.drain().await;
 }
 
 /// Forward-secrecy rig: Alice + Bob channel; Alice sends two messages; Bob reads
