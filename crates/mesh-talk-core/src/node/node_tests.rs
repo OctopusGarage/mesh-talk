@@ -3151,7 +3151,7 @@ async fn signed_channel_replica_preference_survives_restart_and_ignores_outsider
         .await
         .unwrap();
     let outsider = DeviceIdentity::generate();
-    let (parents, lamport) = node.log.lock().unwrap().prepare(&channel);
+    let (parents, lamport) = node.log.lock().unwrap().prepare(&channel).unwrap();
     let forged = Event::new(
         &outsider,
         channel,
@@ -5539,6 +5539,20 @@ async fn channel_reactions_are_visible_to_members() {
     let target = got.event_id;
 
     // Bob reacts; it distributes to Alice.
+    let before = bob_node.log.lock().unwrap().events(&channel).len();
+    assert!(
+        bob_node
+            .react_channel_if(channel, target, "blocked", false, |_| Err(
+                NodeError::Authorization("session changed".into())
+            ))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        bob_node.log.lock().unwrap().events(&channel).len(),
+        before,
+        "denied channel reaction has no signed event"
+    );
     bob_node
         .react_channel(channel, target, "👍", false)
         .await
@@ -7921,6 +7935,64 @@ async fn account_reaction_aggregates_on_the_peer_account() {
     assert_eq!(views[0].emoji, "👍");
     assert!(views[0].who.contains(&alice_acct.account_id()));
 
+    // A valid sealed reaction addressed to another account must not leak into
+    // this account's aggregate, even when its logical target is reused.
+    let wrong_route = crate::node::dm_envelope::ReactionEnvelope::new(
+        alice_acct.account_id(),
+        Account::generate().account_id(),
+        *target.as_bytes(),
+        "🔥".into(),
+        false,
+    );
+    let peer = alice_node
+        .roster
+        .lock()
+        .unwrap()
+        .get(&bob_uid)
+        .unwrap()
+        .clone();
+    let conv = dm_conversation_id(&alice_node.identity.public(), &peer.public);
+    alice_node
+        .append_event(
+            conv,
+            EventKind::React,
+            crate::dm::seal(
+                &alice_node.identity,
+                &peer.public.x25519_pub,
+                &wrong_route.encode(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    alice_node.deliver_direct(&peer, conv).await.unwrap();
+    assert!(
+        bob_node
+            .log
+            .lock()
+            .unwrap()
+            .events(&conv)
+            .iter()
+            .filter(|e| e.kind == EventKind::React)
+            .count()
+            >= 2
+    );
+    assert_eq!(
+        bob_node.account_reactions(&alice_acct.account_id()),
+        views,
+        "reaction route must match the requested account conversation"
+    );
+
+    bob_node
+        .roster
+        .lock()
+        .unwrap()
+        .evict_stale(std::time::Duration::ZERO);
+    assert_eq!(
+        bob_node.account_reactions(&alice_acct.account_id()),
+        views,
+        "verified history keeps offline account reactions visible"
+    );
+
     // Alice's own view includes her reaction too (sealed-to-peer, merged locally).
     let a_views = alice_node.account_reactions(&bob_acct.account_id());
     assert_eq!(a_views.len(), 1);
@@ -8608,7 +8680,7 @@ async fn group_reception_history_respects_signed_ancestry_despite_clock_skew() {
     assert_eq!(recovery.phase, "waiting_for_peer");
     assert_eq!(recovery.checked_at, None);
 
-    let (parents, _) = node.log.lock().unwrap().prepare(&conv);
+    let (parents, _) = node.log.lock().unwrap().prepare(&conv).unwrap();
     let question = Event::new(
         &author,
         conv,
@@ -8735,7 +8807,7 @@ async fn group_reception_multiple_chunks_complete_once_and_reopen_preserves_eras
     };
     let append = |seq, kind, bytes| {
         let mut log = node.log.lock().unwrap();
-        let (parents, clock) = log.prepare(&conv);
+        let (parents, clock) = log.prepare(&conv).unwrap();
         let event = Event::new(&owner, conv, seq, parents, clock, seq, kind, bytes);
         let id = event.id;
         log.append(event).unwrap();
@@ -8878,7 +8950,7 @@ async fn group_reception_terminal_is_independent_of_erased_and_expired_rows() {
     let conv = crate::channel::new_channel_id();
     let append = |seq, kind, bytes| {
         let mut log = node.log.lock().unwrap();
-        let (parents, clock) = log.prepare(&conv);
+        let (parents, clock) = log.prepare(&conv).unwrap();
         let event = Event::new(
             &owner,
             conv,
@@ -8967,5 +9039,173 @@ async fn group_reception_terminal_is_independent_of_erased_and_expired_rows() {
         remainder
             .iter()
             .all(|event| event.text != b"expiring prefix")
+    );
+}
+
+#[tokio::test]
+async fn own_account_reactions_survive_restart_and_removal() {
+    use crate::identity::account::Account;
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let secret = identity.secret_bytes();
+    let account = Account::generate();
+    let peer = Account::generate().account_id();
+    let open = || {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (ch, _) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        Node::open_with_account(
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+            Account::from_secret_bytes(account.secret_bytes()),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            ch,
+            file,
+            &dir.path().join("events.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let target = EventId::new([42; 32]);
+    let node = open();
+    assert!(
+        node.react_to_account_if(&peer, target, "blocked", false, |_| Err(
+            NodeError::Authorization("session changed".into())
+        ))
+        .await
+        .is_err()
+    );
+    assert!(
+        node.account_reactions(&peer).is_empty(),
+        "denied action has no projection"
+    );
+    assert!(
+        node.log.lock().unwrap().conversations().is_empty(),
+        "denied action has no signed event"
+    );
+    node.react_to_account(&peer, target, "👍", false)
+        .await
+        .unwrap();
+    let expected = node.account_reactions(&peer);
+    assert_eq!(expected.len(), 1);
+    drop(node);
+    let node = open();
+    assert_eq!(
+        node.account_reactions(&peer),
+        expected,
+        "own add survives restart"
+    );
+    node.my_dm_reactions.lock().unwrap().fail_appends_for_test();
+    assert!(
+        node.react_to_account(&peer, target, "🔥", false)
+            .await
+            .is_err(),
+        "projection persistence failures reach the caller"
+    );
+    assert_eq!(
+        node.account_reactions(&peer),
+        expected,
+        "failed add is invisible"
+    );
+    drop(node);
+    let node = open();
+
+    node.react_to_account(&peer, target, "👍", true)
+        .await
+        .unwrap();
+    drop(node);
+    assert!(
+        open().account_reactions(&peer).is_empty(),
+        "own remove survives restart"
+    );
+    let node = open();
+    let other = EventId::new([43; 32]);
+    node.react_to_account(&peer, other, "🎉", false)
+        .await
+        .unwrap();
+    node.delete_account_message(&peer, other).unwrap();
+    assert_eq!(
+        node.my_dm_reactions.lock().unwrap().len(),
+        1,
+        "erasing a message physically removes its local reaction projection"
+    );
+    drop(node);
+    assert!(
+        open().account_reactions(&peer).is_empty(),
+        "local erase removes durable reactions"
+    );
+    let node = open();
+    node.react_to_account(&peer, EventId::new([44; 32]), "✅", false)
+        .await
+        .unwrap();
+    node.clear_account_conversation(&peer).unwrap();
+    drop(node);
+    assert_eq!(
+        open().my_dm_reactions.lock().unwrap().len(),
+        0,
+        "clearing conversation removes durable actions and tombstones"
+    );
+}
+
+#[tokio::test]
+async fn own_dm_reactions_survive_restart_and_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let secret = identity.secret_bytes();
+    let peer = DeviceIdentity::generate();
+    let conv = dm_conversation_id(&identity.public(), &peer.public());
+    let open = || {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (ch, _) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        Node::open(
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+            seed_roster(&peer, "Peer", 1, &identity.user_id()),
+            dm,
+            ch,
+            file,
+            &dir.path().join("events.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let target = EventId::new([42; 32]);
+    let node = open();
+    assert!(
+        node.react_dm_if(&peer.user_id(), target, "blocked", false, |_| Err(
+            NodeError::Authorization("session changed".into())
+        ))
+        .await
+        .is_err()
+    );
+    assert!(
+        node.reactions(conv).is_empty(),
+        "denied DM reaction has no projection"
+    );
+    assert!(
+        node.log.lock().unwrap().conversations().is_empty(),
+        "denied DM reaction has no event"
+    );
+    node.react_dm(&peer.user_id(), target, "👍", false)
+        .await
+        .unwrap();
+    let expected = node.reactions(conv);
+    assert_eq!(expected.len(), 1);
+    drop(node);
+    let node = open();
+    assert_eq!(
+        node.reactions(conv),
+        expected,
+        "own DM add survives restart"
+    );
+    node.react_dm(&peer.user_id(), target, "👍", true)
+        .await
+        .unwrap();
+    drop(node);
+    assert!(
+        open().reactions(conv).is_empty(),
+        "own DM remove survives restart"
     );
 }

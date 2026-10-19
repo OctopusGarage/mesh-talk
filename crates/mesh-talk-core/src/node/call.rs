@@ -61,6 +61,19 @@ impl Node {
         target_user_id: &str,
         payload: &[u8],
     ) -> Result<(), NodeError> {
+        self.send_call_signal_if(target_user_id, payload, |commit| commit())
+            .await
+    }
+
+    /// Authorize frame encryption after dial and policy waits, before any payload write.
+    pub async fn send_call_signal_if(
+        &self,
+        target_user_id: &str,
+        payload: &[u8],
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(), NodeError> {
+        authorize(&mut || Ok(()))?;
         let peer = self
             .routing_peer(target_user_id)
             .ok_or_else(|| NodeError::UnknownPeer(target_user_id.to_string()))?;
@@ -79,7 +92,17 @@ impl Node {
             .map_err(SessionError::Transport)
             .map_err(NodeError::Session)?;
         channel
-            .send(&frame)
+            .send_if(&frame, |commit| {
+                authorize(&mut || {
+                    commit()
+                        .map_err(SessionError::Transport)
+                        .map_err(NodeError::Session)
+                })
+                .map_err(|error| match error {
+                    NodeError::Session(SessionError::Transport(error)) => error,
+                    _ => crate::transport::TransportError::AdmissionDenied,
+                })
+            })
             .await
             .map_err(SessionError::Transport)
             .map_err(NodeError::Session)?;

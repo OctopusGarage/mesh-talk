@@ -927,7 +927,7 @@ mod tests {
         kind: EventKind,
         ciphertext: Vec<u8>,
     ) {
-        let (parents, lamport) = log.prepare(&channel);
+        let (parents, lamport) = log.prepare(&channel).unwrap();
         let self_author = Author::from_ed25519(author.public().ed25519_pub);
         let seq = log
             .version_vector(&channel)

@@ -1,5 +1,5 @@
 use super::{NodeState, PeerInfo};
-use crate::commands::CommandError;
+use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use serde::Serialize;
 
 #[tauri::command]
@@ -30,13 +30,23 @@ pub async fn account_id(state: tauri::State<'_, NodeState>) -> Result<String, Co
 /// bounds the size and signs it with the account key.
 #[tauri::command]
 pub async fn publish_avatar(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     avatar: Option<String>,
 ) -> Result<(), CommandError> {
-    let node = state.node_handle().await?;
-    node.set_avatar(avatar.map(|s| s.into_bytes()))
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let node = runtime.handle();
+                node.set_avatar_if(avatar.map(|s| s.into_bytes()), |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 /// Durable signed profiles, including `null` for a cleared avatar. The frontend uses
@@ -60,38 +70,58 @@ pub async fn peer_avatars(
 }
 
 #[tauri::command]
-pub async fn start_linking(state: tauri::State<'_, NodeState>) -> Result<String, CommandError> {
-    let guard = state.0.lock().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(rt.start_linking())
+pub async fn start_linking(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+) -> Result<String, CommandError> {
+    RuntimeAdmission::capture_current(&app, &state)?
+        .with_runtime(move |rt| Ok(rt.start_linking()))
+        .await
 }
 
 #[tauri::command]
-pub async fn stop_linking(state: tauri::State<'_, NodeState>) -> Result<(), CommandError> {
-    let guard = state.0.lock().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    rt.stop_linking();
-    Ok(())
+pub async fn stop_linking(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+) -> Result<(), CommandError> {
+    RuntimeAdmission::capture_current(&app, &state)?
+        .with_runtime(move |rt| {
+            rt.stop_linking();
+            Ok(())
+        })
+        .await
 }
 
 #[tauri::command]
 pub async fn link_device(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     peer: String,
     code: String,
 ) -> Result<String, CommandError> {
-    let guard = state.0.lock().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    rt.link_device(&peer, &code)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let rt = runtime;
+                rt.link_device_if(&peer, &code, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub async fn rekey_account(state: tauri::State<'_, NodeState>) -> Result<String, CommandError> {
-    let guard = state.0.lock().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    rt.rekey_account().map_err(CommandError::from)
+pub async fn rekey_account(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+) -> Result<String, CommandError> {
+    RuntimeAdmission::capture_current(&app, &state)?
+        .with_runtime(move |rt| rt.rekey_account().map_err(CommandError::from))
+        .await
 }
 
 /// An account (group of devices) as shown in the chat UI.
@@ -108,17 +138,13 @@ pub async fn list_accounts(
     policy: tauri::State<'_, crate::contact_policy::HiddenContactsState>,
     state: tauri::State<'_, NodeState>,
 ) -> Result<Vec<AccountInfo>, CommandError> {
-    let session = app.session().clone();
-    let owner = session
-        .with_owner(|owner| {
-            owner
-                .map(str::to_owned)
-                .ok_or_else(|| "Missing contact owner".to_owned())
-        })
-        .map_err(CommandError::Authorization)?;
-    let node = state.0.clone();
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let lease = admission.lease().clone();
+    let owner = lease.owner().to_owned();
+    let node = state.inner().clone();
     #[cfg(test)]
     let captured = app.owner_command_captured.clone();
+    let app = app.inner().clone();
     let policy = policy.inner().clone();
     tokio::task::spawn_blocking(move || {
         // Runtime first, matching startup and runtime admission. Never wait for
@@ -127,8 +153,10 @@ pub async fn list_accounts(
         if let Some(entered) = captured.lock().unwrap().as_ref() {
             let _ = entered.send("contact-runtime-wait");
         }
-        let guard = node.blocking_lock();
-        policy.transaction(&session, &owner, || {
+        let guard = node.0.blocking_lock();
+        policy.transaction_for_lease(&app, &lease, || {
+            node.check_installation(&lease)
+                .map_err(|error| error.to_string())?;
             // Capture fresh presence inside the policy transaction so an older
             // poll cannot undo a later contact deletion.
             let rt = guard.as_ref().ok_or("Node not started")?;

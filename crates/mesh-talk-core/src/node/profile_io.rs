@@ -25,25 +25,48 @@ impl Node {
     /// contacts actually see the photo. Best-effort delivery per device (the event is
     /// durably logged and syncs later if a peer is offline).
     pub async fn set_avatar(&self, avatar: Option<Vec<u8>>) -> Result<(), NodeError> {
-        if let Some(a) = &avatar
-            && a.len() > MAX_AVATAR_BYTES
-        {
-            return Err(NodeError::Channel(format!(
-                "avatar too large: {} bytes (max {MAX_AVATAR_BYTES})",
-                a.len()
-            )));
+        self.set_avatar_if(avatar, |commit| commit()).await
+    }
+
+    pub async fn set_avatar_if(
+        &self,
+        avatar: Option<Vec<u8>>,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(), NodeError> {
+        let mut delivery = Vec::new();
+        authorize(&mut || {
+            if let Some(a) = &avatar
+                && a.len() > MAX_AVATAR_BYTES
+            {
+                return Err(NodeError::Channel(format!(
+                    "avatar too large: {} bytes (max {MAX_AVATAR_BYTES})",
+                    a.len()
+                )));
+            }
+            if self
+                .my_profile
+                .lock()
+                .expect("my_profile mutex not poisoned")
+                .as_ref()
+                .is_some_and(|current| current.avatar.as_ref() == avatar.as_ref())
+            {
+                return Ok(());
+            }
+            let payload = self.prepare_own_profile(avatar.clone(), None)?;
+            let wire = payload.encode();
+            for peer in self.profile_fanout_targets() {
+                let Some(conv) = self.prepare_profile_delivery(&peer, &wire) else {
+                    continue;
+                };
+                delivery.push((peer, conv));
+            }
+            Ok(())
+        })?;
+        for (peer, conv) in delivery {
+            let _ = self.deliver_direct(&peer, conv).await;
+            let _ = self.replicate_to_post_office(conv).await;
         }
-        if self
-            .my_profile
-            .lock()
-            .expect("my_profile mutex not poisoned")
-            .as_ref()
-            .is_some_and(|current| current.avatar.as_ref() == avatar.as_ref())
-        {
-            return Ok(());
-        }
-        let payload = self.prepare_own_profile(avatar, None)?;
-        self.publish_profile_to_peers(&payload).await;
         Ok(())
     }
 
@@ -94,19 +117,22 @@ impl Node {
     /// (direct, then post office). Best-effort: transport failures are swallowed (the
     /// event is durably logged and syncs later).
     async fn deliver_profile(&self, peer: &PeerRecord, wire: &[u8]) {
-        if !self.known_account_allowed(&peer.public) {
+        let Some(conv) = self.prepare_profile_delivery(peer, wire) else {
             return;
-        }
-        let conv = dm_conversation_id(&self.identity.public(), &peer.public);
-        let sealed = match crate::dm::seal(&self.identity, &peer.public.x25519_pub, wire) {
-            Ok(s) => s,
-            Err(_) => return,
         };
-        if self.append_event(conv, EventKind::Profile, sealed).is_err() {
-            return;
-        }
         let _ = self.deliver_direct(peer, conv).await;
         let _ = self.replicate_to_post_office(conv).await;
+    }
+
+    /// Shared synchronous acceptance policy for user publication and background replay.
+    fn prepare_profile_delivery(&self, peer: &PeerRecord, wire: &[u8]) -> Option<ConversationId> {
+        if !self.known_account_allowed(&peer.public) {
+            return None;
+        }
+        let conv = dm_conversation_id(&self.identity.public(), &peer.public);
+        let sealed = crate::dm::seal(&self.identity, &peer.public.x25519_pub, wire).ok()?;
+        self.append_event(conv, EventKind::Profile, sealed).ok()?;
+        Some(conv)
     }
 
     /// Decode + verify + store any new `Profile` events in `conv` authored by others, then

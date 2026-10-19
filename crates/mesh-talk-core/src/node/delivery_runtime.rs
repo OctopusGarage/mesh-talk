@@ -469,9 +469,9 @@ impl Node {
             }
             let log = self.log.lock().expect("log lock not poisoned");
             let conv = payload.conversation();
-            let (_, lamport) = log.prepare(&conv);
+            let (_, lamport) = log.prepare(&conv)?;
             let author = crate::eventlog::Author::from_ed25519(own.ed25519_pub);
-            let seq = log.version_vector(&conv).get(&author).copied().unwrap_or(0) + 1;
+            let seq = log.next_sequence(&conv, &author)?;
             let wire = payload
                 .seal(&self.identity)
                 .map_err(|_| LogError::CorruptFile("manifest receipt sealing failed".into()))?;
@@ -692,7 +692,7 @@ impl Node {
             let wire = payload.seal(&self.identity).ok()?;
             let log = self.log.lock().expect("log lock not poisoned");
             let conv = payload.conversation();
-            let (mut parents, lamport) = log.prepare(&conv);
+            let (mut parents, lamport) = log.prepare(&conv).ok()?;
             // The Ed-pair scope survives account adoption and local deletion.
             // Never make a fresh receipt depend on control ancestry that the
             // current profile cannot safely project to this exact account.
@@ -720,7 +720,7 @@ impl Node {
             parents.retain(|id| eligible.contains(id));
             drop(controls);
             let author = crate::eventlog::Author::from_ed25519(own.ed25519_pub);
-            let seq = log.version_vector(&conv).get(&author).copied().unwrap_or(0) + 1;
+            let seq = log.next_sequence(&conv, &author).ok()?;
             let control = Event::new(
                 &self.identity,
                 conv,

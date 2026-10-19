@@ -14,10 +14,10 @@
 //! and dropped, and an attacker who knows the password could reorder records.
 //!
 //! That is by design. The file is a local *cache*, not the source of truth.
-//! Truncation and reordering are recovered by the higher layers: events are
-//! content-addressed and signed, so on re-ingest via [`crate::eventlog::EventLog`]
-//! any altered event is rejected, and the sync engine re-fetches missing events
-//! from peers. A dropped or reordered local record is therefore self-healing.
+//! Authenticated replay repairs parent/child record reordering, including files
+//! written by earlier timestamp-sorted compactions. Unresolved ancestry returns
+//! an error instead of installing an inconsistent frontier. Events remain signed
+//! and content-addressed; peer sync can recover a causally complete missing tail.
 
 use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
@@ -54,17 +54,24 @@ impl PersistentEventLog {
     }
     /// Open (or create) the log at `path`, replaying any stored events.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
-        let (file, events) = EncryptedRecordLog::open(path, password, MAGIC)?;
+        let (file, events) = EncryptedRecordLog::<Event>::open(path, password, MAGIC)?;
         let mut log = EventLog::default();
-        // File order IS causal order: `append` validates that all parents are
-        // already indexed before writing, so a child can only appear in the file
-        // after its parents — exactly what `index_trusted` requires. (Records are
-        // also validated on first write and AEAD-authenticated at rest, so we
-        // replay them as trusted.) Writing records via `LogFile` directly, or an
-        // adversary reordering the file, breaks this; per the module trust
-        // boundary, the sync layer heals any resulting stale state.
+        // Normal appends are already causal. Earlier versions could compact by
+        // timestamp, so defer authenticated records whose parents appear later.
+        // Only that exceptional subset needs topological sorting on startup.
+        let mut deferred = Vec::new();
         for event in events {
-            log.index_trusted(event);
+            if event.parents.iter().all(|parent| {
+                log.get(parent)
+                    .is_some_and(|prior| prior.conversation_id == event.conversation_id)
+            }) {
+                log.index_trusted(event);
+            } else {
+                deferred.push(event);
+            }
+        }
+        if !deferred.is_empty() {
+            log = Self::index_retained(deferred, log)?.0;
         }
         Ok(Self {
             log,
@@ -192,8 +199,61 @@ impl PersistentEventLog {
     pub fn version_vector(&self, conversation: &ConversationId) -> HashMap<Author, u64> {
         self.log.version_vector(conversation)
     }
-    pub fn prepare(&self, conversation: &ConversationId) -> (Vec<EventId>, u64) {
+    pub fn prepare(&self, conversation: &ConversationId) -> Result<(Vec<EventId>, u64), LogError> {
         self.log.prepare(conversation)
+    }
+
+    pub fn next_sequence(
+        &self,
+        conversation: &ConversationId,
+        author: &Author,
+    ) -> Result<u64, LogError> {
+        self.log.next_sequence(conversation, author)
+    }
+
+    /// Rebuild causal indexes before publishing replacement records. Timestamp
+    /// order is only a tie-break; accepted events may have nonmonotonic clocks.
+    fn rewrite_kept(&mut self, kept: Vec<Event>) -> Result<(), LogError> {
+        let (rebuilt, ordered) = Self::index_retained(kept, EventLog::default())?;
+        self.file.rewrite(&ordered)?;
+        self.log = rebuilt;
+        Ok(())
+    }
+
+    fn index_retained(
+        kept: Vec<Event>,
+        mut rebuilt: EventLog,
+    ) -> Result<(EventLog, Vec<Event>), LogError> {
+        let refs: Vec<_> = kept.iter().collect();
+        let order = super::order::ordered_ids(&refs, &[], true);
+        if order.len() != kept.len() {
+            return Err(LogError::CorruptFile(
+                "retained event graph is not acyclic".into(),
+            ));
+        }
+        let mut by_id: HashMap<_, _> = kept.into_iter().map(|event| (event.id, event)).collect();
+        let mut ordered = Vec::with_capacity(order.len());
+        for id in order {
+            let event = by_id.remove(&id).expect("ordered retained event exists");
+            let missing: Vec<_> = event
+                .parents
+                .iter()
+                .filter(|parent| {
+                    rebuilt
+                        .get(parent)
+                        .is_none_or(|prior| prior.conversation_id != event.conversation_id)
+                })
+                .copied()
+                .collect();
+            if !missing.is_empty() {
+                return Err(LogError::MissingParents(missing));
+            }
+            // These immutable events were already validated on admission. Only
+            // the replacement's causal completeness needs checking again.
+            rebuilt.index_trusted(event.clone());
+            ordered.push(event);
+        }
+        Ok((rebuilt, ordered))
     }
 
     /// All event ids currently held (used to seed an already-emitted set).
@@ -283,7 +343,7 @@ impl PersistentEventLog {
         let mut kept: Vec<Event> = Vec::new();
         for conv in self.log.conversations() {
             if keep.contains(&conv) {
-                // (lamport, id) order is causal within a conversation.
+                // Rebuild establishes causal order before replacing the file.
                 kept.extend(self.log.events(&conv).into_iter().cloned());
             }
         }
@@ -291,12 +351,7 @@ impl PersistentEventLog {
         if dropped == 0 {
             return Ok(0);
         }
-        self.file.rewrite(&kept)?;
-        let mut log = EventLog::default();
-        for event in kept {
-            log.index_trusted(event);
-        }
-        self.log = log;
+        self.rewrite_kept(kept)?;
         self.fingerprint_cache
             .get_mut()
             .expect("fingerprint cache lock not poisoned")
@@ -323,15 +378,10 @@ impl PersistentEventLog {
             .conversations()
             .into_iter()
             .filter(|c| c != conversation)
-            // (lamport, id) order is causal within a conversation.
+            // Rebuild establishes causal order before replacing the file.
             .flat_map(|c| self.log.events(&c).into_iter().cloned().collect::<Vec<_>>())
             .collect();
-        self.file.rewrite(&kept)?;
-        let mut log = EventLog::default();
-        for event in kept {
-            log.index_trusted(event);
-        }
-        self.log = log;
+        self.rewrite_kept(kept)?;
         self.fingerprint_cache
             .get_mut()
             .expect("fingerprint cache lock not poisoned")
@@ -391,12 +441,7 @@ impl PersistentEventLog {
                     .collect::<Vec<_>>()
             })
             .collect();
-        self.file.rewrite(&kept)?;
-        let mut log = EventLog::default();
-        for event in kept {
-            log.index_trusted(event);
-        }
-        self.log = log;
+        self.rewrite_kept(kept)?;
         self.fingerprint_cache
             .get_mut()
             .expect("fingerprint cache lock not poisoned")
@@ -455,6 +500,145 @@ mod tests {
             EventKind::Message,
             payload.to_vec(),
         )
+    }
+
+    #[test]
+    fn invalid_retained_graph_does_not_publish_file_or_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.log");
+        let author = DeviceIdentity::generate();
+        let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+        let parent = mk(&author, 1, 100, b"parent");
+        let child = Event::new(
+            &author,
+            parent.conversation_id,
+            2,
+            vec![parent.id],
+            1,
+            0,
+            EventKind::Message,
+            b"child".to_vec(),
+        );
+        log.append_durable(parent.clone()).unwrap();
+        log.append_durable(child.clone()).unwrap();
+        let before_file = std::fs::read(&path).unwrap();
+        let before_heads = log.heads(&parent.conversation_id);
+        let before_version = log.version_vector(&parent.conversation_id);
+
+        // Exercise the shared replacement boundary with a retained child whose
+        // parent was accidentally omitted. No candidate may publish first.
+        assert!(matches!(
+            log.rewrite_kept(vec![child.clone()]),
+            Err(LogError::MissingParents(ids)) if ids == vec![parent.id]
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before_file);
+        assert!(log.has(&parent.id));
+        assert!(log.has(&child.id));
+        assert_eq!(log.heads(&parent.conversation_id), before_heads);
+        assert_eq!(log.version_vector(&parent.conversation_id), before_version);
+        drop(log);
+        let reopened = PersistentEventLog::open(&path, "pw").unwrap();
+        assert!(reopened.has(&parent.id));
+        assert!(reopened.has(&child.id));
+        assert_eq!(reopened.heads(&parent.conversation_id), before_heads);
+    }
+
+    #[test]
+    fn authenticated_replay_repairs_prior_noncausal_compaction_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.log");
+        let author = DeviceIdentity::generate();
+        let parent = mk(&author, 1, 100, b"parent");
+        let child = Event::new(
+            &author,
+            parent.conversation_id,
+            2,
+            vec![parent.id],
+            1,
+            0,
+            EventKind::Message,
+            b"child".to_vec(),
+        );
+        // Earlier compactions wrote accepted events by timestamp rather than ancestry.
+        let (mut file, _) = EncryptedRecordLog::<Event>::open(&path, "pw", MAGIC).unwrap();
+        file.append_durable(&child).unwrap();
+        file.append_durable(&parent).unwrap();
+        drop(file);
+        let reopened = PersistentEventLog::open(&path, "pw").unwrap();
+        assert_eq!(reopened.heads(&parent.conversation_id), vec![child.id]);
+        assert_eq!(
+            reopened.version_vector(&parent.conversation_id)[&parent.author],
+            2
+        );
+    }
+
+    #[test]
+    fn compaction_preserves_causal_frontier_with_nonmonotonic_clocks() {
+        for mode in ["retain", "drop", "profiles"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("events.log");
+            let author = DeviceIdentity::generate();
+            let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+            let parent = mk(&author, 1, 100, b"parent");
+            let conv = parent.conversation_id;
+            let child = Event::new(
+                &author,
+                conv,
+                2,
+                vec![parent.id],
+                1,
+                0,
+                EventKind::Message,
+                b"child".to_vec(),
+            );
+            log.append_durable(parent.clone()).unwrap();
+            log.append_durable(child.clone()).unwrap();
+            let other = Event::new(
+                &author,
+                ConversationId::new([2; 32]),
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                vec![],
+            );
+            log.append_durable(other.clone()).unwrap();
+            match mode {
+                "retain" => {
+                    log.retain_conversations(&HashSet::from([conv])).unwrap();
+                }
+                "drop" => {
+                    log.drop_conversation(&other.conversation_id).unwrap();
+                }
+                "profiles" => {
+                    for i in 0..10 {
+                        let profile = Event::new(
+                            &author,
+                            other.conversation_id,
+                            i + 2,
+                            vec![],
+                            i + 2,
+                            0,
+                            EventKind::Profile,
+                            vec![i as u8],
+                        );
+                        log.append_durable(profile).unwrap();
+                    }
+                    assert!(
+                        log.compact_superseded_profiles(&other.conversation_id)
+                            .unwrap()
+                            > 0
+                    );
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(log.heads(&conv), vec![child.id], "{mode}");
+            drop(log);
+            let reopened = PersistentEventLog::open(&path, "pw").unwrap();
+            assert!(reopened.has(&parent.id));
+            assert_eq!(reopened.heads(&conv), vec![child.id], "reopen {mode}");
+        }
     }
 
     #[test]
@@ -1150,7 +1334,7 @@ eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 
         // Reopen, derive the next event from the replayed state via `prepare`.
         let mut plog = PersistentEventLog::open(&path, "pw").unwrap();
-        let (parents, lamport) = plog.prepare(&conv);
+        let (parents, lamport) = plog.prepare(&conv).unwrap();
         assert_eq!(parents, vec![root.id]);
         assert_eq!(lamport, 2);
         let child = Event::new(

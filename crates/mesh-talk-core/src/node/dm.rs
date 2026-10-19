@@ -39,24 +39,39 @@ impl Node {
         text: &[u8],
         reply_to: Option<EventId>,
     ) -> Result<(), NodeError> {
+        self.send_dm_reply_if(recipient, text, reply_to, |commit| commit())
+            .await
+    }
+
+    /// Capture host authority around local grants and final durable acceptance.
+    pub async fn send_dm_reply_if(
+        &self,
+        recipient: &str,
+        text: &[u8],
+        reply_to: Option<EventId>,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(), NodeError> {
+        authorize(&mut || Ok(()))?;
         let peer = self
             .routing_peer(recipient)
             .ok_or_else(|| NodeError::UnknownPeer(recipient.to_string()))?;
         if let Some(account) = &peer.account_id {
             self.check_dm_language(account, text)?;
         }
-        self.initiate_device(&peer.public)
-            .await
-            .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
+        self.initiate_device_locally_if(&peer.public, &mut authorize)
+            .await?;
         let account = peer.account_id.clone();
         let id = self.enqueue_encoded_if(
             vec![peer],
             None,
             MessageBody::new(text.to_vec(), reply_to).encode(),
             None,
-            &mut |accept| match &account {
-                Some(account) => self.authorize_dm_language(account, text, accept),
-                None => accept(),
+            &mut |accept| {
+                authorize(&mut || match &account {
+                    Some(account) => self.authorize_dm_language(account, text, accept),
+                    None => accept(),
+                })
             },
             None,
         )?;
@@ -263,8 +278,8 @@ impl Node {
             let (wire, transition) = ratchet
                 .prepare_encrypt(&self.identity, &peer.public, &plaintext)
                 .map_err(NodeError::Log)?;
-            let (parents, lamport) = log.prepare(&conv);
-            let seq = log.version_vector(&conv).get(&author).copied().unwrap_or(0) + 1;
+            let (parents, lamport) = log.prepare(&conv).map_err(NodeError::Log)?;
+            let seq = log.next_sequence(&conv, &author).map_err(NodeError::Log)?;
             let event = Event::new(
                 &self.identity,
                 conv,

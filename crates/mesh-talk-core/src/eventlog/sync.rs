@@ -941,7 +941,7 @@ mod tests {
             let mut seqs: HashMap<[u8; 32], u64> = HashMap::new();
             for i in 0..12u64 {
                 let author = &authors[(rng.next_u32() as usize) % authors.len()];
-                let (parents, lamport) = reference.prepare(&conv());
+                let (parents, lamport) = reference.prepare(&conv()).unwrap();
                 let pk = author.public().ed25519_pub;
                 let seq = {
                     let s = seqs.entry(pk).or_insert(0);

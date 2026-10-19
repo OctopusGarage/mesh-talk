@@ -41,3 +41,53 @@ async fn secure_channel_over_real_tcp() {
 
     server.await.expect("server task");
 }
+
+#[tokio::test]
+async fn denied_frame_commit_over_loopback_preserves_noise_nonce() {
+    use crate::transport::TransportError;
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_public = bob.public();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let receiver = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut channel = SecureChannel::accept(stream, &bob).await.unwrap();
+        // A rejected commit must neither write a frame nor consume its nonce.
+        assert_eq!(channel.recv().await.unwrap(), b"authorized");
+    });
+    let stream = TcpStream::connect(address).await.unwrap();
+    let mut channel = SecureChannel::connect(stream, &alice, Some(&bob_public))
+        .await
+        .unwrap();
+    let gate = std::sync::Arc::new(tokio::sync::RwLock::new(()));
+    channel.set_io_admission(gate.clone(), std::sync::Arc::new(|| true));
+    let held = gate.write().await;
+    let allowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let task_allowed = allowed.clone();
+    let (began, waiting) = tokio::sync::oneshot::channel();
+    let sender = tokio::spawn(async move {
+        {
+            let send = channel.send_if(b"obsolete", |commit| {
+                if task_allowed.load(std::sync::atomic::Ordering::SeqCst) {
+                    commit()
+                } else {
+                    Err(TransportError::AdmissionDenied)
+                }
+            });
+            tokio::pin!(send);
+            tokio::select! {
+                biased;
+                result = &mut send => panic!("send unexpectedly bypassed policy wait: {result:?}"),
+                _ = std::future::ready(()) => { began.send(()).unwrap(); },
+            }
+            assert!(matches!(send.await, Err(TransportError::AdmissionDenied)));
+        }
+        channel.send(b"authorized").await.unwrap();
+    });
+    waiting.await.unwrap();
+    allowed.store(false, std::sync::atomic::Ordering::SeqCst);
+    drop(held);
+    sender.await.unwrap();
+    receiver.await.unwrap();
+}

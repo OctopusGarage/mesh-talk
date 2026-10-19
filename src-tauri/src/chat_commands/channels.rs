@@ -2,7 +2,7 @@ use super::{
     ChannelMemberInfo, ChannelMembersInfo, HistoryItem, NodeState, ReactionInfo, parse_channel_id,
     parse_event_id, to_reaction_infos,
 };
-use crate::commands::CommandError;
+use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use serde::Serialize;
 
 /// A channel as shown in the chat UI.
@@ -92,15 +92,25 @@ pub async fn channel_members(
 
 #[tauri::command]
 pub async fn set_channel_replica_enabled(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
     enabled: bool,
 ) -> Result<(), CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let node = state.node_handle().await?;
-    node.set_channel_replica_enabled(channel, enabled)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let node = runtime.handle();
+                node.set_channel_replica_enabled_if(channel, enabled, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[derive(Serialize)]
@@ -173,141 +183,233 @@ pub async fn channel_activity(
 
 #[tauri::command]
 pub async fn create_channel(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     name: String,
     member_ids: Vec<String>,
 ) -> Result<String, CommandError> {
-    let (node, members) = {
-        let guard = state.0.lock().await;
-        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        let mut members = Vec::new();
-        for uid in &member_ids {
-            let p = rt.channel_invitee_public(uid).ok_or_else(|| {
-                CommandError::Validation(format!("unknown or ineligible peer: {uid}"))
-            })?;
-            members.push(p);
-        }
-        (rt.handle(), members)
-    };
-    let id = node
-        .create_channel_invited(&name, members)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let (node, members) = admission.checked(runtime, || {
+                    let rt = runtime;
+                    let mut members = Vec::new();
+                    for uid in &member_ids {
+                        let p = rt.channel_invitee_public(uid).ok_or_else(|| {
+                            CommandError::Validation(format!("unknown or ineligible peer: {uid}"))
+                        })?;
+                        members.push(p);
+                    }
+                    Ok((rt.handle(), members))
+                })?;
+                let id = node
+                    .create_channel_invited_if(&name, members, |commit| {
+                        admission.authorize_accept(runtime, commit)
+                    })
+                    .await
+                    .map_err(CommandError::from)?;
+                Ok(hex::encode(id.as_bytes()))
+            })
+        })
         .await
-        .map_err(CommandError::from)?;
-    Ok(hex::encode(id.as_bytes()))
 }
 
 #[tauri::command]
 pub async fn add_channel_member(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
     member_id: String,
 ) -> Result<(), CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let (node, member) = {
-        let guard = state.0.lock().await;
-        let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        let member = rt.channel_invitee_public(&member_id).ok_or_else(|| {
-            CommandError::Validation(format!("unknown or ineligible peer: {member_id}"))
-        })?;
-        (rt.handle(), member)
-    };
-    node.add_channel_member(channel, member)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let (node, member) = admission.checked(runtime, || {
+                    let rt = runtime;
+                    let member = rt.channel_invitee_public(&member_id).ok_or_else(|| {
+                        CommandError::Validation(format!("unknown or ineligible peer: {member_id}"))
+                    })?;
+                    Ok((rt.handle(), member))
+                })?;
+                node.add_channel_member_if(channel, member, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn remove_channel_member(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
     member_id: String,
 ) -> Result<(), CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let node = state.node_handle().await?;
-    node.remove_channel_member(channel, &member_id)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let node = runtime.handle();
+                node.remove_channel_member_if(channel, &member_id, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn transfer_channel_owner(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
     member_id: String,
 ) -> Result<(), CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let node = state.node_handle().await?;
-    node.transfer_channel_owner(channel, &member_id)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let node = runtime.handle();
+                node.transfer_channel_owner_if(channel, &member_id, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn leave_channel(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
 ) -> Result<(), CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let node = state.node_handle().await?;
-    node.leave_channel(channel)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let node = runtime.handle();
+                node.leave_channel_if(channel, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn accept_channel_invite(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
 ) -> Result<(), CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let node = state.node_handle().await?;
-    node.accept_channel_invite(channel)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let node = runtime.handle();
+                node.accept_channel_invite_if(channel, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn rename_channel(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
     name: String,
 ) -> Result<(), CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let node = state.node_handle().await?;
-    node.rename_channel(channel, &name)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let node = runtime.handle();
+                node.rename_channel_if(channel, &name, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn dissolve_channel(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
 ) -> Result<(), CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let node = state.node_handle().await?;
-    node.dissolve_channel(channel)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let node = runtime.handle();
+                node.dissolve_channel_if(channel, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn send_channel_message(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
     text: String,
     reply_to: Option<String>,
     expires_at_ms: Option<u64>,
 ) -> Result<(), CommandError> {
-    let id = parse_channel_id(&channel_id)?;
-    let reply = match reply_to {
-        Some(h) => Some(parse_event_id(&h)?),
-        None => None,
-    };
-    let node = state.node_handle().await?;
-    node.send_channel_message_reply_expiring(id, text.as_bytes(), reply, expires_at_ms)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let id = parse_channel_id(&channel_id)?;
+                let reply = match reply_to {
+                    Some(h) => Some(parse_event_id(&h)?),
+                    None => None,
+                };
+                let node = runtime.handle();
+                node.send_channel_message_reply_expiring_if(
+                    id,
+                    text.as_bytes(),
+                    reply,
+                    expires_at_ms,
+                    |commit| admission.authorize_accept(runtime, commit),
+                )
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 /// Map the UI's "sent via the media button?" flag to a manifest file kind, so the receiver
@@ -334,18 +436,28 @@ pub async fn channel_history<R: tauri::Runtime>(
 
 #[tauri::command]
 pub async fn react_channel(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
     target: String,
     emoji: String,
     remove: bool,
 ) -> Result<(), CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let id = parse_event_id(&target)?;
-    let node = state.node_handle().await?;
-    node.react_channel(channel, id, &emoji, remove)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let id = parse_event_id(&target)?;
+                let node = runtime.handle();
+                node.react_channel_if(channel, id, &emoji, remove, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]

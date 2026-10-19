@@ -20,7 +20,6 @@ use crate::node::dm_ratchet::DmRatchet;
 use crate::node::filebook::{FileBook, ReceivedFile};
 use crate::node::pairing::PendingLink;
 use crate::node::ratchet_sessions::RatchetSessions;
-use crate::node::reaction::ReactionPayload;
 use crate::node::received_log::ReceivedLog;
 use crate::node::sentlog::SentLog;
 use crate::node::session::SessionError;
@@ -250,10 +249,6 @@ impl std::fmt::Display for NodeError {
 
 impl std::error::Error for NodeError {}
 
-/// Our own reactions, keyed by `(conversation, target message, emoji)` and collapsed
-/// to the latest action `(wall_clock_ms, payload)`. See the `my_dm_reactions` field.
-type MyReactions = HashMap<(ConversationId, EventId, String), (u64, ReactionPayload)>;
-
 #[cfg(test)]
 type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
 
@@ -416,23 +411,12 @@ pub struct Node {
     /// Profile events we've already surfaced this session (dedup), so re-syncing a peer's
     /// device-pair conversation doesn't re-emit a profile we already applied.
     pub(in crate::node) profiles_emitted: Mutex<HashSet<EventId>>,
-    /// Read-side cache for `reactions()`: conversation → (React-event count, aggregated
-    /// view). React events are add-only per conversation, so the count is a sound version
-    /// stamp — a cache hit skips re-decrypting every React event on each reaction read.
-    pub(in crate::node) reaction_cache:
-        Mutex<HashMap<ConversationId, (usize, Vec<crate::node::reaction::ReactionView>)>>,
     /// Our OWN current profile (the avatar we last set), held so we can re-publish it to a
     /// peer the moment it's freshly discovered. `None` until the user sets/clears one this
     /// session (or it's reloaded on open). Behind a mutex; cheap to clone for a send.
     pub(in crate::node) my_profile: Mutex<Option<crate::node::profile::ProfilePayload>>,
-    /// Own DM reactions: sealed to the peer so un-openable from our own log. Stored in
-    /// memory (with the wall-clock we made each at) so `reactions` can merge them and
-    /// resolve toggles by recency independent of merge order. Keyed by
-    /// `(conv, target, emoji)` and collapsed to the LATEST action — the same
-    /// max-reduction `aggregate` performs per author — so a long-running session can't
-    /// grow this without bound (every author entry here is us). Lost on restart (MVP
-    /// limitation).
-    pub(in crate::node) my_dm_reactions: Mutex<MyReactions>,
+    /// Durable latest local actions; outbound sealed reactions cannot be reopened by us.
+    pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::ReactionStore>,
 }
 
 impl Node {
@@ -526,7 +510,7 @@ impl Node {
             });
             // Durable record of OUR OWN recalls: our recall payloads are sealed to peers (we
             // can't open them from our own log), so this is how `history` knows which of our
-            // messages we recalled — and it must survive restart (unlike own reactions).
+            // messages we recalled — and it must survive restart.
             let h_recalls = s
                 .spawn(|| crate::node::recall::RecallLog::open(&dir.join("recalls.log"), password));
             let h_consent = s.spawn(|| {
@@ -782,6 +766,10 @@ impl Node {
             &dir.join("account-preferences.log"),
             password,
         )?;
+        let my_dm_reactions = super::reaction_store::ReactionStore::open(
+            &log_path.with_extension(format!("{}-reactions.log", account.account_id())),
+            password,
+        )?;
         let node = Arc::new(Self {
             expiry_clock_start: (std::time::Instant::now(), now_millis()),
             expiry_first_seen: Mutex::new(HashMap::new()),
@@ -816,7 +804,6 @@ impl Node {
             call_signal_incoming: call_signal_tx,
             call_signal_rx: Mutex::new(Some(call_signal_rx)),
             profiles_emitted: Mutex::new(HashSet::new()),
-            reaction_cache: Mutex::new(HashMap::new()),
             my_profile: Mutex::new(my_profile),
             pending_link: Mutex::new(None),
             log: Mutex::new(log),
@@ -872,7 +859,7 @@ impl Node {
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),
-            my_dm_reactions: Mutex::new(HashMap::new()),
+            my_dm_reactions: Mutex::new(my_dm_reactions),
         });
         node.prune_expired_received_on_open()
             .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
@@ -1082,18 +1069,15 @@ impl Node {
             .map_err(NodeError::Log)?;
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut log = self.log.lock().expect("log mutex not poisoned");
-        let (mut parents, lamport) = log.prepare(&channel);
+        let (mut parents, lamport) = log.prepare(&channel).map_err(NodeError::Log)?;
         if independent_profile {
             // Signed profile leaves must remain ingestible while sibling content
             // categories are paused. The event log permits sparse author sequences.
             parents.clear();
         }
         let seq = log
-            .version_vector(&channel)
-            .get(&self_author)
-            .copied()
-            .unwrap_or(0)
-            + 1;
+            .next_sequence(&channel, &self_author)
+            .map_err(NodeError::Log)?;
         let event = Event::new(
             &self.identity,
             channel,

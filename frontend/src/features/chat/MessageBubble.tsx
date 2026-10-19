@@ -1,6 +1,5 @@
 import { messageDisplayText } from "@/lib/messageDisplayText";
 import { useState } from "react";
-import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Copy,
@@ -28,12 +27,12 @@ import {
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { chat } from "@/lib/api";
-import { defaultSavePath, effectiveDownloadDir } from "@/lib/download";
+import { saveAttachment } from "@/lib/attachmentSave";
 import {
   attachmentLabel,
   isDirectoryAttachment,
 } from "@/lib/directoryAttachment";
-import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
+import { useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { formatTime, humanSize, shortId } from "@/lib/format";
@@ -45,7 +44,6 @@ import type { ReactionInfo } from "@/lib/types";
 import { useChat, captureChatOwnership, type ChatMessage } from "@/store/chat";
 import {
   useFileStatus,
-  useFileAvailability,
   refreshFileAvailability,
 } from "@/store/fileAvailability";
 import { MediaPreview } from "./MediaPreview";
@@ -105,28 +103,9 @@ function FileBubble({
       return;
     try {
       setSaving(true);
-      const dir = directory ? await effectiveDownloadDir() : "";
-      if (!lease.current()) return;
-      if (dir) {
-        if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
-          return;
-        const path = await chat.saveFileToDir(file.fileConv, dir);
-        if (lease.current()) rememberSavedDownload(file.fileConv, path);
-        return;
-      }
-      const defaultPath = await defaultSavePath(file.name);
-      if (!lease.current()) return;
-      const dest = directory
-        ? await openDialog({ directory: true })
-        : await save({ defaultPath });
-      if (lease.current() && typeof dest === "string") {
-        if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
-          return;
-        const path = directory
-          ? await chat.saveFileToDir(file.fileConv, dest)
-          : (await chat.saveFile(file.fileConv, dest), dest);
-        if (lease.current()) rememberSavedDownload(file.fileConv, path);
-      }
+      await saveAttachment(file, lease, {
+        mode: directory ? "default" : "as",
+      });
     } catch (e) {
       if (lease.current())
         setError(t("files.couldntSave", { error: errorMessage(e) }));

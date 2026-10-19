@@ -632,6 +632,96 @@ mod tests {
     }
 
     #[test]
+    fn queued_contact_mutations_reject_same_owner_relogin() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let app_state =
+            crate::state::AppState::new(crate::services::auth_service::AuthService::new(Arc::new(
+                mesh_talk_core::identity::manager::IdentityManager::new(
+                    mesh_talk_core::storage::file_manager::FileManager::new(dir.path().to_owned()),
+                ),
+            )));
+        let signed_in = session().get().unwrap();
+        app_state.session().set(
+            signed_in.token.clone(),
+            signed_in.user.clone(),
+            signed_in.password.clone(),
+        );
+        let node_state = crate::chat_commands::NodeState::empty();
+        let runtime = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
+            dir.path(),
+            "alice",
+            "Alice",
+            "password",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        ))
+        .unwrap();
+        let node = runtime.handle();
+        tauri::async_runtime::block_on(node.react_to_account(
+            A,
+            mesh_talk_core::eventlog::EventId::new([9; 32]),
+            "👍",
+            false,
+        ))
+        .unwrap();
+        let before = node.account_reactions(A);
+        assert_eq!(before.len(), 1);
+        *node_state.0.blocking_lock() = Some(runtime);
+        let app = tauri::test::mock_builder()
+            .manage(app_state.clone())
+            .manage(node_state.clone())
+            .manage(HiddenContactsState::new(dir.path().to_owned()))
+            .invoke_handler(tauri::generate_handler![
+                set_contact_hidden,
+                delete_contact,
+                crate::chat_commands::list_accounts
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        for cmd in ["delete_contact", "set_contact_hidden", "list_accounts"] {
+            let guard = node_state.0.blocking_lock();
+            let (entered, waiting) = channel();
+            *app_state.owner_command_captured.lock().unwrap() = Some(entered);
+            let window = webview.clone();
+            let pending = std::thread::spawn(move || {
+                tauri::test::get_ipc_response(&window,
+                tauri::webview::InvokeRequest {
+                    cmd: cmd.into(), callback: tauri::ipc::CallbackFn(0), error: tauri::ipc::CallbackFn(1),
+                    url: if cfg!(windows) { "http://tauri.localhost" } else { "tauri://localhost" }.parse().unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(serde_json::json!({"owner":"alice", "account":A, "hidden":true, "name":"Alice"})),
+                    headers: Default::default(), invoke_key: tauri::test::INVOKE_KEY.into(),
+                }).is_err()
+            });
+            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+            app_state.session().publish(
+                "replacement".into(),
+                signed_in.user.clone(),
+                signed_in.password.clone(),
+            );
+            drop(guard);
+            assert!(
+                pending.join().unwrap(),
+                "{cmd} must reject the replaced entry lease"
+            );
+            assert_eq!(
+                node.account_reactions(A),
+                before,
+                "replacement session's durable data survives"
+            );
+        }
+        tauri::async_runtime::block_on(node_state.0.blocking_lock().take().unwrap().stop());
+    }
+
+    #[test]
     fn registered_ipc_commands_authorize_persist_and_restore_offline() {
         use tauri::Manager;
         let dir = tempfile::tempdir().unwrap();
@@ -884,6 +974,7 @@ fn authorize(current: Option<&str>, owner: &str) -> Result<(), String> {
 }
 
 impl HiddenContactsState {
+    #[cfg(test)]
     fn update_with_identity<G>(
         &self,
         session: &crate::state::SessionState,
@@ -910,6 +1001,28 @@ impl HiddenContactsState {
             )
         })
     }
+    /// Acquire policy serialization before matching the originating session. The
+    /// caller retains any runtime guard and validates its installation inside
+    /// this synchronous closure; no session guard is held while waiting.
+    pub(crate) fn transaction_for_lease<T>(
+        &self,
+        app: &crate::state::AppState,
+        lease: &crate::state::SessionLease,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| "Hidden contacts lock unavailable")?;
+        app.session().matching(lease, |_| {
+            authorize(Some(lease.owner()), lease.owner())?;
+            if app.app_lock().is_locked() {
+                return Err("App is locked".into());
+            }
+            operation()
+        })?
+    }
+
     pub(crate) fn transaction<T>(
         &self,
         session: &crate::state::SessionState,
@@ -1152,10 +1265,13 @@ pub async fn set_contact_hidden(
     node: tauri::State<'_, crate::chat_commands::NodeState>,
     policy: tauri::State<'_, HiddenContactsState>,
 ) -> Result<HiddenContactsSnapshot, String> {
-    let node = node.0.clone();
+    let admission = crate::runtime_admission::RuntimeAdmission::capture(&app, &node, &owner)
+        .map_err(|error| error.to_string())?;
+    let lease = admission.lease().clone();
+    let node = node.inner().clone();
     #[cfg(test)]
     let captured = app.owner_command_captured.clone();
-    let session = app.session().clone();
+    let app = app.inner().clone();
     let policy = policy.inner().clone();
     tokio::task::spawn_blocking(move || {
         let guard = if hidden {
@@ -1163,20 +1279,26 @@ pub async fn set_contact_hidden(
             if let Some(entered) = captured.lock().unwrap().as_ref() {
                 let _ = entered.send("contact-runtime-wait");
             }
-            Some(node.blocking_lock())
+            Some(node.0.blocking_lock())
         } else {
             None
         };
-        policy.update_with_identity(&session, &owner, &account, hidden, &name, || {
-            let own = guard
-                .as_ref()
-                .and_then(|guard| guard.as_ref())
-                .and_then(|runtime| {
-                    runtime
-                        .host_account_id()
-                        .map(|namespace| (namespace.to_owned(), runtime.account_id().to_owned()))
-                });
-            (own, guard)
+        policy.transaction_for_lease(&app, &lease, || {
+            let own = guard.as_ref().and_then(|guard| guard.as_ref());
+            if hidden {
+                node.check_installation(&lease)
+                    .map_err(|error| error.to_string())?;
+                if own.and_then(|runtime| runtime.host_account_id()) != Some(owner.as_str()) {
+                    return Err("Hiding a contact requires this account's running node".into());
+                }
+            }
+            policy.update_unlocked(
+                &owner,
+                &account,
+                hidden,
+                &name,
+                own.map(|runtime| runtime.account_id()),
+            )
         })
     })
     .await

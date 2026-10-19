@@ -17,6 +17,7 @@ type AdmissionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CommandError
 /// The owner captured at IPC entry, together with the only authority allowed to
 /// run synchronous producers against the installed runtime. Detached operations
 /// retain the lifecycle guard even if the caller cancels its IPC future.
+#[derive(Clone)]
 pub(crate) struct RuntimeAdmission {
     app: AppState,
     node: NodeState,
@@ -90,6 +91,10 @@ impl RuntimeAdmission {
         })
     }
 
+    pub(crate) fn lease(&self) -> &SessionLease {
+        &self.lease
+    }
+
     /// Enclose a synchronous operation in current installation and session authority.
     pub(crate) fn checked<T>(
         &self,
@@ -149,6 +154,21 @@ impl RuntimeAdmission {
         })?
     }
 
+    /// Blocking producers retain runtime lifecycle ownership through completion,
+    /// including cancellation of their originating IPC future.
+    pub(crate) async fn blocking<T: Send + 'static>(
+        self,
+        operation: impl FnOnce(&NodeRuntime, &Self) -> Result<T, CommandError> + Send + 'static,
+    ) -> Result<T, CommandError> {
+        let guard = self.node.0.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
+            self.checked(runtime, || operation(runtime, &self))
+        })
+        .await
+        .map_err(|_| CommandError::Internal("blocking runtime operation terminated".into()))?
+    }
+
     pub(crate) async fn detached<T: Send + 'static>(
         self,
         operation: impl for<'a> FnOnce(&'a NodeRuntime, &'a Self) -> AdmissionFuture<'a, T>
@@ -163,6 +183,7 @@ impl RuntimeAdmission {
                 // Distinguish a live detached owner from queued mutex admission.
                 let _ = entered.send("owner-producer");
             }
+            self.checked(runtime, || Ok(()))?;
             operation(runtime, &self).await
         })
         .await

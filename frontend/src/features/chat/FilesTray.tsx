@@ -1,5 +1,5 @@
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Download, ExternalLink, FolderOpen, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -16,12 +16,9 @@ import {
 import { Input } from "@/components/ui/input";
 import { IdentityGlyph } from "@/components/identity";
 import { chat, settings as settingsApi } from "@/lib/api";
-import { defaultSavePath, effectiveDownloadDir } from "@/lib/download";
-import {
-  attachmentLabel,
-  isDirectoryAttachment,
-} from "@/lib/directoryAttachment";
-import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
+import { saveAttachment } from "@/lib/attachmentSave";
+import { attachmentLabel } from "@/lib/directoryAttachment";
+import { useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
 import { useChat, captureChatOwnership } from "@/store/chat";
@@ -169,22 +166,9 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
       return;
     try {
       setSavingFile(fileConv);
-      const dir = await effectiveDownloadDir();
-      if (!lease.current()) return;
-      if (dir) {
-        const path = await chat.saveFileToDir(fileConv, dir);
-        if (lease.current()) rememberSavedDownload(fileConv, path);
-        return;
-      }
-      const dest = isDirectoryAttachment(mime)
-        ? await openDialog({ directory: true })
-        : await save({ defaultPath: name });
-      if (lease.current() && typeof dest === "string") {
-        const path = isDirectoryAttachment(mime)
-          ? await chat.saveFileToDir(fileConv, dest)
-          : (await chat.saveFile(fileConv, dest), dest);
-        if (lease.current()) rememberSavedDownload(fileConv, path);
-      }
+      await saveAttachment({ fileConv, name, mime }, lease, {
+        mode: "default",
+      });
     } catch (e) {
       if (lease.current()) handleSaveError(e);
     } finally {
@@ -203,17 +187,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
       return;
     try {
       setSavingFile(fileConv);
-      const defaultPath = await defaultSavePath(name);
-      if (!lease.current()) return;
-      const dest = isDirectoryAttachment(mime)
-        ? await openDialog({ directory: true })
-        : await save({ defaultPath });
-      if (lease.current() && typeof dest === "string") {
-        const path = isDirectoryAttachment(mime)
-          ? await chat.saveFileToDir(fileConv, dest)
-          : (await chat.saveFile(fileConv, dest), dest);
-        if (lease.current()) rememberSavedDownload(fileConv, path);
-      }
+      await saveAttachment({ fileConv, name, mime }, lease, { mode: "as" });
     } catch (e) {
       if (lease.current()) handleSaveError(e);
     } finally {

@@ -1,9 +1,5 @@
 import { messageDisplayText } from "@/lib/messageDisplayText";
 import { useEffect, useMemo, useState } from "react";
-import {
-  open as openDialog,
-  save as saveDialog,
-} from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   FileX,
@@ -28,12 +24,12 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { IdentityGlyph } from "@/components/identity";
 import { chat } from "@/lib/api";
-import { effectiveDownloadDir } from "@/lib/download";
+import { saveAttachment } from "@/lib/attachmentSave";
 import {
   attachmentLabel,
   isDirectoryAttachment,
 } from "@/lib/directoryAttachment";
-import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
+import { useSavedDownloads } from "@/lib/savedDownloads";
 import {
   useFileAvailability,
   watchFileAvailability,
@@ -236,25 +232,9 @@ export function ConversationHistoryDialog({
     )
       return;
     try {
-      const directory = isDirectoryAttachment(file.mime);
-      const dir = directory ? await effectiveDownloadDir() : "";
-      if (!lease.current()) return;
-      if (dir) {
-        if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
-          return;
-        const path = await chat.saveFileToDir(file.fileConv, dir);
-        if (lease.current()) rememberSavedDownload(file.fileConv, path);
-        return;
-      }
-      const dest = directory
-        ? await openDialog({ directory: true })
-        : await saveDialog({ defaultPath: file.name });
-      if (lease.current() && typeof dest === "string") {
-        const path = directory
-          ? await chat.saveFileToDir(file.fileConv, dest)
-          : (await chat.saveFile(file.fileConv, dest), dest);
-        if (lease.current()) rememberSavedDownload(file.fileConv, path);
-      }
+      await saveAttachment(file, lease, {
+        mode: isDirectoryAttachment(file.mime) ? "default" : "as",
+      });
     } catch (e) {
       if (lease.current())
         setHistory((previous) =>

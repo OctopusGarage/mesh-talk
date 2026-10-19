@@ -42,8 +42,21 @@ impl DiscoveryVisibility {
     }
 
     pub async fn set_physical_lan_only(&self, enabled: bool) {
+        self.set_physical_lan_only_if(enabled, |commit| commit())
+            .await
+            .unwrap();
+    }
+
+    pub(crate) async fn set_physical_lan_only_if(
+        &self,
+        enabled: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+    ) -> io::Result<()> {
         let _send_guard = self.public.write().await;
-        self.physical_lan_only.store(enabled, Ordering::Release);
+        authorize(&mut || {
+            self.physical_lan_only.store(enabled, Ordering::Release);
+            Ok(())
+        })
     }
 
     pub(crate) fn initialize_physical_lan_only(&self, enabled: bool) -> io::Result<()> {

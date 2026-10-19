@@ -404,8 +404,21 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<ConversationId, NodeError> {
+        self.send_file_dm_progress_if(recipient, path, kind, on_progress, |commit| commit())
+            .await
+    }
+
+    pub async fn send_file_dm_progress_if(
+        self: &Arc<Self>,
+        recipient: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<ConversationId, NodeError> {
         let (id, file) = self
-            .enqueue_file_dm_progress(recipient, path, kind, on_progress)
+            .enqueue_file_dm_progress_if(recipient, path, kind, on_progress, &mut authorize)
             .await?;
         self.flush_delivery(id).await;
         self.flush_file_delivery(id).await;
@@ -431,20 +444,35 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
     ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        self.enqueue_file_dm_progress_if(recipient, path, kind, on_progress, |commit| commit())
+            .await
+    }
+
+    pub async fn enqueue_file_dm_progress_if(
+        self: &Arc<Self>,
+        recipient: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        authorize(&mut || Ok(()))?;
         let peer = self
             .routing_peer(recipient)
             .ok_or_else(|| NodeError::UnknownPeer(recipient.to_string()))?;
 
-        self.initiate_device_locally(&peer.public)
-            .await
-            .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
+        self.initiate_device_locally_if(&peer.public, &mut authorize)
+            .await?;
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
         let dm_conv = dm_conversation_id(&self.identity.public(), &peer.public);
-        let id = self.accept_staged_manifest(
+        let id = self.accept_staged_manifest_if(
             std::slice::from_ref(&peer),
             dm_conv,
             peer.account_id.clone(),
             &manifest,
+            None,
+            &mut authorize,
         )?;
         Ok((id, file_conv))
     }
@@ -600,6 +628,7 @@ impl Node {
         Ok((id, file_conv))
     }
 
+    #[cfg(test)]
     pub(in crate::node) fn accept_staged_manifest(
         &self,
         peers: &[crate::discovery::PeerRecord],
@@ -634,8 +663,8 @@ impl Node {
             let log = self.log.lock().expect("log lock not poisoned");
             for peer in peers {
                 let conv = dm_conversation_id(&own, &peer.public);
-                let (parents, lamport) = log.prepare(&conv);
-                let seq = log.version_vector(&conv).get(&author).copied().unwrap_or(0) + 1;
+                let (parents, lamport) = log.prepare(&conv).map_err(NodeError::Log)?;
+                let seq = log.next_sequence(&conv, &author).map_err(NodeError::Log)?;
                 let wire = crate::dm::seal(&self.identity, &peer.public.x25519_pub, &plaintext)
                     .map_err(NodeError::Seal)?;
                 let event = crate::eventlog::Event::new(
@@ -730,8 +759,8 @@ impl Node {
         // Its immutable ID binds the random self-seal and exact manifest digest;
         // sequence/lamport describe only the observed host frontier, not a new
         // per-author DAG position or an independent persisted counter.
-        let (parents, lamport) = log.prepare(&host);
-        let seq = log.version_vector(&host).get(&author).copied().unwrap_or(0) + 1;
+        let (parents, lamport) = log.prepare(&host).map_err(NodeError::Log)?;
+        let seq = log.next_sequence(&host, &author).map_err(NodeError::Log)?;
         let sealed = crate::dm::seal(
             &self.identity,
             &self.identity.public().x25519_pub,
@@ -790,6 +819,28 @@ impl Node {
         on_progress: impl FnMut(FileProgress) + Send + 'static,
         expires_at_ms: Option<u64>,
     ) -> Result<ConversationId, NodeError> {
+        self.send_file_channel_progress_expiring_if(
+            channel,
+            path,
+            kind,
+            on_progress,
+            expires_at_ms,
+            |commit| commit(),
+        )
+        .await
+    }
+
+    pub async fn send_file_channel_progress_expiring_if(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<ConversationId, NodeError> {
+        authorize(&mut || Ok(()))?;
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
         {
             let book = self.channels.lock().expect("channels mutex not poisoned");
@@ -815,7 +866,7 @@ impl Node {
             crate::expiry::wrap(&outgoing_manifest_bytes(&manifest), expires_at_ms),
             EventKind::FileManifest,
             None,
-            &mut |accept| accept(),
+            &mut authorize,
         )?;
         let seq = self
             .log
@@ -824,7 +875,9 @@ impl Node {
             .get(&id)
             .ok_or_else(|| NodeError::File("accepted manifest awaits recovery".into()))?
             .seq;
-        self.record_sent_manifest(channel, channel, seq, &manifest, expires_at_ms)?;
+        authorize(&mut || {
+            self.record_sent_manifest(channel, channel, seq, &manifest, expires_at_ms)
+        })?;
         // A file/folder manifest is an offer. Members pull its chunks only after
         // their own receive policy permits it; pushing the chunk conversation here
         // would transmit the bytes before they could approve. Inline media keeps

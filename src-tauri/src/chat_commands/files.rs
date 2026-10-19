@@ -90,65 +90,90 @@ pub async fn attachment_receive_policy(
 
 #[tauri::command]
 pub async fn set_attachment_global_auto(
+    session: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     auto: bool,
 ) -> Result<(), CommandError> {
-    state
-        .node_handle()
-        .await?
-        .set_attachment_global_auto(auto)
-        .map_err(CommandError::from)
+    let admission = RuntimeAdmission::capture_current(&session, &state)?;
+    admission
+        .with_runtime(move |runtime| {
+            runtime
+                .handle()
+                .set_attachment_global_auto(auto)
+                .map_err(CommandError::from)
+        })
+        .await
 }
 
 #[tauri::command]
 pub async fn set_attachment_contact_auto(
+    session: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     account: String,
     auto: Option<bool>,
 ) -> Result<(), CommandError> {
-    state
-        .node_handle()
-        .await?
-        .set_attachment_contact_auto(&account, auto)
-        .map_err(CommandError::from)
+    let admission = RuntimeAdmission::capture_current(&session, &state)?;
+    admission
+        .with_runtime(move |runtime| {
+            runtime
+                .handle()
+                .set_attachment_contact_auto(&account, auto)
+                .map_err(CommandError::from)
+        })
+        .await
 }
 
 #[tauri::command]
 pub async fn decide_attachment(
+    session: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     file_conv: String,
     accept: bool,
 ) -> Result<(), CommandError> {
-    let id = parse_channel_id(&file_conv)?;
-    state
-        .node_handle()
-        .await?
-        .decide_attachment(id, accept)
-        .map_err(CommandError::from)
+    let admission = RuntimeAdmission::capture_current(&session, &state)?;
+    admission
+        .with_runtime(move |runtime| {
+            let id = parse_channel_id(&file_conv)?;
+            runtime
+                .handle()
+                .decide_attachment(id, accept)
+                .map_err(CommandError::from)
+        })
+        .await
 }
 
 #[tauri::command]
-pub async fn send_file_dm(
-    app: tauri::AppHandle,
+pub async fn send_file_dm<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    session: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     recipient: String,
     path: String,
     media: bool,
 ) -> Result<String, CommandError> {
-    let node = state.node_handle().await?;
-    // The legacy DM command has no optimistic message key; retain its recipient key.
-    let mut prog = crate::events::ProgressThrottle::new(app.clone(), recipient.clone(), "prepare");
-    let result = node
-        .send_file_dm_progress(
-            &recipient,
-            std::path::Path::new(&path),
-            file_kind(media),
-            move |p| prog.emit(p.done, p.total),
-        )
-        .await;
-    cleanup_pasted_file(&app, &path);
-    let id = result.map_err(CommandError::from)?;
-    Ok(hex::encode(id.as_bytes()))
+    let admission = RuntimeAdmission::capture_current(&session, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let node = runtime.handle();
+                // The legacy DM command has no optimistic message key; retain its recipient key.
+                let mut prog =
+                    crate::events::ProgressThrottle::new(app.clone(), recipient.clone(), "prepare");
+                let result = node
+                    .send_file_dm_progress_if(
+                        &recipient,
+                        std::path::Path::new(&path),
+                        file_kind(media),
+                        move |p| prog.emit(p.done, p.total),
+                        |commit| admission.authorize_accept(runtime, commit),
+                    )
+                    .await;
+                cleanup_pasted_file(&app, &path);
+                let id = result.map_err(CommandError::from)?;
+                Ok(hex::encode(id.as_bytes()))
+            })
+        })
+        .await
 }
 
 #[tauri::command]
@@ -198,8 +223,9 @@ pub async fn send_file_to_account<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-pub async fn send_file_channel(
-    app: tauri::AppHandle,
+pub async fn send_file_channel<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    session: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
     path: String,
@@ -207,47 +233,56 @@ pub async fn send_file_channel(
     progress_key: Option<String>,
     expires_at_ms: Option<u64>,
 ) -> Result<String, CommandError> {
-    let id = parse_channel_id(&channel_id)?;
-    let node = state.node_handle().await?;
-    let mut prog = crate::events::ProgressThrottle::new(
-        app.clone(),
-        progress_key.unwrap_or_else(|| channel_id.clone()),
-        "prepare",
-    );
-    let result = node
-        .send_file_channel_progress_expiring(
-            id,
-            std::path::Path::new(&path),
-            file_kind(media),
-            move |p| prog.emit(p.done, p.total),
-            expires_at_ms,
-        )
-        .await;
-    cleanup_pasted_file(&app, &path);
-    let file_conv = result.map_err(CommandError::from)?;
-    Ok(hex::encode(file_conv.as_bytes()))
+    let admission = RuntimeAdmission::capture_current(&session, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let id = parse_channel_id(&channel_id)?;
+                let node = runtime.handle();
+                let mut prog = crate::events::ProgressThrottle::new(
+                    app.clone(),
+                    progress_key.unwrap_or_else(|| channel_id.clone()),
+                    "prepare",
+                );
+                let result = node
+                    .send_file_channel_progress_expiring_if(
+                        id,
+                        std::path::Path::new(&path),
+                        file_kind(media),
+                        move |p| prog.emit(p.done, p.total),
+                        expires_at_ms,
+                        |commit| admission.authorize_accept(runtime, commit),
+                    )
+                    .await;
+                cleanup_pasted_file(&app, &path);
+                let file_conv = result.map_err(CommandError::from)?;
+                Ok(hex::encode(file_conv.as_bytes()))
+            })
+        })
+        .await
 }
 
 #[tauri::command]
-pub async fn save_file(
-    app: tauri::AppHandle,
+pub async fn save_file<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    session: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     file_conv: String,
     dest: String,
 ) -> Result<(), CommandError> {
+    let admission = RuntimeAdmission::capture_current(&session, &state)?;
     let id = parse_channel_id(&file_conv)?;
-    let node = state.node_handle().await?;
-    let mut prog = crate::events::ProgressThrottle::new(app, file_conv.clone(), "save");
-    // save_file is synchronous (reads chunk events, decrypts, streams to disk) — run it
-    // on a blocking thread so it doesn't stall the async runtime on a large file.
-    tokio::task::spawn_blocking(move || {
-        node.save_file_progress(id, std::path::Path::new(&dest), |p| {
-            prog.emit(p.done, p.total)
+    let mut prog = crate::events::ProgressThrottle::new(app, file_conv, "save");
+    admission
+        .blocking(move |runtime, _| {
+            runtime
+                .handle()
+                .save_file_progress(id, std::path::Path::new(&dest), |p| {
+                    prog.emit(p.done, p.total)
+                })
+                .map_err(CommandError::from)
         })
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
-    .map_err(CommandError::from)
+        .await
 }
 
 /// Save a received file into a TRUSTED directory, deriving (and sanitizing) the
@@ -302,19 +337,22 @@ pub fn open_download_dir(
 
 #[tauri::command]
 pub async fn save_file_to_dir(
+    session: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     file_conv: String,
     dir: String,
 ) -> Result<String, CommandError> {
+    let admission = RuntimeAdmission::capture_current(&session, &state)?;
     let id = parse_channel_id(&file_conv)?;
-    let node = state.node_handle().await?;
-    let path = tokio::task::spawn_blocking(move || {
-        node.save_file_into_dir(id, std::path::Path::new(&dir))
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
-    .map_err(CommandError::from)?;
-    Ok(path.to_string_lossy().into_owned())
+    admission
+        .blocking(move |runtime, _| {
+            runtime
+                .handle()
+                .save_file_into_dir(id, std::path::Path::new(&dir))
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(CommandError::from)
+        })
+        .await
 }
 
 /// Write raw bytes (e.g. an image pasted from the clipboard) to a temp file in the app
@@ -323,22 +361,29 @@ pub async fn save_file_to_dir(
 /// the received file is recognized as an image. Best-effort temp: it lives in the OS cache
 /// dir and is overwritten on the next paste of the same name.
 #[tauri::command]
-pub async fn write_temp_file(
-    app: tauri::AppHandle,
+pub async fn write_temp_file<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    session: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
     bytes: Vec<u8>,
     ext: String,
     name: Option<String>,
 ) -> Result<String, CommandError> {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let cache = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| CommandError::Validation(format!("no cache dir: {e}")))?;
-    let path = write_temp_file_in_cache(&cache, &bytes, &ext, name.as_deref(), ts)?;
-    Ok(path.to_string_lossy().into_owned())
+    let admission = RuntimeAdmission::capture_current(&session, &state)?;
+    admission
+        .blocking(move |_, _| {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let cache = app
+                .path()
+                .app_cache_dir()
+                .map_err(|e| CommandError::Validation(format!("no cache dir: {e}")))?;
+            let path = write_temp_file_in_cache(&cache, &bytes, &ext, name.as_deref(), ts)?;
+            Ok(path.to_string_lossy().into_owned())
+        })
+        .await
 }
 
 fn write_temp_file_in_cache(

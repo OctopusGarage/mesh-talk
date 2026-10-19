@@ -1,3 +1,4 @@
+import { saveAttachment } from "@/lib/attachmentSave";
 import { create } from "zustand";
 import { chat, contactPolicy, favorites as favoritesApi } from "@/lib/api";
 import { errorMessage, type SendFailReason } from "@/lib/error";
@@ -545,8 +546,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     try {
-      await chat.saveFile(fileConv, dest);
-      if (lease.current()) get().dismissFile(fileConv);
+      const path = await saveAttachment({ fileConv, name: "" }, lease, {
+        mode: "as",
+        destination: dest,
+      });
+      if (path && lease.current()) get().dismissFile(fileConv);
     } catch (e) {
       set({ error: `Couldn't save file: ${errorMessage(e)}` });
     }

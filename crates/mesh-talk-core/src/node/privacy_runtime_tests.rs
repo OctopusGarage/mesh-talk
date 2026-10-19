@@ -2239,7 +2239,7 @@ async fn joined_group_member_can_sync_group_but_not_dm_or_call() {
     for event in bob.log.lock().unwrap().events(&group) {
         log.append(event.clone()).unwrap();
     }
-    let (parents, lamport) = log.prepare(&group);
+    let (parents, lamport) = log.prepare(&group).unwrap();
     let event = crate::eventlog::Event::new(
         &alice.identity,
         group,

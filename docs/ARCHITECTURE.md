@@ -236,6 +236,14 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   returns `(lamport, id)`-sorted (deterministic logical-clock order). Because peer
   Lamport monotonicity is not validated, group consumers use the validated-parent
   traversal in `node/timeline.rs` when they require causal order.
+  Retained-log compaction rebuilds causal indexes through `eventlog/order.rs`
+  before atomically replacing durable records; the timeline facade reuses this
+  traversal. Public Rust API migration: `EventLog::prepare` and
+  `PersistentEventLog::prepare` now return `Result<(Vec<EventId>, u64), LogError>`.
+  Callers must propagate or handle `ClockExhausted`; `next_sequence` returns
+  `SequenceExhausted` when the author counter has no successor. Exhaustive
+  `LogError` matches must account for these variants. Event serialization and
+  wire formats are unchanged.
 - **Sync** (`sync.rs`) — three-message id-set reconciliation: `Request(have)` →
   `Response(missing + responder have)` → `Followup(what responder lacks)`, bounded by
   frame budget (`MAX_PLAINTEXT`), multiple rounds (≤ `MAX_SYNC_ROUNDS`). Every event is
@@ -380,15 +388,25 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   bridge invalidation; they enter host authority outside privacy-state locks.
   Announcement drain/restore and presence publication remain awaits outside the
   session guard. A canceled IPC waiter cannot release the lifecycle barrier while
-  its detached privacy operation still runs. Legacy device/channel commands and
-  live settings application retain separate commit-seam limitations; arbitrary
-  SDK handles are not session leases. Stable file results include the original
+  its detached privacy operation still runs. Registered channel/device/file,
+  reaction and recall mutations use guarded synchronous commits as well. Call
+  signals authorize Noise frame encryption after policy waits; denial consumes
+  no nonce. Contact mutations retain the entry lease through runtime/policy/session
+  admission. Live settings application is serialized and revision-checked at
+  policy and retention commits, including the periodic prune. Arbitrary SDK
+  handles are not session leases. Stable file results include the original
   card ID and file conversation.
   Owner-sensitive identity queries atomically inspect session plus runtime; status
   queries accept at most 256 IDs and project only the exact account conversation.
   Own-device synchronization, device-addressed legacy history and incoming rows
   have no external delivery status. Existing SDK and legacy IPC response shapes
   remain available; new frontend flows must use the owner-sensitive surface.
+
+Own DM/account reactions are retained in an account-scoped encrypted latest-action
+projection. Restart and offline discovery do not discard the projection; local
+message erasure and retention remove its matching rows. Repeated toggles compact
+into their latest actions. Reaction fanout remains best-effort and is not part of
+the message delivery WAL; portable recovery snapshots currently omit reactions.
 
 ## 4. Networking & delivery (`discovery/`, `node/`, `postoffice/`)
 

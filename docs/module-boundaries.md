@@ -163,12 +163,34 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   linked-device synchronization/preferences. Capture
   before waiting for the runtime; synchronous operations retain matching session
   authority through the operation. `NodeState::with_session_runtime` owns the
-  shared session/installation decision; `node_for_owner` captures before waiting
-  and returns only a snapshot, not authority for future mutations.
-  Legacy payloads without an owner cannot
-  identify a frontend intent created before IPC execution. Remaining legacy
-  device/channel commands and live settings application still need commit-seam
-  characterization; a post-result authority check cannot prevent side effects.
+  shared session/installation decision. A raw node handle remains a snapshot,
+  not authority for future mutations.
+  Registered channel, device, file, reaction, recall and call mutations use the
+  same entry lease and guarded core commit. Native file writers keep lifecycle
+  ownership through cancellation. Contact mutations acquire runtime, then policy,
+  then the matching entry session; owner strings alone do not authorize them.
+  Legacy payloads without an owner cannot identify a frontend intent created
+  before IPC execution. A post-result check cannot prevent prior side effects.
+- Live settings application is serialized and carries the originating lease plus
+  a settings revision. Policy commits and blocking retention pruning check the
+  latest revision while holding its guard; periodic pruning uses the same path.
+  A superseded document cannot apply policy or erase history after a newer save.
+- `ui/lib/attachmentSave.ts` owns configured destinations, save dialogs,
+  post-dialog owner/readiness checks and remembered paths for bubbles, previews,
+  history, the files tray and store saves. Native writes already admitted may
+  finish; stale continuations do not record paths into a replacement session.
+- The call store owns local terminal signaling before resource disposal and an
+  independent incoming-ring deadline. Disposing local media alone is not a
+  distributed call termination.
+- Own DM/account reaction state uses an account-scoped encrypted projection with
+  latest-action compaction and local erase integration. Retained peer reactions
+  resolve verified historical identities rather than live presence. Reactions
+  retain best-effort fanout; portable recovery snapshots do not include them.
+- Causal traversal lives in `core/eventlog/order.rs` and is reused by node history
+  and persistence. Compaction checks retained ancestry before replacing records;
+  authenticated replay can recover earlier noncausal file ordering. Local clock
+  and author-sequence allocation return errors on exhaustion. Public `prepare`
+  now returns `Result`; SDK callers must handle it despite unchanged wire formats.
 - Privacy commands reuse the same admission for checked observations and
   operation-enclosing IO commits. Core `*_guarded` methods await the privacy gate
   without host session authority, then enclose synchronous policy/proof/route
