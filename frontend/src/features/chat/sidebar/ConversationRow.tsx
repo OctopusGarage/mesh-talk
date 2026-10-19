@@ -109,7 +109,6 @@ export function ConversationRow({
         data-virtual-index={navIndex}
         data-testid={`conversation-row-${conv.id}`}
         aria-current={isActive ? "true" : undefined}
-        aria-label={`${conv.name}${summary ? `, ${summary}` : ""}`}
         className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         {personal && (
