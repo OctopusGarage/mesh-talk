@@ -417,9 +417,6 @@ impl Node {
                         {
                             continue;
                         }
-                        if self.hidden_by_language(e.event_id) {
-                            continue;
-                        }
                         out.push(BackfillRecord {
                             conv: *conv.as_bytes(),
                             from: e.from.clone(),
@@ -501,12 +498,6 @@ impl Node {
             }) {
                 continue;
             }
-            self.classify_incoming_language(
-                EventId::new(r.event_id),
-                &r.from,
-                &MessageBody::decode(&envelope.body),
-            )
-            .map_err(NodeError::Log)?;
             received
                 .record_durable(&super::received_log::ReceivedEntry {
                     conversation,

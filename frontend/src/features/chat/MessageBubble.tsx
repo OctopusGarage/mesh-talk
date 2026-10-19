@@ -1,4 +1,3 @@
-import { messageDisplayText } from "@/lib/messageDisplayText";
 import { useState } from "react";
 import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -348,7 +347,7 @@ export function MessageBubble({
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
   const installedPacks = usePacks((s) => s.packs);
-  const displayedText = messageDisplayText(m.text, t);
+  const displayedText = m.text;
   const mine = m.fromMe;
   const isFile = !!m.file;
   // Sticker messages render bubble-less (Telegram-style): just the animation. Fall back to
@@ -586,8 +585,7 @@ export function MessageBubble({
                   >
                     <CornerUpLeft className="h-3 w-3 shrink-0 opacity-70" />
                     <span className="truncate opacity-80">
-                      {messageDisplayText(parent.text, t) ||
-                        t("composer.message")}
+                      {parent.text || t("composer.message")}
                     </span>
                   </div>
                 )}

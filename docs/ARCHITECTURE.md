@@ -961,9 +961,8 @@ context/send/status tools using the official SDK. See the
 [setup and limits](bot-integrations.md) and [design rationale](bot-mcp-architecture-research.md).
 
 Core `node/outgoing_message.rs` accepts retry keys through guarded enqueue.
-New bot direct messages apply the same recipient language checks as desktop
-sends, including the final synchronous acceptance check. Duplicate retries
-return the original acceptance without sending again after a policy change.
+Bot and desktop sends retain the host's authorization guard through synchronous
+acceptance. Duplicate retries return the original acceptance without sending again.
 Request mapping and prepared DM/group state share the encrypted delivery WAL.
 Appended journal variants preserve old positional tags; a pending new variant
 requires a compatible binary for recovery. Group messages, sender distributions
@@ -1057,27 +1056,15 @@ device-key compromise. Previously stored V1 events remain readable until
 evicted. Details and operational limits are in
 [`post-office-metadata-privacy.md`](post-office-metadata-privacy.md).
 
-## Incoming DM language policy
+## Retired profile and snapshot metadata
 
-The core owns an opt-in, account-signed incoming language preference and local
-80/20 content validation. `node/language_policy.rs` bundles ten language models
-and measures alphabetic grapheme spans with bounded work; no translation service
-is contacted. `MTPF2` carries the complete avatar and language state so existing
-profile compaction retains both. Avatar-only `MTPF1` remains byte-compatible.
-Policy-aware profile decoding requires an updated peer; text and event-kind wire
-formats are unchanged.
+Messages have no content-language restrictions. The core does not bundle language
+models, classify message text, or persist language-based visibility decisions.
+Display-language localization remains a device preference.
 
-`node/language_state.rs` durably stores verified preferences and immutable receive
-decisions against signed transport-event IDs. Core outgoing admission rechecks
-policy at synchronous WAL acceptance; incoming classification precedes receive
-WAL acceptance without changing ratchet transitions or receipt semantics. History,
-live callbacks, search and linked-device plaintext export apply the persisted
-filter. Trusted direct-history imports are classified before installation. Hidden
-content remains encrypted locally under existing retention.
-
-Desktop `language_commands.rs` uses the existing runtime/session admission guards.
-The UI separates the language selector from display language and validates draft
-content before durable enqueue. Snapshot schema 2 includes preferences and
-receive decisions while accepting schema 1 for restoration. See
-[incoming DM language](dm-language-restrictions.md) for product behavior, processing
-limits, asynchronous policy propagation, and old-client compatibility.
+New account profiles use avatar-only `MTPF1`. Decoding still authenticates existing
+`MTPF2` signatures so retained avatar events and linked devices remain readable;
+retired metadata is ignored and never re-emitted as a preference. Snapshot schema 2
+retains the positional tags of its two retired metadata records for old-backup
+compatibility. Imports validate those records without installing filtering state;
+new exports omit them. Existing `language.log` sidecars are not opened or applied.

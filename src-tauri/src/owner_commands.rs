@@ -412,9 +412,6 @@ mod tests {
                     crate::chat_commands::send_file_to_account,
                     crate::chat_commands::send_to_account,
                     crate::chat_commands::send_sticker,
-                    crate::language_commands::dm_language_policy,
-                    crate::language_commands::set_dm_language_policy,
-                    crate::language_commands::validate_dm_language,
                     super::owner_node_identity,
                     super::owner_enqueue_text,
                     super::owner_enqueue_sticker,
@@ -707,63 +704,6 @@ mod tests {
             },
         )
         .map(|body| body.deserialize::<serde_json::Value>().unwrap())
-    }
-
-    #[test]
-    fn registered_language_preferences_are_owner_scoped_and_validate_local_text() {
-        let fixture = Fixture::new();
-        let get = || {
-            fixture
-                .invoke(
-                    "dm_language_policy",
-                    serde_json::json!({"owner":"alice","account":null}),
-                )
-                .unwrap()
-        };
-        assert!(get()["language"].is_null());
-        let rejected = fixture
-            .invoke(
-                "set_dm_language_policy",
-                serde_json::json!({"owner":"bob","language":"en"}),
-            )
-            .unwrap_err();
-        assert_eq!(rejected["kind"], "authorization");
-        assert!(get()["language"].is_null());
-        let rejected = fixture
-            .invoke(
-                "set_dm_language_policy",
-                serde_json::json!({"owner":"alice","language":"unsupported"}),
-            )
-            .unwrap_err();
-        assert_eq!(rejected["kind"], "invalid-input");
-        let enabled = fixture
-            .invoke(
-                "set_dm_language_policy",
-                serde_json::json!({"owner":"alice","language":"en"}),
-            )
-            .unwrap();
-        assert_eq!(enabled["language"], "en");
-        assert_eq!(enabled["min_target_percent"], 80);
-        assert_eq!(enabled["supported_languages"].as_array().unwrap().len(), 10);
-        let identity = fixture
-            .invoke("owner_node_identity", serde_json::json!({"owner":"alice"}))
-            .unwrap();
-        let verdict = fixture.invoke("validate_dm_language", serde_json::json!({"owner":"alice","account":identity["account_id"],"text":"你好，我们明天一起出去吃午饭吧。"})).unwrap();
-        assert_eq!(verdict["allowed"], false);
-        let rejected = fixture
-            .invoke(
-                "validate_dm_language",
-                serde_json::json!({"owner":"bob","account":identity["account_id"],"text":"hello"}),
-            )
-            .unwrap_err();
-        assert_eq!(rejected["kind"], "authorization");
-        let cleared = fixture
-            .invoke(
-                "set_dm_language_policy",
-                serde_json::json!({"owner":"alice","language":null}),
-            )
-            .unwrap();
-        assert!(cleared["language"].is_null());
     }
 
     #[test]

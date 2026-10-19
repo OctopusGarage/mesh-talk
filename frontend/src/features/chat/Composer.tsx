@@ -1,4 +1,3 @@
-import { messageDisplayText } from "@/lib/messageDisplayText";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ComposerImagePreview } from "./ComposerImagePreview";
 import { AnimatePresence, motion } from "framer-motion";
@@ -187,7 +186,6 @@ function StickerThumb({
 
 export function Composer({
   onSend,
-  validateText,
   admissionPending = false,
   initialDraft = "",
   onDraftChange,
@@ -209,7 +207,6 @@ export function Composer({
   onExpiryDurationChange,
 }: {
   onSend: (text: string) => boolean | Promise<boolean>;
-  validateText?: (text: string) => Promise<string | null>;
   /** A conversation-scoped durable admission may outlive this keyed composer. */
   admissionPending?: boolean;
   initialDraft?: string;
@@ -252,21 +249,19 @@ export function Composer({
   const motionOK = useMotionOK();
   const [text, setText] = useState(initialDraft);
   const [sendRejected, setSendRejected] = useState(false);
-  const [validationError, setValidationError] = useState<string | null>(null);
-  const [validating, setValidating] = useState(false);
-  const validationPending = useRef(false);
-  const validationEpoch = useRef(0);
+  const [queuing, setQueuing] = useState(false);
+  const sendPendingRef = useRef(false);
+  const sendEpoch = useRef(0);
   const draftRevision = useRef(0);
   useEffect(
     () => () => {
-      validationEpoch.current += 1;
+      sendEpoch.current += 1;
     },
     [],
   );
   const setDraftText = (next: string) => {
     draftRevision.current += 1;
     setText(next);
-    setValidationError(null);
   };
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [sendingFiles, setSendingFiles] = useState(false);
@@ -408,7 +403,7 @@ export function Composer({
   };
 
   const send = () => {
-    if (validationPending.current || admissionPending) return;
+    if (sendPendingRef.current || admissionPending) return;
     if (pendingFiles.length) {
       if (sendingFiles || !onPasteFiles) return;
       setSendingFiles(true);
@@ -438,19 +433,18 @@ export function Composer({
     }
     const candidate = text.trim();
     if (!candidate) return;
-    const epoch = validationEpoch.current;
+    const epoch = sendEpoch.current;
     const revision = draftRevision.current;
     const current = () =>
-      validationEpoch.current === epoch && draftRevision.current === revision;
+      sendEpoch.current === epoch && draftRevision.current === revision;
     const pending = () => {
-      validationPending.current = true;
-      setValidating(true);
-      setValidationError(null);
+      sendPendingRef.current = true;
+      setQueuing(true);
     };
     const release = () => {
-      if (validationEpoch.current !== epoch) return;
-      validationPending.current = false;
-      setValidating(false);
+      if (sendEpoch.current !== epoch) return;
+      sendPendingRef.current = false;
+      setQueuing(false);
     };
     const rejected = () => {
       if (current()) setSendRejected(true);
@@ -480,27 +474,8 @@ export function Composer({
         rejected();
       }
     };
-    if (!validateText) {
-      const admission = admit();
-      if (admission) void admission.finally(release);
-      return;
-    }
-    pending();
-    void (async () => {
-      let error: string | null;
-      try {
-        error = await validateText(candidate);
-      } catch {
-        if (current()) setValidationError(t("dmLanguage.validationFailed"));
-        return;
-      }
-      if (!current()) return;
-      if (error) {
-        setValidationError(error);
-        return;
-      }
-      await admit();
-    })().finally(release);
+    const admission = admit();
+    if (admission) void admission.finally(release);
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -555,7 +530,7 @@ export function Composer({
           <span className="min-w-0 flex-1 truncate text-muted-foreground">
             {t("composer.replyingTo")}{" "}
             <span className="text-foreground">
-              {messageDisplayText(replyTo.text, t) || t("composer.message")}
+              {replyTo.text || t("composer.message")}
             </span>
           </span>
           <button
@@ -999,7 +974,7 @@ export function Composer({
             )}
             disabled={
               sendingFiles ||
-              validating ||
+              queuing ||
               admissionPending ||
               (!text.trim() && pendingFiles.length === 0)
             }
@@ -1011,19 +986,19 @@ export function Composer({
             <SendHorizontal className="h-4 w-4" />
           </Button>
         </div>
-        {validationError || sendRejected ? (
+        {sendRejected ? (
           <p
             role="alert"
             className="mt-1.5 min-h-4 text-right text-[11px] text-destructive"
           >
-            {validationError ?? t("composer.notQueued")}
+            {t("composer.notQueued")}
           </p>
-        ) : validating || admissionPending ? (
+        ) : queuing || admissionPending ? (
           <p
             role="status"
             className="mt-1.5 min-h-4 text-right text-[11px] text-muted-foreground"
           >
-            {t("dmLanguage.checking")}
+            {t("composer.queuing")}
           </p>
         ) : (
           <p className="mt-1.5 h-4 text-right text-[11px] text-muted-foreground opacity-0 transition-opacity group-focus-within:opacity-100">

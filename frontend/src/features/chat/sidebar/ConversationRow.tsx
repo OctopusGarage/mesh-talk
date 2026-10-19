@@ -1,4 +1,3 @@
-import { messageDisplayText } from "@/lib/messageDisplayText";
 import { useState } from "react";
 import { Bookmark, MoreHorizontal, Pencil, Pin, PinOff } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -68,7 +67,7 @@ export function ConversationRow({
       ? groupPresenceLabel(presence, t)
       : prioritizeSubtitle
         ? subtitle
-        : (latest?.text ? messageDisplayText(latest.text, t) : "") ||
+        : (latest?.text ? latest.text : "") ||
           latest?.file?.name ||
           (personal
             ? subtitle

@@ -42,7 +42,7 @@ impl Node {
         {
             return Ok(());
         }
-        let payload = self.prepare_own_profile(avatar, None)?;
+        let payload = self.prepare_own_profile(avatar)?;
         self.publish_profile_to_peers(&payload).await;
         Ok(())
     }
@@ -196,9 +196,25 @@ impl Node {
             .request_profile_compaction(conv);
     }
 
-    /// Serialize own incoming updates with local edits, using the same lock order.
-    /// A legacy avatar update is merged and persisted as a complete modern profile
-    /// so the local preference and what we republish cannot disagree on revision.
+    /// Atomically persist an avatar-only profile without propagating retired preferences.
+    fn prepare_own_profile(&self, avatar: Option<Vec<u8>>) -> Result<ProfilePayload, NodeError> {
+        let mut current = self
+            .my_profile
+            .lock()
+            .expect("my_profile mutex not poisoned");
+        let mut avatars = self.profiles.lock().expect("profiles mutex not poisoned");
+        let account = self.account_id();
+        let revision = super::node::now_millis()
+            .max(avatars.updated_at(&account).unwrap_or(0).saturating_add(1));
+        let payload = ProfilePayload::new(&self.account, avatar.clone(), revision);
+        avatars
+            .record(&account, revision, avatar)
+            .map_err(NodeError::Log)?;
+        *current = Some(payload.clone());
+        Ok(payload)
+    }
+
+    /// Serialize own received avatar updates with local edits. Retired metadata is ignored.
     fn apply_received_profile(
         &self,
         payload: &ProfilePayload,
@@ -209,14 +225,7 @@ impl Node {
                 .lock()
                 .expect("my_profile mutex not poisoned")
         });
-        let mut language = self
-            .language_state
-            .lock()
-            .expect("language state mutex not poisoned");
         let mut avatars = self.profiles.lock().expect("profiles mutex not poisoned");
-        if payload.language_supported {
-            language.record_profile(payload)?;
-        }
         let applied = avatars.record(
             &payload.account_id(),
             payload.updated_at,
@@ -225,19 +234,7 @@ impl Node {
         if let Some(current) = current.as_mut() {
             let revision = avatars.updated_at(&self.account_id()).unwrap_or(0);
             let avatar = avatars.avatar(&self.account_id());
-            let merged = match language.profile(&self.account_id()) {
-                Some(policy) => ProfilePayload::new_with_language(
-                    &self.account,
-                    avatar,
-                    revision.max(policy.updated_at),
-                    policy.language,
-                ),
-                None => ProfilePayload::new(&self.account, avatar, revision),
-            };
-            if merged.language_supported {
-                language.record_profile(&merged)?;
-            }
-            **current = Some(merged);
+            **current = Some(ProfilePayload::new(&self.account, avatar, revision));
         }
         Ok(applied)
     }

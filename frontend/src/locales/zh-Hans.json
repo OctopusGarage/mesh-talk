@@ -345,7 +345,8 @@
     "manageStickers": "管理贴纸包",
     "sendSticker": "发送 {{emoji}} 贴纸",
     "cancelReply": "取消回复",
-    "tools": "消息工具"
+    "tools": "消息工具",
+    "queuing": "正在保存消息…"
   },
   "screenshot": {
     "trigger": "截图",
@@ -945,31 +946,5 @@
     "openDiagnostics": "打开连接诊断",
     "online": "在线阅读",
     "linkFailed": "无法打开链接。请重试，或在浏览器中打开在线手册。"
-  },
-  "dmLanguage": {
-    "title": "私信语言",
-    "help": "要求收到的每条私信中，所选语言至少占80%，其他语言最多占20%。群聊不受影响。",
-    "localOnly": "语言检测在本设备上进行。消息不会发送到翻译服务。",
-    "unrestricted": "不限语言",
-    "loadFailed": "无法加载语言偏好。",
-    "saveFailed": "无法保存语言偏好，之前的选择仍然生效。",
-    "validationFailed": "无法检查消息语言。草稿已保留，请重试。",
-    "notice": "每条消息中，{{language}}至少占{{percent}}%，其他语言最多占20%。",
-    "rejected": "这条消息中，{{language}}需要至少占{{percent}}%（其他语言最多占20%）。草稿已保留。",
-    "languages": {
-      "en": "英语",
-      "zh": "中文",
-      "ja": "日语",
-      "es": "西班牙语",
-      "fr": "法语",
-      "de": "德语",
-      "ko": "韩语",
-      "pt": "葡萄牙语",
-      "ru": "俄语",
-      "ar": "阿拉伯语"
-    },
-    "checking": "正在检查消息语言…",
-    "resourceLimit": "这条消息太长或太复杂，无法检查。请拆分成更短的消息。",
-    "hidden": "消息已根据你的语言设置隐藏"
   }
 }
