@@ -46,6 +46,7 @@ export function requiredBrowserPaths(tier) {
     ["attachment-approval.spec.ts", "incoming folder waits for approval and can be declined or received"],
     ["attachment-approval.spec.ts", "global and per-contact automatic receive controls persist their selection"],
     ["attachment-approval.spec.ts", "video media requires approval and appears in Received files"],
+    ["attachment-approval.spec.ts", "an expired previously ready attachment becomes unavailable"],
     ["unread-badge.spec.ts", "incoming unread count reaches the OS badge and clears on read and logout"],
     ["unread-badge.spec.ts", "an open chat remains unread while Mesh-Talk is in the background"],
     ["unread-badge.spec.ts", "clicking an already open conversation clears unread after app activation"],
