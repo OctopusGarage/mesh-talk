@@ -319,6 +319,9 @@ Console output reports queue time, execution time, reuse, and running-stage
 heartbeats. Platform preflight reports each platform's completion immediately and
 prints progress while the other continues. Missing/corrupted evidence is a cache
 miss; it is never a successful verification result.
+On macOS, preparation holds a child-scoped `caffeinate -is` assertion through both
+platform preflight and full health. It ends with preparation and changes no power
+settings; browser timeouts must not be masked by a retry after idle sleep.
 
 ## CI ownership and browser sharding
 
