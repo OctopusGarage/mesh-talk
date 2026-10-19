@@ -222,3 +222,71 @@ it("does not mutate membership for an account conversation", async () => {
   expect(await s.actions.addMember("member")).toBe(false);
   expect(s.commands.addChannelMember).not.toHaveBeenCalled();
 });
+
+it.each([
+  ["leaveChannel", "Couldn't leave channel"],
+  ["acceptChannelInvite", "Couldn't accept invitation"],
+  ["dissolveChannel", "Couldn't dissolve channel"],
+  ["renameChannel", "Couldn't rename channel"],
+] as const)(
+  "%s reports its current command failure without changing state",
+  async (command, prefix) => {
+    const s = session();
+    const before = structuredClone(s.read());
+    s.commands[command].mockRejectedValueOnce(new Error("offline"));
+    if (command === "renameChannel") {
+      await s.actions.renameChannel("team", "Renamed");
+    } else if (command === "dissolveChannel") {
+      expect(await s.actions.dissolveChannel("team")).toBe(false);
+    } else {
+      expect(await s.actions[command]()).toBe(false);
+    }
+    expect(s.reportError).toHaveBeenCalledExactlyOnceWith(`${prefix}: offline`);
+    expect(s.read()).toEqual(before);
+    expect(s.refreshRoster).not.toHaveBeenCalled();
+  },
+);
+
+it("opens a created channel only after refreshing the roster", async () => {
+  const s = session();
+  s.open.mockImplementationOnce(async () => {
+    expect(s.refreshRoster).toHaveBeenCalledOnce();
+  });
+  expect(await s.actions.createChannel("New", ["member"])).toBe(true);
+  expect(s.commands.createChannel).toHaveBeenCalledExactlyOnceWith("New", [
+    "member",
+  ]);
+  expect(s.open).toHaveBeenCalledExactlyOnceWith({
+    kind: "channel",
+    id: "new",
+    name: "New",
+  });
+});
+
+it("renames the active channel after its roster refresh", async () => {
+  const s = session();
+  await s.actions.renameChannel("team", "Renamed");
+  expect(s.commands.renameChannel).toHaveBeenCalledExactlyOnceWith(
+    "team",
+    "Renamed",
+  );
+  expect(s.refreshRoster).toHaveBeenCalledOnce();
+  expect(s.read().active).toEqual({
+    kind: "channel",
+    id: "team",
+    name: "Renamed",
+  });
+});
+
+it("does not rename a new session after the roster refresh completes", async () => {
+  const s = session();
+  const refresh = deferred<void>();
+  s.refreshRoster.mockReturnValueOnce(refresh.promise);
+  const pending = s.actions.renameChannel("team", "Renamed");
+  await vi.waitFor(() => expect(s.refreshRoster).toHaveBeenCalledOnce());
+  s.relogin();
+  refresh.resolve();
+  await pending;
+  expect(s.read().active?.name).toBe("Team");
+  expect(s.reportError).not.toHaveBeenCalled();
+});

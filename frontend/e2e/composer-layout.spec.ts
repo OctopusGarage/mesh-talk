@@ -59,8 +59,10 @@ test("composer reveals secondary actions on demand", async ({ page }) => {
   await expect(page.getByTestId("expression-picker")).toBeVisible();
   await expect(page.getByTestId("expression-picker")).toHaveCSS(
     "transform",
-    "matrix(1, 0, 0, 1, 0, 0)",
+    // Browsers may serialize an identity transform as either value.
+    /^(none|matrix\(1, 0, 0, 1, 0, 0\))$/,
   );
+  await expect(page.getByTestId("expression-picker")).toHaveCSS("opacity", "1");
 });
 
 test("Enter confirms IME composition before it can send", async ({ page }) => {

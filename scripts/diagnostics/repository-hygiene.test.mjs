@@ -94,7 +94,17 @@ test("allows local ignored files and their staged removal", (t) => {
   assert.equal(f.run().status, 0);
 });
 
-test("handles spaces and newlines in artifact filenames", (t) => {
+test("handles spaces in artifact filenames", (t) => {
+  const f = fixture(t);
+  f.add("tmp/my note.md", true);
+  const result = f.run();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /my note.md/);
+});
+
+// Win32 filenames cannot contain control characters; retain this real-filesystem
+// escaping assertion on platforms that can represent the input.
+test("escapes newlines in artifact filenames", { skip: process.platform === "win32" }, (t) => {
   const f = fixture(t);
   f.add("tmp/my note\nsecond line.md", true);
   const result = f.run();
@@ -129,4 +139,19 @@ test("the existing commit, health and CI gates enforce the same policy", () => {
       /node scripts\/check-repository-hygiene\.mjs/,
     );
   }
+});
+
+test("rejects generated Tauri schemas while retaining capability source files", (t) => {
+  const f = fixture(t);
+  f.add("src-tauri/capabilities/default.json");
+  assert.equal(f.run().status, 0);
+  for (const platform of ["linux", "windows", "macOS", "desktop"]) {
+    f.add(`src-tauri/gen/schemas/${platform}-schema.json`, true);
+  }
+  f.add("src-tauri/gen/schemas/acl-manifests.json", true);
+  f.add("src-tauri/gen/schemas/capabilities.json", true);
+  const result = f.run();
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /src-tauri\/gen\/schemas\/linux-schema.json/);
+  assert.match(result.stderr, /src-tauri\/gen\/schemas\/capabilities.json/);
 });

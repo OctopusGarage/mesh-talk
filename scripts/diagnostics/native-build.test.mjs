@@ -176,3 +176,23 @@ test("an explicit source mismatch still rejects production build admission", asy
   await assert.rejects(f.build({ env: { ...process.env, EVAL_SOURCE_SHA: "0".repeat(40) } }), /source SHA differs from HEAD/);
   assert.equal(f.calls.length, 0, "no build command runs with a mismatched source pin");
 });
+
+test("platform-generated Tauri schemas do not dirty source or invalidate native proof", async t => {
+  const f = await fixture(t);
+  await writeFile(path.join(f.root, ".gitignore"), await readFile(new URL("../../.gitignore", import.meta.url)));
+  f.commit();
+  const manifest = await f.build({ run: async (...args) => {
+    const result = await f.run(...args);
+    if (args[0] === "cargo") {
+      const directory = path.join(f.root, "src-tauri/gen/schemas");
+      await mkdir(directory, { recursive: true });
+      for (const filename of ["linux-schema.json", "windows-schema.json", "capabilities.json", "acl-manifests.json"]) {
+        await writeFile(path.join(directory, filename), "generated platform schema\n");
+      }
+    }
+    return result;
+  } });
+  assert.equal(manifest.sourceSha, f.git(["rev-parse", "HEAD"]));
+  assert.equal(native.nativeSourceIdentity(f.root).cleanSource, true);
+  assert.equal((await f.verify()).buildVerified, true);
+});

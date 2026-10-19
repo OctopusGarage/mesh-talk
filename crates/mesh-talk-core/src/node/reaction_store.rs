@@ -150,11 +150,7 @@ mod tests {
         store.record(conv, 199, payload(false)).unwrap();
         drop(store);
         let (_, records) = EncryptedRecordLog::<Record>::open(&path, "pw", MAGIC).unwrap();
-        assert!(
-            records.len() < 70,
-            "toggle history is compacted: {} records",
-            records.len()
-        );
+        assert!(records.len() < 70, "toggle history is compacted");
         let reopened = ReactionStore::open(&path, "pw").unwrap();
         assert_eq!(reopened.len(), 1);
         assert!(
