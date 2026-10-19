@@ -415,10 +415,9 @@ async fn login_impl_guarded(
     let normalized_password = password.trim().to_string();
 
     // The Argon2 password KDF inside auth_service.login is CPU-bound and would pin a tokio
-    // worker for its full duration. Run it on the blocking pool (AuthService is Arc-cloneable);
-    // only the cheap session mutation stays on the reactor.
+    // worker for its full duration. Run credential verification and its atomic session
+    // publication on the blocking pool (AuthService is Arc-cloneable).
     let auth_service = app_state.auth_service().clone();
-    let session = app_state.session().clone();
     let auth_result = {
         let normalized_username = normalized_username.clone();
         let normalized_password = normalized_password.clone();
@@ -426,9 +425,8 @@ async fn login_impl_guarded(
             // The blocking operation owns auth serialization even if its IPC
             // future is cancelled. Publication belongs to this actual result.
             let _auth = auth_operation;
-            let (user, token) =
-                auth_service.login(normalized_username, normalized_password.clone())?;
-            let lease = session.publish(token.clone(), user.clone(), normalized_password);
+            let (user, token, lease) =
+                auth_service.login_session(normalized_username, normalized_password)?;
             Ok::<_, AuthError>(AuthOutcome {
                 user: user.clone(),
                 lease,
@@ -532,7 +530,6 @@ fn logout_impl(app_state: &AppState) -> CommandResult<LogoutResult> {
         .auth_service()
         .logout(session.token.clone())
         .map_err(|e| CommandError::Service(format!("Failed to logout: {e:?}")))?;
-    app_state.session().clear();
     Ok(LogoutResult { success: true })
 }
 
@@ -629,17 +626,10 @@ pub async fn rename_account(
     let auth_service = app_state.auth_service().clone();
     let password = session.password.clone();
     let name_for_store = new_display_name.clone();
-    let session_state = app_state.session().clone();
     let rename_lease = lease.clone();
     let updated = tokio::task::spawn_blocking(move || {
         let _auth = auth;
-        let updated = auth_service.set_display_name(&password, &name_for_store)?;
-        session_state
-            .matching(&rename_lease, |info| {
-                info.user.display_name = updated.display_name.clone()
-            })
-            .map_err(|_| AuthError::NotLoggedIn)?;
-        Ok::<_, AuthError>(updated)
+        auth_service.rename_session(&rename_lease, &password, &name_for_store)
     })
     .await
     .map_err(|e| CommandError::Service(format!("join error: {e}")))?
@@ -1301,15 +1291,11 @@ mod tests {
             std::thread::spawn(move || invoke_auth(&webview, "auto_login", serde_json::json!({})));
         AuthFixture::wait_phase(&entered_rx, "auto-login-entry");
         logout_impl(&fixture.app_state).unwrap();
-        let (user, token) = fixture
+        let (user, _, lease) = fixture
             .app_state
             .auth_service()
-            .login(fixture.bob.clone(), "password-b".into())
+            .login_session(fixture.bob.clone(), "password-b".into())
             .unwrap();
-        let lease = fixture
-            .app_state
-            .session()
-            .publish(token, user.clone(), "password-b".into());
         remember_login(
             fixture.webview.app_handle(),
             &fixture.app_state,
@@ -1538,15 +1524,11 @@ mod tests {
         logout_impl(&fixture.app_state).unwrap();
         // Already hold the same auth mutex; publish a real B service result
         // synchronously to create an exact queued-command generation boundary.
-        let (user, token) = fixture
+        let (user, _, lease) = fixture
             .app_state
             .auth_service()
-            .login(fixture.bob.clone(), "password-b".into())
+            .login_session(fixture.bob.clone(), "password-b".into())
             .unwrap();
-        let lease = fixture
-            .app_state
-            .session()
-            .publish(token, user.clone(), "password-b".into());
         remember_login(
             fixture.webview.app_handle(),
             &fixture.app_state,

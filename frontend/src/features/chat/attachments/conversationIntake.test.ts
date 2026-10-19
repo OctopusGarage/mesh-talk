@@ -227,19 +227,19 @@ it("keeps native paths and directory/media intent without byte staging", async (
     1,
     "/native/photo.png",
     false,
-    expect.any(Number),
+    null,
   );
   expect(useChat.getState().sendFile).toHaveBeenNthCalledWith(
     2,
     "/native/photo.png",
     true,
-    expect.any(Number),
+    null,
   );
   expect(useChat.getState().sendFile).toHaveBeenNthCalledWith(
     3,
     "/native/photo.png",
     false,
-    expect.any(Number),
+    null,
   );
   expect(native.open).toHaveBeenCalledWith({
     multiple: false,
@@ -277,19 +277,19 @@ it("preserves paste filenames and MIME/extension classification", async () => {
     1,
     "/tmp/staged",
     true,
-    expect.any(Number),
+    null,
   );
   expect(useChat.getState().sendFile).toHaveBeenNthCalledWith(
     2,
     "/tmp/staged",
     true,
-    expect.any(Number),
+    null,
   );
   expect(useChat.getState().sendFile).toHaveBeenNthCalledWith(
     3,
     "/tmp/staged",
     false,
-    expect.any(Number),
+    null,
   );
 });
 it("rejects files above the IPC limit before reading and reports the original message", async () => {
@@ -411,7 +411,7 @@ it("classifies native drops and stops a pending batch at a conversation switch",
   expect(useChat.getState().sendFile).toHaveBeenCalledExactlyOnceWith(
     "/native/clip.mp4",
     true,
-    expect.any(Number),
+    null,
   );
 });
 it("does not enqueue the accepted prefix again when a later pasted file cannot be staged", async () => {
@@ -474,7 +474,7 @@ it("keeps a store-owned failed intent for its existing retry instead of reportin
     kind: "file",
     path: "/tmp/photo.png",
     media: true,
-    expiresAtMs: expect.any(Number),
+    expiresAtMs: null,
   });
   expect(native.invoke).not.toHaveBeenCalledWith(
     "delete_temp_file",
@@ -550,7 +550,7 @@ it("allows a new intentional batch to reuse a File from an abandoned partial bat
     2,
     "/tmp/intentional-resend",
     true,
-    expect.any(Number),
+    null,
   );
 });
 function IntakeProbe({ translate }: { translate: typeof i18n.t }) {
@@ -703,6 +703,10 @@ it("preserves files pasted into the real Composer while an earlier batch succeed
   );
 });
 
+it("defaults new messages to Keep", () => {
+  expect(composer.expiryDurationMs).toBeNull();
+});
+
 it("preserves the selected expiry through picker and paste intake after merging expiry controls", async () => {
   const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
   try {
@@ -714,7 +718,7 @@ it("preserves the selected expiry through picker and paste intake after merging 
       false,
       4_600_000,
     );
-    expect(composer.expiryDurationMs).toBe(300_000);
+    expect(composer.expiryDurationMs).toBeNull();
     await act(async () => composer.onExpiryDurationChange!(null));
     native.invoke.mockImplementation((command: string) =>
       Promise.resolve(
@@ -727,7 +731,7 @@ it("preserves the selected expiry through picker and paste intake after merging 
       true,
       null,
     );
-    expect(composer.expiryDurationMs).toBe(300_000);
+    expect(composer.expiryDurationMs).toBeNull();
   } finally {
     now.mockRestore();
   }

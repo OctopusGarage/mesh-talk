@@ -269,9 +269,24 @@ impl EventLog {
         self.version.get(conversation).cloned().unwrap_or_default()
     }
 
+    /// Return the next sequence without overflowing on an imported high value.
+    pub fn next_sequence(
+        &self,
+        conversation: &ConversationId,
+        author: &Author,
+    ) -> Result<u64, LogError> {
+        self.version
+            .get(conversation)
+            .and_then(|version| version.get(author))
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(LogError::SequenceExhausted)
+    }
+
     /// The `(parents, lamport)` a new local event should use: the current heads
     /// and the next Lamport timestamp (one past the highest seen).
-    pub fn prepare(&self, conversation: &ConversationId) -> (Vec<EventId>, u64) {
+    pub fn prepare(&self, conversation: &ConversationId) -> Result<(Vec<EventId>, u64), LogError> {
         let parents = self.heads(conversation);
         let lamport = self
             .max_lamport
@@ -279,8 +294,8 @@ impl EventLog {
             .copied()
             .unwrap_or(0)
             .checked_add(1)
-            .expect("lamport u64 overflow (unreachable in practice)");
-        (parents, lamport)
+            .ok_or(LogError::ClockExhausted)?;
+        Ok((parents, lamport))
     }
 }
 
@@ -311,6 +326,38 @@ mod tests {
             EventKind::Message,
             payload.to_vec(),
         )
+    }
+
+    #[test]
+    fn next_sequence_after_author_exhaustion_does_not_panic_or_mutate() {
+        let author = DeviceIdentity::generate();
+        let mut log = EventLog::default();
+        let last = mk(&author, u64::MAX, vec![], 1, b"last sequence");
+        log.append(last.clone()).unwrap();
+        let heads = log.heads(&conv());
+        assert!(matches!(
+            log.next_sequence(&conv(), &last.author),
+            Err(LogError::SequenceExhausted)
+        ));
+        assert_eq!(log.heads(&conv()), heads);
+        assert_eq!(
+            log.version_vector(&conv()).get(&last.author),
+            Some(&u64::MAX)
+        );
+        let other = Author::from_ed25519(DeviceIdentity::generate().public().ed25519_pub);
+        assert_eq!(log.next_sequence(&conv(), &other).unwrap(), 1);
+    }
+
+    #[test]
+    fn preparing_after_lamport_exhaustion_does_not_panic() {
+        let author = DeviceIdentity::generate();
+        let mut log = EventLog::default();
+        log.append(mk(&author, 1, vec![], u64::MAX, b"last clock"))
+            .unwrap();
+        assert!(matches!(
+            log.prepare(&conv()),
+            Err(LogError::ClockExhausted)
+        ));
     }
 
     #[test]
@@ -547,11 +594,11 @@ mod tests {
     fn prepare_returns_heads_and_next_lamport() {
         let id = DeviceIdentity::generate();
         let mut log = EventLog::default();
-        assert_eq!(log.prepare(&conv()), (vec![], 1));
+        assert_eq!(log.prepare(&conv()).unwrap(), (vec![], 1));
 
         let root = mk(&id, 1, vec![], 5, b"root");
         log.append(root.clone()).unwrap();
-        let (parents, lamport) = log.prepare(&conv());
+        let (parents, lamport) = log.prepare(&conv()).unwrap();
         assert_eq!(parents, vec![root.id]);
         assert_eq!(lamport, 6); // one past the highest lamport (5)
     }
@@ -620,6 +667,6 @@ mod tests {
         assert!(log.events(&conv()).is_empty());
         assert!(log.heads(&conv()).is_empty());
         assert!(log.version_vector(&conv()).is_empty());
-        assert_eq!(log.prepare(&conv()), (vec![], 1));
+        assert_eq!(log.prepare(&conv()).unwrap(), (vec![], 1));
     }
 }

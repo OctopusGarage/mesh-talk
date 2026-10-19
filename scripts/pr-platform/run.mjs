@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPlan, hasSelectedTests, parseFlags, validateWindowsRoot } from "./plan.mjs";
 import { digestFile, expectedSteps, runCommand, validatePlaywrightEvidence } from "./guest.mjs";
+import { loadRequirements, requiredBrowserSpecs, committedFiles, verifyRequiredNative } from "../validation/pr-scenarios.mjs";
 import { linuxTarget, dockerInvocation, remoteInvocation } from "./linux-target.mjs";
 
 async function checked(program, args, options, run = runCommand) {
@@ -77,6 +78,7 @@ $env:RUSTC="$rustRoot/bin/rustc.exe"
 $env:RUSTDOC="$rustRoot/bin/rustdoc.exe"
 $env:CARGO_HOME="$cargoHome"
 $env:RUSTUP_HOME="$cache/rustup"
+$env:RUSTUP_TOOLCHAIN="$rustRoot"
 $env:CARGO_TARGET_DIR="$cache/target"
 $env:npm_config_cache="$cache/npm"
 $env:npm_config_userconfig="$cache/npm/npmrc"
@@ -204,13 +206,17 @@ async function main() {
   const cwd = await checked("git", ["rev-parse", "--show-toplevel"], { timeoutMs: 30_000 });
   const candidate = await checked("git", ["rev-parse", "HEAD"], { cwd, timeoutMs: 30_000 });
   const base = await checked("git", ["merge-base", candidate, flags.base], { cwd, timeoutMs: 30_000 });
-  const changed = (await checked("git", ["diff", "--name-only", base, candidate], { cwd, timeoutMs: 30_000 })).split("\n");
+  const changed = committedFiles(cwd, base, candidate);
+  const requirements = await loadRequirements(changed, cwd);
+  flags.uiSpecs = requiredBrowserSpecs(flags.uiSpecs, requirements);
   const plan = buildPlan(flags, changed);
+  plan.scenarios = requirements;
   plan.sourceSha = candidate;
   plan.baseRef = flags.base;
   plan.mergeBase = base;
   for (const spec of plan.uiSpecs) await checked("git", ["cat-file", "-e", `${candidate}:frontend/${spec}`], { cwd, timeoutMs: 30_000 });
   if (flags.planOnly) { console.log(JSON.stringify(plan, null, 2)); return; }
+  await verifyRequiredNative(requirements, candidate);
   if (!hasSelectedTests(plan)) {
     if (await checked("git", ["status", "--porcelain"], { cwd, timeoutMs: 30_000 }) || await checked("git", ["rev-parse", "HEAD"], { cwd, timeoutMs: 30_000 }) !== candidate) throw Error("Platform preflight requires a stable clean committed revision");
     const directory = path.join(cwd, "target/pr-platform", `${Date.now()}-not-applicable`);

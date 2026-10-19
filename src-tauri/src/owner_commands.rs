@@ -387,13 +387,11 @@ mod tests {
                     .auth_service()
                     .register("alice".into(), password.into(), "fixture".into())
                     .unwrap();
-                let (user, token) = app_state
+                let (user, _) = app_state
                     .auth_service()
                     .login("alice".into(), password.into())
                     .unwrap();
-                let owner = user.user_id.clone();
-                app_state.session().publish(token, user, password.into());
-                owner
+                user.user_id.clone()
             } else {
                 app_state
                     .session()
@@ -405,13 +403,51 @@ mod tests {
                 .manage(app_state.clone())
                 .manage(app_state.app_lock().clone())
                 .manage(node.clone())
+                .manage(crate::trust::TrustState::default())
                 .manage(crate::settings::SettingsState::isolated(
                     root.path().join("settings.json"),
                 ))
                 .invoke_handler(tauri::generate_handler![
+                    crate::chat_commands::search,
+                    crate::chat_commands::read_file,
+                    crate::chat_commands::read_media,
+                    crate::trust::mark_verified,
                     crate::chat_commands::send_file_to_account,
                     crate::chat_commands::send_to_account,
                     crate::chat_commands::send_sticker,
+                    crate::chat_commands::create_channel,
+                    crate::chat_commands::rescan_peers,
+                    crate::chat_commands::probe_peer_endpoint,
+                    crate::chat_commands::rename_channel,
+                    crate::chat_commands::set_channel_replica_enabled,
+                    crate::chat_commands::add_channel_member,
+                    crate::chat_commands::remove_channel_member,
+                    crate::chat_commands::transfer_channel_owner,
+                    crate::chat_commands::leave_channel,
+                    crate::chat_commands::accept_channel_invite,
+                    crate::chat_commands::dissolve_channel,
+                    crate::chat_commands::send_channel_message,
+                    crate::chat_commands::react_channel,
+                    crate::chat_commands::send_dm,
+                    crate::chat_commands::send_call_signal,
+                    crate::chat_commands::react_dm,
+                    crate::chat_commands::react_account,
+                    crate::chat_commands::delete_message,
+                    crate::chat_commands::recall_message,
+                    crate::chat_commands::clear_conversation,
+                    crate::chat_commands::start_linking,
+                    crate::chat_commands::stop_linking,
+                    crate::chat_commands::link_device,
+                    crate::chat_commands::rekey_account,
+                    crate::chat_commands::publish_avatar,
+                    crate::chat_commands::set_attachment_global_auto,
+                    crate::chat_commands::set_attachment_contact_auto,
+                    crate::chat_commands::decide_attachment,
+                    crate::chat_commands::send_file_dm,
+                    crate::chat_commands::send_file_channel,
+                    crate::chat_commands::save_file,
+                    crate::chat_commands::save_file_to_dir,
+                    crate::chat_commands::write_temp_file,
                     super::owner_node_identity,
                     super::owner_enqueue_text,
                     super::owner_enqueue_sticker,
@@ -913,6 +949,273 @@ mod tests {
     }
 
     #[test]
+    fn canceled_blocking_waiter_keeps_runtime_owned_until_writer_finishes() {
+        let fixture = Fixture::new();
+        let admission = crate::runtime_admission::RuntimeAdmission::capture_current(
+            &fixture.app_state,
+            &fixture.node,
+        )
+        .unwrap();
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let (finished, done) = std::sync::mpsc::channel();
+        tauri::async_runtime::block_on(async {
+            let pending = tokio::spawn(async move {
+                admission
+                    .blocking(move |_, _| {
+                        entered.send(()).unwrap();
+                        proceed.recv().unwrap();
+                        finished.send(()).unwrap();
+                        Ok(())
+                    })
+                    .await
+            });
+            waiting
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            pending.abort();
+            assert!(pending.await.unwrap_err().is_cancelled());
+            assert!(
+                fixture.node.0.try_lock().is_err(),
+                "retirement must wait for the real writer after cancellation"
+            );
+            release.send(()).unwrap();
+        });
+        done.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        // The writer releases session and runtime guards before retirement proceeds.
+        drop(fixture.node.0.blocking_lock());
+    }
+
+    #[test]
+    fn queued_channel_mutation_rejects_lock_and_same_owner_relogin() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let channel = "11".repeat(32);
+        let cases = [
+            (
+                "write_temp_file",
+                serde_json::json!({"bytes":[],"ext":"png"}),
+            ),
+            ("rescan_peers", serde_json::json!({})),
+            (
+                "probe_peer_endpoint",
+                serde_json::json!({"host":"127.0.0.1","port":47474}),
+            ),
+            (
+                "create_channel",
+                serde_json::json!({"name":"must not create", "memberIds":[]}),
+            ),
+            (
+                "rename_channel",
+                serde_json::json!({"channelId":channel, "name":"must not rename"}),
+            ),
+            (
+                "set_channel_replica_enabled",
+                serde_json::json!({"channelId":channel,"enabled":false}),
+            ),
+            (
+                "add_channel_member",
+                serde_json::json!({"channelId":channel,"memberId":"peer"}),
+            ),
+            (
+                "remove_channel_member",
+                serde_json::json!({"channelId":channel,"memberId":"peer"}),
+            ),
+            (
+                "transfer_channel_owner",
+                serde_json::json!({"channelId":channel,"memberId":"peer"}),
+            ),
+            ("leave_channel", serde_json::json!({"channelId":channel})),
+            (
+                "accept_channel_invite",
+                serde_json::json!({"channelId":channel}),
+            ),
+            ("dissolve_channel", serde_json::json!({"channelId":channel})),
+            (
+                "send_channel_message",
+                serde_json::json!({"channelId":channel,"text":"queued"}),
+            ),
+            (
+                "react_channel",
+                serde_json::json!({"channelId":channel,"target":channel,"emoji":"x","remove":false}),
+            ),
+            (
+                "send_dm",
+                serde_json::json!({"recipient":"peer","text":"queued"}),
+            ),
+            (
+                "send_call_signal",
+                serde_json::json!({"target":"peer","payload":"queued"}),
+            ),
+            (
+                "react_dm",
+                serde_json::json!({"recipient":"peer","target":channel,"emoji":"x","remove":false}),
+            ),
+            (
+                "react_account",
+                serde_json::json!({"account":"peer","target":channel,"emoji":"x","remove":false}),
+            ),
+            (
+                "delete_message",
+                serde_json::json!({"convId":channel,"target":channel,"isChannel":true}),
+            ),
+            (
+                "recall_message",
+                serde_json::json!({"convId":channel,"target":channel,"isChannel":true}),
+            ),
+            (
+                "clear_conversation",
+                serde_json::json!({"convId":channel,"isChannel":true}),
+            ),
+            ("start_linking", serde_json::json!({})),
+            ("stop_linking", serde_json::json!({})),
+            (
+                "link_device",
+                serde_json::json!({"peer":"peer","code":"unused"}),
+            ),
+            ("rekey_account", serde_json::json!({})),
+            ("publish_avatar", serde_json::json!({"avatar":"queued"})),
+            (
+                "set_attachment_global_auto",
+                serde_json::json!({"auto":false}),
+            ),
+            (
+                "set_attachment_contact_auto",
+                serde_json::json!({"account":"peer","auto":false}),
+            ),
+            (
+                "decide_attachment",
+                serde_json::json!({"fileConv":channel,"accept":true}),
+            ),
+            (
+                "send_file_dm",
+                serde_json::json!({"recipient":"peer","path":"unused","media":false}),
+            ),
+            (
+                "send_file_channel",
+                serde_json::json!({"channelId":channel,"path":"unused","media":false}),
+            ),
+            (
+                "save_file",
+                serde_json::json!({"fileConv":channel,"dest":"unused"}),
+            ),
+            (
+                "save_file_to_dir",
+                serde_json::json!({"fileConv":channel,"dir":"unused"}),
+            ),
+        ];
+        for lock in [true, false] {
+            for (command, body) in &cases {
+                fixture.app_state.app_lock().clear();
+                let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+                let lifecycle = fixture.node.0.blocking_lock();
+                let webview = fixture.webview.clone();
+                let command = *command;
+                let body = body.clone();
+                let pending = std::thread::spawn(move || invoke(&webview, command, body));
+                let captured = entered_rx.recv_timeout(std::time::Duration::from_secs(2));
+                if lock {
+                    crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap();
+                } else {
+                    fixture.app_state.session().set(
+                        "replacement".into(),
+                        user("alice"),
+                        "pw".into(),
+                    );
+                }
+                drop(lifecycle);
+                let result = pending.join().unwrap();
+                assert!(
+                    captured.is_ok(),
+                    "{command} must capture entry authority before waiting"
+                );
+                assert_eq!(
+                    result.unwrap_err()["kind"],
+                    "authorization",
+                    "queued {command}, lock={lock}"
+                );
+                assert!(
+                    fixture
+                        .node
+                        .0
+                        .blocking_lock()
+                        .as_ref()
+                        .unwrap()
+                        .list_channels()
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn registered_plaintext_and_trust_commands_reject_replaced_entry_authority() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let trust_path =
+            crate::config_store::account_path(&crate::data_dir(), "alice", "trust.json").unwrap();
+        let before = std::fs::read(&trust_path).ok();
+        for change in ["relogin", "logout", "lock"] {
+            for (command, body) in [
+                ("search", serde_json::json!({"query":"private"})),
+                ("read_file", serde_json::json!({"fileConv":"00".repeat(32)})),
+                (
+                    "read_media",
+                    serde_json::json!({"fileConv":"00".repeat(32)}),
+                ),
+                (
+                    "mark_verified",
+                    serde_json::json!({"owner":"alice","accountId":"contact","fingerprint":"fp"}),
+                ),
+            ] {
+                fixture.app_state.app_lock().clear();
+                fixture
+                    .app_state
+                    .session()
+                    .set("entry".into(), user("alice"), "pw".into());
+                let (entered, captured) = std::sync::mpsc::channel();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+                let lifecycle = fixture.node.0.blocking_lock();
+                let webview = fixture.webview.clone();
+                let pending = std::thread::spawn(move || invoke(&webview, command, body));
+                let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
+                match change {
+                    "logout" => fixture.app_state.session().clear(),
+                    "relogin" => fixture.app_state.session().set(
+                        "replacement".into(),
+                        user("alice"),
+                        "pw".into(),
+                    ),
+                    _ => crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap(),
+                }
+                drop(lifecycle);
+                let result = pending.join().unwrap();
+                assert!(
+                    captured.is_ok(),
+                    "{command} must capture authority before waiting"
+                );
+                assert_eq!(
+                    result.unwrap_err()["kind"],
+                    "authorization",
+                    "{command}: {change}"
+                );
+                assert_eq!(std::fs::read(&trust_path).ok(), before);
+                *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+            }
+        }
+    }
+
+    #[test]
     fn registered_commands_queued_behind_lifecycle_lock_reject_same_owner_new_generation() {
         let fixture = Fixture::new();
         let before = fixture.sync_documents();
@@ -1301,15 +1604,11 @@ mod tests {
         let logged_out = fixture.app_state.session().get().is_none();
         // Real registered logout publication above; direct authenticated re-publication
         // below models the same host UUID's replacement generation, not runtime startup.
-        let (user, token) = fixture
+        let (_, _, replacement) = fixture
             .app_state
             .auth_service()
-            .login("alice".into(), "password-owner".into())
+            .login_session("alice".into(), "password-owner".into())
             .unwrap();
-        let replacement = fixture
-            .app_state
-            .session()
-            .publish(token, user, "password-owner".into());
         let replaced = replacement.owner() == owner && replacement != lease;
         release_tx.send(()).unwrap();
         let holder_result = holder.join().unwrap();

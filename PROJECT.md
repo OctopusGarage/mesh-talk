@@ -8,17 +8,17 @@ vendor-operated account service is required.
 
 ## Maintained references
 
-| Question                                                | Reference                                                            |
-| ------------------------------------------------------- | -------------------------------------------------------------------- |
-| Product overview and first run                          | [README](README.md)                                                  |
-| Communication principles, topology and module contracts | [Network architecture baseline](docs/network-design-reference.md)    |
-| Crypto, protocol, wire compatibility and storage        | [Architecture](docs/ARCHITECTURE.md)                                 |
-| Domain terminology and invariants                       | [Domain model](CONTEXT.md)                                           |
-| Current capabilities and acceptance boundaries          | [Implementation status](specifications/TODO.md)                      |
-| Development commands, agent rules and PR gates          | [Repository guidelines](AGENTS.md) · [Contributing](CONTRIBUTING.md) |
-| Focused tests and escalation triggers                   | [Testing feedback loop](docs/testing-feedback-loop.md)               |
-| Frontend interaction and visual conventions             | [Visual system](frontend/DESIGN.md)                                  |
-| All maintained guides and dated evidence                | [Documentation map](docs/README.md)                                  |
+| Question                                                | Reference                                                                                 |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Product overview and first run                          | [README](README.md)                                                                       |
+| Communication principles, topology and module contracts | [Network architecture baseline](docs/network-design-reference.md)                         |
+| Crypto, protocol, wire compatibility and storage        | [Architecture](docs/ARCHITECTURE.md)                                                      |
+| Domain terminology and DDD conventions                  | [Canonical glossary](CONTEXT.md) · [DDD guide and reference index](docs/domain-design.md) |
+| Current capabilities and acceptance boundaries          | [Implementation status](specifications/TODO.md)                                           |
+| Development commands, agent rules and PR gates          | [Repository guidelines](AGENTS.md) · [Contributing](CONTRIBUTING.md)                      |
+| Focused tests and escalation triggers                   | [Testing feedback loop](docs/testing-feedback-loop.md)                                    |
+| Frontend interaction and visual conventions             | [Visual system](frontend/DESIGN.md)                                                       |
+| All maintained guides and evaluation inputs             | [Documentation map](docs/README.md)                                                       |
 
 ## Rules to preserve
 

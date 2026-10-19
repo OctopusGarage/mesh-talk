@@ -3,23 +3,34 @@ use super::{
 };
 use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use serde::Serialize;
+use tauri::Manager;
 
 #[tauri::command]
 pub async fn send_dm(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     recipient: String,
     text: String,
     reply_to: Option<String>,
 ) -> Result<(), CommandError> {
-    // Snapshot the node handle, then release the state lock before the .await send.
-    let node = state.node_handle().await?;
-    let reply = match reply_to {
-        Some(h) => Some(parse_event_id(&h)?),
-        None => None,
-    };
-    node.send_dm_reply(&recipient, text.as_bytes(), reply)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                // Snapshot the node handle, then release the state lock before the .await send.
+                let node = runtime.handle();
+                let reply = match reply_to {
+                    Some(h) => Some(parse_event_id(&h)?),
+                    None => None,
+                };
+                node.send_dm_reply_if(&recipient, text.as_bytes(), reply, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 /// Send an opaque WebRTC call signal (SDP offer/answer / "bye") to a specific device
@@ -27,14 +38,24 @@ pub async fn send_dm(
 /// account fan-out. Errors if the peer is offline/unknown (a live call needs both online).
 #[tauri::command]
 pub async fn send_call_signal(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     target: String,
     payload: String,
 ) -> Result<(), CommandError> {
-    let node = state.node_handle().await?;
-    node.send_call_signal(&target, payload.as_bytes())
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let node = runtime.handle();
+                node.send_call_signal_if(&target, payload.as_bytes(), |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -108,19 +129,16 @@ pub async fn send_sticker(
             Box::pin(async move {
                 let node = runtime.handle();
                 match channel {
-                    Some(channel) => {
-                        // Channel sends retain their existing core policy; this entry
-                        // check rejects a queued replacement before starting the send.
-                        admission.authorize_accept(runtime, &mut || Ok(()))?;
-                        node.send_sticker_channel_expiring(
+                    Some(channel) => node
+                        .send_sticker_channel_expiring_if(
                             channel,
                             &sticker_id,
                             fallback.as_bytes(),
                             expires_at_ms,
+                            |commit| admission.authorize_accept(runtime, commit),
                         )
                         .await
-                        .map_err(CommandError::from)
-                    }
+                        .map_err(CommandError::from),
                     None => {
                         let id = node
                             .enqueue_sticker_to_account_if(
@@ -161,17 +179,27 @@ pub async fn account_history<R: tauri::Runtime>(
 
 #[tauri::command]
 pub async fn react_dm(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     recipient: String,
     target: String,
     emoji: String,
     remove: bool,
 ) -> Result<(), CommandError> {
-    let id = parse_event_id(&target)?;
-    let node = state.node_handle().await?;
-    node.react_dm(&recipient, id, &emoji, remove)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let id = parse_event_id(&target)?;
+                let node = runtime.handle();
+                node.react_dm_if(&recipient, id, &emoji, remove, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -189,17 +217,27 @@ pub async fn reactions(
 
 #[tauri::command]
 pub async fn react_account(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     account: String,
     target: String,
     emoji: String,
     remove: bool,
 ) -> Result<(), CommandError> {
-    let id = parse_event_id(&target)?;
-    let node = state.node_handle().await?;
-    node.react_to_account(&account, id, &emoji, remove)
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let id = parse_event_id(&target)?;
+                let node = runtime.handle();
+                node.react_to_account_if(&account, id, &emoji, remove, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
         .await
-        .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -217,71 +255,93 @@ pub async fn account_reactions(
 /// the UI holds. The file rewrite runs on the blocking pool.
 #[tauri::command]
 pub async fn delete_message(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     conv_id: String,
     target: String,
     is_channel: bool,
 ) -> Result<(), CommandError> {
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+
     let id = parse_event_id(&target)?;
     let channel = if is_channel {
         Some(parse_channel_id(&conv_id)?)
     } else {
         None
     };
-    let node = state.node_handle().await?;
-    tokio::task::spawn_blocking(move || match channel {
-        Some(channel) => node.delete_message(channel, id, false),
-        None => node.delete_account_message(&conv_id, id),
-    })
-    .await
-    .map_err(|e| CommandError::Service(format!("join error: {e}")))?
-    .map(|_| ())
-    .map_err(CommandError::from)
+    admission
+        .blocking(move |runtime, _| {
+            let node = runtime.handle();
+            match channel {
+                Some(channel) => node.delete_message(channel, id, false),
+                None => node.delete_account_message(&conv_id, id),
+            }
+            .map(|_| ())
+            .map_err(CommandError::from)
+        })
+        .await
 }
 
 /// Recall (unsend) one of OUR OWN messages within the 2-minute window — propagates to peers.
 #[tauri::command]
 pub async fn recall_message(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     conv_id: String,
     target: String,
     is_channel: bool,
 ) -> Result<(), CommandError> {
-    let id = parse_event_id(&target)?;
-    let node = state.node_handle().await?;
-    if is_channel {
-        let channel = parse_channel_id(&conv_id)?;
-        node.recall_channel(channel, id)
-            .await
-            .map_err(CommandError::from)
-    } else {
-        node.recall_account(&conv_id, id)
-            .await
-            .map_err(CommandError::from)
-    }
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let id = parse_event_id(&target)?;
+                let node = runtime.handle();
+                if is_channel {
+                    let channel = parse_channel_id(&conv_id)?;
+                    node.recall_channel_if(channel, id, |commit| {
+                        admission.authorize_accept(runtime, commit)
+                    })
+                    .await
+                    .map_err(CommandError::from)
+                } else {
+                    node.recall_account_if(&conv_id, id, |commit| {
+                        admission.authorize_accept(runtime, commit)
+                    })
+                    .await
+                    .map_err(CommandError::from)
+                }
+            })
+        })
+        .await
 }
 
 /// Clear all locally-stored history for a conversation (text + files). Local only.
 #[tauri::command]
 pub async fn clear_conversation(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     conv_id: String,
     is_channel: bool,
 ) -> Result<(), CommandError> {
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+
     let channel = if is_channel {
         Some(parse_channel_id(&conv_id)?)
     } else {
         None
     };
-    let node = state.node_handle().await?;
-    tokio::task::spawn_blocking(move || match channel {
-        Some(channel) => node.clear_conversation(channel),
-        None => node.clear_account_conversation(&conv_id),
-    })
-    .await
-    .map_err(|e| CommandError::Service(format!("join error: {e}")))?
-    .map(|_| ())
-    .map_err(CommandError::from)
+    admission
+        .blocking(move |runtime, _| {
+            let node = runtime.handle();
+            match channel {
+                Some(channel) => node.clear_conversation(channel),
+                None => node.clear_account_conversation(&conv_id),
+            }
+            .map(|_| ())
+            .map_err(CommandError::from)
+        })
+        .await
 }
 
 /// A search result hit for display in the UI.
@@ -303,25 +363,26 @@ pub async fn search<R: tauri::Runtime>(
     state: tauri::State<'_, NodeState>,
     query: String,
 ) -> Result<Vec<SearchHitInfo>, CommandError> {
-    // Snapshot the node handle and DROP the state lock before the scan, so a search can't
-    // serialize all other node IPC behind the synchronous scan; run the scan on the
-    // blocking pool (it reads/decrypts every conversation's stores).
-    let node = state.node_handle().await?;
-    let hits = tokio::task::spawn_blocking(move || node.search(&query))
-        .await
-        .map_err(|e| format!("join error: {e}"))?;
-    crate::app_lock::reject_if_locked(&app)?;
-    Ok(hits
-        .into_iter()
-        .map(|h| SearchHitInfo {
-            is_channel: h.is_channel,
-            account_id: h.account_id,
-            target: h.target,
-            label: h.label,
-            from_me: h.from_me,
-            who: h.who,
-            text: String::from_utf8_lossy(&h.text).into_owned(),
-            wall_clock: h.wall_clock,
+    let admission = RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state)?;
+    let hits = admission
+        .clone()
+        .blocking(move |runtime, _| Ok(runtime.handle().search(&query)))
+        .await?;
+    admission
+        .with_runtime(move |_| {
+            Ok(hits
+                .into_iter()
+                .map(|h| SearchHitInfo {
+                    is_channel: h.is_channel,
+                    account_id: h.account_id,
+                    target: h.target,
+                    label: h.label,
+                    from_me: h.from_me,
+                    who: h.who,
+                    text: String::from_utf8_lossy(&h.text).into_owned(),
+                    wall_clock: h.wall_clock,
+                })
+                .collect())
         })
-        .collect())
+        .await
 }

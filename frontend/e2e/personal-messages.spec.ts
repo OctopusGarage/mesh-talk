@@ -18,6 +18,25 @@ for (const viewport of [
     await entry.click();
     const header = page.getByTestId("conversation-header");
     await expect(header).toContainText("Saved Messages");
+    const devices = page.getByTestId("personal-devices");
+    await expect(devices).toHaveCount(0);
+    await header.getByTestId("personal-devices-trigger").click();
+    await expect(devices).toContainText("This device");
+    await expect(devices).toContainText("No other linked devices yet");
+    await expect(devices).toContainText("device_self_0001");
+    const bounds = await devices.boundingBox();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+    await page.screenshot({ path: testInfo.outputPath("saved-devices.png") });
+    await devices
+      .getByRole("button", { name: "Link a device", exact: true })
+      .click();
+    await expect(page.getByTestId("link-device-dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("link-device-dialog")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(devices).toHaveCount(0);
+
     await expect(page.getByTestId("composer-expiry")).toHaveCount(0);
     await expect(header.getByTestId("conversation-member-profile")).toHaveCount(
       0,
@@ -105,4 +124,76 @@ test("older linked devices explain the file metadata limitation without enabling
   await expect(
     dialog.getByRole("switch", { name: "Attachments", exact: true }),
   ).not.toBeChecked();
+});
+
+test("Saved Messages shows certified online and offline devices without exposing other accounts", async ({
+  page,
+}, testInfo) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const api = (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (command: string, args: unknown) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    const invoke = api.invoke;
+    api.invoke = (command, args) => {
+      if (command === "get_device_sync_status")
+        return Promise.resolve([
+          {
+            device_id: "linked-online-device",
+            phase: "disabled",
+            pending_attachments: 0,
+            error: null,
+          },
+          {
+            device_id: "previously-linked-device",
+            phase: "up_to_date",
+            pending_attachments: 0,
+            error: null,
+          },
+        ]);
+      if (command === "get_presence")
+        return Promise.resolve({
+          acc_self_aaaa1111: {
+            online: true,
+            last_seen_secs: 0,
+            devices: [
+              {
+                user_id: "linked-online-device",
+                evidence: [
+                  {
+                    source: "authenticated",
+                    last_seen_secs: 0,
+                    expires_in_secs: 30,
+                  },
+                ],
+              },
+            ],
+          },
+        });
+      return invoke(command, args);
+    };
+  });
+  await page.getByTestId(`conversation-row-${PERSONAL}`).click();
+  const trigger = page.getByTestId("personal-devices-trigger");
+  await expect(trigger).toContainText("2 online");
+  await trigger.click();
+  const panel = page.getByTestId("personal-devices");
+  await expect(
+    panel.locator('[data-device-id="linked-online-device"]'),
+  ).toContainText("Online");
+  await expect(
+    panel.locator('[data-device-id="previously-linked-device"]'),
+  ).toContainText("Offline");
+  await expect(panel).not.toContainText("device_bob_2222");
+  await expect(panel).not.toContainText("device_carol_3333");
+  await page.screenshot({
+    path: testInfo.outputPath("saved-devices-mixed.png"),
+  });
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveCount(0);
+  await expect(trigger).toBeFocused();
 });

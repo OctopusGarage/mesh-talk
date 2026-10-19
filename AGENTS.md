@@ -25,6 +25,10 @@
 
 - `make dev` primes Rust + Node deps and installs git hooks.
 - `make build` / `make frontend-build` — release build / Vite production build.
+- During feature development, preview changed-boundary validation with `make test-plan`
+  and run it with `make test-changed`. Unmapped changes require an explicit owner
+  and reason; inspect escalation notes for browser/native or consumer checks.
+  These commands do not replace required PR/review gates or static checks.
 - During feature development, run affected tests only: `make test-focused
 TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   tests; add `TEST_TARGET=bridge_cross_lan` to select one integration target.
@@ -47,8 +51,25 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 - Write documentation and reusable prompts in English unless a specific exception is needed.
 - Reference `specifications/development_conventions.md` for naming nuances.
 
+## Domain Language
+
+- `CONTEXT.md` is the canonical domain glossary. `docs/domain-design.md` indexes
+  the modeling references and defines DDD vocabulary and naming translations.
+- Distinguish local users, accounts and devices; desktop, transport and ratchet
+  sessions; discovery, presence, custody, recipient delivery and read state.
+- Use explicit identity/lifetime names in new code. Preserve public, wire and
+  stored identifiers unless a separately validated compatibility change is intended.
+- Update the glossary and affected owning guides when a domain meaning changes;
+  link to definitions instead of maintaining duplicate glossaries.
+
 ## Architecture & Components
 
+- Before adding business logic, consult [module ownership and reuse](docs/module-boundaries.md),
+  inspect the owning module and its callers, and extend its existing implementation.
+  Parallel tasks should name their owned paths and shared-interface dependencies;
+  coordinate changes to shared interfaces through one integration owner. Keep
+  feature-specific helpers local and share rules when their meaning and lifecycle
+  are the same. The guide owns the detailed assignment and handoff contract.
 - Stack: Rust 2024 on Tokio; Tauri 2 + React shell. No vendor-operated server.
 - The `Node` (`node/node.rs`) wires identity + signed UDP **multicast** discovery
   (group `224.0.0.167`, port 47474) + Noise-encrypted TCP transport (`transport/`,
@@ -78,14 +99,16 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 - Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
   `specifications/git_standards.md`. Squash WIP; link issues.
 - Create PRs through `./scripts/create-pr.sh <preflight selectors/specs> -- <gh pr create options>`.
-  It runs preflight first and refuses to publish if verification fails or the candidate changes.
-  Before opening a PR, commit the branch and run `./scripts/pr-preflight.sh` with only the
+  It runs `prepare-pr.sh` (full health plus platform preflight) and refuses to publish if verification fails or the candidate changes.
+  Before opening or updating a PR, commit the branch and run `./scripts/prepare-pr.sh` with only the
   Playwright specs relevant to changed frontend behavior (for example,
-  `./scripts/pr-preflight.sh e2e/avatar-gallery.spec.ts e2e/theme-picker.spec.ts`).
+  `./scripts/prepare-pr.sh e2e/avatar-gallery.spec.ts e2e/theme-picker.spec.ts`).
   Preflight automatically runs the same selected tests in Linux Docker and through SSH to
   `windows10`; Windows workspaces, caches and temporary data stay on drive D. For changed
   Rust crates, pass repeated `--core-filter <test filter>` / `--host-filter <test filter>`
-  selectors. Missing environments or empty Rust selections fail the gate; do not silently
+  selectors; use `--integration-filter` and `--mcp-filter` for those crates.
+  Owning scenario rules automatically add visual specs and require real native
+  evidence for lifecycle/discovery changes. Missing environments or empty Rust selections fail the gate; do not silently
   skip them. See `docs/testing-feedback-loop.md` for configuration and plan preview.
   Include `e2e/ui-visual-regression.spec.ts` when a change affects theme layout or snapshots.
   It checks the changed-line coverage estimate and portable scenario evidence; add focused
@@ -100,3 +123,15 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 - Triage vulnerabilities immediately or document mitigation in the PR.
 - If plans shift, update the relevant committed design or architecture docs. Keep
   `docs/superpowers/` and the root `plans/` directory local and untracked.
+
+## Repository Hygiene
+
+- Keep implementation plans, research, investigation notes and scratch scripts
+  under ignored `tmp/`; remove them when the work is complete.
+- Merge durable decisions into the maintained owning guide. Do not commit
+  completed-work reports, score histories, duplicate runbooks or archive copies.
+- `docs/evals/` owns reusable suites/inventories, prompts and its README only.
+  Generated evidence belongs in ignored output or PR/CI artifacts.
+- Run `node scripts/check-repository-hygiene.mjs` before committing. The shared
+  index check also runs in pre-commit, CI and health, rejecting ignored files
+  even when force-added. See `docs/DOCUMENTATION_GUIDELINES.md` for ownership.

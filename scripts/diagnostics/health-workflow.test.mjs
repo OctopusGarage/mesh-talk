@@ -44,3 +44,19 @@ test("Codecov receives the frontend and Rust coverage produced by CI", () => {
   assert.match(step, /files:.*frontend\/coverage\/lcov\.info/, "frontend coverage must not be carried forward from an older commit");
   assert.match(step, /files:.*src-tauri\/lcov\.info/, "Rust coverage must remain part of the upload");
 });
+
+test("health reports cheap formatting and frontend static failures before expensive suites", () => {
+  const script = readFileSync(new URL("../check-health.sh", import.meta.url), "utf8");
+  assert.ok(script.indexOf("cargo fmt --all -- --check") < script.indexOf('scripts/ai-eval-smoke.sh'));
+  for (const command of ['npx prettier --check src/', 'npm run lint', 'npm run typecheck']) {
+    assert.ok(script.indexOf(command) < script.indexOf('node --test scripts/test-ai-eval.mjs'), command);
+    assert.ok(script.indexOf(command) < script.indexOf('npm run build'), command);
+  }
+});
+
+test("affected preflight checks frontend formatting before diagnostics and compilation", () => {
+  const script = readFileSync(new URL("../pr-preflight.sh", import.meta.url), "utf8");
+  assert.ok(script.includes("npx prettier --check src/"));
+  assert.ok(script.indexOf("npx prettier --check src/") < script.indexOf('node "$stage" diagnostics'));
+  assert.ok(script.indexOf("npx prettier --check src/") < script.indexOf('node "$stage" rust-selectors'));
+});

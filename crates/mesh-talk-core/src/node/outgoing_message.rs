@@ -283,13 +283,10 @@ impl Node {
                 .map_err(|e| NodeError::Channel(e.to_string()))?;
             let log = self.log.lock().expect("log lock");
             let author = Author::from_ed25519(self.identity.public().ed25519_pub);
-            let (mut parents, mut lamport) = log.prepare(&channel);
+            let (mut parents, mut lamport) = log.prepare(&channel).map_err(NodeError::Log)?;
             let mut seq = log
-                .version_vector(&channel)
-                .get(&author)
-                .copied()
-                .unwrap_or(0)
-                + 1;
+                .next_sequence(&channel, &author)
+                .map_err(NodeError::Log)?;
             let clock = now_millis();
             let mut events = Vec::new();
             if let Some(distribution) = rotation {
@@ -311,8 +308,12 @@ impl Node {
                     sealed.encode(),
                 );
                 parents = vec![event.id];
-                lamport += 1;
-                seq += 1;
+                lamport = lamport
+                    .checked_add(1)
+                    .ok_or(NodeError::Log(crate::eventlog::LogError::ClockExhausted))?;
+                seq = seq
+                    .checked_add(1)
+                    .ok_or(NodeError::Log(crate::eventlog::LogError::SequenceExhausted))?;
                 events.push(event);
             }
             let event = Event::new(
@@ -365,5 +366,119 @@ impl Node {
         }
         self.delivery_notify.notify_one();
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::channel::ChannelMeta;
+    use crate::discovery::Announce;
+    use crate::eventlog::LogError;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[tokio::test]
+    async fn two_event_rotation_clock_exhaustion_leaves_wal_and_sender_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let peer = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "peer",
+            9,
+        );
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        let channel = crate::channel::new_channel_id();
+        let meta = ChannelMeta {
+            name: "clock boundary".into(),
+            members: vec![node.identity.public()],
+            epoch: 0,
+            owner: node.user_id(),
+        };
+        // A valid genesis without a distributed sender key forces the next send
+        // to prepare both a KeyRotation and a Message. One clock slot remains.
+        let genesis = Event::new(
+            &node.identity,
+            channel,
+            1,
+            vec![],
+            u64::MAX - 1,
+            0,
+            EventKind::MembershipChange,
+            meta.encode(),
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(genesis.clone())
+            .unwrap();
+        node.process_channel(channel);
+        let before_senders = node
+            .channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .export_my_senders();
+        assert!(before_senders.is_empty());
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        let snapshot = || {
+            [
+                "events.log",
+                "sent.log",
+                "delivery-transactions.log",
+                "delivery-outbox.log",
+                "channel.senders",
+            ]
+            .map(|name| match std::fs::read(dir.path().join(name)) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("cannot snapshot {name}: {error}"),
+            })
+        };
+        let before_files = snapshot();
+
+        let result = node.enqueue_channel_body_if(
+            channel,
+            b"must not commit".to_vec(),
+            None,
+            &mut |commit| commit(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(NodeError::Log(LogError::ClockExhausted))
+        ));
+        assert_eq!(snapshot(), before_files);
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        assert_eq!(
+            node.channels
+                .lock()
+                .unwrap()
+                .state(&channel)
+                .unwrap()
+                .export_my_senders(),
+            before_senders,
+        );
+        let log = node.log.lock().unwrap();
+        assert_eq!(log.heads(&channel), vec![genesis.id]);
+        assert_eq!(log.events(&channel).len(), 1);
+        assert_eq!(log.prepare(&channel).unwrap().1, u64::MAX);
     }
 }

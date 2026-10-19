@@ -19,7 +19,7 @@ and the technical [documentation map](../README.md).
 | Understand pending or failed messages   | [Message delivery](topics/delivery.md)               |
 | Share attachments                       | [Send and receive files](topics/send-files.md)       |
 | Choose where files are saved            | [Download folder](topics/download-location.md)       |
-| Start a group                           | [Channels](topics/channels.md)                       |
+| Start a group or catch up on messages   | [Channels](topics/channels.md)                       |
 | Try calling                             | [Experimental calls](topics/calls.md)                |
 | Compare a contact's identity            | [Verify a contact](topics/verify-contact.md)         |
 | Add another computer                    | [Link devices](topics/link-devices.md)               |

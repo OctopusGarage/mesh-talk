@@ -63,10 +63,18 @@ impl Node {
     }
 
     pub async fn set_physical_lan_only(&self, enabled: bool) {
+        self.set_physical_lan_only_if(enabled, |commit| commit())
+            .await
+            .unwrap();
+    }
+
+    /// Revalidate host authority after waiting for active discovery sends.
+    pub async fn set_physical_lan_only_if(
+        &self,
+        enabled: bool,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+    ) -> io::Result<()> {
         let _policy_guard = self.privacy.gate.write().await;
-        if self.physical_lan_only() == enabled {
-            return;
-        }
         let visibility = self
             .privacy
             .state
@@ -74,15 +82,29 @@ impl Node {
             .expect("privacy state lock not poisoned")
             .as_ref()
             .map(|state| Arc::clone(&state.visibility));
+        let mut commit_node = || {
+            if self.physical_lan_only() == enabled {
+                return Ok(());
+            }
+            self.physical_lan_only.store(enabled, Ordering::Release);
+            self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+            self.sessions.clear();
+            self.clear_bridge_introductions();
+            self.bridge_notify.notify_one();
+            Ok(())
+        };
         if let Some(visibility) = visibility {
-            visibility.set_physical_lan_only(enabled).await;
+            visibility
+                .set_physical_lan_only_if(enabled, |commit_visibility| {
+                    authorize(&mut || {
+                        commit_visibility()?;
+                        commit_node()
+                    })
+                })
+                .await
+        } else {
+            authorize(&mut commit_node)
         }
-        self.physical_lan_only.store(enabled, Ordering::Release);
-        self.privacy.generation.fetch_add(1, Ordering::SeqCst);
-        self.sessions.clear();
-        // Invalidate in-flight directory responses, including disable/enable ABA.
-        self.clear_bridge_introductions();
-        self.bridge_notify.notify_one();
     }
 
     /// Configure before starting any network tasks. Unconfigured SDK constructors
@@ -337,6 +359,7 @@ impl Node {
     }
     /// The enqueue acceptance path commits permission locally; its outbox owns
     /// transport scheduling, including publication of signed return presence.
+    #[cfg(test)]
     pub(in crate::node) async fn initiate_contact_locally(&self, account: &str) -> io::Result<()> {
         self.change_allowed(account, true, PermissionSource::Initiated, || Ok(()))
             .await
@@ -387,6 +410,7 @@ impl Node {
         self.publish_presence(account).await;
         Ok(())
     }
+    #[cfg(test)]
     async fn change_allowed(
         &self,
         account: &str,
@@ -523,53 +547,71 @@ impl Node {
         })
         .await;
     }
-    pub(in crate::node) async fn initiate_device(&self, public: &PublicIdentity) -> io::Result<()> {
-        self.initiate_device_with_presence(public, true).await
-    }
-    pub(in crate::node) async fn initiate_device_locally(
+    pub(in crate::node) async fn initiate_device_locally_if(
         &self,
         public: &PublicIdentity,
-    ) -> io::Result<()> {
-        self.initiate_device_with_presence(public, false).await
+        authorize: &mut (
+                 impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send
+             ),
+    ) -> Result<(), NodeError> {
+        self.initiate_device_authorized(public, false, authorize)
+            .await
     }
-    async fn initiate_device_with_presence(
+
+    pub(in crate::node) async fn initiate_device_if(
+        &self,
+        public: &PublicIdentity,
+        authorize: &mut (
+                 impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send
+             ),
+    ) -> Result<(), NodeError> {
+        self.initiate_device_authorized(public, true, authorize)
+            .await
+    }
+
+    async fn initiate_device_authorized(
         &self,
         public: &PublicIdentity,
         publish: bool,
-    ) -> io::Result<()> {
-        if self.privacy.state.read().map_err(|_| denied())?.is_none() {
-            return Ok(());
-        }
+        authorize: &mut (
+                 impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send
+             ),
+    ) -> Result<(), NodeError> {
         let account = self
             .roster
             .lock()
-            .expect("roster lock not poisoned")
+            .expect("roster lock")
             .announcement(public)
-            .and_then(Announce::account_id);
-        let account = account.or_else(|| {
-            self.privacy
-                .state
-                .read()
-                .ok()?
-                .as_ref()?
-                .proofs
-                .account_for(public)
-        });
-        let Some(account) = account else {
-            // Public legacy discovery remains usable, but cannot create a
-            // permission without a verified account proof. Private mode denies.
-            return if self.privacy_snapshot().invisible {
-                Err(denied())
-            } else {
-                Ok(())
-            };
-        };
-        if publish {
-            self.initiate_contact(&account).await
+            .and_then(Announce::account_id)
+            .or_else(|| {
+                self.privacy
+                    .state
+                    .read()
+                    .ok()?
+                    .as_ref()?
+                    .proofs
+                    .account_for(public)
+            });
+        if let Some(account) = account {
+            self.initiate_contact_locally_if(&account, authorize)
+                .await?;
+            if publish {
+                self.publish_presence(&account).await;
+            }
+            Ok(())
         } else {
-            self.initiate_contact_locally(&account).await
+            authorize(&mut || {
+                if self.privacy_snapshot().invisible {
+                    Err(NodeError::Authorization(
+                        "private device has no verified account".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
         }
     }
+
     pub(in crate::node) fn account_allowed(
         &self,
         public: &PublicIdentity,

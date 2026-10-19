@@ -31,6 +31,21 @@ there is no central server. Key security properties:
   UI preferences live in webview storage. Messages and profile photos are sent
   to intended peers; the optional post office stores only encrypted events.
 
+## Managed devices and plaintext exposure
+
+End-to-end encryption protects content in transit. A device administrator may
+observe the screen, clipboard, notifications, exported files, running processes
+or backups. Encryption at rest and the app lock do not hide an unlocked session
+from the host operating system. Mesh-Talk cannot promise privacy from a device
+administrator or reliably detect every monitoring tool.
+
+Privacy presets and notification previews are documented in
+[privacy controls](docs/privacy-controls.md). Explicit exports remain plaintext;
+older backups may retain copies after local deletion. Native lock/unlock,
+notification privacy, CSP-dependent features and interrupted media migrations
+need platform acceptance evidence; browser mocks cannot establish those results.
+See [platform validation](docs/platform-validation.md) for the evidence boundary.
+
 ## Known limitations
 
 This is an experimental project. The following are tracked, not yet hardened:

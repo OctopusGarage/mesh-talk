@@ -278,6 +278,14 @@ impl ParticipantRuntime {
 
     /// Probe with the same privacy gate and IPv4/IPv6 socket policy as candidates.
     pub async fn probe_endpoint(&self, endpoint: std::net::SocketAddr) -> std::io::Result<()> {
+        self.probe_endpoint_if(endpoint, |commit| commit()).await
+    }
+
+    pub async fn probe_endpoint_if(
+        &self,
+        endpoint: std::net::SocketAddr,
+        authorize: impl FnMut(&mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()> + Send,
+    ) -> std::io::Result<()> {
         if !self.visibility.routed_allowed().await {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -296,7 +304,11 @@ impl ParticipantRuntime {
                 "routed discovery is disabled",
             )
         })?;
-        if self.routed_discovery.probe(socket, endpoint).await? {
+        if self
+            .routed_discovery
+            .probe_if(socket, endpoint, authorize)
+            .await?
+        {
             Ok(())
         } else {
             Err(std::io::Error::new(

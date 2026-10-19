@@ -10,7 +10,7 @@ test("separate browser stages isolate server ports, results and HTML reports", (
   try {
     for (const directory of ["scripts/validation", "scripts/pr-platform", "frontend/node_modules/playwright"])
       mkdirSync(path.join(root, directory), { recursive: true });
-    for (const filename of ["validation/browser.mjs", "pr-platform/guest.mjs", "pr-platform/plan.mjs"])
+    for (const filename of ["validation/browser.mjs", "pr-platform/guest.mjs", "pr-platform/plan.mjs", "pr-platform/rust-packages.mjs"])
       copyFileSync(new URL(`../${filename}`, import.meta.url), path.join(root, "scripts", filename));
     const trace = path.join(root, "trace.jsonl");
     writeFileSync(path.join(root, "frontend/node_modules/playwright/cli.js"), `
@@ -52,7 +52,7 @@ test("browser wrapper exposes timeout diagnostics and never writes success evide
   try {
     for (const directory of ["scripts/validation", "scripts/pr-platform", "frontend/node_modules/playwright"])
       mkdirSync(path.join(root, directory), { recursive: true });
-    for (const filename of ["validation/browser.mjs", "pr-platform/guest.mjs", "pr-platform/plan.mjs"])
+    for (const filename of ["validation/browser.mjs", "pr-platform/guest.mjs", "pr-platform/plan.mjs", "pr-platform/rust-packages.mjs"])
       copyFileSync(new URL(`../${filename}`, import.meta.url), path.join(root, "scripts", filename));
     writeFileSync(path.join(root, "frontend/node_modules/playwright/cli.js"), "setTimeout(() => {}, 3000);\n");
     const result = spawnSync(process.execPath, [path.join(root, "scripts/validation/browser.mjs"), "full"], {

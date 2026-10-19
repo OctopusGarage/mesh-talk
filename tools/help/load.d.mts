@@ -6,4 +6,5 @@ export interface HelpData {
   topics: Topic[];
 }
 export const repositoryRoot: string;
+export const helpCategories: Readonly<Record<string, string>>;
 export function loadHelp(options?: { root?: string }): Promise<HelpData>;

@@ -159,3 +159,28 @@ test("malformed metadata produces controlled validation errors", async (t) => {
     );
   }
 });
+
+test("public readers share the landing page theme and self-hosted font at every version depth", async (t) => {
+  const { buildHelp } = await import("./build.mjs");
+  const root = await fixture(t),
+    out = join(root, "out");
+  await buildHelp({ root, out });
+  const theme = await readFile(
+    new URL("../../site/theme.css", import.meta.url),
+    "utf8",
+  );
+  for (const prefix of ["", "v/0.4.0/"]) {
+    const html = await readFile(join(out, prefix, "connect.html"), "utf8");
+    assert.match(html, /href="theme.css"/);
+    assert.match(html, /class="manual"/);
+    assert.equal(await readFile(join(out, prefix, "theme.css"), "utf8"), theme);
+    assert.deepEqual(
+      await readFile(join(out, prefix, "fonts/space-grotesk-latin.woff2")),
+      await readFile(
+        new URL("../../site/fonts/space-grotesk-latin.woff2", import.meta.url),
+      ),
+    );
+    assert.match(html, /aria-label="Help topics"/);
+    assert.match(html, /Connection/);
+  }
+});

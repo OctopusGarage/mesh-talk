@@ -13,6 +13,7 @@ import {
   presenceStatus,
   usePresenceFor,
 } from "@/store/presence";
+import { PersonalDevices } from "./PersonalDevices";
 import { MemberProfileDialog } from "./MemberProfileDialog";
 
 export function PersonalHeader() {
@@ -33,6 +34,7 @@ export function PersonalHeader() {
           {t("personal.description")}
         </div>
       </div>
+      <PersonalDevices />
     </div>
   );
 }

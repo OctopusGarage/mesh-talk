@@ -18,6 +18,8 @@ Post offices are operated by peers, not a vendor account service. They hold encr
 
 Turning sending off also withholds return controls such as relay receipts and file decisions. Direct peer communication remains separate. In invisible mode, offline relay delivery requires a manually allowed trusted relay account.
 
+A post office does not become a channel member. Authorized members can also recover retained group history from one another when **Share a copy** is enabled; see [Channels](channels.md). A retained encrypted event or file card is not proof that all attachment bytes are available.
+
 Relay custody is not the same as recipient confirmation. Relays may observe routing metadata even when content is encrypted. Calls and direct device synchronization still need their own reachable paths.
 
 ## Further reference

@@ -930,7 +930,15 @@
     "title": "保存済みメッセージ",
     "description": "デバイス間で共有するメモとファイル",
     "saved": "このデバイスに保存済み",
-    "fileCardSaved": "ファイル情報をこのデバイスに保存済み"
+    "fileCardSaved": "ファイル情報をこのデバイスに保存済み",
+    "devices": "デバイス",
+    "onlineCount": "{{count}} 台がオンライン",
+    "devicesDescription": "このアカウントにリンクされたデバイス。現在オフラインのものも含みます。",
+    "thisDevice": "このデバイス",
+    "linkedDevice": "リンク済みデバイス",
+    "noOtherDevices": "他のリンク済みデバイスはまだありません",
+    "devicesLoading": "リンク済みデバイスを読み込み中…",
+    "devicesFailed": "リンク済みデバイスを読み込めませんでした。まもなく再試行します。"
   },
   "help": {
     "title": "ヘルプ",

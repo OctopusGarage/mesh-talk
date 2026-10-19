@@ -15,4 +15,5 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN test -n "$PLAYWRIGHT_VERSION" \
     && npx --yes "playwright@$PLAYWRIGHT_VERSION" install --with-deps --only-shell chromium \
     && npm cache clean --force
+RUN rustup component add clippy
 WORKDIR /work/source

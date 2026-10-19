@@ -73,3 +73,13 @@ package manifest and lockfile. Browser search and Markdown rendering have no
 package dependencies or Node imports. The renderer deliberately supports only
 headings, paragraphs, lists, inline code, bold, HTTPS links, and relative topic
 links; raw HTML is escaped and other link schemes are rejected.
+
+## Reader presentation
+
+The public reader shares [the project theme](../../site/theme.css) and its licensed,
+self-hosted heading font with the landing page. [Reader layout](style.css) adds
+article typography and grouped topic navigation. The build copies these assets
+into current and versioned output; generated HTML/CSS is not maintained by hand.
+See [documentation ownership](../../docs/DOCUMENTATION_GUIDELINES.md) for content
+and styling conventions. Offline application help uses the same manual sources
+inside the desktop app's own visual system.

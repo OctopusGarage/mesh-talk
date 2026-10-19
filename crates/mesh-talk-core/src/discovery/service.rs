@@ -85,17 +85,38 @@ impl RoutedDiscovery {
 
     /// One bounded query to an explicitly supplied candidate endpoint.
     pub async fn probe(&self, socket: &UdpSocket, target: SocketAddr) -> std::io::Result<bool> {
+        self.probe_if(socket, target, |commit| commit()).await
+    }
+
+    pub(crate) async fn probe_if(
+        &self,
+        socket: &UdpSocket,
+        target: SocketAddr,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()> + Send,
+    ) -> std::io::Result<bool> {
         let nonce = uuid::Uuid::new_v4().into_bytes();
-        if !self
-            .pending
-            .lock()
-            .expect("query lock not poisoned")
-            .record(target.ip(), nonce, Instant::now())
-        {
-            return Ok(false);
+        loop {
+            socket.writable().await?;
+            let mut sent = false;
+            let result = authorize(&mut || {
+                if !self
+                    .pending
+                    .lock()
+                    .expect("query lock not poisoned")
+                    .record(target.ip(), nonce, Instant::now())
+                {
+                    return Ok(());
+                }
+                socket.try_send_to(&query::encode_query(nonce), target)?;
+                sent = true;
+                Ok(())
+            });
+            match result {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(error),
+                Ok(()) => return Ok(sent),
+            }
         }
-        socket.send_to(&query::encode_query(nonce), target).await?;
-        Ok(true)
     }
 }
 

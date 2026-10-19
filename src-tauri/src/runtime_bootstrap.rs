@@ -163,32 +163,43 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 if !permit.install(runtime).await {
                     return;
                 }
-                // Serialize with mark_verified so startup cannot replace a newer
-                // in-memory allowlist with an older trust-file snapshot. Read
-                // the relay preference under the same runtime lock so startup
-                // cannot overwrite a setting changed after publication.
-                let mut guard = node_handle.0.lock().await;
-                if let Some(runtime) = guard
-                    .as_ref()
-                    .filter(|runtime| runtime.host_account_id() == Some(&account_id))
+                // Keep startup's exact session and installation authority through
+                // trust publication and every relay-policy commit after a wait.
+                let Ok(admission) = crate::runtime_admission::RuntimeAdmission::capture_lease(
+                    &integration_state,
+                    &node_handle,
+                    &integration_lease,
+                ) else {
+                    return;
+                };
+                if admission
+                    .with_runtime(|runtime| {
+                        if let Some(path) =
+                            crate::config_store::account_path(&base_dir, &account_id, "trust.json")
+                        {
+                            runtime.handle().replace_verified_dm_pull_peers(
+                                crate::trust::verified_fingerprints_at(&path),
+                            );
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .is_err()
                 {
-                    let node = runtime.handle();
-                    if let Some(path) =
-                        crate::config_store::account_path(&base_dir, &account_id, "trust.json")
-                    {
-                        node.replace_verified_dm_pull_peers(
-                            crate::trust::verified_fingerprints_at(&path),
-                        );
-                    }
-                    if let Ok(settings) = app_handle
-                        .state::<crate::settings::SettingsState>()
-                        .get_for_owner(&account_id)
-                        && let Err(error) =
-                            crate::settings::apply_relay_settings(&node, &settings).await
-                    {
-                        log::warn!("Ignored invalid bridge hub setting: {error}");
-                    }
+                    return;
                 }
+                if let Err(error) = crate::settings::apply_startup_settings(
+                    admission,
+                    app_handle
+                        .state::<crate::settings::SettingsState>()
+                        .inner()
+                        .clone(),
+                )
+                .await
+                {
+                    log::warn!("Startup relay settings were not applied: {error}");
+                }
+                let mut guard = node_handle.0.lock().await;
                 if std::env::var_os("MESH_TALK_INTEGRATIONS").as_deref()
                     == Some(std::ffi::OsStr::new("1"))
                     && let Some(runtime) = guard

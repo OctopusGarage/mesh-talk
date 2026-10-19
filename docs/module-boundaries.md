@@ -6,6 +6,11 @@ implementation. Network semantics and configuration belong to the
 [communication architecture](network-design-reference.md); this document defines
 where those decisions live in code and how to change them safely.
 
+The [canonical glossary](../CONTEXT.md) defines domain concepts;
+[DDD conventions](domain-design.md) define modeling terms and identifier mappings.
+The layers and owners below are implementation responsibilities, not declarations
+that every module or crate is a separate DDD bounded context.
+
 ## 1. Dependency direction
 
 | Layer                                       | Owns                                                                                          | Depends on                                              | Must delegate                                                        |
@@ -33,6 +38,13 @@ The existing API facade remains stable. Its settings owner resolver is composed
 at the application seam; adapters never import stores. ESLint enforces that rule
 for alias imports and relative imports at any nesting depth. The auth store uses
 low-level adapters to avoid recreating the facade/settings/auth runtime cycle.
+
+ESLint also rejects static imports of rendering modules (`components/` and
+`features/`) from stores and IPC adapters, including type-only imports and nested
+relative paths. Shared presence vocabulary lives in `lib/presence.ts`; identity
+controls re-export it for compatibility. Stores own evidence expiry and state
+transitions; controls own visual mapping. These checks cover direct static
+dependencies, not transitive dependencies or dynamic imports.
 
 ## 2. Feature owners and shared decisions
 
@@ -69,6 +81,80 @@ business decision or a real lifecycle seam, not merely by similar syntax. For
 example, discovery TTL and conversation presence need not share a constant just
 because both measure time; session admission and mailbox admission must retain
 their distinct authorization contracts.
+
+### Coordinated state owners
+
+`ui/store/conversationHistory.ts` owns active history reloads, bounded background
+coverage scans and expansion to a requested Event. It shares history selection
+and coverage/reception commits across those paths. The roster supplies discovered
+Conversations and import revisions; `outgoingIntent.ts` retains acceptance and
+retry. `reception.ts` owns identity-based receipt/unread decisions, including the
+legacy unread projection. `conversationState.ts` retains cache, deletion and
+optimistic-message reconciliation. History callers do not coordinate those
+internal transitions or import back into the chat composition module at runtime.
+The history module defines its own state/context interface; `chat.ts` composes it
+and supplies runtime generations plus status refresh. Its patches cannot mutate
+that session context. `conversationModel.ts` owns shared Conversation/message data
+types, with established chat exports preserved. History and cache initialization
+are defined by their respective owners and reused by production session resets
+and standalone history tests, which do not initialize the aggregate chat store.
+Outgoing intents likewise define their own state/context contract, composing the
+shared cache state with runtime validity, sender identity, reload, status refresh
+and error-reporting capabilities. Their patches cannot mutate unrelated chat
+state. Chat supplies these capabilities; standalone send/status tests use the
+same cache defaults without initializing chat. Feature work should extend these
+owners instead of importing the aggregate chat getter/setter into them.
+
+`ui/store/channelActions.ts` owns channel creation, member edits, ownership
+transfer, invitation acceptance, leaving, dissolution and renaming. Its narrow
+state/context defines channel projections and explicit capture, command,
+navigation, refresh and error capabilities. `chat.ts` supplies these capabilities
+and preserves its existing public actions. The common member-mutation sequence
+is private to the owner; distinct leave/dissolve/acceptance transitions remain
+explicit. Standalone tests exercise the owner without initializing chat.
+
+Attachment approval ordering and stale-session checks belong to
+`ui/features/chat/attachments/attachmentDecision.ts`, reused by message bubbles
+and the files tray. Those views retain their translated errors and local controls;
+core remains authoritative for consent and byte readiness. `HighlightedText.tsx`
+owns shared search/history highlighting. `StickerThumb.tsx` owns decoded static
+frames and bitmap cleanup, while `ui/lib/motion.ts` owns the live reduced-motion
+preference. Unknown preferences disable animation; mounted consumers react to
+operating-system preference changes. None of these modules owns global chat state.
+
+`core/node/account_profile.rs` owns signed Account profile state: startup
+reconstruction, local revision allocation, authenticated incoming updates and
+coordinated avatar persistence. Its internal state owns the journal and current
+publication together. Node profile paths retain authenticated Event processing,
+authorization and delivery. Recovery uses explicit snapshot/import operations;
+retired language metadata is never republished or restored as filtering state.
+The existing signed payload and encrypted record formats remain the same.
+
+`src-tauri/src/desktop_session.rs` owns the active desktop user, token, password
+and exact-session generation. Credential authentication and profile persistence
+delegate active-session transitions to that shared owner. Commands retain auth
+operation lifetime, runtime installation and retirement, without maintaining a
+second active user/token representation. `state.rs` preserves established exports;
+`runtime_admission.rs` continues to own runtime/session commit authority.
+
+### Focused validation ownership
+
+Module-owned `validation.json` contracts link these boundaries to development
+checks. Account profiles use `core-account-profile`; desktop session/admission
+uses `desktop-session`; history, outgoing intents, shared conversation state and
+chat composition use `frontend-history`, `frontend-outgoing`,
+`frontend-conversation-state` and `frontend-chat`. Channel actions use
+`frontend-channel-actions`, with chat as a declared consumer. Contracts declare downstream
+consumer IDs and escalation notes; frontend source imports add affected unit
+consumers automatically. Integration grant policy expands through service,
+headless host, IPC, client and desktop/MCP adapters. Most other core module IDs
+require explicit selection with a reason until their consumers are established.
+
+A module change should ship its focused behavior evidence and update its contract
+when it changes consumer obligations or shared fixtures. Interface changes require
+consumer validation; runtime/native behavior can require browser or process
+checks. See [change-aware development plans](testing-feedback-loop.md#change-aware-development-plans)
+for preview/run commands, unknown-path handling and the unchanged mandatory gates.
 
 ## 3. Sidebar responsibilities
 
@@ -117,6 +203,25 @@ serial polling is not an authorization mechanism.
    hooks use mounted lifecycle tests; protocol changes need the relevant core
    integration assertion. Avoid source-text tests that punish harmless moves.
 
+Before parallel implementation, record each task's owned paths, the existing
+decision owner it will reuse, any required shared-interface change, and its
+focused verification command. Include behavioral contracts (authority, ordering,
+cancellation, errors and persistence) when agreeing on an interface. A shared
+helper should own the decision and its invariants so callers do not each repeat
+the same validation or transition sequence.
+
+One integration owner coordinates edits to shared types, command registrations,
+module declarations, dependency manifests and composition roots. Agents can
+propose these edits in their handoff while implementing their own modules.
+Separate worktrees isolate edits but do not resolve overlapping responsibilities.
+Avoid broad formatting, unrelated moves and feature-private global exports.
+
+Each handoff lists changed paths, interface changes, reused owners, executed
+checks and any assumptions that affect other tasks. After integrating, rerun the
+owner's focused tests and affected callers' checks; a clean Git merge alone does
+not establish behavioral compatibility. Update this ownership map when a decision
+moves, rather than maintaining a second competing map.
+
 Module division reduces overlapping edits; it cannot guarantee conflict-free
 parallel work. Cross-feature policy changes still need coordination and review.
 
@@ -163,12 +268,54 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   linked-device synchronization/preferences. Capture
   before waiting for the runtime; synchronous operations retain matching session
   authority through the operation. `NodeState::with_session_runtime` owns the
-  shared session/installation decision; `node_for_owner` captures before waiting
-  and returns only a snapshot, not authority for future mutations.
-  Legacy payloads without an owner cannot
-  identify a frontend intent created before IPC execution. Remaining legacy
-  device/channel commands and live settings application still need commit-seam
-  characterization; a post-result authority check cannot prevent side effects.
+  shared session/installation decision. A raw node handle remains a snapshot,
+  not authority for future mutations or plaintext release.
+  Registered channel, device, file, reaction, recall and call mutations use the
+  same entry lease and guarded core commit. Native file writers keep lifecycle
+  ownership through cancellation. Search and file/media queries use the same
+  blocking lifecycle and recheck the entry lease before releasing plaintext.
+  Trust verification encloses its durable write and live recovery-policy update
+  in that authority. Contact mutations acquire runtime, then policy,
+  then the matching entry session; owner strings alone do not authorize them.
+  Legacy payloads without an owner cannot identify a frontend intent created
+  before IPC execution. A post-result check cannot prevent prior side effects.
+- Live settings application is serialized and carries the originating lease plus
+  a settings revision. Policy commits and blocking retention pruning check the
+  latest revision while holding its guard; periodic pruning uses the same path.
+  A superseded document cannot apply policy or erase history after a newer save.
+  Startup follow-up retains its originating authority and uses the same guarded
+  settings application; matching an account name alone is insufficient.
+- `ui/lib/attachmentSave.ts` owns configured destinations, save dialogs,
+  post-dialog owner/readiness checks and remembered paths for bubbles, previews,
+  history, the files tray and store saves. Native writes already admitted may
+  finish; stale continuations do not record paths into a replacement session.
+- The call store owns local terminal signaling before resource disposal and an
+  independent incoming-ring deadline. Disposing local media alone is not a
+  distributed call termination. The local WebRTC diagnostic separately owns a
+  run generation; closing or unmounting disposes its peers, timers and tracks,
+  stops late captures and settles its pending media waits.
+- Own DM/account reaction state uses an account-scoped encrypted projection with
+  latest-action compaction and local erase integration. Retained peer reactions
+  resolve verified historical identities rather than live presence. Reactions
+  retain best-effort fanout; portable recovery snapshots do not include them.
+- Causal traversal lives in `core/eventlog/order.rs` and is reused by node history
+  persistence and sync exports before filtering/pagination. Signed logical clocks
+  alone do not prove ancestry. Compaction checks retained ancestry before replacing records;
+  authenticated replay can recover earlier noncausal file ordering. Local clock
+  and author-sequence allocation return errors on exhaustion. Public `prepare`
+  now returns `Result`; SDK callers must handle it despite unchanged wire formats.
+- Archived channel summaries and admission use `ChannelBook::projected_metadata`
+  and its signed control reducer. Key distribution/decryption remains separate;
+  archives share membership epochs, leaves, acceptance, ownership, rename and
+  terminal dissolution rules with the metadata projection.
+- Peer-avatar journals reclaim obsolete versions using encrypted record-log
+  rewrites. They compact on opening older redundant logs and amortize subsequent
+  rewrites by profile-version count. Latest clear tombstones survive compaction;
+  the budget is relative to live profiles, rather than a cap on distinct accounts.
+- Auth registration builds the complete encrypted user aggregate in an unpublished
+  same-volume staging directory, then publishes it by directory rename. Existing
+  partial directories are preserved for recovery. Subsequent encrypted metadata
+  writes replace a synchronized sibling file instead of truncating the live file.
 - Privacy commands reuse the same admission for checked observations and
   operation-enclosing IO commits. Core `*_guarded` methods await the privacy gate
   without host session authority, then enclose synchronous policy/proof/route
@@ -193,8 +340,8 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
 The structural scan for this refactor covered production frontend import edges,
 the Rust module/public-export structure, host adapters, and the feature owners
 above. It is not an exhaustive line-by-line audit or proof that all bugs have
-been eliminated. The historical [boundary audit](evals/architecture-boundaries-2026-10-15.md)
-records earlier findings and fixes; this file is the maintained ownership guide.
+been eliminated. This file is the maintained ownership guide; Git history retains
+superseded audit findings and implementation reports.
 
 ## Public help
 

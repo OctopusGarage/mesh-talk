@@ -1,8 +1,5 @@
+import { HighlightedText } from "./HighlightedText";
 import { useEffect, useMemo, useState } from "react";
-import {
-  open as openDialog,
-  save as saveDialog,
-} from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   FileX,
@@ -27,12 +24,12 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { IdentityGlyph } from "@/components/identity";
 import { chat } from "@/lib/api";
-import { effectiveDownloadDir } from "@/lib/download";
+import { saveAttachment } from "@/lib/attachmentSave";
 import {
   attachmentLabel,
   isDirectoryAttachment,
 } from "@/lib/directoryAttachment";
-import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
+import { useSavedDownloads } from "@/lib/savedDownloads";
 import {
   useFileAvailability,
   watchFileAvailability,
@@ -59,35 +56,6 @@ import { ClearHistoryButton } from "./ClearHistoryButton";
 // single page can return — so this view is complete up to the durable-store window.
 const FULL_HISTORY_LIMIT = 500;
 const NO_HISTORY: ChatMessage[] = [];
-
-/** Highlight every case-insensitive occurrence of `term` in `text` (mirrors SearchDialog). */
-function Highlighted({ text, term }: { text: string; term: string }) {
-  const parts = useMemo(() => {
-    const q = term.trim();
-    if (!q) return [text];
-    const re = new RegExp(
-      `(${q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
-      "gi",
-    );
-    return text.split(re);
-  }, [text, term]);
-  return (
-    <>
-      {parts.map((p, i) =>
-        i % 2 === 1 ? (
-          <mark
-            key={i}
-            className="rounded-sm bg-signal/20 px-0.5 font-medium text-signal"
-          >
-            {p}
-          </mark>
-        ) : (
-          <span key={i}>{p}</span>
-        ),
-      )}
-    </>
-  );
-}
 
 /** Author + timestamp line shared by the text + link rows. */
 function RowMeta({ m }: { m: ChatMessage }) {
@@ -235,25 +203,9 @@ export function ConversationHistoryDialog({
     )
       return;
     try {
-      const directory = isDirectoryAttachment(file.mime);
-      const dir = directory ? await effectiveDownloadDir() : "";
-      if (!lease.current()) return;
-      if (dir) {
-        if (!useFileAvailability.getState().statuses[file.fileConv]?.ready)
-          return;
-        const path = await chat.saveFileToDir(file.fileConv, dir);
-        if (lease.current()) rememberSavedDownload(file.fileConv, path);
-        return;
-      }
-      const dest = directory
-        ? await openDialog({ directory: true })
-        : await saveDialog({ defaultPath: file.name });
-      if (lease.current() && typeof dest === "string") {
-        const path = directory
-          ? await chat.saveFileToDir(file.fileConv, dest)
-          : (await chat.saveFile(file.fileConv, dest), dest);
-        if (lease.current()) rememberSavedDownload(file.fileConv, path);
-      }
+      await saveAttachment(file, lease, {
+        mode: isDirectoryAttachment(file.mime) ? "default" : "as",
+      });
     } catch (e) {
       if (lease.current())
         setHistory((previous) =>
@@ -394,13 +346,13 @@ export function ConversationHistoryDialog({
                         ) : m.file ? (
                           <span className="inline-flex items-center gap-1.5">
                             {fileGlyph(m.file.name, m.file.mime)}
-                            <Highlighted
+                            <HighlightedText
                               text={attachmentLabel(m.file.name, m.file.mime)}
                               term={query}
                             />
                           </span>
                         ) : (
-                          <Highlighted text={m.text} term={query} />
+                          <HighlightedText text={m.text} term={query} />
                         )}
                       </div>
                     </div>

@@ -1,12 +1,10 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Download, FolderOpen, Play, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { chat } from "@/lib/api";
-import { defaultSavePath } from "@/lib/download";
-import { rememberSavedDownload, useSavedDownloads } from "@/lib/savedDownloads";
+import { saveAttachment } from "@/lib/attachmentSave";
+import { useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
 import { humanSize } from "@/lib/format";
 import { ease, useMotionOK } from "@/lib/motion";
@@ -87,13 +85,7 @@ export function MediaPreview({
     if (!lease.current() || !available || saving) return;
     try {
       setSaving(true);
-      const defaultPath = await defaultSavePath(name);
-      if (!lease.current()) return;
-      const dest = await save({ defaultPath });
-      if (lease.current() && typeof dest === "string") {
-        await chat.saveFile(fileConv, dest);
-        if (lease.current()) rememberSavedDownload(fileConv, dest);
-      }
+      await saveAttachment({ fileConv, name, mime }, lease, { mode: "as" });
     } catch (e) {
       if (lease.current())
         setError(t("files.couldntSave", { error: errorMessage(e) }));

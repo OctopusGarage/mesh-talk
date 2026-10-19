@@ -62,18 +62,23 @@ pub async fn delete_contact(
     node: tauri::State<'_, crate::chat_commands::NodeState>,
     policy: tauri::State<'_, HiddenContactsState>,
 ) -> Result<HiddenContactsSnapshot, String> {
-    let node = node.0.clone();
+    let admission = crate::runtime_admission::RuntimeAdmission::capture(&app, &node, &owner)
+        .map_err(|error| error.to_string())?;
+    let lease = admission.lease().clone();
+    let node = node.inner().clone();
     #[cfg(test)]
     let captured = app.owner_command_captured.clone();
-    let session = app.session().clone();
+    let app = app.inner().clone();
     let policy = policy.inner().clone();
     tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         if let Some(entered) = captured.lock().unwrap().as_ref() {
             let _ = entered.send("contact-runtime-wait");
         }
-        let guard = node.blocking_lock();
-        policy.transaction(&session, &owner, || {
+        let guard = node.0.blocking_lock();
+        policy.transaction_for_lease(&app, &lease, || {
+            node.check_installation(&lease)
+                .map_err(|error| error.to_string())?;
             let runtime = guard
                 .as_ref()
                 .ok_or("Deleting a contact requires a running node")?;

@@ -84,9 +84,7 @@ export function ConversationView() {
   const admitText = useChat((s) => s.admitText);
   const admitTextAndWait = useChat((s) => s.admitTextAndWait);
   const retry = useChat((s) => s.retry);
-  const [expiryDurationMs, setExpiryDurationMs] = useState<number | null>(
-    300_000,
-  );
+  const [expiryDurationMs, setExpiryDurationMs] = useState<number | null>(null);
   const expiresAtSend = () =>
     isPersonal || expiryDurationMs === null
       ? null
@@ -104,7 +102,7 @@ export function ConversationView() {
   useEffect(() => setMemberProfile(null), [active?.id]);
   const attachments = useAttachmentIntake(t, {
     expiresAtSend,
-    onHandoff: () => setExpiryDurationMs(300_000),
+    onHandoff: () => setExpiryDurationMs(null),
   });
   const recallMessage = useChat((s) => s.recallMessage);
   const sendSticker = useChat((s) => s.sendSticker);
@@ -692,7 +690,7 @@ export function ConversationView() {
           prefill={prefill?.key === draftKey ? prefill : null}
           onSendSticker={(id, fallback) => {
             void sendSticker(id, fallback, expiresAtSend());
-            setExpiryDurationMs(300_000);
+            setExpiryDurationMs(null);
           }}
           onCancelReply={() => setReply(null)}
           onAttach={attachments.attachFile}
@@ -715,7 +713,7 @@ export function ConversationView() {
               resetDraft = false,
             ) => {
               if (accepted && cleared && current()) {
-                setExpiryDurationMs(300_000);
+                setExpiryDurationMs(null);
                 setReply(null);
                 if (resetDraft)
                   setPrefill((previous) => ({

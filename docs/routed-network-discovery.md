@@ -82,10 +82,11 @@ endpoints, not all machines on their neighboring LANs. Tailscale-only and
 EasyTier-only devices still need a shared permitted route or a separately
 configured Mesh Talk relay topology.
 
-The [two-Mac EasyTier acceptance](evals/easytier-macos-2026-10-17.md) records
-automatic inventory discovery and encrypted messaging over the EasyTier virtual
-IP, plus bidirectional DM/group/file checks. It does not establish WebRTC media,
-every operating system, or internet NAT/relay behavior.
+Use `scripts/e2e-easytier-macos.py` for opt-in two-Mac acceptance of automatic
+inventory discovery and bidirectional encrypted DM/group/file exchange. This
+scenario does not establish WebRTC media, every operating system, or internet
+NAT/relay behavior. Record exact source and observations in the PR or CI artifacts;
+do not retain another dated implementation report in the documentation tree.
 
 ## Opt-in post-office bridge
 
@@ -196,7 +197,6 @@ all E2E during development.
   attempts and privacy transitions. Loopback discovery scopes do not prove an
   independent physical site or forced DERP path.
 
-Historical source research remains in [routed discovery research](routed-network-discovery-research.md).
 External references: [Tailscale CLI](https://tailscale.com/docs/reference/tailscale-cli),
 [status representation](https://github.com/tailscale/tailscale/blob/main/ipn/ipnstate/ipnstate.go),
 [connection types](https://tailscale.com/docs/reference/connection-types).

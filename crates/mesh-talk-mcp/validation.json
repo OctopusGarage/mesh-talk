@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "contracts": [
+    {
+      "id": "mcp-adapter",
+      "paths": ["crates/mesh-talk-mcp/src/lib.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-mcp",
+          "filters": ["tests::"]
+        }
+      ],
+      "escalation": [
+        "Changed tool contracts require protocol lifecycle/schema evidence; binary launch or stdio changes also require explicit CLI validation."
+      ]
+    }
+  ]
+}

@@ -113,9 +113,9 @@ impl NodeState {
         Ok(runtime.handle())
     }
 
-    /// Clone only from the installation matching the entry session lease and
-    /// requested account. This snapshot does not authorize later asynchronous
-    /// mutations; callers must still validate at their actual commit seam.
+    /// Test adapter for exercising the shared installation/session checks.
+    /// Production operations use RuntimeAdmission to retain their entry lease.
+    #[cfg(test)]
     pub(crate) async fn node_for_owner(
         &self,
         session: &SessionState,

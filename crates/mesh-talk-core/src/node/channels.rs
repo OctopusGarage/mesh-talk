@@ -312,41 +312,75 @@ impl Node {
         channel: ConversationId,
         enabled: bool,
     ) -> Result<(), NodeError> {
-        let members = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state(&channel)
-                .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-            if !state.is_accepted_member(&self.user_id()) || state.is_dissolved() {
-                return Err(NodeError::Channel("not an active channel member".into()));
-            }
-            state.members().to_vec()
+        self.set_channel_replica_enabled_if(channel, enabled, |commit| commit())
+            .await
+    }
+
+    pub async fn set_channel_replica_enabled_if(
+        &self,
+        channel: ConversationId,
+        enabled: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let mut distribution = None;
+        authorize(&mut || {
+            let members = {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+                if !state.is_accepted_member(&self.user_id()) || state.is_dissolved() {
+                    return Err(NodeError::Channel("not an active channel member".into()));
+                }
+                state.members().to_vec()
+            };
+            self.append_event(channel, EventKind::ChannelReplica, vec![u8::from(enabled)])?;
+            self.process_channel(channel);
+            distribution = Some(members.clone());
+            Ok(())
+        })?;
+        let Some(members) = distribution else {
+            return Ok(());
         };
-        self.append_event(channel, EventKind::ChannelReplica, vec![u8::from(enabled)])?;
-        self.process_channel(channel);
         self.distribute_channel(channel, &members).await;
         Ok(())
     }
 
     /// Close a channel for every member while retaining each device's local history.
     pub async fn dissolve_channel(&self, channel: ConversationId) -> Result<(), NodeError> {
-        let members = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if self.user_id() != state.owner() {
-                return Err(NodeError::Channel(
-                    "only the channel owner can dissolve it".into(),
-                ));
-            }
-            if state.is_dissolved() {
-                return Err(NodeError::Channel("channel is already dissolved".into()));
-            }
-            state.members().to_vec()
+        self.dissolve_channel_if(channel, |commit| commit()).await
+    }
+
+    pub async fn dissolve_channel_if(
+        &self,
+        channel: ConversationId,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let mut distribution = None;
+        authorize(&mut || {
+            let members = {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+                if self.user_id() != state.owner() {
+                    return Err(NodeError::Channel(
+                        "only the channel owner can dissolve it".into(),
+                    ));
+                }
+                if state.is_dissolved() {
+                    return Err(NodeError::Channel("channel is already dissolved".into()));
+                }
+                state.members().to_vec()
+            };
+            self.append_event(channel, EventKind::ChannelDissolve, Vec::new())?;
+            self.process_channel(channel);
+            distribution = Some(members.clone());
+            Ok(())
+        })?;
+        let Some(members) = distribution else {
+            return Ok(());
         };
-        self.append_event(channel, EventKind::ChannelDissolve, Vec::new())?;
-        self.process_channel(channel);
         self.distribute_channel(channel, &members).await;
         Ok(())
     }
@@ -389,7 +423,8 @@ impl Node {
         name: &str,
         members: Vec<PublicIdentity>,
     ) -> Result<ConversationId, NodeError> {
-        self.create_channel_with_consent(name, members, false).await
+        self.create_channel_with_consent(name, members, false, |commit| commit())
+            .await
     }
 
     /// Desktop-created groups require every invited device to accept explicitly.
@@ -398,7 +433,18 @@ impl Node {
         name: &str,
         members: Vec<PublicIdentity>,
     ) -> Result<ConversationId, NodeError> {
-        self.create_channel_with_consent(name, members, true).await
+        self.create_channel_invited_if(name, members, |commit| commit())
+            .await
+    }
+
+    pub async fn create_channel_invited_if(
+        &self,
+        name: &str,
+        members: Vec<PublicIdentity>,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<ConversationId, NodeError> {
+        self.create_channel_with_consent(name, members, true, authorize)
+            .await
     }
 
     async fn create_channel_with_consent(
@@ -406,37 +452,44 @@ impl Node {
         name: &str,
         mut members: Vec<PublicIdentity>,
         invite: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<ConversationId, NodeError> {
-        let me = self.identity.public();
-        let owner = me.user_id();
-        if !members.iter().any(|m| m.user_id() == owner) {
-            members.push(me);
-        }
-        let members = canonical_members(members);
-        let channel = crate::channel::new_channel_id();
-        let meta = ChannelMeta {
-            name: name.to_string(),
-            members: members.clone(),
-            epoch: 0,
-            // The creator is the initial owner. Administration can later transfer
-            // through a separately signed control event.
-            owner: owner.clone(),
-        };
+        let mut distribution = None;
+        authorize(&mut || {
+            let me = self.identity.public();
+            let owner = me.user_id();
+            if !members.iter().any(|m| m.user_id() == owner) {
+                members.push(me);
+            }
+            let members = canonical_members(std::mem::take(&mut members));
+            let channel = crate::channel::new_channel_id();
+            let meta = ChannelMeta {
+                name: name.to_string(),
+                members: members.clone(),
+                epoch: 0,
+                // The creator is the initial owner. Administration can later transfer
+                // through a separately signed control event.
+                owner: owner.clone(),
+            };
 
-        self.append_event(
-            channel,
-            EventKind::MembershipChange,
-            if invite {
-                meta.encode_invitation()
-            } else {
-                meta.encode()
-            },
-        )?;
-        // Build our own channel state (sets our identity for the sender-key path).
-        self.process_channel(channel);
-        // Distribute our epoch-0 sender-key distribution to every member.
-        self.distribute_my_sender_key(channel, &members)?;
+            self.append_event(
+                channel,
+                EventKind::MembershipChange,
+                if invite {
+                    meta.encode_invitation()
+                } else {
+                    meta.encode()
+                },
+            )?;
+            // Build our own channel state (sets our identity for the sender-key path).
+            self.process_channel(channel);
+            // Distribute our epoch-0 sender-key distribution to every member.
+            self.distribute_my_sender_key(channel, &members)?;
 
+            distribution = Some((channel, members.clone()));
+            Ok(())
+        })?;
+        let (channel, members) = distribution.expect("authorized channel commit executed");
         self.distribute_channel(channel, &members).await;
         Ok(channel)
     }
@@ -477,12 +530,9 @@ impl Node {
         let author =
             crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
         let seq = log
-            .version_vector(&channel)
-            .get(&author)
-            .copied()
-            .unwrap_or(0)
-            + 1;
-        let (parents, lamport) = log.prepare(&channel);
+            .next_sequence(&channel, &author)
+            .map_err(NodeError::Log)?;
+        let (parents, lamport) = log.prepare(&channel).map_err(NodeError::Log)?;
         let clock = now_millis();
         let event = crate::eventlog::event::Event::new(
             &self.identity,
@@ -527,46 +577,64 @@ impl Node {
         channel: ConversationId,
         new_member: PublicIdentity,
     ) -> Result<(), NodeError> {
-        let (name, mut new_members, new_epoch, owner) = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            (
-                state.name().to_string(),
-                state.members().to_vec(),
-                state.epoch() + 1,
-                state.owner().to_string(),
-            )
-        };
-        // Only the owner may change membership — a non-owner's event would be rejected by
-        // every node's `process`, so refuse it locally too (no useless event/epoch bump).
-        if self.user_id() != owner {
-            return Err(NodeError::Channel(
-                "only the channel owner can change membership".into(),
-            ));
-        }
-        // Already a member → no-op. Don't bump the epoch / force a re-key for nothing.
-        if new_members
-            .iter()
-            .any(|m| m.user_id() == new_member.user_id())
-        {
+        self.add_channel_member_if(channel, new_member, |commit| commit())
+            .await
+    }
+
+    pub async fn add_channel_member_if(
+        &self,
+        channel: ConversationId,
+        new_member: PublicIdentity,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let mut distribution = None;
+        authorize(&mut || {
+            let (name, mut new_members, new_epoch, owner) = {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+                (
+                    state.name().to_string(),
+                    state.members().to_vec(),
+                    state.epoch() + 1,
+                    state.owner().to_string(),
+                )
+            };
+            // Only the owner may change membership — a non-owner's event would be rejected by
+            // every node's `process`, so refuse it locally too (no useless event/epoch bump).
+            if self.user_id() != owner {
+                return Err(NodeError::Channel(
+                    "only the channel owner can change membership".into(),
+                ));
+            }
+            // Already a member → no-op. Don't bump the epoch / force a re-key for nothing.
+            if new_members
+                .iter()
+                .any(|m| m.user_id() == new_member.user_id())
+            {
+                return Ok(());
+            }
+            new_members.push(new_member.clone());
+            let new_members = canonical_members(new_members);
+            let meta = ChannelMeta {
+                name,
+                members: new_members.clone(),
+                epoch: new_epoch,
+                owner,
+            };
+            self.append_event(
+                channel,
+                EventKind::MembershipChange,
+                meta.encode_invitation(),
+            )?;
+            self.process_channel(channel);
+            distribution = Some(new_members.clone());
+            Ok(())
+        })?;
+        let Some(new_members) = distribution else {
             return Ok(());
-        }
-        new_members.push(new_member);
-        let new_members = canonical_members(new_members);
-        let meta = ChannelMeta {
-            name,
-            members: new_members.clone(),
-            epoch: new_epoch,
-            owner,
         };
-        self.append_event(
-            channel,
-            EventKind::MembershipChange,
-            meta.encode_invitation(),
-        )?;
-        self.process_channel(channel);
         self.distribute_channel(channel, &new_members).await;
         Ok(())
     }
@@ -581,50 +649,68 @@ impl Node {
         channel: ConversationId,
         member_user_id: &str,
     ) -> Result<(), NodeError> {
-        let (name, mut new_members, new_epoch, owner) = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            (
-                state.name().to_string(),
-                state.members().to_vec(),
-                state.epoch() + 1,
-                state.owner().to_string(),
-            )
-        };
-        // Only the owner may change membership — reject a non-owner's removal locally
-        // (every node would reject the resulting event anyway).
-        if self.user_id() != owner {
-            return Err(NodeError::Channel(
-                "only the channel owner can change membership".into(),
-            ));
-        }
-        if member_user_id == owner {
-            return Err(NodeError::Channel(
-                "transfer channel ownership before the owner leaves".into(),
-            ));
-        }
-        // Not a member → no-op (don't bump the epoch / re-key for nothing).
-        if !new_members.iter().any(|m| m.user_id() == member_user_id) {
+        self.remove_channel_member_if(channel, member_user_id, |commit| commit())
+            .await
+    }
+
+    pub async fn remove_channel_member_if(
+        &self,
+        channel: ConversationId,
+        member_user_id: &str,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let mut distribution = None;
+        authorize(&mut || {
+            let (name, mut new_members, new_epoch, owner) = {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+                (
+                    state.name().to_string(),
+                    state.members().to_vec(),
+                    state.epoch() + 1,
+                    state.owner().to_string(),
+                )
+            };
+            // Only the owner may change membership — reject a non-owner's removal locally
+            // (every node would reject the resulting event anyway).
+            if self.user_id() != owner {
+                return Err(NodeError::Channel(
+                    "only the channel owner can change membership".into(),
+                ));
+            }
+            if member_user_id == owner {
+                return Err(NodeError::Channel(
+                    "transfer channel ownership before the owner leaves".into(),
+                ));
+            }
+            // Not a member → no-op (don't bump the epoch / re-key for nothing).
+            if !new_members.iter().any(|m| m.user_id() == member_user_id) {
+                return Ok(());
+            }
+            // Refuse to remove the last member — it would leave an unreadable, keyless channel.
+            if new_members.len() <= 1 {
+                return Err(NodeError::Channel(
+                    "cannot remove the last member of a channel".into(),
+                ));
+            }
+            new_members.retain(|m| m.user_id() != member_user_id);
+            let new_members = canonical_members(new_members);
+            let meta = ChannelMeta {
+                name,
+                members: new_members.clone(),
+                epoch: new_epoch,
+                owner,
+            };
+            self.append_event(channel, EventKind::MembershipChange, meta.encode())?;
+            self.process_channel(channel);
+            distribution = Some(new_members.clone());
+            Ok(())
+        })?;
+        let Some(new_members) = distribution else {
             return Ok(());
-        }
-        // Refuse to remove the last member — it would leave an unreadable, keyless channel.
-        if new_members.len() <= 1 {
-            return Err(NodeError::Channel(
-                "cannot remove the last member of a channel".into(),
-            ));
-        }
-        new_members.retain(|m| m.user_id() != member_user_id);
-        let new_members = canonical_members(new_members);
-        let meta = ChannelMeta {
-            name,
-            members: new_members.clone(),
-            epoch: new_epoch,
-            owner,
         };
-        self.append_event(channel, EventKind::MembershipChange, meta.encode())?;
-        self.process_channel(channel);
         self.distribute_channel(channel, &new_members).await;
         Ok(())
     }
@@ -640,40 +726,58 @@ impl Node {
         channel: ConversationId,
         new_name: &str,
     ) -> Result<(), NodeError> {
-        let (current_name, members, owner) = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            (
-                state.name().to_string(),
-                state.members().to_vec(),
-                state.owner().to_string(),
-            )
-        };
-        // Only the owner may rename — a non-owner's event would be rejected by every node's
-        // `process`, so refuse it locally too.
-        if self.user_id() != owner {
-            return Err(NodeError::Channel(
-                "only the channel owner can rename the channel".into(),
-            ));
-        }
-        let new_name = new_name.trim();
-        if new_name.is_empty() {
-            return Err(NodeError::InvalidInput(
-                "channel name cannot be empty".into(),
-            ));
-        }
-        // Unchanged name → no-op (don't post a redundant event).
-        if new_name == current_name {
+        self.rename_channel_if(channel, new_name, |commit| commit())
+            .await
+    }
+
+    pub async fn rename_channel_if(
+        &self,
+        channel: ConversationId,
+        new_name: &str,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let mut distribution = None;
+        authorize(&mut || {
+            let (current_name, members, owner) = {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+                (
+                    state.name().to_string(),
+                    state.members().to_vec(),
+                    state.owner().to_string(),
+                )
+            };
+            // Only the owner may rename — a non-owner's event would be rejected by every node's
+            // `process`, so refuse it locally too.
+            if self.user_id() != owner {
+                return Err(NodeError::Channel(
+                    "only the channel owner can rename the channel".into(),
+                ));
+            }
+            let new_name = new_name.trim();
+            if new_name.is_empty() {
+                return Err(NodeError::InvalidInput(
+                    "channel name cannot be empty".into(),
+                ));
+            }
+            // Unchanged name → no-op (don't post a redundant event).
+            if new_name == current_name {
+                return Ok(());
+            }
+            self.append_event(
+                channel,
+                EventKind::ChannelRename,
+                new_name.as_bytes().to_vec(),
+            )?;
+            self.process_channel(channel);
+            distribution = Some(members.clone());
+            Ok(())
+        })?;
+        let Some(members) = distribution else {
             return Ok(());
-        }
-        self.append_event(
-            channel,
-            EventKind::ChannelRename,
-            new_name.as_bytes().to_vec(),
-        )?;
-        self.process_channel(channel);
+        };
         self.distribute_channel(channel, &members).await;
         Ok(())
     }
@@ -685,46 +789,64 @@ impl Node {
         channel: ConversationId,
         new_owner: &str,
     ) -> Result<(), NodeError> {
-        let (owner, accepted) = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            (
-                state.owner().to_string(),
-                state.is_accepted_member(new_owner),
-            )
-        };
-        if self.user_id() != owner {
-            return Err(NodeError::Channel(
-                "only the channel owner can transfer ownership".into(),
-            ));
-        }
-        if new_owner == owner {
-            return Ok(());
-        }
-        if !accepted {
-            return Err(NodeError::Channel(
-                "new owner must have accepted the channel invitation".into(),
-            ));
-        }
-        self.append_event(
-            channel,
-            EventKind::ChannelOwnerTransfer,
-            new_owner.as_bytes().to_vec(),
-        )?;
-        self.process_channel(channel);
-        let members = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if state.owner() != new_owner {
+        self.transfer_channel_owner_if(channel, new_owner, |commit| commit())
+            .await
+    }
+
+    pub async fn transfer_channel_owner_if(
+        &self,
+        channel: ConversationId,
+        new_owner: &str,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let mut distribution = None;
+        authorize(&mut || {
+            let (owner, accepted) = {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+                (
+                    state.owner().to_string(),
+                    state.is_accepted_member(new_owner),
+                )
+            };
+            if self.user_id() != owner {
                 return Err(NodeError::Channel(
-                    "channel membership changed before ownership transfer completed".into(),
+                    "only the channel owner can transfer ownership".into(),
                 ));
             }
-            state.members().to_vec()
+            if new_owner == owner {
+                return Ok(());
+            }
+            if !accepted {
+                return Err(NodeError::Channel(
+                    "new owner must have accepted the channel invitation".into(),
+                ));
+            }
+            self.append_event(
+                channel,
+                EventKind::ChannelOwnerTransfer,
+                new_owner.as_bytes().to_vec(),
+            )?;
+            self.process_channel(channel);
+            let members = {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+                if state.owner() != new_owner {
+                    return Err(NodeError::Channel(
+                        "channel membership changed before ownership transfer completed".into(),
+                    ));
+                }
+                state.members().to_vec()
+            };
+            distribution = Some(members.clone());
+            Ok(())
+        })?;
+        let Some(members) = distribution else {
+            return Ok(());
         };
         self.distribute_channel(channel, &members).await;
         Ok(())
@@ -733,23 +855,39 @@ impl Node {
     /// Publish a self-signed departure, then stop participating locally. The event is
     /// first offered to the old member set while our old group route is still active.
     pub async fn leave_channel(&self, channel: ConversationId) -> Result<(), NodeError> {
-        let (owner, members) = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            (state.owner().to_string(), state.members().to_vec())
+        self.leave_channel_if(channel, |commit| commit()).await
+    }
+
+    pub async fn leave_channel_if(
+        &self,
+        channel: ConversationId,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let mut distribution = None;
+        authorize(&mut || {
+            let (owner, members) = {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+                (state.owner().to_string(), state.members().to_vec())
+            };
+            let me = self.user_id();
+            if me == owner {
+                return Err(NodeError::Channel(
+                    "transfer channel ownership before leaving".into(),
+                ));
+            }
+            if !members.iter().any(|member| member.user_id() == me) {
+                return Err(NodeError::Channel("not a channel member".into()));
+            }
+            self.append_event(channel, EventKind::ChannelLeave, vec![])?;
+            distribution = Some(members.clone());
+            Ok(())
+        })?;
+        let Some(members) = distribution else {
+            return Ok(());
         };
-        let me = self.user_id();
-        if me == owner {
-            return Err(NodeError::Channel(
-                "transfer channel ownership before leaving".into(),
-            ));
-        }
-        if !members.iter().any(|member| member.user_id() == me) {
-            return Err(NodeError::Channel("not a channel member".into()));
-        }
-        self.append_event(channel, EventKind::ChannelLeave, vec![])?;
         self.distribute_channel(channel, &members).await;
         self.process_channel(channel);
         Ok(())
@@ -758,18 +896,35 @@ impl Node {
     /// Accept a pending invitation. The signed event makes the decision survive
     /// restart and sync to other copies of this device's log.
     pub async fn accept_channel_invite(&self, channel: ConversationId) -> Result<(), NodeError> {
-        let members = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            let state = book
-                .state(&channel)
-                .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !state.pending_invite() || !state.is_member(&self.user_id()) {
-                return Err(NodeError::Channel("no pending invitation".into()));
-            }
-            state.members().to_vec()
+        self.accept_channel_invite_if(channel, |commit| commit())
+            .await
+    }
+
+    pub async fn accept_channel_invite_if(
+        &self,
+        channel: ConversationId,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        let mut distribution = None;
+        authorize(&mut || {
+            let members = {
+                let book = self.channels.lock().expect("channels mutex not poisoned");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+                if !state.pending_invite() || !state.is_member(&self.user_id()) {
+                    return Err(NodeError::Channel("no pending invitation".into()));
+                }
+                state.members().to_vec()
+            };
+            self.append_event(channel, EventKind::ChannelAccept, vec![])?;
+            self.process_channel(channel);
+            distribution = Some(members.clone());
+            Ok(())
+        })?;
+        let Some(members) = distribution else {
+            return Ok(());
         };
-        self.append_event(channel, EventKind::ChannelAccept, vec![])?;
-        self.process_channel(channel);
         self.distribute_channel(channel, &members).await;
         Ok(())
     }
@@ -837,13 +992,33 @@ impl Node {
         reply_to: Option<EventId>,
         expires_at_ms: Option<u64>,
     ) -> Result<(), NodeError> {
+        self.send_channel_message_reply_expiring_if(
+            channel,
+            text,
+            reply_to,
+            expires_at_ms,
+            |commit| commit(),
+        )
+        .await
+    }
+
+    pub async fn send_channel_message_reply_expiring_if(
+        &self,
+        channel: ConversationId,
+        text: &[u8],
+        reply_to: Option<EventId>,
+        expires_at_ms: Option<u64>,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(), NodeError> {
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
-        self.send_channel_body(
+        self.send_channel_body_if(
             channel,
             crate::expiry::wrap(
                 &MessageBody::new(text.to_vec(), reply_to).encode(),
                 expires_at_ms,
             ),
+            &mut authorize,
         )
         .await
     }
@@ -867,25 +1042,49 @@ impl Node {
         fallback: &[u8],
         expires_at_ms: Option<u64>,
     ) -> Result<(), NodeError> {
+        self.send_sticker_channel_expiring_if(
+            channel,
+            sticker_id,
+            fallback,
+            expires_at_ms,
+            |commit| commit(),
+        )
+        .await
+    }
+
+    pub async fn send_sticker_channel_expiring_if(
+        &self,
+        channel: ConversationId,
+        sticker_id: &str,
+        fallback: &[u8],
+        expires_at_ms: Option<u64>,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(), NodeError> {
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
-        self.send_channel_body(
+        self.send_channel_body_if(
             channel,
             crate::expiry::wrap(
                 &MessageBody::sticker(sticker_id.to_string(), fallback.to_vec()).encode(),
                 expires_at_ms,
             ),
+            &mut authorize,
         )
         .await
     }
 
     /// Seal an already-encoded message body with this node's sender key, append it, record
     /// a local plaintext copy, and distribute to channel members.
-    async fn send_channel_body(
+    async fn send_channel_body_if(
         &self,
         channel: ConversationId,
         wrapped: Vec<u8>,
+        authorize: &mut (
+                 impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send
+             ),
     ) -> Result<(), NodeError> {
-        let id = self.enqueue_channel_body_if(channel, wrapped, None, &mut |accept| accept())?;
+        let id =
+            self.enqueue_channel_body_if(channel, wrapped, None, &mut |accept| authorize(accept))?;
         self.flush_accepted_message(&MessageDestination::Channel(channel), id)
             .await;
         Ok(())
@@ -1354,6 +1553,62 @@ mod fanout_tests {
     use crate::identity::device::DeviceIdentity;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::Instant;
+
+    #[tokio::test]
+    async fn channel_commit_authorization_rejects_control_and_message_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel_events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(std::sync::Mutex::new(
+                crate::discovery::roster::Roster::default(),
+            )),
+            dm,
+            channel_events,
+            file,
+            &dir.path().join("node.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        let deny = |_: &mut dyn FnMut() -> Result<(), NodeError>| {
+            Err(NodeError::Authorization("session replaced".into()))
+        };
+        assert!(
+            node.create_channel_invited_if("denied", vec![], deny)
+                .await
+                .is_err()
+        );
+        assert!(node.list_channels().is_empty());
+        let channel = node.create_channel("original", vec![]).await.unwrap();
+        let before = node.log.lock().unwrap().events(&channel).len();
+        assert!(
+            node.rename_channel_if(channel, "denied", deny)
+                .await
+                .is_err()
+        );
+        assert!(node.dissolve_channel_if(channel, deny).await.is_err());
+        assert!(
+            node.set_channel_replica_enabled_if(channel, false, deny)
+                .await
+                .is_err()
+        );
+        assert!(
+            node.send_channel_message_reply_expiring_if(channel, b"denied", None, None, deny)
+                .await
+                .is_err()
+        );
+        assert!(
+            node.send_sticker_channel_expiring_if(channel, "wave", b"denied", None, deny)
+                .await
+                .is_err()
+        );
+        assert_eq!(node.log.lock().unwrap().events(&channel).len(), before);
+        assert_eq!(node.list_channels()[0].name, "original");
+        assert!(!node.list_channels()[0].dissolved);
+    }
 
     #[test]
     fn group_reception_recovery_observations_are_bounded() {

@@ -266,3 +266,28 @@ export function reconcileHistory(
     reception: state.reception,
   };
 }
+
+/** Merge identity counts without losing legacy-host unread counters. */
+export function receptionPatch(
+  state: ReceptionState & { unread: Record<string, number> },
+  next: ReceptionState,
+): Partial<ReceptionState & { unread: Record<string, number> }> {
+  if (next === state) return {};
+  const unread = { ...state.unread };
+  for (const key of new Set([
+    ...Object.keys(state.unreadIds),
+    ...Object.keys(next.unreadIds),
+    ...Object.keys(state.overflowUnread),
+    ...Object.keys(next.overflowUnread),
+  ])) {
+    unread[key] = Math.max(
+      0,
+      (unread[key] ?? 0) +
+        (next.unreadIds[key]?.length ?? 0) +
+        (next.overflowUnread[key] ?? 0) -
+        (state.unreadIds[key]?.length ?? 0) -
+        (state.overflowUnread[key] ?? 0),
+    );
+  }
+  return { ...next, unread };
+}

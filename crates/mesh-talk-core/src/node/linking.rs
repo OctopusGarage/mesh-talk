@@ -53,11 +53,21 @@ impl Node {
         peer_public: &PublicIdentity,
         code_hex: &str,
     ) -> Result<LinkedAccount, NodeError> {
+        self.link_to_device_if(addr, peer_public, code_hex, |commit| commit())
+            .await
+    }
+
+    pub async fn link_to_device_if(
+        &self,
+        addr: std::net::SocketAddr,
+        peer_public: &PublicIdentity,
+        code_hex: &str,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<LinkedAccount, NodeError> {
         let code = PairingCode::from_hex(code_hex)
             .ok_or_else(|| NodeError::Channel("invalid pairing code".into()))?;
-        self.initiate_device(peer_public)
-            .await
-            .map_err(|e| NodeError::Log(crate::eventlog::LogError::Io(e)))?;
+        self.initiate_device_if(peer_public, &mut authorize).await?;
         let (wanted, wanted_revision) = self.device_sync_policy_snapshot();
         let (mut channel, resp) = match self
             .pairing_response(addr, peer_public, &code, Some(wanted.history))
@@ -131,7 +141,9 @@ impl Node {
             && self.device_sync_policy_snapshot().1 == wanted_revision
             && self.device_sync_policy().history
         {
-            self.import_account_backfill_for_account(&account.account_id(), &backfill)?;
+            authorize(&mut || {
+                self.import_account_backfill_for_account(&account.account_id(), &backfill)
+            })?;
         }
         Ok(LinkedAccount {
             secret: resp.account_secret,

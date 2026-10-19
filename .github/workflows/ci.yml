@@ -109,7 +109,9 @@ jobs:
 
       - name: Diagnostic and release gate regressions (all platforms)
         shell: bash
-        run: node --test scripts/diagnostics/*.test.mjs
+        run: |
+          node scripts/check-repository-hygiene.mjs
+          node --test scripts/diagnostics/*.test.mjs
 
       - name: Build retention safeguards (all platforms)
         run: python3 -m unittest discover -s scripts -p test_build_retention.py -v

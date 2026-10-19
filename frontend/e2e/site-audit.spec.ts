@@ -5,7 +5,7 @@ import { test, expect } from "@playwright/test";
 
 const site = pathToFileURL(resolve("../site/index.html")).href;
 
-for (const width of [390, 721, 1280]) {
+for (const width of [320, 390, 721, 1280]) {
   test(`static site is readable and accessible at ${width}px`, async ({
     page,
   }) => {
@@ -37,6 +37,16 @@ for (const width of [390, 721, 1280]) {
         ),
       )
       .toBe(true);
+
+    for (const link of await page.locator(".foot__links a").all()) {
+      const bounds = await link.boundingBox();
+      expect(
+        bounds,
+        (await link.textContent()) ?? "Footer link",
+      ).not.toBeNull();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width + 1);
+    }
 
     const { violations } = await new AxeBuilder({ page })
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])

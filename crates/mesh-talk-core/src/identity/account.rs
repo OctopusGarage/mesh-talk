@@ -1,7 +1,8 @@
 //! Account identity (multi-device): an Ed25519 account keypair shared across a
 //! user's devices, and device certificates (the account key signs each device's
 //! public key, binding the device to the account). The `account_id` is the user's
-//! stable cross-device handle. Pure crypto — persistence + networking are later plans.
+//! stable cross-device handle. This module owns cryptographic identity and
+//! certificates; persistence and synchronization belong to their respective owners.
 
 use crate::identity::{device::DeviceIdentity, random_signing_key};
 use bincode::Options;

@@ -8,12 +8,9 @@
 //! guarantee dense per-author sequences, so a version-vector diff would miss a
 //! gap. See the module plan for the rationale.
 //!
-//! [`SyncStore::events_excluding`] returns the missing events in the store's
-//! `(lamport, id)` order, which is topological for honestly-built events, so a
-//! requester can ingest them one-by-one (each event's parents precede it or
-//! already exist). [`SyncStore::ingest`] re-validates every event regardless,
-//! so a peer that violates the Lamport invariant cannot corrupt the receiver —
-//! at worst its events are rejected with `MissingParents`.
+//! [`SyncStore::events_excluding`] traverses signed parent edges before filtering
+//! known ids. Lamport values only break ties between causally independent events,
+//! so even signed events with inverted clocks make progress across bounded frames.
 
 use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};
@@ -21,7 +18,7 @@ use crate::eventlog::store::{AppendOutcome, EventLog};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Bytes reserved per sync frame for the message's non-event framing (enum tag,
 /// conversation id, bincode wrappers) on top of the event/id payload.
@@ -160,8 +157,8 @@ pub trait SyncStore {
     /// The conversation's events whose id is NOT in `have`, cloned, in
     /// **topological order**: every event's parents must precede it in the
     /// returned slice or already be in `have`, so a requester can ingest them
-    /// one-by-one without a spurious `MissingParents`. `EventLog`'s `(lamport,
-    /// id)` sort satisfies this for honestly-authored events.
+    /// one-by-one without a spurious `MissingParents`. Parent edges, rather than
+    /// signed clocks, determine this order; filter `have` only after traversal.
     fn events_excluding(
         &self,
         conversation: &ConversationId,
@@ -192,7 +189,7 @@ impl SyncStore for EventLog {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
     ) -> Vec<Event> {
-        self.events(conversation)
+        causal_events(self.events(conversation))
             .into_iter()
             .filter(|e| !have.contains(&e.id))
             .cloned()
@@ -201,6 +198,14 @@ impl SyncStore for EventLog {
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         self.append(event)
     }
+}
+
+/// Traverse the complete retained DAG before policy or requester-have filtering.
+/// Preserves compatibility with accepted signed events whose clocks are inverted.
+pub(crate) fn causal_events(events: Vec<&Event>) -> Vec<&Event> {
+    let order = super::order::ordered_ids(&events, &[], true);
+    let by_id: HashMap<_, _> = events.into_iter().map(|event| (event.id, event)).collect();
+    order.into_iter().map(|id| by_id[&id]).collect()
 }
 
 /// The fixint-bincode encoded size of one event (matches `node::session::encode`).
@@ -941,7 +946,7 @@ mod tests {
             let mut seqs: HashMap<[u8; 32], u64> = HashMap::new();
             for i in 0..12u64 {
                 let author = &authors[(rng.next_u32() as usize) % authors.len()];
-                let (parents, lamport) = reference.prepare(&conv());
+                let (parents, lamport) = reference.prepare(&conv()).unwrap();
                 let pk = author.public().ed25519_pub;
                 let seq = {
                     let s = seqs.entry(pk).or_insert(0);
@@ -1094,6 +1099,27 @@ mod tests {
             store.append(e).unwrap();
         }
         (store, c)
+    }
+
+    #[test]
+    fn bounded_sync_advances_across_inverted_signed_clocks() {
+        let author = DeviceIdentity::generate();
+        let parent = ev(&author, 1, vec![], 100, b"parent");
+        let child = ev(&author, 2, vec![parent.id], 1, b"child");
+        let mut source = EventLog::default();
+        source.append(parent.clone()).unwrap();
+        source.append(child.clone()).unwrap();
+        let mut target = EventLog::default();
+        for expected in [parent.id, child.id] {
+            let response =
+                handle_request_bounded(&source, &build_request(&target, conv()), SYNC_MARGIN + 1);
+            assert_eq!(response.events.len(), 1);
+            assert_eq!(response.events[0].id, expected);
+            let (report, _) = handle_response(&mut target, &response);
+            assert_eq!(report.applied, 1);
+            assert!(report.rejected.is_empty());
+        }
+        assert_converged(&target, &source);
     }
 
     #[test]

@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validatePlan } from "./plan.mjs";
+import { selectedRustPackages } from "./rust-packages.mjs";
 
 export function rustTestCount(output) {
   return [...output.matchAll(/test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed;/gu)]
@@ -109,10 +110,11 @@ export function expectedSteps(plan) {
   const needsNpm = plan.frontendBuild || plan.uiSpecs.length;
   if (needsNpm) steps.push({ name: "npm-ci", program: "npm", args: ["ci", "--no-audit", "--no-fund"], frontend: true });
   if (plan.frontendBuild) steps.push({ name: "frontend-build", program: "npm", args: ["run", "build"], frontend: true });
-  for (const [prefix, filters, crate] of [["core", plan.coreFilters, "mesh-talk-core"], ["host", plan.hostFilters, "mesh-talk"]]) {
-    for (const filter of filters) steps.push({ name: `${prefix}:${filter}`, kind: "rust", program: "cargo", args: ["test", "--locked", "-p", crate, "--lib", filter, "--", "--nocapture"] });
+  for (const pkg of selectedRustPackages(plan)) {
+    steps.push({ name: `${pkg.kind}-clippy`, program: "cargo", args: ["clippy", "--locked", "-p", pkg.package, "--all-targets", "--", "-D", "warnings"] });
+    for (const filter of plan[pkg.filters] ?? []) steps.push({ name: `${pkg.kind}:${filter}`, kind: "rust", program: "cargo", args: ["test", "--locked", "-p", pkg.package, "--lib", filter, "--", "--nocapture"] });
+    for (const target of pkg.targets ? plan[pkg.targets] : []) steps.push({ name: `${pkg.kind}-test:${target}`, kind: "rust", program: "cargo", args: ["test", "--locked", "-p", pkg.package, "--test", target, "--", "--nocapture"] });
   }
-  for (const target of plan.coreTests) steps.push({ name: `core-test:${target}`, kind: "rust", program: "cargo", args: ["test", "--locked", "-p", "mesh-talk-core", "--test", target, "--", "--nocapture"] });
   if (plan.uiSpecs.length) {
     const cli = "node_modules/playwright/cli.js";
     steps.push({ name: "browser-install", program: "node", args: [cli, "install", "--only-shell", "chromium"], frontend: true });
@@ -149,7 +151,7 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
     const error = result.error || uiError || (result.timedOut ? "Command timed out" : result.code !== 0 ? `Command exited ${result.code}` : step.kind === "rust" && count === 0 ? "Selector ran zero Rust tests" : undefined);
     results.push({ name: step.name, kind: step.kind, program: step.program, args: step.args, code: result.code, timedOut: !!result.timedOut, testCount: count, ui, ok: !error, error, elapsedMs: result.elapsedMs, outputTail: result.output.slice(-4000) });
   }
-  return { schema: 1, sourceSha: plan.sourceSha, archiveSha: plan.archiveSha, platform: process.platform, architecture: os.arch(), scope: "Affected workflow diagnostics, core/host tests and explicitly selected browser specs; no ASan or native UI certification", ok: results.every(result => result.ok), elapsedMs: Date.now() - started, results };
+  return { schema: 1, sourceSha: plan.sourceSha, archiveSha: plan.archiveSha, platform: process.platform, architecture: os.arch(), scope: "Affected workflow diagnostics, selected Rust package lint/tests and explicitly selected browser specs; no ASan or native UI certification", ok: results.every(result => result.ok), elapsedMs: Date.now() - started, results };
 }
 
 async function main() {

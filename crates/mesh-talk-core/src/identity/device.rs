@@ -1,5 +1,6 @@
 //! Device identity: Ed25519 (signing) + X25519 (key exchange) keys, with a
-//! self-certifying `user_id` derived from the signing public key.
+//! self-certifying device ID derived from the signing public key. The historical
+//! `user_id()` spelling does not refer to a local sign-in UUID or account ID.
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};

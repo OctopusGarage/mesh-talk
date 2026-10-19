@@ -4,6 +4,14 @@ import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
+// Business state and IPC adaptation must not depend on rendering modules.
+const renderingImports = [
+  "@/components/**",
+  "@/features/**",
+  "**/components/**",
+  "**/features/**",
+];
+
 export default tseslint.config(
   {
     ignores: [
@@ -48,14 +56,15 @@ export default tseslint.config(
       "no-restricted-imports": [
         "error",
         {
-          patterns: [
-            "@/store/**",
-            "@/features/**",
-            "**/store/**",
-            "**/features/**",
-          ],
+          patterns: ["@/store/**", "**/store/**", ...renderingImports],
         },
       ],
+    },
+  },
+  {
+    files: ["src/store/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": ["error", { patterns: renderingImports }],
     },
   },
   {
@@ -72,6 +81,7 @@ export default tseslint.config(
               message: "Import the auth/chat IPC adapters directly.",
             },
           ],
+          patterns: renderingImports,
         },
       ],
     },

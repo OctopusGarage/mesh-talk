@@ -169,6 +169,19 @@ impl Node {
         target_account_id: &str,
         target: EventId,
     ) -> Result<(), NodeError> {
+        self.recall_account_if(target_account_id, target, |commit| commit())
+            .await
+    }
+
+    /// Enclose signed events and local recall projection in host commit authority.
+    pub async fn recall_account_if(
+        &self,
+        target_account_id: &str,
+        target: EventId,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(), NodeError> {
+        authorize(&mut || Ok(()))?;
         let my_account = self.account.account_id();
         let acct_conv = account_conversation_id(&my_account, target_account_id);
         // Authorship + window: the message must be ours, i.e. present in our sent sidecar
@@ -197,19 +210,27 @@ impl Node {
             *target.as_bytes(),
         )
         .encode();
-        for peer in self.account_fanout_targets(target_account_id) {
-            let sealed = match crate::dm::seal(&self.identity, &peer.public.x25519_pub, &envelope) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let conv = dm_conversation_id(&self.identity.public(), &peer.public);
-            if self.append_event(conv, EventKind::Delete, sealed).is_err() {
-                continue;
+        let mut deliveries = Vec::new();
+        authorize(&mut || {
+            for peer in self.account_fanout_targets(target_account_id) {
+                let Ok(sealed) =
+                    crate::dm::seal(&self.identity, &peer.public.x25519_pub, &envelope)
+                else {
+                    continue;
+                };
+                let conv = dm_conversation_id(&self.identity.public(), &peer.public);
+                if self.append_event(conv, EventKind::Delete, sealed).is_ok() {
+                    deliveries.push((peer, conv));
+                }
             }
+            // Account recalls retain their best-effort fanout contract, including
+            // a durable local recall when every destination is currently unavailable.
+            self.record_my_recall(acct_conv, target, wall)
+        })?;
+        for (peer, conv) in deliveries {
             self.deliver_direct(&peer, conv).await.ok();
             self.replicate_to_post_office(conv).await.ok();
         }
-        self.record_my_recall(acct_conv, target, wall);
         Ok(())
     }
 
@@ -221,6 +242,19 @@ impl Node {
         channel: ConversationId,
         target: EventId,
     ) -> Result<(), NodeError> {
+        self.recall_channel_if(channel, target, |commit| commit())
+            .await
+    }
+
+    /// Enclose signed events and local recall projection in host commit authority.
+    pub async fn recall_channel_if(
+        &self,
+        channel: ConversationId,
+        target: EventId,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(), NodeError> {
+        authorize(&mut || Ok(()))?;
         let me = Author::from_ed25519(self.identity.public().ed25519_pub);
         let wall = {
             let log = self.log.lock().expect("log mutex not poisoned");
@@ -257,18 +291,25 @@ impl Node {
         let sealed =
             crate::node::channel::SealedPayload::seal(&self.identity, &members, &payload.encode())
                 .map_err(|e| NodeError::Channel(format!("recall seal failed: {e}")))?;
-        self.append_event(channel, EventKind::Delete, sealed.encode())?;
+        authorize(&mut || {
+            self.append_event(channel, EventKind::Delete, sealed.encode())?;
+            self.record_my_recall(channel, target, wall)
+        })?;
         self.distribute_channel(channel, &members).await;
-        self.record_my_recall(channel, target, wall);
         Ok(())
     }
 
-    fn record_my_recall(&self, conv: ConversationId, target: EventId, wall_clock: u64) {
-        let _ = self
-            .recalls
+    fn record_my_recall(
+        &self,
+        conv: ConversationId,
+        target: EventId,
+        wall_clock: u64,
+    ) -> Result<(), NodeError> {
+        self.recalls
             .lock()
             .expect("recalls mutex not poisoned")
-            .record(conv, target, wall_clock);
+            .record(conv, target, wall_clock)
+            .map_err(NodeError::Log)
     }
 
     /// The set of recalled message ids for a CHANNEL: our own recalls (durable) plus peer
@@ -502,5 +543,59 @@ mod tests {
         let r = RecallLog::open(&path, "pw").unwrap();
         assert_eq!(r.targets(&conv).len(), 2);
         assert!(r.targets(&ConversationId::new([9u8; 32])).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod acceptance_tests {
+    use super::*;
+    use crate::discovery::Announce;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[tokio::test]
+    async fn rejected_channel_recall_append_does_not_create_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = DeviceIdentity::generate();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "peer", 1);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            own,
+            Account::generate(),
+            &proof,
+        );
+        let channel = node.create_channel("local", vec![]).await.unwrap();
+        let target = {
+            let mut log = node.log.lock().unwrap();
+            let (parents, clock) = log.prepare(&channel).unwrap();
+            let target = Event::new(
+                &node.identity,
+                channel,
+                100,
+                parents,
+                clock,
+                now_millis(),
+                EventKind::Message,
+                vec![],
+            );
+            log.append(target.clone()).unwrap();
+            log.append(Event::new(
+                &peer,
+                channel,
+                1,
+                vec![target.id],
+                u64::MAX,
+                now_millis(),
+                EventKind::Message,
+                vec![],
+            ))
+            .unwrap();
+            target
+        };
+        assert!(matches!(
+            node.recall_channel(channel, target.id).await,
+            Err(NodeError::Log(LogError::ClockExhausted))
+        ));
+        assert!(node.recalls.lock().unwrap().targets(&channel).is_empty());
     }
 }
