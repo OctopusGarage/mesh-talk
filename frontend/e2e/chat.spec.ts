@@ -1,8 +1,13 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { seedMarketPacks } from "./helpers/packs";
 import { test, expect } from "./tauri-mock";
 import type { Page } from "@playwright/test";
-import { revealComposerTools } from "./helpers/session";
+import {
+  waitForChatShell,
+  enterChat,
+  revealComposerTools,
+} from "./helpers/session";
 
 // Stable scenario ids — mirror e2e/tauri-mock.ts.
 const BOB = { account: "acc_bob_bbbb2222" };
@@ -24,17 +29,6 @@ async function signIn(page: Page, user = "tester") {
   await page.getByTestId("login-submit").click();
 }
 
-/** Full path to a rendered, ready chat shell with the roster loaded. */
-async function enterChat(page: Page, user = "tester", path = "/") {
-  await register(page, user, path);
-  await signIn(page, user);
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
-  // Roster has loaded once the seeded contact row is present (node boot resolved).
-  await expect(
-    page.getByTestId(`conversation-row-${BOB.account}`),
-  ).toBeVisible();
-}
-
 /** Open Bob's DM and wait for its (seeded) history to render. */
 async function openBobDm(page: Page) {
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
@@ -51,7 +45,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByText("Account created")).toBeVisible();
     await signIn(page);
 
-    await expect(page.getByTestId("chat-shell")).toBeVisible();
+    await waitForChatShell(page);
     // Identity is present (the glyph + own name), and no blank/black screen regression.
     await expect(page.getByTestId("self-identity")).toBeVisible();
     await expect(page.locator("#root")).not.toBeEmpty();
@@ -64,7 +58,7 @@ test.describe("Mesh-Talk UI flow", () => {
   }) => {
     await enterChat(page, "guard");
     await expect(page.locator("#root")).not.toBeEmpty();
-    await expect(page.getByTestId("chat-shell")).toBeVisible();
+    await waitForChatShell(page);
     await expect(page.getByText("Something went wrong")).toHaveCount(0);
   });
 
@@ -150,12 +144,12 @@ test.describe("Mesh-Talk UI flow", () => {
 
     const log = page.getByRole("log");
     await expect(log.getByText("latest-after-reading")).toBeInViewport();
-    await log.evaluate((element) => {
-      element.scrollTop = 80;
-    });
+    await log.hover();
+    await page.mouse.wheel(0, -600);
     const jump = page.getByRole("button", { name: "Jump to latest messages" });
     await expect(jump).toBeVisible();
     const before = await log.evaluate((element) => element.scrollTop);
+    expect(before).toBeGreaterThan(0);
 
     await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
     await page.getByTestId(`conversation-row-${BOB.account}`).click();
@@ -265,6 +259,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.getByTestId("composer-send").click();
     const link = page.getByRole("link", { name: "https://example.com" });
     await expect(link).toBeVisible();
+    const appUrl = page.url();
     await link.click();
     await expect
       .poll(() =>
@@ -273,7 +268,7 @@ test.describe("Mesh-Talk UI flow", () => {
         ),
       )
       .toEqual(["https://example.com"]);
-    await expect(page).toHaveURL(/localhost/);
+    await expect(page).toHaveURL(appUrl);
   });
 
   test("emoji picker inserts into the composer", async ({ page }) => {
@@ -305,7 +300,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("screenshot-editor")).toBeVisible();
     await expect(page.getByTestId("screenshot-send")).toBeDisabled();
     await expect(
-      page.getByRole("article", { name: /pasted\.png/ }),
+      page.getByRole("article", { name: /screenshot\.png/ }),
     ).toHaveCount(0);
     await page
       .getByTestId("screenshot-canvas")
@@ -314,6 +309,7 @@ test.describe("Mesh-Talk UI flow", () => {
         targetPosition: { x: 80, y: 60 },
       });
     await expect(page.getByTestId("screenshot-send")).toBeEnabled();
+    await page.getByRole("button", { name: "Draw", exact: true }).click();
     await page
       .getByTestId("screenshot-canvas")
       .dragTo(page.getByTestId("screenshot-canvas"), {
@@ -321,9 +317,13 @@ test.describe("Mesh-Talk UI flow", () => {
         targetPosition: { x: 60, y: 45 },
       });
     await page.getByTestId("screenshot-send").click();
+    await expect(page.getByTestId("composer-pending-files")).toContainText(
+      "screenshot.png",
+    );
+    await page.getByTestId("composer-send").click();
     await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
     await expect(
-      page.getByRole("article", { name: /pasted\.png/ }),
+      page.getByRole("article", { name: /screenshot\.png/ }),
     ).toBeVisible();
     const crop = await page.evaluate(() => {
       const bytes = (window as unknown as { __lastWrittenFileBytes?: number[] })
@@ -354,7 +354,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("composer-screenshot")).toBeDisabled();
   });
 
-  test("screenshot stays editable when saving fails", async ({ page }) => {
+  test("screenshot stays staged when sending fails", async ({ page }) => {
     await enterChat(page, "tester", "/?data=screenshot-write-fails");
     await openBobDm(page);
     await revealComposerTools(page);
@@ -368,10 +368,15 @@ test.describe("Mesh-Talk UI flow", () => {
         targetPosition: { x: 80, y: 60 },
       });
     await page.getByTestId("screenshot-send").click();
-    await expect(
-      page.getByTestId("screenshot-editor").getByRole("alert"),
-    ).toContainText("disk full");
-    await expect(page.getByTestId("screenshot-editor")).toBeVisible();
+    await expect(page.getByTestId("composer-pending-files")).toContainText(
+      "screenshot.png",
+    );
+    await page.getByTestId("composer-send").click();
+    await expect(page.getByTestId("composer").getByRole("alert")).toBeVisible();
+    await expect(page.getByTestId("composer-pending-files")).toContainText(
+      "screenshot.png",
+    );
+    await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
   });
 
   test("add an emoji reaction and see the chip", async ({ page }) => {
@@ -624,6 +629,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.locator("html")).toHaveClass(/dark/);
 
     await openSidebarMenuAction(page, "sidebar-nav-settings");
+    await selectSettingsCategory(page, "appearance");
     await expect(page.getByTestId("theme-picker")).toBeVisible();
 
     await page.getByTestId("theme-light").click();

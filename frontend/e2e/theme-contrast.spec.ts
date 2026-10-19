@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./tauri-mock";
 import { contrastRatio } from "./helpers/ui-audit";
@@ -64,7 +65,7 @@ async function enterBobDm(page: Page) {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await page.getByTestId(`conversation-row-${BOB}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
 }

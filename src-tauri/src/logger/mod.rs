@@ -12,6 +12,7 @@ use tauri_plugin_log::{Target, TargetKind, TimezoneStrategy};
 
 /// Maximum number of days to retain log files
 const MAX_LOG_RETENTION_DAYS: u64 = 7;
+pub(crate) const GRAPHICS_LOG_TARGET: &str = "mesh_talk::graphics_configuration";
 
 fn configured_log_level(debug_build: bool) -> LogLevelFilter {
     if debug_build {
@@ -52,6 +53,7 @@ pub fn init_logging(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::er
     let log_plugin = tauri_plugin_log::Builder::new()
         .targets(targets)
         .level(configured_log_level(cfg!(debug_assertions)))
+        .level_for(GRAPHICS_LOG_TARGET, LogLevelFilter::Info)
         .timezone_strategy(TimezoneStrategy::UseLocal)
         .build();
 

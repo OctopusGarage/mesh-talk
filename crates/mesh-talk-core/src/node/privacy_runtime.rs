@@ -11,6 +11,7 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 use tokio::net::TcpStream;
 
@@ -50,6 +51,40 @@ fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "privacy operation denied")
 }
 impl Node {
+    /// Restrict public discovery to enumerated physical LAN interfaces. Known,
+    /// explicitly authorized contacts can still use existing TCP routes.
+    pub fn physical_lan_only(&self) -> bool {
+        self.physical_lan_only.load(Ordering::Acquire)
+    }
+
+    /// Startup-only policy. Call before configure_privacy and network launch.
+    pub fn initialize_physical_lan_only(&self, enabled: bool) {
+        self.physical_lan_only.store(enabled, Ordering::Release);
+    }
+
+    pub async fn set_physical_lan_only(&self, enabled: bool) {
+        let _policy_guard = self.privacy.gate.write().await;
+        if self.physical_lan_only() == enabled {
+            return;
+        }
+        let visibility = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy state lock not poisoned")
+            .as_ref()
+            .map(|state| Arc::clone(&state.visibility));
+        if let Some(visibility) = visibility {
+            visibility.set_physical_lan_only(enabled).await;
+        }
+        self.physical_lan_only.store(enabled, Ordering::Release);
+        self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+        self.sessions.clear();
+        // Invalidate in-flight directory responses, including disable/enable ABA.
+        self.clear_bridge_introductions();
+        self.bridge_notify.notify_one();
+    }
+
     /// Configure before starting any network tasks. Unconfigured SDK constructors
     /// keep their legacy public behavior. Corrupt durable policy/proofs return errors.
     pub fn configure_privacy(
@@ -59,18 +94,24 @@ impl Node {
         own: &Announce,
         visibility: Arc<DiscoveryVisibility>,
     ) -> io::Result<()> {
-        if !own.verify()
+        if !own.valid_presence()
             || own.public() != self.identity.public()
             || own.account_id() != Some(self.account_id())
-            || own.tcp_port == 0
-            || own.name.len() > 1024
         {
             return Err(denied());
         }
         let policy = PrivacyPolicy::open(&directory.join("privacy.policy"), password)?;
         visibility.initialize_public(!policy.snapshot().invisible)?;
+        visibility.initialize_physical_lan_only(self.physical_lan_only())?;
         let mut proofs = PeerDirectory::open(&directory.join("peer-proofs"), password)?;
         proofs.record_own(own, &self.identity.public())?;
+        for device in self.linked_devices() {
+            proofs.authorize_linked_device(device.clone(), &self.account_id())?;
+            self.roster
+                .lock()
+                .expect("roster lock not poisoned")
+                .authorize_linked_account(&device.public, &device.certificate);
+        }
         let routes =
             super::privacy_routes::RouteCache::open(&directory.join("peer-routes"), password)?;
         let (mut sent_manifest_scopes, stored_scopes) =
@@ -190,6 +231,24 @@ impl Node {
         invisible: bool,
         authorize: impl FnOnce() -> io::Result<()> + Send,
     ) -> io::Result<()> {
+        self.set_invisible_guarded(invisible, |commit| {
+            authorize()?;
+            commit()
+        })
+        .await
+    }
+
+    /// Await network/policy serialization, then let host authority enclose the
+    /// synchronous policy commit and invalidation. No state lock is held when
+    /// authority is acquired, and no host guard crosses a network await.
+    /// The callback must execute the supplied commit exactly once while its
+    /// authority is held and propagate the commit result; reject without calling
+    /// the commit when authority is absent.
+    pub async fn set_invisible_guarded(
+        &self,
+        invisible: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
+    ) -> io::Result<()> {
         let _operation = self.privacy.gate.write().await;
         let (visibility, previous) = {
             let state = self.privacy.state.read().map_err(|_| denied())?;
@@ -197,30 +256,35 @@ impl Node {
             (state.visibility.clone(), state.policy.snapshot().invisible)
         };
         if previous == invisible {
-            return authorize();
+            return authorize(&mut || Ok(()));
         }
         if invisible {
             visibility.set_public(false).await;
         }
-        let result = {
-            let mut state = self.privacy.state.write().map_err(|_| denied())?;
-            authorize().and_then(|_| {
-                state
-                    .as_mut()
-                    .ok_or_else(denied)?
-                    .policy
-                    .set_invisible(invisible)
-            })
-        };
+        let result = authorize(&mut || {
+            self.privacy
+                .state
+                .write()
+                .map_err(|_| denied())?
+                .as_mut()
+                .ok_or_else(denied)?
+                .policy
+                .set_invisible(invisible)?;
+            self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+            if invisible {
+                self.clear_bridge_introductions();
+            }
+            Ok(())
+        });
         if let Err(error) = result {
             if invisible {
                 visibility.set_public(!previous).await;
             }
             return Err(error);
         }
-        self.privacy.generation.fetch_add(1, Ordering::SeqCst);
         if !invisible {
             visibility.set_public(true).await;
+            self.bridge_notify.notify_one();
         }
         Ok(())
     }
@@ -236,8 +300,31 @@ impl Node {
         allowed: bool,
         authorize: impl FnOnce() -> io::Result<()> + Send,
     ) -> io::Result<()> {
-        self.change_allowed(account, allowed, PermissionSource::Manual, authorize)
-            .await?;
+        self.set_allowed_guarded(account, allowed, |commit| {
+            authorize()?;
+            commit()
+        })
+        .await
+    }
+
+    /// Enclose the complete durable grant/revocation after acquiring the policy
+    /// gate. Grant validation precedes authority, matching the legacy `_if` API.
+    /// The callback follows the commit contract of [`Self::set_invisible_guarded`].
+    pub async fn set_allowed_guarded(
+        &self,
+        account: &str,
+        allowed: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
+    ) -> io::Result<()> {
+        {
+            let _operation = self.privacy.gate.write().await;
+            self.change_allowed_locked_guarded(
+                account,
+                allowed,
+                PermissionSource::Manual,
+                authorize,
+            )?;
+        }
         if allowed {
             self.publish_presence(account).await;
         }
@@ -274,8 +361,29 @@ impl Node {
         account: &str,
         authorize: impl FnOnce() -> io::Result<()> + Send,
     ) -> io::Result<()> {
-        self.change_allowed(account, true, PermissionSource::Initiated, authorize)
-            .await?;
+        self.initiate_contact_guarded(account, |commit| {
+            authorize()?;
+            commit()
+        })
+        .await
+    }
+
+    /// Enclose an initiated grant before best-effort private presence publication.
+    /// The callback follows the commit contract of [`Self::set_invisible_guarded`].
+    pub async fn initiate_contact_guarded(
+        &self,
+        account: &str,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
+    ) -> io::Result<()> {
+        {
+            let _operation = self.privacy.gate.write().await;
+            self.change_allowed_locked_guarded(
+                account,
+                true,
+                PermissionSource::Initiated,
+                authorize,
+            )?;
+        }
         self.publish_presence(account).await;
         Ok(())
     }
@@ -298,6 +406,22 @@ impl Node {
         source: PermissionSource,
         authorize: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
+        self.change_allowed_locked_guarded(account, allowed, source, |commit| {
+            authorize()?;
+            commit()
+        })
+    }
+
+    /// Caller holds the policy gate. Validate with a short state read, release
+    /// it before host authorization, then acquire writes inside the commit.
+    /// This retains session -> privacy-state lock order used by local enqueue.
+    fn change_allowed_locked_guarded(
+        &self,
+        account: &str,
+        allowed: bool,
+        source: PermissionSource,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+    ) -> io::Result<()> {
         let announcements = self
             .roster
             .lock()
@@ -308,56 +432,71 @@ impl Node {
             .lock()
             .expect("roster lock not poisoned")
             .peers();
-        let mut guard = self.privacy.state.write().map_err(|_| denied())?;
-        let Some(state) = guard.as_mut() else {
-            return authorize();
-        };
-        let before = state.policy.snapshot();
-        if allowed {
-            let matches: Vec<_> = announcements
-                .into_iter()
-                .filter(|a| a.account_id().as_deref() == Some(account) && a.verify())
-                .collect();
-            let cached = state
-                .proofs
-                .announcements()
-                .into_iter()
-                .find(|a| a.account_id().as_deref() == Some(account));
-            let name = matches
-                .first()
-                .or(cached.as_ref())
-                .map(|a| a.name.clone())
-                .or_else(|| {
-                    before
-                        .allowed_accounts
-                        .iter()
-                        .find(|a| a.id == account)
-                        .map(|a| a.name.clone())
+        let matches: Vec<_> = announcements
+            .into_iter()
+            .filter(|a| a.account_id().as_deref() == Some(account) && a.verify())
+            .collect();
+        let prepared = {
+            let guard = self.privacy.state.read().map_err(|_| denied())?;
+            guard
+                .as_ref()
+                .map(|state| {
+                    let before = state.policy.snapshot();
+                    let name = if allowed {
+                        let cached = state
+                            .proofs
+                            .announcements()
+                            .into_iter()
+                            .find(|a| a.account_id().as_deref() == Some(account));
+                        Some(
+                            matches
+                                .first()
+                                .or(cached.as_ref())
+                                .map(|a| a.name.clone())
+                                .or_else(|| {
+                                    before
+                                        .allowed_accounts
+                                        .iter()
+                                        .find(|a| a.id == account)
+                                        .map(|a| a.name.clone())
+                                })
+                                .ok_or_else(denied)?,
+                        )
+                    } else {
+                        None
+                    };
+                    Ok::<_, io::Error>((before, name))
                 })
-                .ok_or_else(denied)?;
-            authorize()?;
-            for proof in &matches {
-                let binding_changed =
-                    state.proofs.account_for(&proof.public()) != proof.account_id();
-                state.proofs.record_explicit_account(proof)?;
-                if binding_changed {
-                    // Invalidate even if a later policy save fails or the new
-                    // account already had an independent permission entry.
-                    self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+                .transpose()?
+        };
+        let Some((before, name)) = prepared else {
+            return authorize(&mut || Ok(()));
+        };
+        authorize(&mut || {
+            let mut guard = self.privacy.state.write().map_err(|_| denied())?;
+            let state = guard.as_mut().ok_or_else(denied)?;
+            if let Some(name) = name.as_ref() {
+                for proof in &matches {
+                    let binding_changed =
+                        state.proofs.account_for(&proof.public()) != proof.account_id();
+                    state.proofs.record_explicit_account(proof)?;
+                    if binding_changed {
+                        // Invalidate even when a later policy save fails.
+                        self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if let Some(endpoint) = endpoints.iter().find(|p| p.public == proof.public()) {
+                        state.routes.record(&endpoint.public, endpoint.addr.ip())?;
+                    }
                 }
-                if let Some(endpoint) = endpoints.iter().find(|p| p.public == proof.public()) {
-                    state.routes.record(&endpoint.public, endpoint.addr.ip())?;
-                }
+                state.policy.grant(account, name, source.clone())?;
+            } else {
+                state.policy.revoke(account)?;
             }
-            state.policy.grant(account, &name, source)?;
-        } else {
-            authorize()?;
-            state.policy.revoke(account)?;
-        }
-        if before != state.policy.snapshot() {
-            self.privacy.generation.fetch_add(1, Ordering::SeqCst);
-        }
-        Ok(())
+            if before != state.policy.snapshot() {
+                self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        })
     }
     async fn publish_presence(&self, account: &str) {
         if self
@@ -576,11 +715,9 @@ impl Node {
         Ok(())
     }
     pub(in crate::node) fn update_presence(&self, own: &Announce) -> io::Result<()> {
-        if !own.verify()
+        if !own.valid_presence()
             || own.public() != self.identity.public()
             || own.account_id() != Some(self.account_id())
-            || own.tcp_port == 0
-            || own.name.len() > 1024
         {
             return Err(denied());
         }
@@ -592,6 +729,12 @@ impl Node {
         Ok(())
     }
     pub(in crate::node) fn relay_allowed(&self, public: &PublicIdentity) -> bool {
+        if !self
+            .post_office_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
         let announce = self
             .roster
             .lock()
@@ -630,11 +773,8 @@ impl Node {
                 .read()
                 .expect("privacy lock not poisoned");
             if let Some(state) = state.as_ref()
-                && let (Some(old), Some(new)) = (
-                    state.proofs.by_author(&peer.public_identity().ed25519_pub),
-                    peer.announcement(),
-                )
-                && (old.public() != new.public() || old.account_id() != new.account_id())
+                && let Some(new) = peer.announcement()
+                && !state.proofs.accepts_binding(new)
             {
                 return false;
             }
@@ -643,6 +783,24 @@ impl Node {
             || self.group_member(peer.public_identity())
             || self.group_departure_peer(peer.public_identity())
     }
+    // This bit describes disclosure on this connection. Physical-LAN-only
+    // peers stay visible to their actual LAN neighbors while overlay contacts
+    // receive private presence. Use the connected endpoint, including IPv6 scope.
+    fn publicly_visible_at(&self, endpoint: std::net::SocketAddr) -> bool {
+        if self.privacy_snapshot().invisible {
+            return false;
+        }
+        if !self.physical_lan_only() {
+            return true;
+        }
+        self.privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned")
+            .as_ref()
+            .is_some_and(|state| state.visibility.accepts_source(endpoint))
+    }
+
     fn own_presence(&self) -> Option<Announce> {
         self.privacy
             .state
@@ -708,7 +866,8 @@ impl Node {
         }
         let mut roster = self.roster.lock().expect("roster lock not poisoned");
         if publicly_visible {
-            roster.update(announce, ip, &self.user_id());
+            roster.update_authenticated(announce, ip, &self.user_id());
+            roster.mark_authenticated(public, std::net::SocketAddr::new(ip, announce.tcp_port));
         } else {
             roster.forget(public);
         }
@@ -770,24 +929,38 @@ impl Node {
         for proof in proofs {
             if proof.account_id().is_none() {
                 if !state.policy.snapshot().invisible
-                    && proof.verify()
-                    && proof.tcp_port != 0
-                    && proof.name.len() <= 1024
+                    && proof.valid_presence()
                     && state.proofs.by_author(&proof.ed25519_pub).is_none()
                 {
                     successful.push(proof);
                 }
                 continue;
             }
-            if state.proofs.record(&proof).is_err() {
+            if let Err(error) = state.proofs.record(&proof) {
+                // Rejected bindings are ineligible peers; failed persistence is
+                // an unavailable snapshot, never a successful empty roster.
+                if error.kind() != io::ErrorKind::InvalidData {
+                    return Err(error);
+                }
                 log::warn!("discovered peer proof was not cached");
                 continue;
             }
             if let Some(peer) = peers.iter().find(|p| p.public == proof.public())
-                && state.routes.record(&peer.public, peer.addr.ip()).is_err()
+                && (if peer.routes.is_empty() {
+                    vec![peer.addr.ip()]
+                } else {
+                    peer.routes
+                        .iter()
+                        .filter(|route| {
+                            route.source != crate::discovery::roster::RouteSource::PostOffice
+                        })
+                        .map(|route| route.addr.ip())
+                        .collect()
+                })
+                .into_iter()
+                .any(|ip| state.routes.record(&peer.public, ip).is_err())
             {
-                log::warn!("discovered peer route was not cached");
-                continue;
+                return Err(io::Error::other("discovered peer route was not cached"));
             }
             successful.push(proof);
         }
@@ -800,8 +973,13 @@ impl Node {
             })
             .collect())
     }
-    fn guard_channel(&self, channel: &mut SecureChannel<TcpStream>, generation: u64) {
+    pub(in crate::node) fn guard_channel(
+        &self,
+        channel: &mut SecureChannel<TcpStream>,
+        generation: u64,
+    ) {
         let control = self.privacy.clone();
+        channel.set_host_generation(generation);
         channel.set_io_admission(
             control.gate.clone(),
             Arc::new(move || control.generation.load(Ordering::SeqCst) == generation),
@@ -814,13 +992,13 @@ impl Node {
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
+        let permits = self.sessions.outbound().await?;
         let mut addr = addr;
         addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
         #[cfg(test)]
         timing.phase("dial-privacy-gate");
         let _operation = self.privacy.gate.read().await;
         let own = self.own_presence();
-        let publicly_visible = !self.privacy_snapshot().invisible;
         #[cfg(test)]
         timing.phase("dial-admission");
         let generation = self.privacy.generation.load(Ordering::SeqCst);
@@ -836,27 +1014,113 @@ impl Node {
         {
             return Err(TransportError::AdmissionDenied);
         }
-        let mut channel = tokio::time::timeout(super::transport::HANDSHAKE_TIMEOUT, async {
-            #[cfg(test)]
-            timing.phase("dial-tcp-connect");
-            let stream = TcpStream::connect(addr).await?;
-            #[cfg(test)]
-            {
-                timing.socket(&stream);
-                timing.phase("dial-noise-presence");
+        let mut candidates = Vec::with_capacity(10);
+        if let Some(preferred) = self
+            .preferred_routes
+            .lock()
+            .expect("routes lock not poisoned")
+            .get(&expected.user_id())
+            .copied()
+        {
+            candidates.push(preferred);
+        }
+        let mut current_ports = std::collections::HashMap::new();
+        let mut supplied_relay_address = false;
+        if let Some(peer) = self
+            .roster
+            .lock()
+            .expect("roster lock not poisoned")
+            .get(&expected.user_id())
+            .filter(|peer| peer.public == *expected)
+            .cloned()
+        {
+            let mut routes = peer.routes;
+            supplied_relay_address = routes.iter().any(|route| {
+                route.source == crate::discovery::roster::RouteSource::PostOffice
+                    && route.addr == addr
+            }) && !routes.iter().any(|route| {
+                route.source != crate::discovery::roster::RouteSource::PostOffice
+                    && route.addr == addr
+            });
+            routes
+                .retain(|route| route.source != crate::discovery::roster::RouteSource::PostOffice);
+            current_ports.extend(
+                routes
+                    .iter()
+                    .map(|route| (route.addr.ip(), route.addr.port())),
+            );
+            routes.sort_by_key(|route| route.last_authenticated);
+            candidates.extend(routes.into_iter().rev().map(|route| route.addr));
+        }
+        if let Ok(state) = self.privacy.state.read()
+            && let Some(state) = state.as_ref()
+        {
+            let port = announce
+                .as_ref()
+                .map_or(addr.port(), |proof| proof.tcp_port);
+            candidates.extend(
+                state
+                    .routes
+                    .routes()
+                    .into_iter()
+                    .filter(|(public, _)| public == expected)
+                    .map(|(_, ip)| std::net::SocketAddr::new(ip, port)),
+            );
+        }
+        for candidate in &mut candidates {
+            candidate.set_ip(crate::transport::net::canonical_peer_ip(candidate.ip()));
+        }
+        // A fresh signed announce replaces an old listening port on the same IP.
+        // A successful dial cached for that IP must not silently resurrect the
+        // superseded port; other IP paths remain available for fallback.
+        candidates.retain(|candidate| {
+            current_ports
+                .get(&candidate.ip())
+                .is_none_or(|port| *port == candidate.port())
+        });
+        // The caller may supply a fresh one-off endpoint (for example, a
+        // pairing listener) before its signed port reaches the roster.
+        if !supplied_relay_address {
+            candidates.insert(0, addr);
+        }
+        let mut unique = std::collections::HashSet::new();
+        candidates.retain(|candidate| unique.insert(*candidate));
+        candidates.truncate(10);
+        let mut last_error = TransportError::Noise("no peer route available".into());
+        let mut successful = None;
+        for candidate in candidates {
+            let attempt = tokio::time::timeout(Duration::from_secs(3), async {
+                #[cfg(test)]
+                timing.phase("dial-tcp-connect");
+                let stream = TcpStream::connect(candidate).await?;
+                #[cfg(test)]
+                {
+                    timing.socket(&stream);
+                    timing.phase("dial-noise-presence");
+                }
+                stream.set_nodelay(true)?;
+                let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
+                SecureChannel::connect_with_visibility(
+                    stream,
+                    &self.identity,
+                    Some(expected),
+                    own.as_ref(),
+                    publicly_visible,
+                )
+                .await
+            })
+            .await;
+            match attempt {
+                Ok(Ok(channel)) => {
+                    successful = Some((candidate, channel));
+                    break;
+                }
+                Ok(Err(error)) => last_error = error,
+                Err(_) => last_error = TransportError::Noise("dial timed out".into()),
             }
-            stream.set_nodelay(true)?;
-            SecureChannel::connect_with_visibility(
-                stream,
-                &self.identity,
-                Some(expected),
-                own.as_ref(),
-                publicly_visible,
-            )
-            .await
-        })
-        .await
-        .map_err(|_| TransportError::Noise("dial timed out".into()))??;
+        }
+        let (addr, mut channel) = successful.ok_or(last_error)?;
+        channel.retain_connection_permits(permits);
         #[cfg(test)]
         timing.phase("dial-proof-validation");
         if let Some(new) = channel.peer_announcement() {
@@ -866,8 +1130,7 @@ impl Node {
                 .read()
                 .expect("privacy lock not poisoned");
             if let Some(state) = state.as_ref()
-                && let Some(old) = state.proofs.by_author(&expected.ed25519_pub)
-                && (old.public() != new.public() || old.account_id() != new.account_id())
+                && !state.proofs.accepts_binding(new)
             {
                 return Err(TransportError::AdmissionDenied);
             }
@@ -880,20 +1143,35 @@ impl Node {
             addr.ip(),
             channel.peer_publicly_visible(),
         )?;
+        self.preferred_routes
+            .lock()
+            .expect("routes lock not poisoned")
+            .insert(expected.user_id(), addr);
         self.guard_channel(&mut channel, generation);
         #[cfg(test)]
         timing.finish();
         Ok(channel)
     }
+    #[cfg(test)]
     pub(in crate::node) async fn privacy_accept(
         &self,
         stream: TcpStream,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        let permits = self.sessions.inbound().await?;
+        self.privacy_accept_with_permits(stream, permits).await
+    }
+
+    pub(in crate::node) async fn privacy_accept_with_permits(
+        &self,
+        stream: TcpStream,
+        permits: Vec<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("accept-tcp-ready");
         #[cfg(test)]
         timing.socket(&stream);
-        let ip = stream.peer_addr()?.ip();
+        let endpoint = stream.peer_addr()?;
+        let ip = endpoint.ip();
         stream.set_nodelay(true)?;
         #[cfg(test)]
         timing.phase("accept-own-presence");
@@ -901,7 +1179,7 @@ impl Node {
         timing.phase("accept-privacy-gate");
         let _operation = self.privacy.gate.read().await;
         let own = self.own_presence();
-        let publicly_visible = !self.privacy_snapshot().invisible;
+        let publicly_visible = self.publicly_visible_at(endpoint);
         #[cfg(test)]
         timing.phase("accept-noise-presence");
         let generation = self.privacy.generation.load(Ordering::SeqCst);
@@ -912,19 +1190,27 @@ impl Node {
                 &self.identity,
                 own.as_ref(),
                 publicly_visible,
-                |peer| self.admitted(peer),
+                |peer| {
+                    self.admitted(peer)
+                        || self.pairing_retry_allowed(peer.public_identity(), peer.announcement())
+                },
             ),
         )
         .await
         .map_err(|_| TransportError::Noise("accept timed out".into()))??;
         #[cfg(test)]
         timing.phase("accept-remember-peer");
-        self.remember_peer_with_visibility(
-            channel.peer_identity(),
-            channel.peer_announcement(),
-            ip,
-            channel.peer_publicly_visible(),
-        )?;
+        channel.retain_connection_permits(permits);
+        if self.pairing_retry_allowed(channel.peer_identity(), channel.peer_announcement()) {
+            channel.restrict_to_pairing();
+        } else {
+            self.remember_peer_with_visibility(
+                channel.peer_identity(),
+                channel.peer_announcement(),
+                ip,
+                channel.peer_publicly_visible(),
+            )?;
+        }
         self.guard_channel(&mut channel, generation);
         #[cfg(test)]
         timing.finish();
@@ -935,3 +1221,7 @@ impl Node {
 #[cfg(test)]
 #[path = "privacy_runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_pool_tests.rs"]
+mod session_pool_tests;

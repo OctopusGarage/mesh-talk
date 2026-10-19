@@ -11,11 +11,13 @@
 //! and the user can re-verify. The pinned value is the FIRST-seen fingerprint; we never
 //! silently overwrite it.
 
+use crate::chat_commands::NodeState;
 use crate::commands::CommandError;
 use crate::config_store;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// What we persist about one contact account.
@@ -112,6 +114,18 @@ fn set_verified(file: &mut TrustFile, account_id: String, fingerprint: String) {
     );
 }
 
+fn verified_fingerprints(file: &TrustFile) -> Vec<String> {
+    file.contacts
+        .values()
+        .filter(|record| record.verified)
+        .map(|record| record.first_seen_fingerprint.clone())
+        .collect()
+}
+
+pub(crate) fn verified_fingerprints_at(path: &Path) -> Vec<String> {
+    verified_fingerprints(&config_store::read_account::<TrustFile>(path))
+}
+
 /// Fetch trust state for a contact account, given its CURRENT device fingerprint.
 ///
 /// TOFU: if we have never seen this account, we pin `current_fingerprint` as the
@@ -140,19 +154,31 @@ pub fn get_trust(
 /// out-of-band; we also (re-)pin `fingerprint` as the trusted first-seen value, so
 /// verifying after a legitimate fingerprint change clears the warning.
 #[tauri::command]
-pub fn mark_verified(
+pub async fn mark_verified(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, TrustState>,
+    node_state: tauri::State<'_, NodeState>,
     owner: String,
     account_id: String,
     fingerprint: String,
 ) -> Result<(), CommandError> {
-    config_store::with_account(&app, &owner, TRUST_FILE, |path| {
+    let node = node_state.0.lock().await;
+    let fingerprints = config_store::with_account(&app, &owner, TRUST_FILE, |path| {
         let _guard = state.0.lock().unwrap();
         let mut file: TrustFile = config_store::read_account(path);
         set_verified(&mut file, account_id, fingerprint);
-        config_store::write_account(path, &file)
-    })
+        config_store::write_account(path, &file)?;
+        Ok(verified_fingerprints(&file))
+    })?;
+    if let Some(runtime) = node
+        .as_ref()
+        .filter(|runtime| runtime.host_account_id() == Some(&owner))
+    {
+        runtime
+            .handle()
+            .replace_verified_dm_pull_peers(fingerprints);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -220,5 +246,14 @@ mod tests {
         let (info, _) = evaluate(&mut file, "acct".into(), "fp1".into());
         assert!(info.verified);
         assert!(!info.fingerprint_changed);
+    }
+
+    #[test]
+    fn only_manually_verified_fingerprints_authorize_dm_pull() {
+        let mut file = TrustFile::default();
+        evaluate(&mut file, "known".into(), "known-fp".into());
+        set_verified(&mut file, "verified".into(), "old-fp".into());
+        evaluate(&mut file, "verified".into(), "new-fp".into());
+        assert_eq!(verified_fingerprints(&file), vec!["old-fp"]);
     }
 }

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -11,25 +11,140 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { useAuth } from "@/store/auth";
+import { useChat, captureChatOwnership } from "@/store/chat";
 import { recovery } from "@/lib/api";
 import { errorMessage } from "@/lib/error";
 import type { BackupCreated, BackupStatus } from "@/lib/api/recovery";
 
-export function DataRecoverySettings() {
+export function DataRecoverySettings({
+  enabled = true,
+  onBackupCreated,
+  open,
+  onOpenChange,
+}: {
+  enabled?: boolean;
+  onBackupCreated?: () => void;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
+  const owner = useAuth((state) => state.generation);
+  const run = useChat((state) => state.runEpoch);
+  const identity = useChat((state) => state.identityEpoch);
+  return enabled ? (
+    <BackupDialog
+      key={`${owner}:${run}:${identity}`}
+      onBackupCreated={onBackupCreated}
+      controlledOpen={open}
+      onOpenChange={onOpenChange}
+    />
+  ) : null;
+}
+
+export function BackupStatusSummary({
+  enabled = true,
+  refreshToken = 0,
+}: {
+  enabled?: boolean;
+  refreshToken?: number;
+}) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
+  const owner = useAuth((state) => state.generation);
+  const run = useChat((state) => state.runEpoch);
+  const identity = useChat((state) => state.identityEpoch);
+  const [status, setStatus] = useState<BackupStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let current = true;
+    const lease = captureChatOwnership();
+    setStatus(null);
+    setLoading(true);
+    setFailed(null);
+    if (enabled)
+      void recovery.status().then(
+        (next) => {
+          if (current && lease.current()) {
+            setStatus(next);
+            setLoading(false);
+          }
+        },
+        (reason) => {
+          if (current && lease.current()) {
+            setFailed(errorMessage(reason));
+            setLoading(false);
+          }
+        },
+      );
+    return () => {
+      current = false;
+    };
+  }, [enabled, owner, run, identity, retry, refreshToken]);
+  return (
+    <div
+      className="space-y-2 text-xs text-muted-foreground"
+      data-testid="backup-status-summary"
+    >
+      <p className="break-all" role={failed ? "alert" : "status"}>
+        {loading
+          ? t("common.loading")
+          : failed
+            ? t("recovery.statusUnavailable", { error: failed })
+            : status
+              ? t("recovery.lastBackup", {
+                  date: new Date(status.preview.created_at_ms).toLocaleString(),
+                  path: status.destination,
+                })
+              : t("recovery.noBackup")}
+      </p>
+      {failed && (
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => setRetry((value) => value + 1)}
+        >
+          {t("contactVisibility.retry")}
+        </Button>
+      )}
+      <p>{t("recovery.restoreHint")}</p>
+    </div>
+  );
+}
+
+function BackupDialog({
+  onBackupCreated,
+  controlledOpen,
+  onOpenChange,
+}: {
+  onBackupCreated?: () => void;
+  controlledOpen?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const [localOpen, setOpen] = useState(false);
+  const open = controlledOpen ?? localOpen;
   const [key, setKey] = useState("");
   const [challenge, setChallenge] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [created, setCreated] = useState<BackupCreated | null>(null);
-  const [last, setLast] = useState<BackupStatus | null>(null);
+  const pending = useRef(false);
+  useEffect(
+    () => () => {
+      preparation.current++;
+    },
+    [],
+  );
   const preparation = useRef(0);
   const groups = key.split("-");
   const challengeAnswer =
     groups.length === 8 ? `${groups[1]}-${groups[6]}` : "";
 
-  const prepare = async () => {
+  const prepare = useCallback(async () => {
+    if (pending.current) return;
+    const lease = captureChatOwnership();
+    if (!lease.current()) return;
     const current = ++preparation.current;
     setError("");
     setCreated(null);
@@ -37,36 +152,58 @@ export function DataRecoverySettings() {
     setKey("");
     try {
       const nextKey = await recovery.prepareKey();
-      if (current !== preparation.current) return;
+      if (current !== preparation.current || !lease.current()) return;
       setKey(nextKey);
-      const status = await recovery.status();
-      if (current === preparation.current) setLast(status);
     } catch (cause) {
-      if (current === preparation.current) setError(errorMessage(cause));
+      if (current === preparation.current && lease.current())
+        setError(errorMessage(cause));
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    preparation.current++;
+    pending.current = false;
+    setBusy(false);
+    setKey("");
+    setChallenge("");
+    setCreated(null);
+    setError("");
+    if (open) void prepare();
+  }, [open, prepare]);
 
   const create = async () => {
-    if (!key || challenge.trim().toLowerCase() !== challengeAnswer) return;
-    const destination = await save({
-      defaultPath: `mesh-talk-${new Date().toISOString().slice(0, 10)}.mtbackup`,
-      filters: [{ name: "Mesh-Talk backup", extensions: ["mtbackup"] }],
-    });
-    if (!destination) return;
+    if (
+      pending.current ||
+      created ||
+      !key ||
+      challenge.trim().toLowerCase() !== challengeAnswer
+    )
+      return;
+    const lease = captureChatOwnership();
+    if (!lease.current()) return;
+    const generation = preparation.current;
+    const current = () => generation === preparation.current && lease.current();
+    pending.current = true;
     setBusy(true);
     setError("");
     try {
-      const backup = await recovery.create(destination, key);
-      setCreated(backup);
-      setLast({
-        destination,
-        preview: backup.preview,
-        archive_bytes: backup.archive_bytes,
+      const destination = await save({
+        defaultPath: `mesh-talk-${new Date().toISOString().slice(0, 10)}.mtbackup`,
+        filters: [{ name: "Mesh-Talk backup", extensions: ["mtbackup"] }],
       });
+      if (!destination || !current()) return;
+      const backup = await recovery.create(destination, key);
+      if (current()) {
+        setCreated(backup);
+        onBackupCreated?.();
+      }
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (current()) setError(errorMessage(cause));
     } finally {
-      setBusy(false);
+      if (current()) {
+        pending.current = false;
+        setBusy(false);
+      }
     }
   };
 
@@ -74,15 +211,9 @@ export function DataRecoverySettings() {
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (!busy) {
+        if (!pending.current) {
           setOpen(next);
-          if (next) void prepare();
-          else {
-            preparation.current++;
-            setKey("");
-            setChallenge("");
-            setCreated(null);
-          }
+          onOpenChange?.(next);
         }
       }}
     >
@@ -149,14 +280,10 @@ export function DataRecoverySettings() {
               </p>
             </div>
           )}
-          {last && (
-            <p className="break-all text-xs text-muted-foreground">
-              {t("recovery.lastBackup", {
-                date: new Date(last.preview.created_at_ms).toLocaleString(),
-                path: last.destination,
-              })}
-            </p>
-          )}
+          <BackupStatusSummary
+            key={created ? "created" : "initial"}
+            enabled={open}
+          />
           <div className="flex justify-end gap-2">
             <Button
               variant="secondary"

@@ -1,3 +1,4 @@
+import { waitForChatShell } from "./helpers/session";
 import { expect, test } from "./tauri-mock";
 
 test("owner can dissolve a channel and keep its history read-only", async ({
@@ -10,7 +11,7 @@ test("owner can dissolve a channel and keep its history read-only", async ({
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await page.getByTestId("conversation-row-chan_team_dddd4444").click();
   await page.getByTestId("members-trigger").click();
   await page.getByTestId("dissolve-channel-trigger").click();

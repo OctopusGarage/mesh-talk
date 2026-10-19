@@ -1,3 +1,5 @@
+import { waitForChatShell } from "./helpers/session";
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import { seedMarketPacks } from "./helpers/packs";
@@ -15,7 +17,7 @@ async function login(page: import("@playwright/test").Page) {
     await page.getByTestId("login-password").fill("password123");
     await page.getByTestId("login-submit").click();
   }
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
 }
 const palette = (page: import("@playwright/test").Page) =>
   page.evaluate(() => document.documentElement.getAttribute("data-palette"));
@@ -32,6 +34,7 @@ test("theme picker applies + persists a brand palette, and clears it for base mo
       .evaluate((dot) => getComputedStyle(dot).backgroundColor);
   const darkOnline = await onlineColor();
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-picker")).toBeVisible();
 
   await page.getByTestId("theme-barcelona").click();
@@ -53,6 +56,7 @@ test("theme changes stay scoped and reduced motion keeps control feedback", asyn
 }) => {
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
 
   const normal = await page.getByTestId("theme-light").evaluate((button) => {
     (button as HTMLButtonElement).click();
@@ -103,6 +107,7 @@ test("theme previews match the canvas, signal, and rail colors they apply", asyn
 }) => {
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   for (const id of [
     "dark",
     "light",
@@ -156,6 +161,7 @@ test("wallpaper can be hidden without changing the personal theme", async ({
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
   const shell = page.getByTestId("chat-shell");
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await page.getByTestId("theme-barcelona").click();
   await expect
     .poll(() => shell.evaluate((el) => getComputedStyle(el).backgroundImage))
@@ -175,6 +181,7 @@ test("wallpaper can be hidden without changing the personal theme", async ({
   await login(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await wallpaper.click();
   await expect
     .poll(() => shell.evaluate((el) => getComputedStyle(el).backgroundImage))
@@ -188,6 +195,7 @@ test("nature theme offers all 50 wallpapers and restores the selected scene", as
   await login(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await page.getByTestId("theme-nature").click();
 
   const gallery = page.getByTestId("nature-wallpaper-picker");
@@ -220,6 +228,7 @@ test("nature theme offers all 50 wallpapers and restores the selected scene", as
   await page.reload();
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-nature")).toHaveAttribute(
     "aria-pressed",
     "true",
@@ -241,6 +250,7 @@ test("Cat Acrylic theme offers 45 wallpapers and restores the selection", async 
   await login(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await page.getByTestId("theme-cat-acrylic").click();
   const gallery = page.getByTestId("cat-acrylic-wallpaper-picker");
   await expect(gallery.getByRole("button")).toHaveCount(45);
@@ -261,6 +271,7 @@ test("Cat Acrylic theme offers 45 wallpapers and restores the selection", async 
   await page.reload();
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-cat-acrylic")).toHaveAttribute(
     "aria-pressed",
     "true",
@@ -277,6 +288,7 @@ test("upgrading preserves the old Cat Acrylic wallpaper choice", async ({
   });
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-cat-acrylic")).toHaveAttribute(
     "aria-pressed",
     "true",
@@ -299,6 +311,7 @@ test("upgrading preserves the old Nature wallpaper choice", async ({
   await seedMarketPacks(page, ["nature"]);
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await page.getByTestId("theme-nature").click();
   await expect(
     page.getByTestId("nature-wallpaper-050-maldives-wallpaper"),
@@ -310,6 +323,7 @@ test("a replacement theme uses its declared base for omitted colors", async ({
 }) => {
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await page.getByTestId("theme-barcelona").click();
   await page
     .getByTestId("pack-manager-theme")
@@ -393,6 +407,7 @@ test("each theme remembers its wallpaper and previews the applied image", async 
   }, custom);
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await page.getByTestId("theme-nature").click();
   const natureLast = page.getByTestId(
     "nature-wallpaper-050-maldives-wallpaper",
@@ -419,6 +434,7 @@ test("each theme remembers its wallpaper and previews the applied image", async 
   await page.reload();
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("test.scenes-wallpaper-two")).toHaveAttribute(
     "aria-pressed",
     "true",

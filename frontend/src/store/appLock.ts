@@ -4,6 +4,10 @@ import { errorMessage } from "@/lib/error";
 import { useAuth } from "@/store/auth";
 import { useChat } from "@/store/chat";
 import { useCalls } from "@/store/calls";
+import { useAvatars } from "@/store/avatars";
+import { usePresence } from "@/store/presence";
+import { useContactPolicy } from "@/store/contactPolicy";
+import { usePrivacy } from "@/store/privacy";
 
 interface AppLockState {
   locked: boolean;
@@ -16,18 +20,11 @@ interface AppLockState {
 
 function hideSensitiveState() {
   useAuth.setState((state) => ({ generation: state.generation + 1 }));
-  useChat.setState((state) => ({
-    runEpoch: state.runEpoch + 1,
-    active: null,
-    messages: {},
-    reactions: {},
-    incomingFiles: [],
-    peers: [],
-    accounts: [],
-    channels: [],
-    members: [],
-    searchTarget: null,
-  }));
+  useChat.getState().resetForLock();
+  useAvatars.getState().setOwner(null);
+  usePresence.getState().clear();
+  useContactPolicy.getState().reset();
+  usePrivacy.getState().reset();
   useCalls.getState().teardown();
 }
 

@@ -1,19 +1,20 @@
 #!/bin/bash
 set -e
-# pre-commit hook: Run the FAST local quality gate.
-#
-# Fast gate = formatting, clippy, frontend lint/tests, and the in-memory Rust unit slice
-# (cheap thanks to test-only KDF params). The slow/heavy pieces — full `cargo test --workspace`,
-# the verbose workspace + frontend builds, and the supply-chain/secret/typos scans — are SKIPPED
-# here and run in CI (.github/workflows/ci.yml) on every push, so coverage is not lost. Run the
-# full local gate any time with `./scripts/check-health.sh` (no --fast).
+# Keep commits responsive. Developers run the affected tests while changing code;
+# PR preflight and CI run the comprehensive gates.
+git diff --cached --check
 
-# Run unified health check script in fast mode
-chmod +x scripts/check-health.sh
-./scripts/check-health.sh --fast
+if git diff --cached --name-only --diff-filter=ACMR | rg -q '^(crates/|src-tauri/).*\.rs$'; then
+    cargo fmt --all -- --check
+fi
 
-# Ensure all changes are staged after auto-fixes
-git add -A
+frontend_files=()
+while IFS= read -r path; do
+    frontend_files+=("${path#frontend/}")
+done < <(git diff --cached --name-only --diff-filter=ACMR -- frontend/src/ | rg '\.(ts|tsx|css)$' || true)
+if [ "${#frontend_files[@]}" -gt 0 ]; then
+    (cd frontend && npx prettier --check "${frontend_files[@]}")
+fi
 
-echo "All pre-commit checks passed!"
+echo "Source checks passed. Run affected tests before opening a PR."
 

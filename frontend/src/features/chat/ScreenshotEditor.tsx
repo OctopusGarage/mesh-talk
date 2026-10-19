@@ -1,123 +1,96 @@
-import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ArrowUpRight,
-  Check,
-  Eraser,
-  Pencil,
-  RotateCcw,
-  Square,
-  Type,
-  X,
-} from "lucide-react";
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
+import { isLinuxDesktop } from "@/lib/platform";
+import { expandCaptureWindow } from "./screenshot/captureWindow";
+import { ScreenshotToolbar } from "./screenshot/ScreenshotToolbar";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { isMacOverlay } from "@/lib/platform";
+import {
+  adjustRegion,
+  handlePoint,
+  handles,
+  hitHandle,
+  regionBetween,
+  toolbarPosition,
+  type Adjustment,
+  type Point,
+  type Region,
+} from "./screenshot/geometry";
+import {
+  colors,
+  paintMark,
+  type Ink,
+  type Mark,
+  type Tool,
+} from "./screenshot/annotations";
 
-type Point = { x: number; y: number };
-type Region = Point & { width: number; height: number };
-type Mark =
-  | { kind: "pen"; points: Point[] }
-  | { kind: "rect" | "arrow"; from: Point; to: Point }
-  | { kind: "text"; at: Point; value: string };
-type Tool = "select" | "pen" | "rect" | "arrow" | "text";
-
-const INK = "#f43f5e";
-const lineWidth = 3;
-
-function regionBetween(a: Point, b: Point): Region {
-  return {
-    x: Math.min(a.x, b.x),
-    y: Math.min(a.y, b.y),
-    width: Math.abs(a.x - b.x),
-    height: Math.abs(a.y - b.y),
-  };
-}
-
-function paintMark(ctx: CanvasRenderingContext2D, mark: Mark) {
-  ctx.strokeStyle = INK;
-  ctx.fillStyle = INK;
-  ctx.lineWidth = lineWidth;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  if (mark.kind === "text") {
-    ctx.font = "bold 24px sans-serif";
-    ctx.fillText(mark.value, mark.at.x, mark.at.y);
-  } else if (mark.kind === "pen") {
-    if (!mark.points.length) return;
-    ctx.beginPath();
-    ctx.moveTo(mark.points[0].x, mark.points[0].y);
-    for (const point of mark.points.slice(1)) ctx.lineTo(point.x, point.y);
-    ctx.stroke();
-  } else if (mark.kind === "rect") {
-    const rect = regionBetween(mark.from, mark.to);
-    ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
-  } else {
-    const angle = Math.atan2(mark.to.y - mark.from.y, mark.to.x - mark.from.x);
-    ctx.beginPath();
-    ctx.moveTo(mark.from.x, mark.from.y);
-    ctx.lineTo(mark.to.x, mark.to.y);
-    ctx.moveTo(mark.to.x, mark.to.y);
-    ctx.lineTo(
-      mark.to.x - 14 * Math.cos(angle - Math.PI / 6),
-      mark.to.y - 14 * Math.sin(angle - Math.PI / 6),
-    );
-    ctx.moveTo(mark.to.x, mark.to.y);
-    ctx.lineTo(
-      mark.to.x - 14 * Math.cos(angle + Math.PI / 6),
-      mark.to.y - 14 * Math.sin(angle + Math.PI / 6),
-    );
-    ctx.stroke();
-  }
-}
-
+type Drag = {
+  start: Point;
+  points: Point[];
+  region?: Region;
+  adjustment?: Adjustment;
+};
+/** Editing stays in image pixels; confirmation hands the PNG back to the composer. */
 export function ScreenshotEditor({
   bytes,
-  initialRegion = false,
   onCancel,
   onSend,
 }: {
   bytes: Uint8Array;
-  initialRegion?: boolean;
   onCancel: () => void;
   onSend: (bytes: Uint8Array) => Promise<void>;
 }) {
   const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
-  const dragRef = useRef<{ start: Point; points: Point[] } | null>(null);
+  const dragRef = useRef<Drag | null>(null);
+  const busy = useRef(false);
   const [ready, setReady] = useState(false);
-  const [backdropUrl, setBackdropUrl] = useState<string | null>(null);
   const [region, setRegion] = useState<Region | null>(null);
   const [marks, setMarks] = useState<Mark[]>([]);
   const [preview, setPreview] = useState<Mark | null>(null);
   const [tool, setTool] = useState<Tool>("select");
+  const [ink, setInk] = useState<Ink>({ color: colors[0], width: 3 });
   const [label, setLabel] = useState("");
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  const [layout, setLayout] = useState({
+    left: 8,
+    top: 8,
+    canvasX: 0,
+    canvasY: 0,
+    scaleX: 1,
+    scaleY: 1,
+  });
   const invalidImageMessage = useRef(t("screenshot.invalidImage"));
   invalidImageMessage.current = t("screenshot.invalidImage");
 
   useEffect(() => {
-    dialogRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    // The macOS native selector already spans the desktop. On Windows and Linux, show
-    // the frozen screenshot across the display while the user selects a region.
-    if (!("__TAURI_INTERNALS__" in window) || isMacOverlay()) return;
-    const nativeWindow = getCurrentWindow();
-    let active = true;
-    let expanded = false;
-    void nativeWindow
-      .isFullscreen()
-      .then(async (wasFullscreen) => {
-        if (!active || wasFullscreen) return;
-        await nativeWindow.setFullscreen(true);
-        expanded = true;
-        if (!active) await nativeWindow.setFullscreen(false);
-      })
-      .catch(() => {});
+    const previous = document.activeElement as HTMLElement | null;
+    const restoreFocus = () => {
+      if (previous?.isConnected && previous !== document.body) previous.focus();
+      else
+        document
+          .querySelector<HTMLTextAreaElement>(
+            '[data-testid="composer"] textarea',
+          )
+          ?.focus();
+    };
+    dialogRef.current?.focus();
+    // Portal images have no display identity; Linux edits the chosen image in-app.
+    if (!("__TAURI_INTERNALS__" in window) || isLinuxDesktop())
+      return restoreFocus;
+    const restore = expandCaptureWindow(getCurrentWindow());
     return () => {
-      active = false;
-      if (expanded) void nativeWindow.setFullscreen(false).catch(() => {});
+      restore();
+      restoreFocus();
     };
   }, []);
 
@@ -130,28 +103,15 @@ export function ScreenshotEditor({
     image.onload = () => {
       if (!active) return;
       imageRef.current = image;
-      setBackdropUrl(url);
       const canvas = canvasRef.current;
       if (canvas) {
         canvas.width = image.naturalWidth;
         canvas.height = image.naturalHeight;
       }
-      if (initialRegion) {
-        setRegion({
-          x: 0,
-          y: 0,
-          width: image.naturalWidth,
-          height: image.naturalHeight,
-        });
-        setTool("pen");
-      }
       setReady(true);
     };
     image.onerror = () => {
-      if (active) {
-        setBackdropUrl(null);
-        setFailure(invalidImageMessage.current);
-      }
+      if (active) setFailure(invalidImageMessage.current);
     };
     image.src = url;
     return () => {
@@ -160,15 +120,52 @@ export function ScreenshotEditor({
       image.onerror = null;
       URL.revokeObjectURL(url);
     };
-  }, [bytes, initialRegion]);
+  }, [bytes]);
 
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !sending) onCancel();
+  useLayoutEffect(() => {
+    const measure = () => {
+      const canvas = canvasRef.current;
+      const toolbar = toolbarRef.current;
+      if (!canvas || !toolbar) return;
+      const rect = canvas.getBoundingClientRect();
+      const sx = rect.width / canvas.width;
+      const sy = rect.height / canvas.height;
+      const selected = region
+        ? {
+            x: rect.left + region.x * sx,
+            y: rect.top + region.y * sy,
+            width: region.width * sx,
+            height: region.height * sy,
+          }
+        : {
+            x: 8,
+            y: window.innerHeight - 170,
+            width: window.innerWidth - 16,
+            height: 0,
+          };
+      const position = toolbarPosition(
+        selected,
+        { width: window.innerWidth, height: window.innerHeight },
+        { width: toolbar.offsetWidth, height: toolbar.offsetHeight },
+      );
+      setLayout({
+        ...position,
+        canvasX: rect.left,
+        canvasY: rect.top,
+        scaleX: sx,
+        scaleY: sy,
+      });
     };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [onCancel, sending]);
+    measure();
+    const observer = new ResizeObserver(measure);
+    if (canvasRef.current) observer.observe(canvasRef.current);
+    if (toolbarRef.current) observer.observe(toolbarRef.current);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [ready, region, tool]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -178,8 +175,10 @@ export function ScreenshotEditor({
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(image, 0, 0);
-    if (region) {
-      ctx.fillStyle = "rgba(9, 14, 24, 0.52)";
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    if (!region) ctx.fillRect(0, 0, canvas.width, canvas.height);
+    else {
       ctx.fillRect(0, 0, canvas.width, region.y);
       ctx.fillRect(0, region.y, region.x, region.height);
       ctx.fillRect(
@@ -194,26 +193,17 @@ export function ScreenshotEditor({
         canvas.width,
         canvas.height - region.y - region.height,
       );
-      ctx.strokeStyle = "rgba(9, 14, 24, 0.9)";
-      ctx.lineWidth = 4;
-      ctx.strokeRect(region.x, region.y, region.width, region.height);
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([8, 5]);
-      ctx.strokeRect(region.x, region.y, region.width, region.height);
-      ctx.setLineDash([]);
-      ctx.save();
       ctx.beginPath();
       ctx.rect(region.x, region.y, region.width, region.height);
       ctx.clip();
-      marks.forEach((mark) => paintMark(ctx, mark));
-      if (preview) paintMark(ctx, preview);
-      ctx.restore();
+      marks.forEach((mark) => paintMark(ctx, mark, image));
+      if (preview) paintMark(ctx, preview, image);
     }
+    ctx.restore();
   }, [ready, region, marks, preview]);
 
   const point = useCallback(
-    (event: React.PointerEvent<HTMLCanvasElement>): Point => {
+    (event: React.MouseEvent<HTMLCanvasElement>): Point => {
       const canvas = event.currentTarget;
       const rect = canvas.getBoundingClientRect();
       return {
@@ -239,23 +229,53 @@ export function ScreenshotEditor({
     },
     [],
   );
-
   const within = (p: Point) =>
     region &&
     p.x >= region.x &&
     p.y >= region.y &&
     p.x <= region.x + region.width &&
     p.y <= region.y + region.height;
-
+  const imageInk = () => {
+    const canvas = canvasRef.current;
+    return {
+      ...ink,
+      scale: canvas ? canvas.width / canvas.getBoundingClientRect().width : 1,
+    };
+  };
+  const markBetween = (drag: Drag, p: Point): Mark =>
+    tool === "pen"
+      ? { ...imageInk(), kind: "pen", points: [...drag.points, p] }
+      : {
+          ...imageInk(),
+          kind: tool as "rect" | "ellipse" | "arrow" | "mosaic",
+          from: drag.start,
+          to: p,
+        };
+  const adjustmentAt = (p: Point): Adjustment | null => {
+    const canvas = canvasRef.current;
+    const tolerance = canvas
+      ? (6 * canvas.width) / canvas.getBoundingClientRect().width
+      : 6;
+    return region
+      ? (hitHandle(region, p, tolerance) ??
+          (tool === "select" && within(p) ? "move" : null))
+      : null;
+  };
   const pointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!ready || sending) return;
+    if (!ready || busy.current || event.button !== 0) return;
     const p = point(event);
+    const adjustment = adjustmentAt(p);
+    if (adjustment && region) {
+      event.currentTarget.setPointerCapture(event.pointerId);
+      dragRef.current = { start: p, points: [], region, adjustment };
+      return;
+    }
     if (tool !== "select" && !within(p)) return;
     if (tool === "text") {
       if (label.trim())
         setMarks((items) => [
           ...items,
-          { kind: "text", at: p, value: label.trim() },
+          { ...imageInk(), kind: "text", at: p, value: label.trim() },
         ]);
       return;
     }
@@ -266,42 +286,68 @@ export function ScreenshotEditor({
       setRegion({ ...p, width: 0, height: 0 });
     }
   };
-
   const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const drag = dragRef.current;
-    if (!drag) return;
     const p = point(event);
-    if (tool === "select") setRegion(regionBetween(drag.start, p));
-    else if (tool === "pen") {
-      drag.points.push(p);
-      setPreview({ kind: "pen", points: [...drag.points] });
-    } else
-      setPreview({ kind: tool as "rect" | "arrow", from: drag.start, to: p });
+    if (!drag) {
+      const adjustment = adjustmentAt(p);
+      event.currentTarget.style.cursor = adjustment
+        ? adjustment === "move"
+          ? "move"
+          : `${adjustment}-resize`
+        : "crosshair";
+      return;
+    }
+    if (drag.region && drag.adjustment)
+      setRegion(
+        adjustRegion(
+          drag.region,
+          drag.adjustment,
+          { x: p.x - drag.start.x, y: p.y - drag.start.y },
+          event.currentTarget,
+        ),
+      );
+    else if (tool === "select") setRegion(regionBetween(drag.start, p));
+    else {
+      if (tool === "pen") drag.points.push(p);
+      setPreview(markBetween(drag, p));
+    }
   };
-
   const pointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const drag = dragRef.current;
     if (!drag) return;
-    dragRef.current = null;
     const p = point(event);
-    if (tool === "select") {
+    dragRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    if (drag.region && drag.adjustment)
+      setRegion(
+        adjustRegion(
+          drag.region,
+          drag.adjustment,
+          { x: p.x - drag.start.x, y: p.y - drag.start.y },
+          event.currentTarget,
+        ),
+      );
+    else if (tool === "select") {
       const next = regionBetween(drag.start, p);
       setRegion(next.width >= 4 && next.height >= 4 ? next : null);
-      if (next.width >= 4 && next.height >= 4) setTool("pen");
-    } else {
-      const mark: Mark =
-        tool === "pen"
-          ? { kind: "pen", points: [...drag.points, p] }
-          : { kind: tool as "rect" | "arrow", from: drag.start, to: p };
-      setMarks((items) => [...items, mark]);
-      setPreview(null);
-    }
+    } else setMarks((items) => [...items, markBetween(drag, p)]);
+    setPreview(null);
   };
-
-  const send = async () => {
+  const confirm = useCallback(async () => {
     const image = imageRef.current;
-    if (!image || !region || sending) return;
+    if (
+      !image ||
+      !region ||
+      region.width < 4 ||
+      region.height < 4 ||
+      busy.current ||
+      dragRef.current
+    )
+      return;
+    busy.current = true;
     setSending(true);
+    setFailure(null);
     try {
       const output = document.createElement("canvas");
       output.width = region.width;
@@ -320,7 +366,7 @@ export function ScreenshotEditor({
         region.height,
       );
       ctx.translate(-region.x, -region.y);
-      marks.forEach((mark) => paintMark(ctx, mark));
+      marks.forEach((mark) => paintMark(ctx, mark, image));
       const blob = await new Promise<Blob>((resolve, reject) =>
         output.toBlob(
           (value) =>
@@ -332,135 +378,167 @@ export function ScreenshotEditor({
     } catch (error) {
       setFailure(error instanceof Error ? error.message : String(error));
     } finally {
+      busy.current = false;
       setSending(false);
     }
-  };
+  }, [region, marks, onSend]);
 
+  useEffect(() => {
+    const keyboard = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!busy.current) onCancel();
+        return;
+      }
+      const input =
+        event.target instanceof HTMLElement &&
+        !!event.target.closest("input, textarea, [contenteditable=true]");
+      const interactive =
+        event.target instanceof HTMLElement &&
+        !!event.target.closest(
+          "button, input, textarea, select, a, [role=button], [contenteditable=true]",
+        );
+      if (event.key === "Enter" && !interactive) {
+        event.preventDefault();
+        event.stopPropagation();
+        void confirm();
+      }
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.key.toLowerCase() === "z" &&
+        !input &&
+        !busy.current
+      ) {
+        event.preventDefault();
+        setMarks((items) => items.slice(0, -1));
+      }
+      if (event.key === "Tab") {
+        const buttons = Array.from(
+          dialogRef.current?.querySelectorAll<HTMLElement>(
+            "button:not(:disabled), input:not(:disabled)",
+          ) ?? [],
+        );
+        const first = buttons[0];
+        const last = buttons[buttons.length - 1];
+        if (
+          event.shiftKey &&
+          (document.activeElement === first ||
+            document.activeElement === dialogRef.current)
+        ) {
+          event.preventDefault();
+          last?.focus();
+        } else if (
+          !event.shiftKey &&
+          (document.activeElement === last ||
+            document.activeElement === dialogRef.current)
+        ) {
+          event.preventDefault();
+          first?.focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", keyboard, true);
+    return () => window.removeEventListener("keydown", keyboard, true);
+  }, [confirm, onCancel]);
+
+  const visibleRegion = region && {
+    left: layout.canvasX + region.x * layout.scaleX,
+    top: layout.canvasY + region.y * layout.scaleY,
+    width: region.width * layout.scaleX,
+    height: region.height * layout.scaleY,
+  };
   return (
     <div
       ref={dialogRef}
+      tabIndex={-1}
       data-testid="screenshot-editor"
       role="dialog"
       aria-modal="true"
       aria-label={t("screenshot.editorTitle")}
-      className="fixed inset-0 z-[100] flex flex-col bg-slate-950 text-white"
+      className="fixed inset-0 z-[100] select-none overflow-hidden bg-black text-neutral-800 outline-none"
+      onContextMenu={(event) => {
+        event.preventDefault();
+        if (!busy.current) onCancel();
+      }}
     >
-      <header className="flex items-center justify-between gap-4 border-b border-white/15 px-5 py-3">
-        <div>
-          <h2 className="font-semibold">{t("screenshot.editorTitle")}</h2>
-          <p className="text-xs text-slate-300">
-            {t(
-              initialRegion
-                ? "screenshot.editorHintSelected"
-                : "screenshot.editorHint",
-            )}
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={sending}
-          aria-label={t("screenshot.cancel")}
-          className="flex h-11 w-11 items-center justify-center rounded-md hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
-        >
-          <X size={20} />
-        </button>
-      </header>
-      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-slate-900 p-5">
-        {backdropUrl && (
-          <>
-            <img
-              data-testid="screenshot-backdrop"
-              src={backdropUrl}
-              alt=""
-              aria-hidden="true"
-              className="pointer-events-none absolute inset-0 h-full w-full scale-110 object-cover opacity-75 blur-3xl"
-            />
-            <div className="pointer-events-none absolute inset-0 bg-slate-950/25" />
-          </>
-        )}
+      <div className="absolute inset-0 flex items-center justify-center overflow-hidden">
         <canvas
           ref={canvasRef}
           data-testid="screenshot-canvas"
           onPointerDown={pointerDown}
           onPointerMove={pointerMove}
           onPointerUp={pointerUp}
+          onDoubleClick={(event) => {
+            if (tool === "select" && within(point(event))) void confirm();
+          }}
           onPointerCancel={() => {
+            if (dragRef.current)
+              setRegion(
+                dragRef.current.region ?? (tool === "select" ? null : region),
+              );
             dragRef.current = null;
             setPreview(null);
           }}
-          className="relative max-h-full max-w-full cursor-crosshair touch-none ring-1 ring-black/50 shadow-[0_20px_50px_rgba(0,0,0,0.45)]"
+          className="max-h-full max-w-full cursor-crosshair touch-none"
           aria-label={t("screenshot.canvasLabel")}
         />
       </div>
-      <footer className="flex flex-wrap items-center justify-center gap-2 border-t border-white/15 px-4 py-3">
-        {failure && (
-          <p role="alert" className="w-full text-center text-sm text-red-300">
-            {failure}
-          </p>
-        )}
-        {(
-          [
-            ["select", <Eraser size={17} />, "selectRegion"],
-            ["pen", <Pencil size={17} />, "pen"],
-            ["rect", <Square size={17} />, "rectangle"],
-            ["arrow", <ArrowUpRight size={17} />, "arrow"],
-            ["text", <Type size={17} />, "text"],
-          ] as const
-        ).map(([value, icon, key]) => (
-          <button
-            key={value}
-            type="button"
-            title={t(`screenshot.${key}`)}
-            aria-label={t(`screenshot.${key}`)}
-            aria-pressed={tool === value}
-            disabled={value !== "select" && !region}
-            onClick={() => setTool(value)}
-            className={`flex h-11 w-11 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 disabled:opacity-40 ${tool === value ? "bg-white text-slate-950" : "hover:bg-white/15"}`}
-          >
-            {icon}
-          </button>
-        ))}
-        {tool === "text" && (
-          <input
-            value={label}
-            onChange={(event) => setLabel(event.target.value)}
-            maxLength={80}
-            aria-label={t("screenshot.textValue")}
-            placeholder={t("screenshot.textValue")}
-            className="w-36 rounded-md border border-white/25 bg-slate-900 px-2 py-1 text-sm"
+      {!region && (
+        <p className="pointer-events-none absolute left-1/2 top-8 -translate-x-1/2 rounded bg-black/75 px-4 py-2 text-sm text-white">
+          {t("screenshot.editorHint")}
+        </p>
+      )}
+      {visibleRegion && (
+        <>
+          <div
+            className="pointer-events-none absolute border border-[#07c160]"
+            style={visibleRegion}
           />
-        )}
-        <button
-          type="button"
-          title={t("screenshot.undo")}
-          aria-label={t("screenshot.undo")}
-          disabled={!marks.length}
-          onClick={() => setMarks((items) => items.slice(0, -1))}
-          className="flex h-11 w-11 items-center justify-center rounded-md hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 disabled:opacity-40"
-        >
-          <RotateCcw size={17} />
-        </button>
-        <span className="mx-2 h-5 w-px bg-white/20" />
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={sending}
-          className="min-h-11 rounded-md px-3 py-2 text-sm hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
-        >
-          {t("screenshot.cancel")}
-        </button>
-        <button
-          type="button"
-          data-testid="screenshot-send"
-          disabled={!region || sending}
-          onClick={() => void send()}
-          className="flex min-h-11 items-center gap-2 rounded-md bg-blue-500 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-300"
-        >
-          <Check size={16} />
-          {t("screenshot.send")}
-        </button>
-      </footer>
+          <output
+            data-testid="screenshot-dimensions"
+            className="pointer-events-none absolute rounded bg-black/75 px-2 py-1 text-xs tabular-nums text-white"
+            style={{
+              left: Math.max(8, visibleRegion.left),
+              top: Math.max(8, visibleRegion.top - 30),
+            }}
+          >
+            {region.width} × {region.height}
+          </output>
+          {handles.map((handle) => {
+            const p = handlePoint(region, handle);
+            return (
+              <span
+                key={handle}
+                aria-hidden="true"
+                className="pointer-events-none absolute h-[7px] w-[7px] -translate-x-1/2 -translate-y-1/2 border border-[#07c160] bg-white"
+                style={{
+                  left: layout.canvasX + p.x * layout.scaleX,
+                  top: layout.canvasY + p.y * layout.scaleY,
+                }}
+              />
+            );
+          })}
+        </>
+      )}
+      <ScreenshotToolbar
+        ref={toolbarRef}
+        position={{ left: layout.left, top: layout.top }}
+        selected={!!region && region.width >= 4 && region.height >= 4}
+        sending={sending}
+        tool={tool}
+        setTool={setTool}
+        ink={ink}
+        setInk={setInk}
+        label={label}
+        setLabel={setLabel}
+        canUndo={marks.length > 0}
+        onUndo={() => setMarks((items) => items.slice(0, -1))}
+        onCancel={onCancel}
+        onConfirm={() => void confirm()}
+        failure={failure}
+      />
     </div>
   );
 }

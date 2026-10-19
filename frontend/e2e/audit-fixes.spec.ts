@@ -57,6 +57,188 @@ test("device-linking fields are named and failed clipboard writes are announced"
   await expect(dialog.getByRole("alert")).toContainText("Couldn't copy");
 });
 
+test("device linking offers user devices but excludes post office nodes", async ({
+  page,
+}) => {
+  await enterChat(page, "tester", "/?data=post-office");
+  const linkAction = page.getByTestId("sidebar-action-link");
+  if (!(await linkAction.isVisible())) {
+    await page.getByTestId("sidebar-overflow").click();
+  }
+  await linkAction.click();
+  const devices = page
+    .getByTestId("link-device-dialog")
+    .getByRole("combobox", { name: "Device" });
+  await expect(devices.getByRole("option", { name: /bob/ })).toBeAttached();
+  await expect(devices.getByRole("option", { name: /relay node/ })).toHaveCount(
+    0,
+  );
+});
+
+test("linked-device history choice is local and survives reopening", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId("sidebar-overflow").click();
+  await page.getByTestId("sidebar-action-link").click();
+  const dialog = page.getByTestId("link-device-dialog");
+  const history = dialog.getByRole("switch", {
+    name: "Message history",
+  });
+  const profile = dialog.getByRole("switch", { name: "Account avatar" });
+  const attachments = dialog.getByRole("switch", { name: "Attachments" });
+  const appearance = dialog.getByRole("switch", { name: "Appearance" });
+  const contacts = dialog.getByRole("switch", { name: "Contacts" });
+  await expect(history).toHaveAttribute("aria-checked", "true");
+  await expect(profile).toHaveAttribute("aria-checked", "true");
+  await expect(attachments).toHaveAttribute("aria-checked", "false");
+  await expect(appearance).toHaveAttribute("aria-checked", "false");
+  await expect(contacts).toHaveAttribute("aria-checked", "false");
+  await history.click();
+  await profile.click();
+  await attachments.click();
+  await appearance.click();
+  await contacts.click();
+  await expect(history).toHaveAttribute("aria-checked", "false");
+  await expect(profile).toHaveAttribute("aria-checked", "false");
+  await expect(attachments).toHaveAttribute("aria-checked", "true");
+  await expect(appearance).toHaveAttribute("aria-checked", "true");
+  await expect(contacts).toHaveAttribute("aria-checked", "true");
+
+  await dialog.getByRole("button", { name: "Close" }).click();
+  const linkAction = page.getByTestId("sidebar-action-link");
+  if (!(await linkAction.isVisible()))
+    await page.getByTestId("sidebar-overflow").click();
+  await linkAction.click();
+  await expect(history).toHaveAttribute("aria-checked", "false");
+  await expect(profile).toHaveAttribute("aria-checked", "false");
+  await expect(attachments).toHaveAttribute("aria-checked", "true");
+  await expect(appearance).toHaveAttribute("aria-checked", "true");
+  await expect(contacts).toHaveAttribute("aria-checked", "true");
+});
+
+test("linked-device status shows pending attachments and failures", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const tauri = (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            cmd: string,
+            args: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    const invoke = tauri.invoke.bind(tauri);
+    tauri.invoke = (cmd, args) =>
+      cmd === "get_device_sync_status"
+        ? Promise.resolve([
+            {
+              device_id: "abcd1234".repeat(4),
+              phase: "error",
+              pending_attachments: 2,
+              error: "source offline",
+            },
+          ])
+        : invoke(cmd, args);
+  });
+  await page.getByTestId("sidebar-overflow").click();
+  await page.getByTestId("sidebar-action-link").click();
+  const dialog = page.getByTestId("link-device-dialog");
+  await expect(dialog).toContainText("2 attachments pending");
+  await expect(dialog.getByRole("alert")).toContainText("source offline");
+});
+
+test("failed sync choice leaves the device policy unchanged", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const tauri = (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            cmd: string,
+            args: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    const invoke = tauri.invoke.bind(tauri);
+    tauri.invoke = (cmd, args) =>
+      cmd === "set_device_sync_category"
+        ? Promise.reject(new Error("disk write failed"))
+        : invoke(cmd, args);
+  });
+  await page.getByTestId("sidebar-overflow").click();
+  await page.getByTestId("sidebar-action-link").click();
+  const dialog = page.getByTestId("link-device-dialog");
+  const history = dialog.getByRole("switch", {
+    name: "Message history",
+  });
+  await expect(history).toHaveAttribute("aria-checked", "true");
+  await history.click();
+  await expect(dialog.getByRole("alert")).toContainText("disk write failed");
+  await expect(history).toHaveAttribute("aria-checked", "true");
+});
+
+test("late sync choice cannot replace policy after the dialog reopens", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const win = window as unknown as {
+      __resolveSyncSave?: (policy: unknown) => void;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    const invoke = win.__TAURI_INTERNALS__.invoke.bind(win.__TAURI_INTERNALS__);
+    win.__TAURI_INTERNALS__.invoke = (cmd, args) =>
+      cmd === "set_device_sync_category"
+        ? new Promise((resolve) => {
+            win.__resolveSyncSave = resolve;
+          })
+        : invoke(cmd, args);
+  });
+  await page.getByTestId("sidebar-overflow").click();
+  await page.getByTestId("sidebar-action-link").click();
+  const dialog = page.getByTestId("link-device-dialog");
+  const history = dialog.getByRole("switch", { name: "Message history" });
+  await expect(history).toHaveAttribute("aria-checked", "true");
+  await history.click();
+  await page.waitForFunction(
+    () =>
+      typeof (window as unknown as { __resolveSyncSave?: unknown })
+        .__resolveSyncSave === "function",
+  );
+  await dialog.getByRole("button", { name: "Close" }).click();
+  const linkAction = page.getByTestId("sidebar-action-link");
+  if (!(await linkAction.isVisible()))
+    await page.getByTestId("sidebar-overflow").click();
+  await linkAction.click();
+  await expect(history).toHaveAttribute("aria-checked", "true");
+  await page.evaluate(() => {
+    (
+      window as unknown as { __resolveSyncSave: (policy: unknown) => void }
+    ).__resolveSyncSave({
+      history: false,
+      attachments: false,
+      profile: true,
+      appearance: false,
+      contacts: false,
+    });
+  });
+  await expect(history).toBeEnabled();
+  await expect(history).toHaveAttribute("aria-checked", "true");
+});
+
 test("diagnostics copy controls report clipboard failure", async ({ page }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-connection");
@@ -79,6 +261,52 @@ test("diagnostics copy controls report clipboard failure", async ({ page }) => {
   await dialog.locator('button[title="Copy"]').first().click();
   await expect(dialog.getByRole("alert")).toContainText("Couldn't copy");
 });
+
+for (const theme of [null, "oled"] as const) {
+  test(`pairing publishes ${theme ? "saved appearance only" : "no fresh appearance defaults"}`, async ({
+    page,
+  }) => {
+    await page.addInitScript((savedTheme) => {
+      if (savedTheme) localStorage.setItem("mesh-talk-theme", savedTheme);
+    }, theme);
+    await enterChat(page);
+    await page.evaluate(() => {
+      const win = window as typeof window & {
+        __appearanceWrites: { key: unknown; value: unknown }[];
+        __TAURI_INTERNALS__: {
+          invoke: (
+            command: string,
+            args: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      };
+      win.__appearanceWrites = [];
+      const original = win.__TAURI_INTERNALS__.invoke;
+      win.__TAURI_INTERNALS__.invoke = (command, args) => {
+        if (
+          command === "set_account_preference" &&
+          args.category === "appearance"
+        ) {
+          win.__appearanceWrites.push({ key: args.key, value: args.value });
+        }
+        return original(command, args);
+      };
+    });
+    await page.getByTestId("sidebar-overflow").click();
+    await page.getByTestId("sidebar-action-link").click();
+    await page.getByTestId("link-show-code").click();
+    await expect(page.getByTestId("pairing-code")).toBeVisible();
+    const writes = await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __appearanceWrites: { key: unknown; value: unknown }[];
+          }
+        ).__appearanceWrites,
+    );
+    expect(writes).toEqual(theme ? [{ key: "theme", value: theme }] : []);
+  });
+}
 
 test("closing during code generation cleans up the late pairing session", async ({
   page,

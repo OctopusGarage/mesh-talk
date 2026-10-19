@@ -1,6 +1,6 @@
 {
   "name": "mesh-talk-agent-workflow-eval",
-  "version": 1,
+  "version": 2,
   "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
   "cases": [
     {
@@ -71,6 +71,82 @@
         "Explains local, CI, PR, Codex, and Claude Code triggers.",
         "States when human review is still required.",
         "Does not claim model-output quality is proven without running a model-backed eval."
+      ]
+    },
+    {
+      "id": "MT-AI-006",
+      "name": "post-office privacy documentation states the actual trust boundary",
+      "subject_file": "docs/post-office-metadata-privacy.md",
+      "min_score": 0.9,
+      "scenario": "A future relay change or documentation edit overstates metadata privacy. Evaluate whether the design document accurately describes what a post office can and cannot learn or guarantee.",
+      "rubric": [
+        "Explains which original event fields are encrypted and which outer routing fields stay visible.",
+        "States that authenticated connections, timing, counts, and size buckets can expose communication patterns.",
+        "States that relays can withhold/delete events, legacy mailboxes do not replicate, and version-3 reconciliation is opportunistic rather than a guarantee that every relay has durable custody; explains reachability, expiry, eviction and policy limits.",
+        "Discloses the lack of metadata forward secrecy under later static device-key compromise.",
+        "Explains that V1 clear-header copies are not retroactively hidden and may require sender retry.",
+        "Distinguishes tested behavior from privacy guarantees that require a different protocol."
+      ]
+    },
+    {
+      "id": "MT-AI-007",
+      "name": "post-office macOS service runbook is operable and protects credentials",
+      "subject_file": "docs/post-office-macos-service.md",
+      "min_score": 0.9,
+      "scenario": "An operator installs or updates the headless post office on an Intel Mac. Evaluate whether the runbook supports a safe, verifiable service lifecycle and states its limits accurately.",
+      "rubric": [
+        "Names the installed binary, data, logs, boot LaunchDaemon and legacy LaunchAgent paths/jobs, and listening/discovery ports.",
+        "Keeps the keystore password out of process arguments and the plist, and requires owner-only password file permissions.",
+        "Gives reproducible build, update, health, and restart commands without discarding queued events or identity.",
+        "Distinguishes system LaunchDaemon startup before login from a legacy LaunchAgent running only in the logged-in user's GUI session.",
+        "Distinguishes legacy nonreplication from opportunistic version-3 federation without guaranteed replicated custody, and identifies remaining routing metadata exposure.",
+        "Provides an executable cross-machine delivery test that stops the sender before the recipient returns.",
+        "Separately explains offline file offers, recipient-authorized encrypted file bytes recovered and verified completion after relay restart with the sender stopped. States that current federated consent/completion does not require direct sender-recipient overlap; labels older direct-overlap or LaunchAgent-only harness limits as historical evidence, not current protocol requirements."
+      ]
+    },
+    {
+      "id": "MT-AI-008",
+      "name": "post-office Windows service runbook is operable and protects credentials",
+      "subject_file": "docs/post-office-windows-service.md",
+      "min_score": 0.9,
+      "scenario": "An operator installs or updates the headless post office on Windows. Evaluate whether the runbook supports a safe, verifiable Scheduled Task lifecycle and accurately distinguishes the cross-machine test layers.",
+      "rubric": [
+        "Names the Windows binary, data directory, Scheduled Task identity, and TCP and UDP ports.",
+        "Keeps the keystore password out of process arguments and restricts relay data access to SYSTEM and Administrators.",
+        "Gives reproducible build, install, update, health, and restart commands that preserve queued events and the relay identity.",
+        "Explains stale lock recovery after a task restart and requires evidence that the service is listening.",
+        "Separately tests offline DM and channel delivery, file offer, complete encrypted file bytes, and multi-relay election against the installed Windows relay.",
+        "States that current signed consent/completion can use encrypted federated mailboxes without direct sender overlap; distinguishes opportunistic version-3 reconciliation from guaranteed replicated custody and identifies exposed routing metadata."
+      ]
+    },
+    {
+      "id": "MT-AI-009",
+      "name": "routed discovery and bridge document keeps network and identity boundaries clear",
+      "subject_file": "docs/routed-network-discovery.md",
+      "min_score": 0.9,
+      "scenario": "A user runs A and B on one LAN, C on another, and E as a post office on A and B's LAN. Only C and E have an existing Tailscale connection. Evaluate whether the document explains what is required for bidirectional Mesh Talk discovery and messaging without promising arbitrary LAN bridging.",
+      "rubric": [
+        "Says Mesh Talk never installs, configures, or authorizes Tailscale and treats its addresses only as candidates.",
+        "Requires signed discovery and Noise identity verification before an endpoint is trusted for communication.",
+        "States that E is bridge-enabled, A/B/C explicitly opt in, and A/B do not need Tailscale when they can reach E over LAN.",
+        "Explains that the directory shares self-signed short-lived introductions and cross-LAN encrypted DMs travel through E's opaque mailbox rather than IP subnet forwarding.",
+        "States that the bridge is default off, invisible nodes do not participate, and disabling it ends local participation.",
+        "Does not promise WebRTC media, arbitrary TCP forwarding, or delivery while E is unavailable."
+      ]
+    },
+    {
+      "id": "MT-AI-010",
+      "name": "equal post-office federation preserves identity, confidentiality and custody limits",
+      "subject_file": "docs/routed-network-discovery.md",
+      "min_score": 0.9,
+      "scenario": "A/B use E on LAN X and C/D use F on LAN Y. Only E and F have an existing permitted Tailscale route. Evaluate the current equal-relay federation design against docs/network-design-reference.md: opted-in discovery, encrypted messaging and signed file controls must work through local relays without subnet bridging, mandatory client hub IDs or legacy gateway assumptions.",
+      "rubric": [
+        "Both relays run equal roles with unique persistent private identities and explicit mutual federation enrollment; shared configuration never means shared keys. Identical TCP ports are valid on different hosts, while co-located listeners must avoid conflicts.",
+        "Clients explicitly opt in and use directly reachable verified local/Tailscale relays; signed short-lived directory introductions do not establish direct remote reachability or group membership.",
+        "Relay links authenticate enrolled identities over Noise, while user payloads remain encrypted for recipients end to end; distinguishes hop transport authentication from the legacy forwarded end-to-end Noise gateway.",
+        "Explains A\u2192E\u2192F\u2192C delivery and reverse signed consent/completion without requiring direct A\u2194C overlap; optional direct-relay preference can fail over, but remote-only federation relays are not direct client choices.",
+        "Version-3 reconciliation is opportunistic, not guaranteed replicated custody; legacy relay-specific mailboxes do not replicate. Cross-site delivery requires surviving onward routes and respects policy, expiry and capacity; custody is not recipient completion.",
+        "Names executable cross-machine federation checks and links dated evidence for claimed scenarios; distinguishes current federation from historical gateway, loopback-only and unobserved platform/route evidence instead of claiming all physical topologies are proved."
       ]
     }
   ]

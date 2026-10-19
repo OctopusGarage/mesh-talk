@@ -59,12 +59,15 @@ async fn exact_old_parser_interoperates_with_presence_over_handshake_in_both_rol
         let a = DeviceIdentity::generate();
         let b = DeviceIdentity::generate();
         let aa = Announce::new_with_account(&a, &Account::generate(), "Alice", 1234);
-        let ba = Announce::new_with_account(&b, &Account::generate(), "Bob", 4321);
+        let bob_announcement = Announce::new_with_account(&b, &Account::generate(), "Bob", 4321);
         let server = tokio::spawn(async move {
             if legacy_initiator {
-                let mut ch = SecureChannel::accept_with_presence(server_io, &b, Some(&ba), |p| {
-                    p.announcement().is_none()
-                })
+                let mut ch = SecureChannel::accept_with_presence(
+                    server_io,
+                    &b,
+                    Some(&bob_announcement),
+                    |p| p.announcement().is_none(),
+                )
                 .await
                 .unwrap();
                 assert_eq!(ch.recv().await.unwrap(), b"ping");
@@ -220,14 +223,17 @@ async fn legacy_and_presence_interoperate_in_both_directions() {
         let a = DeviceIdentity::generate();
         let b = DeviceIdentity::generate();
         let aa = Announce::new_with_account(&a, &Account::generate(), "Alice", 1234);
-        let ba = Announce::new_with_account(&b, &Account::generate(), "Bob", 4321);
+        let bob_announcement = Announce::new_with_account(&b, &Account::generate(), "Bob", 4321);
         let expected_a = aa.clone();
-        let expected_b = ba.clone();
+        let expected_b = bob_announcement.clone();
         let server = tokio::spawn(async move {
             let mut ch = if legacy_initiator {
-                SecureChannel::accept_with_presence(server_io, &b, Some(&ba), |peer| {
-                    peer.announcement().is_none()
-                })
+                SecureChannel::accept_with_presence(
+                    server_io,
+                    &b,
+                    Some(&bob_announcement),
+                    |peer| peer.announcement().is_none(),
+                )
                 .await
                 .unwrap()
             } else {
@@ -275,12 +281,12 @@ async fn verified_account_denial_happens_before_responder_auth() {
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
     let aa = Announce::new_with_account(&a, &Account::generate(), "Alice", 1234);
-    let ba = Announce::new_with_account(&b, &Account::generate(), "Bob", 4321);
+    let bob_announcement = Announce::new_with_account(&b, &Account::generate(), "Bob", 4321);
     let a_account = aa.account_id();
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = calls.clone();
     let server = tokio::spawn(async move {
-        SecureChannel::accept_with_presence(server_io, &b, Some(&ba), |peer| {
+        SecureChannel::accept_with_presence(server_io, &b, Some(&bob_announcement), |peer| {
             assert_eq!(
                 peer.announcement().and_then(Announce::account_id),
                 a_account

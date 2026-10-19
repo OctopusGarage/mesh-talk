@@ -46,3 +46,12 @@ export function applyPlatformClass(): void {
     document.documentElement.setAttribute("data-os", "frameless");
   }
 }
+
+/** Linux capture comes from a portal-chosen image, which carries no monitor identity. */
+export function isLinuxDesktop(): boolean {
+  return (
+    isTauri() &&
+    typeof navigator !== "undefined" &&
+    /Linux/i.test(navigator.userAgent || "")
+  );
+}

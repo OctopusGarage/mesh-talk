@@ -1,11 +1,6 @@
 import { describe, it, expect } from "vitest";
-import {
-  blobMime,
-  isImage,
-  isVideo,
-  posterCanvasSize,
-  withinInlineCap,
-} from "./mediaFile";
+import { isImage, isVideo } from "@/lib/mediaTypes";
+import { blobMime, posterCanvasSize, withinInlineCap } from "./mediaFile";
 
 it("bounds large video posters while preserving small frames and aspect ratio", () => {
   expect(posterCanvasSize(3840, 2160)).toEqual({ width: 1280, height: 720 });

@@ -123,6 +123,12 @@ pub fn init_bob(shared_secret: &[u8; 32], bob_ratchet_secret: [u8; 32]) -> Ratch
 }
 
 impl RatchetState {
+    /// Whether the stored session has established a receiving chain. Check this
+    /// before speculative decryption, which may mutate its copy on failure.
+    pub(crate) fn has_receiving_chain(&self) -> bool {
+        self.ckr.is_some()
+    }
+
     /// Our current ratchet public key (Alice publishes this; tests need it).
     pub fn ratchet_public(&self) -> [u8; 32] {
         self.dhs_public.to_bytes()

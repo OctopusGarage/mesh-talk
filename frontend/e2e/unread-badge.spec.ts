@@ -1,5 +1,5 @@
 import { test, expect } from "./helpers/portable-evidence";
-import { enterChat, BOB, CHANNEL } from "./helpers/session";
+import { waitForChatShell, enterChat, BOB, CHANNEL } from "./helpers/session";
 
 async function observeBadge(page: import("@playwright/test").Page) {
   await page.evaluate(() => {
@@ -132,7 +132,7 @@ test("incoming unread count reaches the OS badge and clears on read and logout",
   await page.getByTestId("login-username").fill("other_user");
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await waitForChatShell(page);
   await expect.poll(latestCount).toEqual({ count: 0, owner: "u_other" });
   const revisions = await page.evaluate(() =>
     (
@@ -229,7 +229,9 @@ test("clicking an already open conversation clears unread after app activation",
       value: () => true,
     });
   });
-  await page.locator("main.conversation-canvas").click({ position: { x: 30, y: 130 } });
+  await page
+    .locator("main.conversation-canvas")
+    .click({ position: { x: 30, y: 130 } });
   await expect.poll(() => latestBadgeCount(page)).toBe(0);
   await expect(
     page
@@ -447,7 +449,9 @@ test("history load failure leaves unread until the chat can be viewed", async ({
       .locator("..")
       .getByText("1", { exact: true }),
   ).toBeVisible();
-  await page.locator("main.conversation-canvas").click({ position: { x: 30, y: 130 } });
+  await page
+    .locator("main.conversation-canvas")
+    .click({ position: { x: 30, y: 130 } });
   await expect.poll(() => latestBadgeCount(page)).toBe(1);
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect.poll(() => latestBadgeCount(page)).toBe(0);

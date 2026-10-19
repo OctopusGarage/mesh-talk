@@ -3,6 +3,15 @@ import { resolve } from "node:path";
 import type { Page } from "@playwright/test";
 import { parsePack } from "../../src/lib/pack";
 
+/** Wait for the complete bundled import, not just the initial IndexedDB read. */
+export async function waitForPackBootstrap(page: Page) {
+  await page.evaluate(async () => {
+    const modulePath = "/src/store/packs.ts";
+    const { usePacks } = await import(/* @vite-ignore */ modulePath);
+    await usePacks.getState().load();
+  });
+}
+
 /** Populate IndexedDB before entering the chat so optional visual scenarios stay offline. */
 export async function seedMarketPacks(page: Page, ids: string[]) {
   const packs = ids.map((id) =>
@@ -11,11 +20,7 @@ export async function seedMarketPacks(page: Page, ids: string[]) {
   await page.goto("/");
   // Wait for the store's full load, including bundled seeding, before the
   // caller navigates again. Individual fetches may fail or be skipped.
-  await page.evaluate(async () => {
-    const modulePath = "/src/store/packs.ts";
-    const { usePacks } = await import(/* @vite-ignore */ modulePath);
-    await usePacks.getState().load();
-  });
+  await waitForPackBootstrap(page);
   await page.evaluate(async (entries) => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open("mesh-talk-customization", 2);

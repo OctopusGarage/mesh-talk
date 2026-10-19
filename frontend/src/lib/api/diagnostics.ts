@@ -14,10 +14,12 @@ export const diag = {
   networkInfo: () => invoke<DiagNetworkInfo>("diag_network_info"),
   /** Force an immediate re-announce + rescan (manual "announce now"). */
   rescan: () => invoke<void>("rescan_peers"),
+  probeEndpoint: (host: string) =>
+    invoke<void>("probe_peer_endpoint", { host }),
 };
 
 export const presence = {
-  /** Per-conversation presence snapshot, keyed by account_id (DMs) and channel_id. */
+  /** Shared person/device observations and accepted-account group count summaries. */
   get: () => invoke<PresenceMap>("get_presence"),
 };
 

@@ -2,6 +2,7 @@ import { Network } from "lucide-react";
 import { IdentityGlyph } from "@/components/identity";
 import { useChat } from "@/store/chat";
 import { useAvatar } from "@/store/avatars";
+import { rosterProjection } from "@/lib/rosterProjection";
 import type { ChannelMemberInfo } from "@/lib/types";
 
 const NO_MEMBERS: ChannelMemberInfo[] = [];
@@ -23,6 +24,7 @@ export function GroupAvatar({
 }) {
   const members = useChat((s) => s.channelMembersById[channelId] ?? NO_MEMBERS);
   const peers = useChat((s) => s.peers);
+  const roster = rosterProjection(peers);
   const myId = useChat((s) => s.myId);
   const myAccountId = useChat((s) => s.myAccountId);
 
@@ -40,9 +42,7 @@ export function GroupAvatar({
     .map((m) =>
       m.user_id === myId
         ? myAccountId || m.user_id
-        : (m.account_id ??
-          peers.find((p) => p.user_id === m.user_id)?.account_id ??
-          m.user_id),
+        : (roster.accountForMember(m) ?? m.user_id),
     );
 
   if (seeds.length === 0) {

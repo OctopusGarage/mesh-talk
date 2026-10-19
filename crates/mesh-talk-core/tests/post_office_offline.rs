@@ -1,6 +1,6 @@
 //! Three-process offline-delivery rig for the post-office slice: a `--post-office`
 //! relay + Alice + Bob. Bob goes offline; Alice DMs him (direct fails, the relay
-//! holds the sealed event); Bob returns and his drain pulls and decrypts it.
+//! holds an opaque encrypted wrapper); Bob returns and his drain decrypts it.
 //! `#[ignore]`d — three real processes, a slow-starting post office (~15-25s cold
 //! start: two KDFs), and UDP broadcast. Run explicitly:
 //!   nice -n 10 cargo test -p mesh-talk-core --test post_office_offline -- --ignored
@@ -12,7 +12,9 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use mesh_talk_core::eventlog::{EventKind, persist::PersistentEventLog};
+use mesh_talk_core::eventlog::{ConversationId, EventKind, persist::PersistentEventLog};
+use mesh_talk_core::identity::keystore;
+use mesh_talk_core::postoffice::opaque::RelayMailbox;
 
 /// A spawned `mesh-talk-node` (normal or `--post-office`) with a line view of stdout.
 struct CliNode {
@@ -175,17 +177,29 @@ fn offline_dm_delivered_via_post_office() {
     await_peer(&mut alice, &po_uid, "Alice→PO");
     await_peer(&mut bob, &alice_uid, "Bob→Alice");
     await_peer(&mut bob, &po_uid, "Bob→PO");
+    // The receiver explicitly compares and verifies the sender's full device
+    // fingerprint before automatic catch-up is permitted. This persists over restart.
+    bob.send(&format!("/verify-peer {alice_uid}"));
+    bob.wait_for(
+        |line| line == "peer verified for automatic DM recovery",
+        Duration::from_secs(5),
+    )
+    .expect("Bob verified Alice before going offline");
 
     // Bob goes offline.
     drop(bob);
 
     // Alice DMs offline Bob: direct dial fails, the event is replicated to the PO.
     alice.send(&format!("/msg {} held-hello", &bob_uid[..8]));
-    // Observe the exact signed event at both ends, without adding test-only IPC
-    // or trusting a fixed sleep/file size. Only load existing fixture logs;
-    // the observer never appends, normalizes or rewrites the live stores.
+    // Derive the pairwise mailbox from the fixture identities and observe the
+    // exact opaque wrapper at the relay. The original signed event must not be
+    // stored there. Only load existing fixture logs; the observer never writes.
     let sender_log = dir.path().join("alice/messages.log");
     let relay_log = dir.path().join("relay/relay.log");
+    let alice_id = keystore::load(&dir.path().join("alice/identity.keystore"), "pw").unwrap();
+    let bob_id = keystore::load(&bob_keystore, "pw").unwrap();
+    let relay_id = keystore::load(&dir.path().join("relay/identity.keystore"), "pw").unwrap();
+    let mailbox = RelayMailbox::new(&alice_id, &bob_id.public(), &relay_id.public()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut replicated = None;
     while Instant::now() < deadline {
@@ -196,12 +210,13 @@ fn offline_dm_delivered_via_post_office() {
                 PersistentEventLog::open(&relay_log, "pw"),
             )
         {
-            replicated = sender.all_event_ids().into_iter().find(|id| {
-                sender.get(id).is_some_and(|event| {
-                    event.kind == EventKind::Message
-                        && event.author.user_id() == alice_uid
-                        && relay.has(id)
-                })
+            replicated = sender.all_event_ids().into_iter().find_map(|id| {
+                let event = sender.get(&id)?;
+                if event.kind != EventKind::Message || event.author.user_id() != alice_uid {
+                    return None;
+                }
+                let outer = mailbox.wrap(event).ok()?;
+                (relay.has(&outer.id) && !relay.has(&id)).then_some(outer.id)
             });
         }
         if replicated.is_some() {
@@ -209,7 +224,47 @@ fn offline_dm_delivered_via_post_office() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let replicated = replicated.expect("relay durably contains the sender's exact signed DM event");
+    let replicated = replicated.expect("relay durably contains only the opaque DM wrapper");
+
+    // Create a private channel while Bob is still offline. The relay must hold
+    // its original channel event only inside the same pairwise mailbox.
+    alice.send(&format!("/channel-new relay-secret-room {}", &bob_uid[..8]));
+    let created = alice
+        .wait_for(
+            |line| line.starts_with("channel ") && line.ends_with(" created"),
+            Duration::from_secs(30),
+        )
+        .expect("offline channel invitation was accepted");
+    let group_hex = created.split_whitespace().nth(1).unwrap().to_string();
+    let group = ConversationId::new(hex::decode(&group_hex).unwrap().try_into().unwrap());
+    alice.send(&format!("/channel-msg {} held-channel", &group_hex[..8]));
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut replicated_group = None;
+    while Instant::now() < deadline {
+        if let (Ok(sender), Ok(relay)) = (
+            PersistentEventLog::open(&sender_log, "pw"),
+            PersistentEventLog::open(&relay_log, "pw"),
+        ) {
+            assert_eq!(
+                relay.conversation_len(&group),
+                0,
+                "channel ID stays private"
+            );
+            replicated_group = sender.all_event_ids().into_iter().find_map(|id| {
+                let event = sender.get(&id)?;
+                if event.conversation_id != group || event.kind != EventKind::Message {
+                    return None;
+                }
+                let outer = mailbox.wrap(event).ok()?;
+                relay.has(&outer.id).then_some(outer.id)
+            });
+        }
+        if replicated_group.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let replicated_group = replicated_group.expect("relay holds the opaque channel event");
 
     // Route isolation: the original sender must be gone before the recipient
     // returns, otherwise ordinary peer synchronization could fake relay success.
@@ -221,22 +276,23 @@ fn offline_dm_delivered_via_post_office() {
         read_user_id(&bob, "node ", Duration::from_secs(90)),
         bob_uid
     );
-    let got = bob
-        .wait_for(
-            |l| l.starts_with(&format!("from {alice_uid}")) && l.contains("held-hello"),
-            Duration::from_secs(30),
-        )
-        .expect("Bob received the held DM from the post office after coming back online");
-    assert!(
-        got.starts_with(&format!("from {alice_uid}")),
-        "authenticated original sender identity"
-    );
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let (mut got_dm, mut got_group) = (false, false);
+    while !(got_dm && got_group) {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("Bob received the held DM and channel message from the relay");
+        let line = bob
+            .lines
+            .recv_timeout(remaining)
+            .expect("Bob received held relay events before timeout");
+        got_dm |= line.starts_with(&format!("from {alice_uid}")) && line.contains("held-hello");
+        got_group |= line.starts_with(&format!("channel {group_hex} from {alice_uid}:"))
+            && line.contains("held-channel");
+    }
     drop(bob);
     drop(po);
-    assert!(
-        PersistentEventLog::open(&relay_log, "pw")
-            .expect("reopen stopped relay store")
-            .has(&replicated),
-        "relay retains the replicated event across process shutdown"
-    );
+    let retained = PersistentEventLog::open(&relay_log, "pw").expect("reopen stopped relay store");
+    assert!(retained.has(&replicated));
+    assert!(retained.has(&replicated_group));
 }

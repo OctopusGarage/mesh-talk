@@ -14,53 +14,15 @@ import {
 } from "lucide-react";
 import { chat } from "@/lib/api";
 import { isDirectoryAttachment } from "@/lib/directoryAttachment";
+import { isImage, isVideo, mediaMimeFromName } from "@/lib/mediaTypes";
 import { useAuth } from "@/store/auth";
 import { useChat, captureChatOwnership } from "@/store/chat";
-
-// Single source of truth for media extensions — the type predicates, the MIME map, AND the
-// image-button file-dialog filter (ConversationView) are all derived from these, so the three
-// can't drift apart (e.g. a file that previews when dropped but not when picked).
-export const IMAGE_EXTENSIONS = [
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "bmp",
-  "avif",
-  "svg",
-  "heic",
-  "heif",
-];
-export const VIDEO_EXTENSIONS = ["mp4", "mov", "webm", "m4v", "ogv"];
-const IMAGE_EXT = new RegExp(`\\.(${IMAGE_EXTENSIONS.join("|")})$`, "i");
-const VIDEO_EXT = new RegExp(`\\.(${VIDEO_EXTENSIONS.join("|")})$`, "i");
-export const isImage = (name: string) => IMAGE_EXT.test(name);
-export const isVideo = (name: string) => VIDEO_EXT.test(name);
 
 /** Best-effort MIME from a file name. The inline <video>/<img> blob URL MUST carry a type,
  * or macOS WKWebView can't pick a decoder and the video silently won't play. Used as a
  * fallback when the manifest's mime is missing/empty. */
 export function mimeFromName(name: string): string | undefined {
-  const ext = name.toLowerCase().split(".").pop() ?? "";
-  const map: Record<string, string> = {
-    png: "image/png",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    gif: "image/gif",
-    webp: "image/webp",
-    bmp: "image/bmp",
-    avif: "image/avif",
-    svg: "image/svg+xml",
-    heic: "image/heic",
-    heif: "image/heif",
-    mp4: "video/mp4",
-    mov: "video/quicktime",
-    webm: "video/webm",
-    m4v: "video/x-m4v",
-    ogv: "video/ogg",
-  };
-  return map[ext];
+  return mediaMimeFromName(name);
 }
 
 /** The MIME to type the inline blob with. Prefer the name-derived type for known image/video
@@ -93,7 +55,7 @@ export function fileGlyph(name: string, mime?: string) {
   const ext = name.toLowerCase().split(".").pop() ?? "";
   const cls = "h-4 w-4 shrink-0 text-signal";
   if (mime && isDirectoryAttachment(mime)) return <Folder className={cls} />;
-  if (IMAGE_EXT.test(name)) return <FileImage className={cls} />;
+  if (isImage(name)) return <FileImage className={cls} />;
   if (/^(mp4|mov|mkv|webm|avi|m4v|ogv)$/.test(ext))
     return <FileVideo className={cls} />;
   if (/^(mp3|wav|flac|aac|ogg|m4a)$/.test(ext))

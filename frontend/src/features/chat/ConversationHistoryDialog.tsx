@@ -58,6 +58,7 @@ import { ClearHistoryButton } from "./ClearHistoryButton";
 // 200 for live scrolling). The backend history commands clamp to 500, which is the most a
 // single page can return — so this view is complete up to the durable-store window.
 const FULL_HISTORY_LIMIT = 500;
+const NO_HISTORY: ChatMessage[] = [];
 
 /** Highlight every case-insensitive occurrence of `term` in `text` (mirrors SearchDialog). */
 function Highlighted({ text, term }: { text: string; term: string }) {
@@ -127,11 +128,18 @@ export function ConversationHistoryDialog({
   const ready = useChat((s) => s.ready);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [items, setItems] = useState<ChatMessage[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<{
+    key: string;
+    items: ChatMessage[];
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
 
   const key = convKey(conversation);
+  const view = history?.key === key ? history : null;
+  const items = view?.items ?? NO_HISTORY;
+  const loading = view?.loading ?? false;
+  const error = view?.error ?? null;
 
   // Load the full conversation history when the dialog opens (and re-load if the active
   // conversation changed under it). Re-scoping is automatic: a new `key` re-runs this.
@@ -139,21 +147,34 @@ export function ConversationHistoryDialog({
     if (!open || !ready) return;
     const lease = captureChatOwnership();
     let alive = true;
-    setLoading(true);
-    setError(null);
+    setHistory((previous) => ({
+      key,
+      items: previous?.key === key ? previous.items : NO_HISTORY,
+      loading: true,
+      error: null,
+    }));
     const load =
       conversation.kind === "account"
         ? chat.ownerHistory(lease.owner!, conversation.id, FULL_HISTORY_LIMIT)
         : chat.channelHistory(conversation.id, FULL_HISTORY_LIMIT);
     load
       .then((hist) => {
-        if (alive && lease.current()) setItems(hist.map(fromHistoryItem));
+        if (alive && lease.current())
+          setHistory({
+            key,
+            items: hist.map(fromHistoryItem),
+            loading: false,
+            error: null,
+          });
       })
       .catch((e) => {
-        if (alive && lease.current()) setError(errorMessage(e));
-      })
-      .finally(() => {
-        if (alive && lease.current()) setLoading(false);
+        if (alive && lease.current())
+          setHistory((previous) => ({
+            key,
+            items: previous?.key === key ? previous.items : NO_HISTORY,
+            loading: false,
+            error: errorMessage(e),
+          }));
       });
     return () => {
       alive = false;
@@ -234,7 +255,12 @@ export function ConversationHistoryDialog({
         if (lease.current()) rememberSavedDownload(file.fileConv, path);
       }
     } catch (e) {
-      if (lease.current()) setError(errorMessage(e));
+      if (lease.current())
+        setHistory((previous) =>
+          previous?.key === key
+            ? { ...previous, error: errorMessage(e) }
+            : previous,
+        );
     }
   };
 
@@ -244,7 +270,12 @@ export function ConversationHistoryDialog({
     try {
       await revealItemInDir(path);
     } catch (e) {
-      if (lease.current()) setError(errorMessage(e));
+      if (lease.current())
+        setHistory((previous) =>
+          previous?.key === key
+            ? { ...previous, error: errorMessage(e) }
+            : previous,
+        );
     }
   };
 

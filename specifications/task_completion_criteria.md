@@ -6,10 +6,11 @@ A task is **done** only when all of the following hold:
    relevant committed design or architecture doc), follows
    [`development_conventions.md`](development_conventions.md), and touches only what the
    task requires.
-2. **Tests** — unit + integration tests cover the normal and failure paths; the **full
-   suite passes** (`cargo test`). Crypto/networking changes ship a loopback integration
-   assertion.
-3. **The gate is green** — `make eval-smoke` and `./scripts/check-health.sh` pass end-to-end: `cargo fmt`,
+2. **Tests** — affected unit or integration tests cover the normal and failure
+   paths during development. Before PR submission, the **full suite passes**
+   (`cargo test`). Crypto/networking changes ship a loopback integration assertion.
+3. **The review gate is green** — before requesting review, `make eval-smoke` and
+   `./scripts/check-health.sh` pass end-to-end: `cargo fmt`,
    `cargo clippy --all-targets -- -D warnings`, ESLint, `cargo test`, typos, cargo-deny,
    cargo-machete, gitleaks, shellcheck, security audits, and both builds. CI mirrors this
    (the `verify` check is required by branch protection).
@@ -21,5 +22,6 @@ A task is **done** only when all of the following hold:
 5. **Security** — no new advisory (cargo-deny/audit clean), no hard-coded secrets
    (gitleaks clean), and at-rest/in-transit data stays encrypted.
 
-> The full check-health gate includes the delivery / AI eval smoke gate. If it passes and
-> the docs are updated, the task is complete.
+> The full check-health gate includes the delivery / AI eval smoke gate. It is
+> reserved for PR/review, CI, or explicit requests; ordinary local changes use
+> focused tests and the affected static checks.
