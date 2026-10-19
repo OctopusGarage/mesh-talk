@@ -74,23 +74,3 @@ linked-device backfill, profile persistence, restart, and backup restoration.
 Frontend tests cover settings failures and account isolation plus asynchronous
 validation/admission and draft preservation. These are bounded automated checks,
 not a guarantee of correct classification for every human-language input.
-
-### Executed checks (2026-10-19)
-
-Validation in the macOS development worktree:
-
-| Check                                                                                                       | Result                                                                                                                                      |
-| ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cargo test -p mesh-talk-core --lib language_`                                                              | 19 passed, including real encrypted two-node loopback.                                                                                      |
-| `cargo test -p mesh-talk-core --lib profile`                                                                | 23 related profile/synchronization regressions passed.                                                                                      |
-| Core filters `recovery_snapshot`, `encrypted_recovery`, `recovery_rejects`                                  | 2, 1, and 2 tests passed respectively.                                                                                                      |
-| `cargo test -p mesh-talk --lib registered_language_preferences`                                             | Registered IPC owner isolation, enable/disable and local validation passed.                                                                 |
-| Focused frontend selection                                                                                  | 178 tests passed across composer, admission/draft ledger, settings, policy hook, IPC, display text, chat store, and locale/API regressions. |
-| `npm run typecheck`, `npm run lint`, `npm run build`                                                        | Passed; build reports a chunk-size advisory.                                                                                                |
-| `cargo clippy --all-targets -- -D warnings`, Rust formatting, documentation formatting and local file links | Passed.                                                                                                                                     |
-| Impeccable mechanical check of changed UI components                                                        | No findings.                                                                                                                                |
-
-The focused browser check `npx playwright test e2e/dm-language.spec.ts` also
-passed both preference and message-admission scenarios. Full workspace, health
-and cross-platform PR gates are recorded separately in the pull request. These
-checks do not establish native desktop visual or physical multi-host acceptance.

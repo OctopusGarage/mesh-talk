@@ -863,8 +863,7 @@ separately rather than being labeled people; membership actions still address
 devices. Member profiles expose deduplicated fresh devices and overlapping source
 details without inferring physical LAN location or claiming a connection. Group
 history through an intermediary does not propagate presence. See the
-[network presence contract](network-design-reference.md#person-presence-contract)
-and [presence Q&A](network-design-qa.md#q16-what-does-a-persons-online-or-offline-status-actually-mean).
+[network presence contract](network-design-reference.md#person-presence-contract).
 
 Unread counters are local presentation state. An incoming event in the selected
 conversation remains unread while the window is unfocused or hidden; focusing that
@@ -918,7 +917,7 @@ running while an account and its newly added device are hidden, then reopens dur
 The `native-contact-eval` example uses the same desktop builder with isolated data/config
 roots and a dev-only embedded WebDriver. The normal entry point has no driver plugin or
 storage override. Three-platform native scenarios and the usability rubric are documented
-in [the hidden-contact evaluation runbook](evals/hidden-contacts.md).
+in [platform validation](platform-validation.md).
 
 ### Manual encrypted backup and recovery
 
@@ -979,7 +978,7 @@ The desktop supplies exact-session admission; a dedicated headless host supplies
 profile/lifecycle admission. Private Unix sockets or Windows named pipes expose
 a closed local API. The MCP adapter in `crates/mesh-talk-mcp` translates four
 context/send/status tools using the official SDK. See the
-[setup and limits](bot-integrations.md) and [design rationale](bot-mcp-architecture-research.md).
+[setup and limits](bot-integrations.md).
 
 Core `node/outgoing_message.rs` accepts retry keys through guarded enqueue.
 New bot direct messages apply the same recipient language checks as desktop

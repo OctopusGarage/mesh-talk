@@ -19,7 +19,7 @@
 
 <!-- Paste the commands you ran and their result. -->
 
-<!-- See docs/evals/quality-gates.md. Record the exact tested commit, platform,
+<!-- See docs/quality-gates.md. Record the exact tested commit, platform,
 test names/actions links and failing-baseline evidence. Separate PASS, FAIL,
 SKIPPED and INCONCLUSIVE. Coverage percentages alone are not proof of correctness. -->
 

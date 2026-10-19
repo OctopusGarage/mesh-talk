@@ -14,7 +14,7 @@ owns them. A feature does not need a new paragraph everywhere it is mentioned.
 | [Architecture](ARCHITECTURE.md)                              | How does the system work?                                             | Protocol, modules, data flow, crypto, wire compatibility, and technical limits.                                                                    |
 | [Network architecture baseline](network-design-reference.md) | Which communication model and contracts must future changes preserve? | Network design principles, module ownership, topology scenarios, policy interactions, resource budgets and feature-specific acceptance boundaries. |
 | Feature and operations guides                                | How do I configure or use this capability?                            | Exact steps, options, examples, constraints, and troubleshooting for their topic.                                                                  |
-| [Evaluations](evals/)                                        | What was verified at the time?                                        | Dated test evidence and its limits; never a substitute for current behavior.                                                                       |
+| [Evaluation inputs](evals/README.md)                         | Which reusable cases and rubrics apply?                               | Maintained suites, inventory and prompts; generated evidence belongs in PR/CI artifacts.                                                           |
 
 The site and README may summarize a capability, but link to its owning guide
 for setup, flags, support matrices, and changing limits. Do not copy a CLI option
@@ -77,3 +77,28 @@ exports. Maintain those sources rather than editing generated pages or keeping
 a separate Wiki copy. Existing feature guides retain detailed policy ownership.
 See [help system maintenance](help-system.md) for supported Markdown, stable IDs,
 version scope, controlled UI targets and focused validation.
+
+## Repository hygiene
+
+Maintain one owner for each topic. Merge durable decisions into that guide and
+remove superseded proposals, implementation plans, investigation notes, duplicate
+runbooks and completed-work reports. Git history preserves prior versions; do not
+add archive directories or placeholder documents just to retain old filenames.
+
+Use ignored `tmp/` for implementation research and scratch scripts. Generated
+validation output belongs under ignored `target/`, coverage or Playwright output
+directories. Delete disposable notes when the work is complete. Keep screenshots
+only when they serve the maintained product/user documentation or an executable
+visual baseline, not as a diary of an earlier investigation.
+
+`docs/evals/` accepts only its README, named `*-suite.json` inputs,
+`module-coverage.json` and reusable Markdown prompts. Operational validation
+guidance belongs in [platform validation](platform-validation.md),
+[quality gates](quality-gates.md) or the [testing workflow](testing-feedback-loop.md).
+
+`.gitignore` owns the artifact policy. `node scripts/check-repository-hygiene.mjs`
+checks the whole Git index, including force-added files. The pre-commit hook, CI
+and health gate run the same check. For a new maintained guide or script, give it
+an owner and a real caller/navigation path; do not add another report or copied
+command wrapper. Filename checks cannot determine whether prose is obsolete, so
+review this ownership rule when changing documentation.

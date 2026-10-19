@@ -52,14 +52,14 @@ a warning and preserve a successful build's exit status.
 
 ## Configuration
 
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `MT_BUILD_KEEP` / `--keep` | `5` | Successful build sets to retain; at least one |
-| `MT_BUILD_CACHE_GB` / `--budget-gb` | `40` | Combined Cargo target budget in GiB |
-| `MT_BUILD_STATE_DIR` | `~/.cache/mesh-talk/build-retention` | Shared archive, registry, locks, and log directory |
-| `MT_BUILD_CHECKOUTS` | empty | Additional clones, separated by the platform path separator |
-| `MT_BUILD_SCAN_INTERVAL_SECONDS` / `--interval-seconds` | `600` | Minimum interval between automatic cache scans; `0` scans after every command |
-| `MT_TARGET_CLEAN` | `1` | Set to `0` to disable eviction; successful builds can still be archived |
+| Setting                                                 | Default                              | Meaning                                                                       |
+| ------------------------------------------------------- | ------------------------------------ | ----------------------------------------------------------------------------- |
+| `MT_BUILD_KEEP` / `--keep`                              | `5`                                  | Successful build sets to retain; at least one                                 |
+| `MT_BUILD_CACHE_GB` / `--budget-gb`                     | `40`                                 | Combined Cargo target budget in GiB                                           |
+| `MT_BUILD_STATE_DIR`                                    | `~/.cache/mesh-talk/build-retention` | Shared archive, registry, locks, and log directory                            |
+| `MT_BUILD_CHECKOUTS`                                    | empty                                | Additional clones, separated by the platform path separator                   |
+| `MT_BUILD_SCAN_INTERVAL_SECONDS` / `--interval-seconds` | `600`                                | Minimum interval between automatic cache scans; `0` scans after every command |
+| `MT_TARGET_CLEAN`                                       | `1`                                  | Set to `0` to disable eviction; successful builds can still be archived       |
 
 Archives are under `packages/`; `cleanup.jsonl` records deletion attempts with
 paths, timestamps, and estimated bytes. Packages appear atomically after copying;
@@ -111,7 +111,3 @@ not remove it, and captures the current configuration and PATH. Reinstall after
 changing these settings or updating the runner. It operates on the same shared
 registry as post-build cleanup. Logs go to
 `~/Library/Logs/mesh-talk-target-gc.log`.
-
-The older `clean-target-cache.sh` and `auto-clean-targets.sh` remain explicit
-legacy maintenance tools. Automated health checks and launchd use the coordinated
-policy instead.

@@ -110,3 +110,15 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 - Triage vulnerabilities immediately or document mitigation in the PR.
 - If plans shift, update the relevant committed design or architecture docs. Keep
   `docs/superpowers/` and the root `plans/` directory local and untracked.
+
+## Repository Hygiene
+
+- Keep implementation plans, research, investigation notes and scratch scripts
+  under ignored `tmp/`; remove them when the work is complete.
+- Merge durable decisions into the maintained owning guide. Do not commit
+  completed-work reports, score histories, duplicate runbooks or archive copies.
+- `docs/evals/` owns reusable suites/inventories, prompts and its README only.
+  Generated evidence belongs in ignored output or PR/CI artifacts.
+- Run `node scripts/check-repository-hygiene.mjs` before committing. The shared
+  index check also runs in pre-commit, CI and health, rejecting ignored files
+  even when force-added. See `docs/DOCUMENTATION_GUIDELINES.md` for ownership.

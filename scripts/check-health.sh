@@ -71,6 +71,9 @@ if [ "$FAST" != "1" ]; then
     actionlint
 fi
 
+print_status "success" "Checking repository hygiene..."
+node scripts/check-repository-hygiene.mjs
+
 print_status "success" "Running delivery / AI eval smoke..."
 if ! scripts/ai-eval-smoke.sh; then
     print_status "error" "Delivery / AI eval smoke failed. Fix the missing coverage or trigger wiring."
@@ -89,8 +92,6 @@ if ! node "$stage" diagnostics --profile shared -- node --test scripts/diagnosti
 fi
 
 print_status "success" "Checking target cache cleanup safeguards..."
-scripts/test-clean-target-cache.sh
-scripts/test-auto-clean-targets.sh
 python3 -m unittest discover -s scripts -p test_build_retention.py -v
 
 # Keep Cargo's target/ from growing without bound. This is intentionally best-effort:

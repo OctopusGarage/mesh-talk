@@ -55,10 +55,6 @@ jobs:
       - name: Audit frontend dependencies
         working-directory: frontend
         run: npx --yes audit-ci --config audit-ci.json
-      - name: Build cache cleanup safeguards (all platforms)
-        run: |
-          scripts/test-clean-target-cache.sh
-          scripts/test-auto-clean-targets.sh
 
   source:
     name: Source and supply-chain checks

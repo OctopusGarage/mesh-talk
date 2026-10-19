@@ -17,9 +17,10 @@ test("CI caches the workspace output and retains native lint and build coverage"
 test("health owns fast checks without repeating Rust or browser suites", () => {
   const health = read("check-health.yml");
   assert.doesNotMatch(health, /bash scripts\/check-health\.sh|cargo (?:build|clippy|test)|npx playwright|src-tauri\/target/);
-  for (const command of ["npm run format:check", "npm run lint", "npm run typecheck", "audit-ci", "test-clean-target-cache.sh", "test-auto-clean-targets.sh", "cargo fmt --all -- --check", "cargo deny check", "cargo machete", "shellcheck", "actionlint", "typos"]) assert.ok(health.includes(command), command);
+  for (const command of ["npm run format:check", "npm run lint", "npm run typecheck", "audit-ci", "cargo fmt --all -- --check", "cargo deny check", "cargo machete", "shellcheck", "actionlint", "typos"]) assert.ok(health.includes(command), command);
   assert.match(health, /matrix:\n        os: \[ubuntu-latest, macos-latest, windows-latest\]/);
   const ci = read("ci.yml");
+  assert.match(step(ci, "Build retention safeguards (all platforms)"), /python3 -m unittest discover -s scripts -p test_build_retention.py -v/);
   for (const command of ["npm run lint", "cargo fmt", "cargo deny", "cargo machete", "shellcheck", "actionlint", "crate-ci/typos"]) assert.ok(!ci.includes(command), `duplicate ${command}`);
 });
 

@@ -337,8 +337,8 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
 The structural scan for this refactor covered production frontend import edges,
 the Rust module/public-export structure, host adapters, and the feature owners
 above. It is not an exhaustive line-by-line audit or proof that all bugs have
-been eliminated. The historical [boundary audit](evals/architecture-boundaries-2026-10-15.md)
-records earlier findings and fixes; this file is the maintained ownership guide.
+been eliminated. This file is the maintained ownership guide; Git history retains
+superseded audit findings and implementation reports.
 
 ## Public help
 

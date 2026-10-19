@@ -1,10 +1,8 @@
 # Mesh Talk: Network Topology and Communication Architecture
 
-**Implementation baseline · 2026-10-16 · reviewed against `2d3ccfb`.**
-
 This document defines the network architecture and development principles for Mesh Talk's discovery, direct communication, post-office custody, federation, group recovery, file delivery, calls and linked devices. It combines the product intent, current implementation contracts, concrete topology examples and the limits of available evidence.
 
-It is the starting point for evaluating whether a change preserves the agreed communication model. [Architecture](ARCHITECTURE.md) owns the broader protocol and cryptographic reference; the [scenario Q&A](network-design-qa.md) provides shorter explanations; the [topology guide](network-topologies.md) provides a compact switch and diagram overview. Operator commands belong in the linked deployment guides.
+It is the starting point for evaluating whether a change preserves the agreed communication model. [Architecture](ARCHITECTURE.md) owns the broader protocol and cryptographic reference; the [topology guide](network-topologies.md) provides a compact switch and diagram overview. Operator commands belong in the linked deployment guides.
 
 **Status vocabulary:** **Implemented** means a code path exists under stated conditions. **Configured** means endpoints, permissions or trust must be supplied. **Verified** means a named test observed the specified outcome. **Conditional** names an environmental dependency. **Future** is an explicit extension, not a current promise. A normative statement below describes an invariant to preserve; it does not establish that every topology has passed a physical test.
 
@@ -174,8 +172,58 @@ When one machine runs both the app and a relay, their names, keys, TCP listeners
 
 ### Person presence contract
 
-The maintained [presence Q&A](network-design-qa.md#q16-what-does-a-persons-online-or-offline-status-actually-mean)
-defines Online/Offline as observations by the current client, not a global census.
+**Online** means this client has unexpired eligible public evidence for at least
+one currently valid device bound to the person's verified account. **Offline**
+means this client has no such evidence; the person may have exited or may simply
+be undiscoverable from this client's network. It is not a global sign-out claim.
+Recent observations enrich Offline (for example, “Offline · Seen by this client
+3m ago”); they are not a third primary state. A never-observed member has no
+invented last-seen time.
+
+The member profile shows fresh devices once each and their actual sources:
+local network discovery, cross-network discovery, post-office discovery, or
+public authenticated contact with unspecified network scope. Ordinary signed UDP
+observations outside the established interface scope show signed discovery with
+unspecified scope; they are not labeled local merely because of an address prefix.
+Sources can overlap
+on one device. Neither a source nor an endpoint establishes physical location.
+A direct application path means no intermediate Mesh Talk post office; it says
+nothing about Tailscale's underlying transport. Online does not guarantee TCP,
+message delivery, file transfer, or calls. UDP discovery can succeed while TCP
+fails; communication failures belong to delivery/call/connection diagnostics.
+
+A group header shows “24 members · 6 known online”, relative to this client.
+Both numbers count accepted current **verified accounts**, deduplicating devices
+and paths. Pending and removed members and post-office identities are excluded.
+The current account counts once in both numbers while its accepted local node is
+running. Zero known online is valid. Membership controls remain device-addressed;
+when a device's account cannot be verified, the UI explicitly adds “unbound device
+members” separately rather than counting them as people. Those rows remain
+inspectable and use their device-scoped observations without inventing an account.
+
+Local evidence lasts 30 seconds, routed evidence 120 seconds, and permitted public
+authenticated observations 300 seconds. Directory presence lasts at most 45
+seconds from its origin observation, retaining the original expiry through
+federation and the versioned v4 client directory response. Legacy directory
+responses still provide route hints but cannot establish fresh presence because
+they omit origin expiry. Private authenticated routes do not refresh visible
+presence. Cached routes, membership, stored contacts, historical messages,
+receipts, relay reachability, and mailbox custody never establish presence.
+
+The frontend ages observations even when refreshes fail, shows a global presence
+availability explanation, and retries its normal shared poll. It does not infer
+loss of LAN connectivity from Internet availability or claim everyone signed out.
+A stopped discovery producer is reported as unavailable; silent packet loss is
+not proof of a local network outage. Normal discovery/runtime recovery restores
+observations. Last-seen history is bounded, session-local, and clears on lock,
+logout, or account/runtime replacement; absence of history is not evidence that
+the person has never run the application.
+
+In A↔B↔C group recovery, A observing B or receiving C's historical events through
+B does **not** establish C's presence at A. A needs its own eligible fresh discovery,
+directory, or permitted public authenticated observation. There is no global
+presence service or new transitive group-presence gossip.
+
 The desktop [presence projection](../src-tauri/src/chat_commands/presence.rs)
 aggregates one verified roster snapshot by account, retaining device/source
 observations with independent monotonic lifetimes. Membership and cached routes

@@ -66,16 +66,15 @@ require_regex() {
 }
 
 # Stable docs and examples for delivery / AI regression checks.
-require_file "docs/evals/delivery-ai-regression.md"
-require_file "docs/evals/ai-eval-cases.md"
+require_file "docs/evals/README.md"
 require_file "docs/evals/ai-eval-suite.json"
 require_file "docs/evals/module-coverage.json"
 require_file "docs/evals/prompts/agent-contract-evaluator.md"
-require_contains "docs/evals/ai-eval-cases.md" "MT-AI-001" "AI eval case registry"
-require_contains "docs/evals/delivery-ai-regression.md" "make eval-smoke" "delivery eval runbook"
-require_contains "docs/evals/delivery-ai-regression.md" "make ai-eval" "real AI eval runbook"
-require_contains "docs/evals/delivery-ai-regression.md" "make smoke-full" "full real smoke runbook"
-require_contains "docs/README.md" "delivery-ai-regression.md" "documentation map entry"
+require_contains "docs/evals/README.md" "MT-AI-001" "AI eval case registry"
+require_contains "docs/evals/README.md" "make eval-smoke" "delivery eval runbook"
+require_contains "docs/evals/README.md" "make ai-eval" "real AI eval runbook"
+require_contains "docs/evals/README.md" "make smoke-full" "full real smoke runbook"
+require_contains "docs/README.md" "evals/README.md" "documentation map entry"
 
 # Core feature smoke and regression examples.
 require_file "crates/mesh-talk-core/tests/decoder_smoke.rs"

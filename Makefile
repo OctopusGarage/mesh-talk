@@ -1,7 +1,7 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test test-focused test-plan test-changed e2e eval-smoke ai-eval smoke-full clean clean-target-cache clean-target-cache-dry-run auto-clean-targets-dry-run clean-builds clean-builds-dry-run check
+.PHONY: dev build test test-focused test-plan test-changed e2e eval-smoke ai-eval smoke-full clean clean-builds clean-builds-dry-run check
 
 # Managed commands coordinate with cache eviction across all local worktrees.
 MANAGED_BUILD = python3 scripts/build-retention.py run --
@@ -55,15 +55,6 @@ smoke-full:
 
 clean:
 	$(MANAGED_BUILD) cargo clean
-
-clean-target-cache:
-	./scripts/clean-target-cache.sh --yes
-
-clean-target-cache-dry-run:
-	./scripts/clean-target-cache.sh --dry-run
-
-auto-clean-targets-dry-run:
-	./scripts/auto-clean-targets.sh --dry-run
 
 clean-builds:
 	python3 scripts/build-retention.py clean
@@ -132,9 +123,6 @@ help:
 	@echo "  make ai-eval          Run real model-backed AI evals (requires AI_EVAL_COMMAND)"
 	@echo "  make smoke-full       Run full real smoke: Rust/frontend unit + backend/UI E2E"
 	@echo "  make clean            Clean build artifacts"
-	@echo "  make clean-target-cache      Prune stale Cargo target cache"
-	@echo "  make clean-target-cache-dry-run Preview target cache pruning"
-	@echo "  make auto-clean-targets-dry-run Preview dormant Mesh Talk target removal"
 	@echo "  make clean-builds     Apply five-build retention and 40 GiB cache budget"
 	@echo "  make clean-builds-dry-run Preview build retention across worktrees"
 	@echo "  make check            Run all quality checks"

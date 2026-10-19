@@ -31,6 +31,19 @@
       "escalation": [
         "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI."
       ]
+    },
+    {
+      "id": "repository-hygiene",
+      "paths": [
+        ".gitignore",
+        "hooks/pre-commit",
+        "scripts/check-repository-hygiene.mjs",
+        "scripts/diagnostics/repository-hygiene.test.mjs"
+      ],
+      "node": ["scripts/diagnostics/repository-hygiene.test.mjs"],
+      "escalation": [
+        "Changes to health or CI entry points also require the affected workflow diagnostic tests."
+      ]
     }
   ]
 }

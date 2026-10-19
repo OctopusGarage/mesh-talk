@@ -1,4 +1,8 @@
-# AI Eval Case Registry
+# Evaluation suites and case registry
+
+This directory contains maintained evaluation inputs, not generated reports or
+historical implementation reviews. Keep output under ignored `target/ai-eval/`
+or `tmp/`; put current guidance in its owning document.
 
 These are stable, repeatable cases for both the deterministic AI regression smoke gate and
 the real model-backed AI eval. The canonical executable suite is
@@ -10,7 +14,7 @@ the real model-backed AI eval. The canonical executable suite is
 | MT-AI-002 | `.claude/agents/e2e-runner.md`         | Runs `make e2e`, triages startup timeout vs environment vs real delivery regression, and never claims green without observed output.                                                                                                |
 | MT-AI-003 | `.claude/agents/bug-hunter.md`         | Reports only verified bugs with repro, severity, blast radius, and fix direction.                                                                                                                                                   |
 | MT-AI-004 | `AGENTS.md`                            | Project guidance preserves module boundaries, validation commands, and security expectations.                                                                                                                                       |
-| MT-AI-005 | `docs/evals/delivery-ai-regression.md` | Delivery guidance distinguishes deterministic and model-backed evaluation, trigger rules, and human review.                                                                                                                         |
+| MT-AI-005 | `docs/evals/README.md`                 | Delivery guidance distinguishes deterministic and model-backed evaluation, trigger rules, and human review.                                                                                                                         |
 | MT-AI-006 | `docs/post-office-metadata-privacy.md` | Relay privacy claims match visible routing metadata, custody limits, key compromise, and V1 migration behavior.                                                                                                                     |
 | MT-AI-007 | `docs/post-office-macos-service.md`    | Intel Mac service setup, credential handling, health checks, lifecycle limits, and separate cross-machine offer and file-byte relay verification.                                                                                   |
 | MT-AI-008 | `docs/post-office-windows-service.md`  | Windows Scheduled Task setup, credential and lock handling, health checks, and separate cross-machine delivery layers.                                                                                                              |
@@ -44,8 +48,10 @@ metadata selection from attachment bytes while preserving MTAHS1 behavior.
 The linked-device suite reviews source against a security rubric. It supplements the Rust unit tests and real-process E2E runs; model scores alone do not verify runtime behavior.
 
 The [tray menu suite](tray-menu-ai-eval-suite.json) reviews native menu actions,
-frontend navigation, and the controlled About dialog. Its
-[validation guide](tray-menu.md) records the regression coverage and native-test limits.
+frontend navigation, and the controlled About dialog. Use the tray Rust unit
+tests, `scripts/diagnostics/tray-geometry-report.test.mjs`, and
+`frontend/e2e/tray-navigation.spec.ts` for executable regressions. Browser mocks
+and source judgments do not prove native OS menu interaction or focus behavior.
 
 ```bash
 AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/tray-menu-ai-eval-suite.json --report target/ai-eval/tray-menu-report.json
@@ -83,3 +89,47 @@ agent-workflow suite; model judgments do not replace unit or loopback evidence.
 ```bash
 AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/person-presence-ai-eval-suite.json --report target/ai-eval/person-presence-report.json
 ```
+
+## Evaluation workflow and limits
+
+`make eval-smoke` checks deterministic repository contracts and required scenario
+wiring without calling a model. `make ai-eval` runs the source cases above using
+`AI_EVAL_COMMAND` or the configured HTTP provider. A missing provider is **not
+run**, not a model-backed pass. The runner records per-case results and binds the
+report to the supplied source context. Exit success alone does not establish
+runtime messaging, native UI behavior or usability.
+
+Run focused checks while changing a feature. Before PR/review, use the required
+[testing gates](../testing-feedback-loop.md) and [quality gates](../quality-gates.md).
+`make smoke-full` is the explicit complete backend/browser smoke entry point.
+It includes deterministic contracts, harness tests, workspace tests, frontend
+coverage, backend multi-process E2E and browser E2E. Do not invoke it for every
+local edit or treat it as physical desktop acceptance.
+
+Changes to agents, prompts, suites, gate scripts or their documented contracts
+require `make eval-smoke` and `node --test scripts/test-ai-eval.mjs`. Run a real
+model when the changed prompt/rubric needs behavioral evaluation, and disclose
+provider unavailability. Preserve case thresholds and supplied security context;
+never replace missing native or model evidence with source assertions.
+
+UI review uses [the reusable screenshot prompt](prompts/ui-ux-review.md), actual
+screenshots and interaction assertions. A screenshot alone cannot establish task
+success. See [platform validation](../platform-validation.md) for native/browser
+boundaries and [quality gates](../quality-gates.md) for evidence requirements.
+
+### Triggers, full smoke and human review
+
+- Local edits: run deterministic smoke after changing its contracts. Codex must
+  invoke it explicitly; a chat instruction alone is not execution evidence.
+  Claude Code's configured change hook invokes `scripts/ai-eval-smoke.sh --changed`
+  for relevant paths; use `make eval-smoke` to check the complete contract.
+- CI and PR: the AI workflow runs deterministic contracts and harness tests;
+  real-model evaluation depends on an available configured provider. Inspect the
+  job report instead of treating a skipped provider as success.
+- Full backend smoke: `make test && make e2e`. Full frontend smoke:
+  `cd frontend && npm test && npm run e2e`. Use these only at the required gate
+  or on explicit request; ordinary development uses affected selections.
+- Human review remains required for security/crypto authority changes, product
+  usability, visual snapshot changes and native/platform acceptance. An AI score
+  or static screenshot cannot replace that review. Keep missing physical-device,
+  remote-network and model-provider evidence explicit in the PR.

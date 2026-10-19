@@ -16,14 +16,14 @@ For each applicable scenario, assert externally observable outcomes. A test shou
 fail with the old implementation or a deliberate incorrect mutation. Do not weaken
 assertions to accommodate unexplained failures.
 
-| Change | Required scenarios in addition to the happy path |
-|--------|-------------------------------------------------|
-| Persistent state | Reopen/restart, append after torn record, read/write failure, owner isolation, no memory-only success after failed persistence |
-| Permissions/privacy | Allow and deny, revocation after existing session, restart recovery, unknown peer/device, group vs direct-message boundaries |
-| Async UI/media | Account switch/logout while request is pending, late response rejection, failed save and retry, media cleanup |
-| Multiple devices/files | Every destination, one logical history record, sender restart before recipient download, revoked access |
-| Platform/native UI | Real Tauri IPC and window/process state on the affected OS, negative control, runner/desktop/GPU limitations |
-| CI/release scripts | Real fixture files, missing/partial evidence, tool failures, changed source and stale artifacts |
+| Change                 | Required scenarios in addition to the happy path                                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Persistent state       | Reopen/restart, append after torn record, read/write failure, owner isolation, no memory-only success after failed persistence |
+| Permissions/privacy    | Allow and deny, revocation after existing session, restart recovery, unknown peer/device, group vs direct-message boundaries   |
+| Async UI/media         | Account switch/logout while request is pending, late response rejection, failed save and retry, media cleanup                  |
+| Multiple devices/files | Every destination, one logical history record, sender restart before recipient download, revoked access                        |
+| Platform/native UI     | Real Tauri IPC and window/process state on the affected OS, negative control, runner/desktop/GPU limitations                   |
+| CI/release scripts     | Real fixture files, missing/partial evidence, tool failures, changed source and stale artifacts                                |
 
 Rust unit/integration, real multi-process backend E2E, browser UI tests, and native
 desktop tests answer different questions. A VM/Xvfb/software-renderer pass does not
