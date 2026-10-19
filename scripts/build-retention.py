@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -331,10 +332,29 @@ def clean(args, state):
                                         raise ValueError(
                                             f"Cache paths changed: {profile}"
                                         )
+                                    cache_stats = [tree_stats(path) for path in paths]
+                                    idle_window = getattr(args, "min_idle_seconds", 0)
+                                    if args.action == "run" and idle_window:
+                                        last_used = max(newest for _, newest in cache_stats)
+                                        marker = root / "target/.mesh-talk-build-use"
+                                        try:
+                                            marker_info = marker.lstat()
+                                            if stat.S_ISREG(marker_info.st_mode):
+                                                last_used = max(last_used, marker_info.st_mtime)
+                                        except FileNotFoundError:
+                                            pass
+                                        # Inspect actual cache activity under Cargo's locks.
+                                        # Creating coordination locks must not warm an idle
+                                        # cache, and a shared target may belong to a different
+                                        # checkout than the just-finished managed command.
+                                        if time.time() - last_used < idle_window:
+                                            print(
+                                                f"Keeping recently used Cargo profile during automatic cleanup: {profile}",
+                                                flush=True,
+                                            )
+                                            continue
                                     before, _ = tree_stats(profile)
-                                    reclaimable = sum(
-                                        tree_stats(path)[0] for path in paths
-                                    )
+                                    reclaimable = sum(size for size, _ in cache_stats)
                                     for cache in paths:
                                         print(
                                             f"{'DRY-RUN: ' if args.dry_run else ''}Remove compiler cache: {cache}",
@@ -379,7 +399,7 @@ def clean(args, state):
             )
             if total > args.budget_gb * 2**30:
                 print(
-                    "Budget still exceeded: active, preserved, or unverified outputs remain; scheduled cleanup will retry."
+                    "Budget still exceeded: active, recent, preserved, or unverified outputs remain; scheduled cleanup will retry."
                 )
     except BlockingIOError:
         print("Another cleanup is active; skipping this attempt.")
@@ -493,18 +513,74 @@ def archive(root, state, mode, started):
             shutil.rmtree(staging)
 
 
+@contextmanager
+def managed_cancellation():
+    """Keep OS build locks until the outer POSIX group owner escalates."""
+    owner = os.environ.get("MESH_VALIDATION_PROCESS_GROUP_OWNER", "")
+    managed = False
+    if os.name != "nt" and owner.isdecimal():
+        try:
+            owner_pid = int(owner)
+            managed = owner_pid > 1 and os.getpgid(owner_pid) != os.getpgrp()
+        except (ProcessLookupError, PermissionError, OverflowError):
+            pass
+    if not managed:
+        yield
+        return
+
+    def await_group_cleanup(_signum, _frame):
+        # The owner has a bounded SIGTERM -> SIGKILL sequence for this group.
+        # Returning (or raising KeyboardInterrupt) would unlock while children
+        # can still be running. A callable handler resets to default on child
+        # exec, unlike SIG_IGN, so commands keep their own signal semantics.
+        while True:
+            signal.pause()
+
+    previous = {}
+    try:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous[signum] = signal.signal(signum, await_group_cleanup)
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def mark_build_use(root):
+    """Refresh only verified checkout-local targets, including explicit shared use."""
+    targets = {root / "target"}
+    configured = os.environ.get("CARGO_TARGET_DIR") or os.environ.get("CARGO_BUILD_TARGET_DIR")
+    if configured:
+        target = Path(configured)
+        targets.add(target if target.is_absolute() else root / target)
+    for target in targets:
+        try:
+            # Resolve parent aliases without hiding a symlinked target itself.
+            owner = target.parent.resolve()
+            target = owner / target.name
+            if target.name != "target" or not project(owner) or not safe_directory(target, owner):
+                continue
+            marker = target / ".mesh-talk-build-use"
+            try:
+                if not stat.S_ISREG(marker.lstat().st_mode):
+                    continue
+            except FileNotFoundError:
+                pass
+            marker.touch()
+        except (OSError, ValueError, RuntimeError) as error:
+            print(f"Cache-use marker skipped for {target}: {error}", file=sys.stderr)
+
+
 def run_build(args, state):
     command = args.command
     if command[:1] == ["--"]:
         command = command[1:]
     if not command:
         raise ValueError("run requires a command after --")
-    with lock(state, name=worktree_lock_name(args.root)):
+    with managed_cancellation(), lock(state, name=worktree_lock_name(args.root)):
         started = time.time()
         result = subprocess.run(command, cwd=args.root)
-        target = args.root / "target"
-        if safe_directory(target, args.root):
-            (target / ".mesh-talk-build-use").touch()
+        mark_build_use(args.root)
         if result.returncode:
             return (
                 result.returncode if result.returncode > 0 else 128 - result.returncode
@@ -552,6 +628,11 @@ def main():
             default=os.environ.get("MT_BUILD_SCAN_INTERVAL_SECONDS", "600"),
         )
         if name == "run":
+            sub.add_argument(
+                "--min-idle-seconds", type=int,
+                default=os.environ.get("MT_BUILD_CACHE_MIN_IDLE_SECONDS", "600"),
+                help="Minimum idle time before automatic cache eviction; 0 disables protection",
+            )
             sub.add_argument("--archive", choices=("binary", "bundle"))
             sub.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -563,8 +644,9 @@ def main():
         or args.budget_gb < 0
         or args.keep < 1
         or args.interval_seconds < 0
+        or getattr(args, "min_idle_seconds", 0) < 0
     ):
-        parser.error("budget must be finite and nonnegative; keep must be at least one")
+        parser.error("budget must be finite and nonnegative; intervals must be nonnegative; keep must be at least one")
     args.checkout.extend(
         Path(path)
         for path in os.environ.get("MT_BUILD_CHECKOUTS", "").split(os.pathsep)

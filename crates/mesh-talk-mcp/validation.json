@@ -3,7 +3,12 @@
   "contracts": [
     {
       "id": "mcp-adapter",
-      "paths": ["crates/mesh-talk-mcp/src/lib.rs"],
+      "paths": [
+        "crates/mesh-talk-mcp/src/lib.rs",
+        "crates/mesh-talk-mcp/Cargo.toml",
+        "crates/mesh-talk-mcp/src/main.rs",
+        "crates/mesh-talk-mcp/tests/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-mcp",
@@ -11,7 +16,7 @@
         }
       ],
       "escalation": [
-        "Changed tool contracts require protocol lifecycle/schema evidence; binary launch or stdio changes also require explicit CLI validation."
+        "Changed tool contracts require protocol lifecycle/schema integration evidence. Binary launch/stdio, package inputs and integration harness changes require explicit CLI builds and local_send integration target validation; library tests do not execute those targets."
       ]
     }
   ]

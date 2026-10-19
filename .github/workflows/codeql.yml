@@ -5,6 +5,8 @@ name: CodeQL
 # Covers the same languages default setup did: Rust, JavaScript/TypeScript, and Actions.
 
 on:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
   pull_request:
@@ -14,6 +16,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 jobs:
   analyze:

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, writeFile, readFile, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm, mkdir, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 async function fixture(t) {
@@ -15,7 +16,10 @@ async function fixture(t) {
   git(["add", "."]); git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "fixture"]);
   const command = [process.execPath, "-e", "const fs=require('node:fs'); const n=fs.existsSync('count')?Number(fs.readFileSync('count')):0; fs.writeFileSync('count',String(n+1)); fs.writeFileSync('artifact','measured');"];
   const { runStage } = await import("../validation/stage.mjs");
-  const run = options => runStage({ root, cwd: root, name: "fixture", command, env: { ...process.env, CI: "" }, log: () => {}, ...options });
+  const run = options => runStage({ root, cwd: root, name: "fixture", command, log: () => {}, ...options,
+    // Each fixture owns its own group even when this test suite itself runs
+    // inside an affected-validation supervisor.
+    env: { ...process.env, CI: "", ...options?.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined } });
   const count = async () => Number(await readFile(path.join(root, "count"), "utf8"));
   return { root, git, run, count, command };
 }
@@ -126,6 +130,52 @@ test("cancelling a running process leaves no successful receipt and releases its
   assert.equal((await f.run({ resource: "heavy" })).code, 0);
 });
 
+test("cancellation waits for a detached-stdio descendant that ignores SIGTERM", { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  let descendant;
+  t.after(() => {
+    controller.abort();
+    if (descendant) { try { process.kill(descendant, "SIGKILL"); } catch {} }
+  });
+  const descendantCode = "process.on('SIGTERM',()=>{});require('node:fs').writeFileSync('target/descendant',String(process.pid));setInterval(()=>{},1000)";
+  const command = [process.execPath, "-e", `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendantCode)}],{stdio:'ignore'});setInterval(()=>{},1000)`];
+  const pending = f.run({ signal: controller.signal, command, resource: "heavy" });
+  try {
+    for (let tries = 0; tries < 500; tries++) {
+      try { descendant = Number(await readFile(path.join(f.root, "target/descendant"), "utf8")); break; }
+      catch { await new Promise(resolve => setTimeout(resolve, 10)); }
+    }
+    assert.ok(descendant, "descendant did not start");
+    controller.abort();
+    const result = await pending;
+    assert.equal(result.code, 130);
+    // An orphaned zombie has stopped running, even if the host init has not
+    // reaped it yet. Check state so Linux containers do not report it as alive.
+    const running = () => {
+      const state = spawnSync("ps", ["-p", String(descendant), "-o", "stat="], { encoding: "utf8" });
+      return state.status === 0 && state.stdout.trim() && !state.stdout.trim().startsWith("Z");
+    };
+    for (let tries = 0; tries < 50 && running(); tries++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(Boolean(running()), false, "descendant survived after resource release");
+    assert.equal((await f.run({ resource: "heavy" })).code, 0);
+  } finally {
+    controller.abort();
+    await pending.catch(() => {});
+  }
+});
+
+test("cancellation immediately before spawn prevents command side effects", async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  await assert.rejects(f.run({
+    signal: controller.signal,
+    log: message => { if (message.startsWith("started after")) controller.abort(); },
+  }), /abort/iu);
+  await assert.rejects(f.count(), /ENOENT/u);
+  assert.equal((await f.run()).code, 0);
+});
+
 test("expired evidence and missing logs cannot authorize reuse", async t => {
   const f = await fixture(t);
   const first = await f.run();
@@ -167,4 +217,189 @@ test("a failed forced rerun invalidates the older successful verdict", async t =
   const next = await f.run({ command });
   assert.equal(next.reused, false);
   assert.equal(next.code, 7);
+});
+
+test("declared inputs reuse clean local evidence across unrelated commits with provenance", async t => {
+  const f = await fixture(t);
+  const options = { inputs: ["source"], artifacts: ["artifact"] };
+  const first = await f.run(options);
+  await writeFile(path.join(f.root, "unrelated"), "documentation");
+  f.git(["add", "unrelated"]);
+  f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "unrelated"]);
+  const second = await f.run(options);
+  assert.equal(second.reused, true);
+  assert.equal(second.source, f.git(["rev-parse", "HEAD"]).trim());
+  assert.equal(second.reusedFromSource, first.source);
+  assert.equal(await f.count(), 1);
+});
+
+test("declared input edits, additions and deletions invalidate cross-revision evidence", async t => {
+  const f = await fixture(t);
+  await mkdir(path.join(f.root, "inputs"));
+  await writeFile(path.join(f.root, "inputs/a"), "one");
+  const commit = () => {
+    f.git(["add", "-A"]);
+    f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "inputs"]);
+  };
+  commit();
+  const options = { inputs: ["inputs/", "optional"] };
+  await f.run(options);
+  assert.equal((await f.run(options)).reused, true);
+  await writeFile(path.join(f.root, "inputs/a"), "two"); commit();
+  assert.equal((await f.run(options)).reused, false);
+  await writeFile(path.join(f.root, "inputs/b"), "new"); commit();
+  assert.equal((await f.run(options)).reused, false);
+  await rm(path.join(f.root, "inputs/a")); commit();
+  assert.equal((await f.run(options)).reused, false);
+  await writeFile(path.join(f.root, "optional"), "new config"); commit();
+  assert.equal((await f.run(options)).reused, false);
+  assert.equal(await f.count(), 5);
+});
+
+test("input caching preserves CI, dirty-source, artifact and fresh-run safeguards", async t => {
+  const f = await fixture(t);
+  const inputs = ["source"];
+  await f.run({ inputs });
+  assert.equal((await f.run({ inputs, env: { ...process.env, CI: "1" } })).reused, false);
+  assert.equal((await f.run({ inputs, fresh: true })).reused, false);
+  await writeFile(path.join(f.root, "source"), "dirty");
+  assert.equal((await f.run({ inputs })).reused, false);
+  assert.equal((await f.run({ inputs })).reused, false);
+});
+
+test("unsafe or empty input declarations fail before executing commands", async t => {
+  const f = await fixture(t);
+  for (const inputs of [[], ["../source"], ["/source"], ["source", ""], ["*.rs"], [":(exclude)source"]]) {
+    await assert.rejects(f.run({ inputs }), /input/i);
+  }
+  await assert.rejects(f.count(), /ENOENT/);
+});
+
+test("ignored frontend env files and Vite environment variables invalidate input reuse", async t => {
+  const f = await fixture(t);
+  await mkdir(path.join(f.root, "frontend"));
+  await writeFile(path.join(f.root, ".gitignore"), "target/\ncount\nartifact\nfrontend/.env*\n");
+  f.git(["add", ".gitignore"]);
+  f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "ignore environment"]);
+  const options = { inputs: ["frontend/"] };
+  await f.run(options);
+  await writeFile(path.join(f.root, "frontend/.env.local"), "VITE_FLAG=one\n");
+  assert.equal((await f.run(options)).reused, false);
+  assert.equal((await f.run(options)).reused, true);
+  await writeFile(path.join(f.root, "frontend/.env.local"), "VITE_FLAG=two\n");
+  assert.equal((await f.run(options)).reused, false);
+  assert.equal((await f.run({ ...options, env: { ...process.env, CI: "", VITE_FLAG: "three" } })).reused, false);
+});
+
+test("attempt history retains failures and distinguishes reused work", async t => {
+  const f = await fixture(t);
+  await f.run(); await f.run();
+  await f.run({ command: [process.execPath, "-e", "process.exit(7)"] });
+  const directory = path.join(f.root, "target/validation/attempts");
+  const records = await Promise.all((await readdir(directory)).map(name => readFile(path.join(directory, name), "utf8").then(JSON.parse)));
+  assert.equal(records.length, 3);
+  assert.equal(records.filter(record => record.code === 7).length, 1);
+  assert.equal(records.filter(record => record.reused).length, 1);
+  assert.equal(records.find(record => record.reused).executionMs, 0);
+  assert(records.every(record => record.platform === process.platform && record.arch === process.arch));
+});
+
+test("cross-revision reuse is only registered for deterministic frontend CLI stages", async () => {
+  const { inputGroup } = await import("../validation/stage-inputs.mjs");
+  assert(inputGroup("frontend", "frontend-build").includes("Cargo.toml"));
+  assert.throws(() => inputGroup("frontend", "browser-full"), /not registered/);
+  assert.throws(() => inputGroup("typo", "frontend-build"), /unknown/i);
+});
+
+test("revision-bound outer stages cannot hide ignored frontend environment changes", async t => {
+  const f = await fixture(t);
+  await mkdir(path.join(f.root, "frontend"));
+  await writeFile(path.join(f.root, ".gitignore"), "target/\ncount\nartifact\nfrontend/.env*\n");
+  f.git(["add", ".gitignore"]);
+  f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "ignore env"]);
+  await f.run();
+  await writeFile(path.join(f.root, "frontend/.env.local"), "VITE_FLAG=changed\n");
+  assert.equal((await f.run()).reused, false);
+});
+
+for (const ignoredStdio of [false, true]) test(
+  `nested stage cancellation owns its commands through group cleanup${ignoredStdio ? " with ignored-stdio descendants" : ""}`,
+  { skip: process.platform === "win32", timeout: 20000 },
+  async t => {
+    const f = await fixture(t);
+    const controller = new AbortController();
+    const { fileURLToPath } = await import("node:url");
+    const { createHash } = await import("node:crypto");
+    const pidfile = path.join(f.root, "target/nested-command-pid");
+    let pid;
+    t.after(() => {
+      controller.abort();
+      if (pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
+    });
+    const worker = `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(pidfile)},String(process.pid));setInterval(()=>{},1000)`;
+    const command = ignoredStdio
+      ? `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(worker)}],{stdio:'ignore'});setInterval(()=>{},1000)`
+      : worker;
+    const pending = f.run({ name: "nested-owner", resource: "heavy", signal: controller.signal,
+      command: [process.execPath, fileURLToPath(new URL("../validation/stage.mjs", import.meta.url)),
+        "nested-child", "--resource", "focused-static", "--", process.execPath, "-e", command] });
+    try {
+      for (let tries = 0; tries < 500; tries++) {
+        try { pid = Number(await readFile(pidfile, "utf8")); break; }
+        catch { await new Promise(resolve => setTimeout(resolve, 10)); }
+      }
+      assert.ok(pid, "nested command did not start");
+      controller.abort();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      // The outer resource lease must cover the grace period, even when the
+      // inner command's leader exits and its descendant ignores SIGTERM.
+      for (const resource of ["heavy", "focused-static"])
+        await readFile(path.join(f.root, ".git/validation-resources", createHash("sha256").update(resource).digest("hex"), "owner.json"));
+      const result = await pending;
+      assert.equal(result.code, 130);
+      const state = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" });
+      const running = state.status === 0 && state.stdout.trim() && !state.stdout.trim().startsWith("Z");
+      assert.equal(Boolean(running), false, "nested command survived when outer stage resolved and released its resource");
+      await assert.rejects(readFile(result.receipt));
+      assert.equal((await f.run({ resource: "heavy" })).code, 0);
+      assert.equal((await f.run({ resource: "focused-static" })).code, 0);
+    } finally {
+      controller.abort();
+      await pending.catch(() => {});
+    }
+  },
+);
+
+test("stage distinguishes an unavailable executable from an executed failing command", async t => {
+  const f = await fixture(t);
+  const unavailable = await f.run({ command: [path.join(f.root, "missing-executable")] });
+  assert.equal(unavailable.failureKind, "unavailable");
+  assert.equal(unavailable.code, 1);
+  const failure = await f.run({ command: [process.execPath, "-e", "process.exit(7)"] });
+  assert.equal(failure.code, 7);
+  assert.notEqual(failure.failureKind, "unavailable");
+});
+
+test("stage CLI publishes structured launch and reused results outside receipt identity", async t => {
+  const f = await fixture(t);
+  const cli = fileURLToPath(new URL("../validation/stage.mjs", import.meta.url));
+  const env = { ...process.env, CI: "", MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined };
+  const output = path.join(f.root, "target/result.json");
+  for (const count of [1, 2]) {
+    const result = spawnSync(process.execPath, [cli, "result-cli", "--result", output, "--", process.execPath, "-e", "process.exit(0)"], { cwd: f.root, env, encoding: "utf8", timeout: 10000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(JSON.parse(await readFile(output, "utf8")).reused, count === 2);
+  }
+  const result = spawnSync(process.execPath, [cli, "result-unavailable", "--result", output, "--", path.join(f.root, "missing-executable")], { cwd: f.root, env, encoding: "utf8", timeout: 10000 });
+  assert.notEqual(result.status, 0);
+  assert.equal(JSON.parse(await readFile(output, "utf8")).failureKind, "unavailable");
+});
+
+test("successful command with changed source is invalidated rather than reported as a test failure", async t => {
+  const f = await fixture(t);
+  const result = await f.run({ command: [process.execPath, "-e", "require('node:fs').writeFileSync('source','changed while validating')"] });
+  assert.equal(result.code, 1);
+  assert.equal(result.failureKind, "invalidated");
+  assert.match(result.error, /Source changed/);
+  await assert.rejects(readFile(result.receipt));
 });

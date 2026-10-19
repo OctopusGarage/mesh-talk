@@ -87,10 +87,58 @@
       "consumers": [
         "integration-client",
         "desktop-integrations",
-        "integration-ipc"
+        "integration-ipc",
+        "integration-policy",
+        "integration-host"
       ],
       "escalation": [
         "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
+      ]
+    },
+    {
+      "id": "integration-model",
+      "paths": ["crates/mesh-talk-integrations/src/model.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-integrations",
+          "filters": ["model::"]
+        }
+      ],
+      "consumers": ["integration-policy", "integration-client"],
+      "escalation": [
+        "Public grant/request/response serialization requires private IPC and MCP schema compatibility evidence."
+      ]
+    },
+    {
+      "id": "integration-package",
+      "paths": [
+        "crates/mesh-talk-integrations/Cargo.toml",
+        "crates/mesh-talk-integrations/src/lib.rs"
+      ],
+      "consumers": [
+        "integration-model",
+        "integration-private-files",
+        "integration-service",
+        "integration-host"
+      ],
+      "escalation": [
+        "Public exports and dependency/build inputs require affected CLI, desktop and MCP consumer compile checks."
+      ]
+    },
+    {
+      "id": "integration-cli-harness",
+      "paths": [
+        "crates/mesh-talk-integrations/src/bin/",
+        "crates/mesh-talk-integrations/tests/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-integrations",
+          "filters": ["host::", "ipc::", "policy::"]
+        }
+      ],
+      "escalation": [
+        "CLI and integration harness changes use conservative host/IPC/policy library coverage; explicitly build the binary and run the affected headless_cli integration tests, which these filters do not execute."
       ]
     }
   ]

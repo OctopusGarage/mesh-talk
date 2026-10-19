@@ -4,11 +4,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { readFile, mkdir, mkdtemp, rm } from "node:fs/promises";
-import { buildAffectedPlan } from "./affected.mjs";
+import { readFile, mkdir, mkdtemp, rm, lstat, readlink, realpath } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { buildAffectedPlan, isFrontendGlobal } from "./affected.mjs";
 import { buildFrontendGraph } from "./frontend-graph.mjs";
 import { runStage } from "./stage.mjs";
 import { runCommand, rustTestCount } from "../pr-platform/guest.mjs";
+import { buildStaticChecks, phasePlan } from "./checks.mjs";
+import { frontendEnvironmentIdentity } from "./stage-inputs.mjs";
+import { loadRequirements, selectRequirements } from "./pr-scenarios.mjs";
+import { createFeedback, completePhase, finishFeedback, observeCommands, writeFeedback } from "./feedback.mjs";
 
 const contractFiles = [
   "scripts/validation/validation.json",
@@ -50,7 +55,8 @@ export function discoverChanges(root, base = "HEAD") {
       ),
     ]),
   ].sort();
-  return { base: resolved, files };
+  const deleted = nulList(git(root, ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=D", resolved, "--"]));
+  return { base: resolved, files, deleted };
 }
 export function parseOptions(args) {
   const options = {
@@ -59,23 +65,30 @@ export function parseOptions(args) {
     json: false,
     owners: [],
     reason: "",
+    checks: false,
+    managed: false,
+    browser: [],
+    native: [],
+    report: undefined,
   };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (["--run", "--json"].includes(arg)) {
+    if (["--run", "--json", "--checks", "--managed"].includes(arg)) {
       options[arg.slice(2)] = true;
       continue;
     }
-    if (["--base", "--owner", "--reason"].includes(arg)) {
+    if (["--base", "--owner", "--reason", "--browser", "--native", "--report"].includes(arg)) {
       const value = args[++i];
       if (!value || value.startsWith("-") || /[\x00-\x1f]/u.test(value))
         throw Error(`${arg} requires a literal value`);
       if (arg === "--owner") options.owners.push(value);
+      else if (arg === "--browser" || arg === "--native") options[arg.slice(2)].push(value);
       else options[arg.slice(2)] = value;
     } else throw Error(`Unknown option: ${arg}`);
   }
-  if (options.owners.length && !options.reason.trim())
-    throw Error("--owner requires --reason");
+  if ((options.owners.length || options.browser.length || options.native.length) && !options.reason.trim())
+    throw Error("Explicit owners/browser/native evidence requires --reason");
+  if (options.report && !options.run) throw Error("--report requires --run; previews are read-only");
   return options;
 }
 
@@ -90,7 +103,7 @@ export async function createPlan(root, options) {
   }
   let frontend;
   if (
-    changes.files.some((file) => file.startsWith("frontend/src/")) ||
+    changes.files.some((file) => file.startsWith("frontend/src/") || isFrontendGlobal(file)) ||
     options.owners.some((owner) => owner.startsWith("frontend-"))
   ) {
     const current = new Map();
@@ -142,10 +155,32 @@ export async function createPlan(root, options) {
       reason: options.reason,
     }),
     base: changes.base,
+    deleted: changes.deleted,
+    source: git(root, ["rev-parse", "HEAD"]).trim(),
+    dirty: git(root, ["status", "--porcelain", "--untracked-files=normal"]).trim() !== "",
   };
+  for (const contract of contracts) if (contract.capability) {
+    for (const reference of [contract.capability.guide, ...contract.capability.invariants.map(item => item.reference)]) {
+      try { await readFile(path.join(root, reference.split("#")[0])); }
+      catch { throw Error(`Missing capability reference for ${contract.id}: ${reference}`); }
+    }
+  }
+  const required = await loadRequirements(plan.files, root);
+  const additional = selectRequirements(["manual"], [{ id: "manual-boundary", paths: ["manual"], browser: options.browser ?? [], native: options.native ?? [] }]);
+  plan.requirements = {
+    browser: [...new Set([...required.browser, ...additional.browser])].sort(),
+    native: [...new Set([...required.native, ...additional.native])].sort(),
+    owners: required.owners,
+    ...(additional.browser.length || additional.native.length ? { addedReason: options.reason } : {}),
+  };
+  for (const spec of plan.requirements.browser) {
+    try { await readFile(path.join(root, "frontend", spec)); }
+    catch { throw Error(`Missing required browser spec: ${spec}`); }
+  }
   for (const file of plan.node) await readFile(path.join(root, file));
   for (const file of plan.frontend)
     await readFile(path.join(root, "frontend", file));
+  if (options.checks) plan.checks = buildStaticChecks(plan);
   return plan;
 }
 
@@ -156,9 +191,10 @@ async function checked(run, program, args, options) {
     timeoutMs: 2_147_483_647,
   });
   if (result.code !== 0 || result.timedOut || result.error)
-    throw Error(
-      `${program} failed: ${result.error || result.output.slice(-6000)}`,
-    );
+    throw Object.assign(Error(`${program} failed: ${result.error || result.output?.slice(-6000) || "no output"}`), {
+      kind: result.failureKind ?? (result.error && !result.timedOut ? "unavailable" : "failed"),
+      reportMessage: `${program} failed (${result.timedOut ? "deadline" : `exit ${result.code ?? "unavailable"}`}); inspect the phase log.`,
+    });
   return result.output;
 }
 export async function prepareRust(
@@ -246,10 +282,20 @@ export function validateFrontendReport(report, files, directory) {
 }
 export async function executePlan(
   plan,
-  { cwd = process.cwd(), run = runCommand, log = console.log } = {},
+  { cwd = process.cwd(), run = runCommand, log = console.log, resultPrefix } = {},
 ) {
   if (plan.blockers.length)
     throw Error(`Validation blocked: ${plan.blockers.join("\n")}`);
+  for (const [index, check] of (plan.checks ?? []).entries()) {
+    log(`Static ${check.name}`);
+    const output = await checked(run, process.execPath, [
+      path.join(cwd, "scripts/validation/stage.mjs"), check.name,
+      "--profile", "shared", ...(resultPrefix ? ["--result", `${resultPrefix}.${index}.json`] : []), ...(check.inputs ? ["--inputs", check.inputs] : []),
+      ...(check.artifacts ?? []).flatMap(artifact => ["--artifact", artifact]),
+      "--", ...check.command,
+    ], { cwd: path.resolve(cwd, check.cwd) });
+    log(output);
+  }
   const prepared = await prepareRust(plan.rust, { cwd, run, log });
   async function execute(program, args, directory) {
     const started = Date.now();
@@ -308,6 +354,25 @@ export async function executePlan(
     }
   }
 }
+
+// The phase handoff also protects dirty development edits, which cannot create
+// reusable receipts. A different plan or changed bytes require fresh static work.
+export async function executionFingerprint(root, plan) {
+  const hash = createHash("sha256").update(JSON.stringify(plan));
+  for (const file of [...plan.files].sort()) {
+    try {
+      const filename = path.join(root, file);
+      const info = await lstat(filename);
+      const bytes = info.isSymbolicLink() ? await readlink(filename) : await readFile(filename);
+      hash.update(JSON.stringify([file, info.mode, createHash("sha256").update(bytes).digest("hex")]));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      hash.update(JSON.stringify([file, "absent"]));
+    }
+  }
+  hash.update(JSON.stringify(await frontendEnvironmentIdentity(root)));
+  return hash.digest("hex");
+}
 function printPlan(plan) {
   console.log(
     `Development validation against ${plan.base.slice(0, 12)} (${plan.files.length} changed files)`,
@@ -319,69 +384,196 @@ function printPlan(plan) {
   for (const file of plan.node) console.log(`Node: ${file}`);
   for (const file of plan.frontend)
     console.log(`Frontend ${file}: ${plan.frontendReasons[file].join("; ")}`);
+  for (const check of plan.checks ?? [])
+    console.log(`Static ${check.name}: ${check.command.join(" ")}`);
   for (const file of plan.acknowledged)
     console.log(`Explicitly reviewed unmapped file: ${file}`);
+  for (const owner of plan.owners) if (owner.capability) {
+    console.log(`Capability ${owner.id}: ${owner.capability.summary} (${owner.capability.guide})`);
+    for (const invariant of owner.capability.invariants) console.log(`Invariant ${invariant.name}: ${invariant.reference}`);
+  }
+  for (const spec of plan.requirements?.browser ?? []) console.log(`Pending browser evidence: ${spec}`);
+  for (const platform of plan.requirements?.native ?? []) console.log(`Pending native evidence: ${platform}`);
   for (const note of plan.escalation) console.log(`Escalation: ${note}`);
   for (const blocker of plan.blockers) console.log(`BLOCKED: ${blocker}`);
   console.log(plan.scope);
 }
+async function reportFilename(root, requested) {
+  let filename = requested ? path.resolve(root, requested) : path.join(root, "target/validation/feedback", `${Date.now()}-${randomUUID()}.json`);
+  // Git canonicalizes /var -> /private/var on macOS. Resolve existing parents
+  // before checking containment, also preventing an output-directory symlink escape.
+  let parent = path.dirname(filename);
+  const suffix = [path.basename(filename)];
+  while (true) {
+    try { filename = path.join(await realpath(parent), ...suffix); break; }
+    catch (error) {
+      if (error.code !== "ENOENT" || parent === path.dirname(parent)) throw error;
+      suffix.unshift(path.basename(parent)); parent = path.dirname(parent);
+    }
+  }
+  if (!/^(?:target|tmp)[/\\]/u.test(path.relative(root, filename)) || !filename.endsWith(".json"))
+    throw Error("Feedback reports must be JSON files under this worktree's ignored target/ or tmp/");
+  const ignored = spawnSync("git", ["check-ignore", "--quiet", "--", filename], { cwd: root });
+  if (ignored.status !== 0) throw Error("Feedback report destination must be ignored by Git");
+  return filename;
+}
+async function terminalFeedback(filename, plan, options, started) {
+  const report = finishFeedback(createFeedback(plan, { checks: options.checks, started }));
+  await writeFeedback(filename, report);
+  console.log(`Development feedback: ${report.status}; candidate acceptance pending. Report: ${filename}`);
+}
 async function main(args) {
   const options = parseOptions(args);
+  const invocationStarted = Date.now();
   const root = git(process.cwd(), ["rev-parse", "--show-toplevel"]).trim();
-  const plan = await createPlan(root, options);
+  const childProgress = process.env.MESH_VALIDATION_AFFECTED_PROGRESS;
+  const reportFile = options.run && !process.env.MESH_VALIDATION_AFFECTED_CHILD ? await reportFilename(root, options.report) : undefined;
+  let plan;
+  try { plan = await createPlan(root, options); }
+  catch (error) {
+    if (childProgress) await observeCommands(childProgress, {
+      phase: process.env.MESH_VALIDATION_AFFECTED_PHASE || "all",
+      fingerprint: process.env.MESH_VALIDATION_AFFECTED_INPUTS,
+    }).fail(Object.assign(Error(`Validation plan changed or became invalid: ${error.message}`), { kind: "invalidated" }));
+    if (reportFile) await terminalFeedback(reportFile, {
+      source: git(root, ["rev-parse", "HEAD"]).trim(), dirty: git(root, ["status", "--porcelain", "--untracked-files=normal"]).trim() !== "", owners: [], rust: [], frontend: [], node: [],
+      blockers: [error.message], escalation: [],
+    }, options, invocationStarted);
+    throw error;
+  }
   if (options.json) console.log(JSON.stringify(plan, null, 2));
   else printPlan(plan);
   if (plan.blockers.length) {
+    if (childProgress) await observeCommands(childProgress, {
+      phase: process.env.MESH_VALIDATION_AFFECTED_PHASE || "all",
+      fingerprint: process.env.MESH_VALIDATION_AFFECTED_INPUTS,
+    }).fail(Object.assign(Error("Validation plan became blocked; preview the changed inputs."), { kind: "invalidated" }));
+    if (reportFile) await terminalFeedback(reportFile, plan, options, invocationStarted);
     process.exitCode = 2;
     return;
   }
   const expectedResource = process.env.MESH_VALIDATION_AFFECTED_CHILD;
-  const resource = plan.rust.length
+  const phase = process.env.MESH_VALIDATION_AFFECTED_PHASE || "all";
+  if (!["all", "static", "tests"].includes(phase)) throw Error("Unknown validation phase");
+  const resource = plan.rust.length || plan.checks?.some(check => check.name === "frontend-build")
     ? "heavy"
     : plan.frontend.length
       ? "focused-frontend"
       : "focused-node";
   const child = !!expectedResource;
   if (!options.run && !child) return;
-  if (!plan.rust.length && !plan.node.length && !plan.frontend.length) {
+  if (!child && !plan.rust.length && !plan.node.length && !plan.frontend.length && !plan.checks?.length) {
     console.log("No tests selected for the current change set.");
+    if (reportFile) await terminalFeedback(reportFile, plan, options, invocationStarted);
     return;
   }
   if (child) {
-    if (resource !== expectedResource)
-      throw Error(
-        "Validation resource class changed while queued; preview and run the updated plan.",
-      );
-    delete process.env.MESH_VALIDATION_AFFECTED_CHILD;
-    return executePlan(plan, { cwd: root });
+    const expectedInputs = process.env.MESH_VALIDATION_AFFECTED_INPUTS;
+    const progressFile = process.env.MESH_VALIDATION_AFFECTED_PROGRESS;
+    const observer = progressFile ? observeCommands(progressFile, { phase, fingerprint: expectedInputs }) : undefined;
+    try {
+      if ((phase === "static" ? "focused-static" : resource) !== expectedResource)
+        throw Object.assign(Error("Validation resource class changed while queued; preview and run the updated plan."), { kind: "invalidated" });
+      if ((phase !== "all" || expectedInputs) && (!expectedInputs || await executionFingerprint(root, plan) !== expectedInputs))
+        throw Object.assign(Error("Validation inputs changed between phases; preview and rerun the updated plan."), { kind: "invalidated" });
+      delete process.env.MESH_VALIDATION_AFFECTED_CHILD;
+      delete process.env.MESH_VALIDATION_AFFECTED_PHASE;
+      delete process.env.MESH_VALIDATION_AFFECTED_INPUTS;
+      delete process.env.MESH_VALIDATION_AFFECTED_PROGRESS;
+      await executePlan(phase === "all" ? plan : phasePlan(plan, phase), {
+        cwd: root, ...(observer ? { run: observer.wrap(runCommand), resultPrefix: progressFile } : {}),
+      });
+      if ((phase !== "all" || expectedInputs) && await executionFingerprint(root, await createPlan(root, options)) !== expectedInputs)
+        throw Object.assign(Error("Validation inputs changed during the phase; preview and rerun the updated plan."), { kind: "invalidated" });
+    } catch (error) { await observer?.fail(error); throw error; }
+    return;
   }
   await mkdir(path.join(root, "target/validation"), { recursive: true });
   // The child recomputes the plan inside the existing cross-worktree resource lock.
-  const forwarded = args.filter((arg) => arg !== "--run" && arg !== "--json");
+  const forwarded = [];
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === "--report") { index++; continue; }
+    if (!["--run", "--json"].includes(args[index])) forwarded.push(args[index]);
+  }
   const controller = new AbortController();
-  // The supervisor owns the deadline and kills the complete managed process group.
-  // Nested commands do not time out independently and orphan Cargo/npm descendants.
+  const fingerprint = await executionFingerprint(root, plan);
+  const report = createFeedback(plan, { checks: options.checks, fingerprint, started: invocationStarted });
+  const runId = randomUUID();
+  const progressFile = name => path.join(root, "target/validation/feedback", `${runId}.${name}.progress.json`);
+  let currentPhase;
+  async function collect(name, record, error) {
+    let progress;
+    try { progress = JSON.parse(await readFile(progressFile(name), "utf8")); }
+    catch (failure) { if (failure.code !== "ENOENT") throw failure; }
+    if (progress && (progress.phase !== (options.checks ? name : "all") || progress.fingerprint !== fingerprint))
+      throw Object.assign(Error("Phase progress belongs to different validation inputs"), { kind: "invalidated" });
+    completePhase(report, name, { record, progress, error, aborted: controller.signal.aborted });
+    await writeFeedback(reportFile, report);
+  }
+  await writeFeedback(reportFile, report);
+  // One owner bounds queueing and cleans up the complete managed process group.
   const deadline = setTimeout(() => controller.abort(), 1_800_000);
   const stop = () => controller.abort();
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop); process.on("SIGTERM", stop);
   try {
+    if (options.checks && phasePlan(plan, "static").checks.length) {
+      currentPhase = "static";
+      const staticPhase = report.phases.find(item => item.name === currentPhase);
+      staticPhase.status = "running"; staticPhase.started = Date.now();
+      await writeFeedback(reportFile, report);
+      const fast = await runStage({
+        root, cwd: root, name: "affected-static", resource: "focused-static", profile: "shared",
+        context: { base: plan.base, plan, phase: "static", fingerprint },
+        env: { ...process.env, MESH_VALIDATION_AFFECTED_CHILD: "focused-static", MESH_VALIDATION_AFFECTED_PHASE: "static", MESH_VALIDATION_AFFECTED_INPUTS: fingerprint, MESH_VALIDATION_AFFECTED_PROGRESS: progressFile("static") },
+        signal: controller.signal,
+        command: [process.execPath, fileURLToPath(import.meta.url), ...forwarded],
+      });
+      await collect("static", fast);
+      if (fast.code !== 0) { process.exitCode = 1; return; }
+    }
+    const artifacts = [...new Set((plan.checks ?? []).flatMap(check =>
+      (check.artifacts ?? []).map(artifact => path.join(check.cwd, artifact))))];
+    const childCommand = [process.execPath, fileURLToPath(import.meta.url), ...forwarded];
+    // Retention must precede the shared build resource, but must not delay cheap checks.
+    const command = options.managed ? [
+      "python3", path.join(root, "scripts/build-retention.py"), "run", "--",
+      process.execPath, path.join(root, "scripts/validation/stage.mjs"), "affected-heavy",
+      "--profile", "shared", "--resource", resource,
+      "--context", fingerprint ?? JSON.stringify(plan),
+      ...artifacts.flatMap(artifact => ["--artifact", artifact]),
+      "--", ...childCommand,
+    ] : childCommand;
+    currentPhase = "tests";
+    const testPhase = report.phases.find(item => item.name === currentPhase);
+    if (testPhase) { testPhase.status = "running"; testPhase.started = Date.now(); }
+    await writeFeedback(reportFile, report);
     const result = await runStage({
       root,
       cwd: root,
       name: "affected-tests",
-      resource,
+      resource: options.managed ? undefined : resource,
+      artifacts,
       profile: "shared",
-      context: { base: plan.base, plan },
-      env: { ...process.env, MESH_VALIDATION_AFFECTED_CHILD: resource },
+      context: { base: plan.base, plan, phase: options.checks ? "tests" : "all", fingerprint },
+      env: { ...process.env, MESH_VALIDATION_AFFECTED_CHILD: resource,
+        MESH_VALIDATION_AFFECTED_PHASE: options.checks ? "tests" : "all", MESH_VALIDATION_AFFECTED_INPUTS: fingerprint, MESH_VALIDATION_AFFECTED_PROGRESS: progressFile("tests") },
       signal: controller.signal,
-      command: [process.execPath, fileURLToPath(import.meta.url), ...forwarded],
+      command,
     });
+    await collect("tests", result);
     process.exitCode = result.code === 0 ? 0 : 1;
+  } catch (error) {
+    if (currentPhase) completePhase(report, currentPhase, {
+      error, aborted: controller.signal.aborted,
+      progress: { commands: report.phases.find(item => item.name === currentPhase)?.commands ?? [] },
+    });
+    throw error;
   } finally {
     clearTimeout(deadline);
-    process.off("SIGINT", stop);
-    process.off("SIGTERM", stop);
+    process.off("SIGINT", stop); process.off("SIGTERM", stop);
+    finishFeedback(report);
+    await writeFeedback(reportFile, report);
+    console.log(`Development feedback: ${report.status}; candidate acceptance pending. Report: ${reportFile}`);
   }
 }
 if (

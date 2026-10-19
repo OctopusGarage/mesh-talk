@@ -3,8 +3,8 @@ import type {
   ChatMessage,
   Conversation,
   SearchTarget,
+  SendIntent,
 } from "./conversationModel";
-import type { SendIntent } from "./outgoingIntent";
 
 /** Cache data and exact-ID protection travel together across eviction and reopening. */
 export interface ConversationCacheState {

@@ -13,6 +13,8 @@ name: Sanitizers
 # code; keep the weekly run to catch toolchain and dependency drift.
 # ASan needs the nightly toolchain + `-Z build-std` (a full std rebuild).
 on:
+  merge_group:
+    types: [checks_requested]
   pull_request:
     branches: [main]
   push:
@@ -27,6 +29,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 jobs:
   asan:

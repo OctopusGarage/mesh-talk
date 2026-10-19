@@ -147,8 +147,18 @@ chat composition use `frontend-history`, `frontend-outgoing`,
 `frontend-channel-actions`, with chat as a declared consumer. Contracts declare downstream
 consumer IDs and escalation notes; frontend source imports add affected unit
 consumers automatically. Integration grant policy expands through service,
-headless host, IPC, client and desktop/MCP adapters. Most other core module IDs
-require explicit selection with a reason until their consumers are established.
+headless host, IPC, client and desktop/MCP adapters. Rust source, package and
+shared-fixture inputs have automatic owners with conservative downstream
+expansion. Shared Cargo/toolchain inputs select every workspace crate. Binary
+and integration-harness owners may use library fallback selectors with explicit
+escalation; those selectors do not establish native, CLI or integration
+acceptance. Unknown paths still require ownership or explicit reviewed selection.
+
+Shared `SendIntent` and `SendPayload` data shapes belong to `conversationModel.ts`.
+Conversation-cache policy depends on this model rather than outgoing dispatch;
+the dispatcher preserves its public type reexports. Focused internal store
+consumers use existing IPC adapters such as `api/chat.ts` and `api/contacts.ts`.
+The public facade remains available at the application composition boundary.
 
 A module change should ship its focused behavior evidence and update its contract
 when it changes consumer obligations or shared fixtures. Interface changes require

@@ -6,11 +6,13 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name("build-retention.py")
@@ -29,6 +31,9 @@ class RetentionTests(unittest.TestCase):
         self.root.mkdir()
         self.state = self.base / "state"
         self.env = dict(os.environ, MT_BUILD_STATE_DIR=str(self.state))
+        # Disposable CLI fixtures are independent supervisors, even when the
+        # Python suite runs inside an affected-validation managed group.
+        self.env.pop("MESH_VALIDATION_PROCESS_GROUP_OWNER", None)
         for key in list(self.env):
             if key.startswith("MT_TARGET_") or key.startswith("MT_BUILD_"):
                 del self.env[key]
@@ -119,6 +124,130 @@ class RetentionTests(unittest.TestCase):
             for line in (self.state / "cleanup.jsonl").read_text().splitlines()
         ]
         self.assertEqual(log[0]["root"], str(other))
+
+    def age_target(self, root, stamp=1):
+        target = root / "target"
+        for path in sorted(target.rglob("*"), reverse=True):
+            os.utime(path, (stamp, stamp))
+        os.utime(target, (stamp, stamp))
+
+    def test_automatic_cleanup_keeps_warm_cache_but_evicts_old_worktree(self):
+        other = self.base / "old worktree"
+        self.git("worktree", "add", "-qb", "old", str(other))
+        old = self.cache(other)
+        self.age_target(other)
+        current = self.cache(self.root)
+        self.age_target(self.root)
+        for _ in range(2):
+            result = self.run_cli(
+                "run", "--budget-gb", "0", "--interval-seconds", "0",
+                "--", sys.executable, "-c", "pass",
+            )
+            self.assertTrue(current.exists(), result.stdout + result.stderr)
+            self.assertFalse(old.exists(), result.stdout + result.stderr)
+            self.assertIn("recently used Cargo profile", result.stdout)
+            self.assertIn("Budget still exceeded", result.stdout)
+        self.assertTrue((other / "target/debug/mesh-talk").exists())
+
+    def test_automatic_cleanup_protects_recent_custom_shared_target(self):
+        other = self.base / "shared target worktree"
+        self.git("worktree", "add", "-qb", "shared", str(other))
+        shared = self.cache(other)
+        self.age_target(other)
+        result = self.run_cli(
+            "run", "--budget-gb", "0", "--interval-seconds", "0", "--",
+            sys.executable, "-c",
+            f"from pathlib import Path; Path({str(shared / 'large.rlib')!r}).write_bytes(b'new compilation')",
+            env=dict(self.env, CARGO_TARGET_DIR=str(other / "target")),
+        )
+        self.assertTrue(shared.exists(), result.stdout + result.stderr)
+        self.assertIn("recently used Cargo profile", result.stdout)
+        self.age_target(other)
+        # A fresh Cargo cache hit need not update artifact mtimes. The explicit
+        # shared-target use must refresh its own verified checkout marker too.
+        result = self.run_cli(
+            "run", "--budget-gb", "0", "--interval-seconds", "0", "--",
+            sys.executable, "-c", "pass",
+            env=dict(self.env, CARGO_TARGET_DIR=str(other / "target")),
+        )
+        self.assertTrue(shared.exists(), result.stdout + result.stderr)
+        self.assertTrue((other / "target/.mesh-talk-build-use").is_file())
+
+    def test_automatic_cleanup_reclaims_cache_after_idle_window(self):
+        other = self.base / "idle worktree"
+        self.git("worktree", "add", "-qb", "idle", str(other))
+        idle = self.cache(other, time.time())
+        first = self.run_cli(
+            "run", "--budget-gb", "0", "--interval-seconds", "0",
+            "--", sys.executable, "-c", "pass",
+        )
+        self.assertTrue(idle.exists(), first.stdout + first.stderr)
+        # Move real artifact timestamps beyond the window, without sleeping or
+        # relying on compiler coordination lock timestamps as build activity.
+        self.age_target(other)
+        second = self.run_cli(
+            "run", "--budget-gb", "0", "--interval-seconds", "0",
+            "--", sys.executable, "-c", "pass",
+        )
+        self.assertFalse(idle.exists(), second.stdout + second.stderr)
+
+    def test_zero_idle_window_and_explicit_cleanup_can_reclaim_warm_cache(self):
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit):
+                cache = self.cache(self.root, time.time())
+                if explicit:
+                    self.run_cli("clean", "--budget-gb", "0", env=dict(
+                        self.env, MT_BUILD_CACHE_MIN_IDLE_SECONDS="600"))
+                else:
+                    self.run_cli("run", "--budget-gb", "0", "--interval-seconds", "0",
+                                 "--min-idle-seconds", "0", "--", sys.executable, "-c", "pass")
+                self.assertFalse(cache.exists())
+
+    def test_idle_window_environment_override_and_invalid_policy(self):
+        cache = self.cache(self.root, time.time())
+        for value in ("-1", "invalid", "1.5"):
+            result = self.run_cli("run", "--", sys.executable, "-c", "pass", check=False,
+                                  env=dict(self.env, MT_BUILD_CACHE_MIN_IDLE_SECONDS=value))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(self.state.exists())
+            self.assertTrue(cache.exists())
+        result = self.run_cli("run", "--min-idle-seconds", "-1", "--", sys.executable, "-c", "pass", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.state.exists())
+        self.run_cli("run", "--budget-gb", "0", "--interval-seconds", "0",
+                     "--", sys.executable, "-c", "pass",
+                     env=dict(self.env, MT_BUILD_CACHE_MIN_IDLE_SECONDS="0"))
+        self.assertFalse(cache.exists())
+
+    def test_custom_target_marker_does_not_write_unverified_output(self):
+        outside = self.base / "unverified checkout"
+        cache = self.cache(outside, time.time())
+        self.run_cli("run", "--budget-gb", "0", "--interval-seconds", "0", "--",
+                     sys.executable, "-c", "pass",
+                     env=dict(self.env, CARGO_BUILD_TARGET_DIR=str(outside / "target")))
+        self.assertTrue(cache.exists())
+        self.assertFalse((outside / "target/.mesh-talk-build-use").exists())
+
+    def test_symlinked_marker_neither_warms_cache_nor_touches_external_file(self):
+        other = self.base / "shared worktree"
+        self.git("worktree", "add", "-qb", "marker", str(other))
+        cache = self.cache(other)
+        self.age_target(other)
+        outside = self.base / "external-marker"
+        outside.write_text("keep metadata")
+        before = outside.stat().st_mtime_ns
+        try:
+            (other / "target/.mesh-talk-build-use").symlink_to(outside)
+        except OSError as error:
+            if os.name == "nt":
+                self.skipTest(f"Windows symlink privilege unavailable: {error}")
+            raise
+        self.run_cli("run", "--budget-gb", "0", "--interval-seconds", "0", "--",
+                     sys.executable, "-c", "pass",
+                     env=dict(self.env, CARGO_TARGET_DIR=str(other / "target")))
+        self.assertFalse(cache.exists())
+        self.assertEqual(outside.stat().st_mtime_ns, before)
+        self.assertEqual(outside.read_text(), "keep metadata")
 
     def test_tree_stats_counts_files_once_across_hard_links(self):
         tree = self.base / "stat-tree"
@@ -411,6 +540,109 @@ class RetentionTests(unittest.TestCase):
             # Release the child normally so the build lock is not orphaned.
             ready.write_text("stop")
             process.communicate(timeout=5)
+
+    @unittest.skipIf(os.name == "nt" or not shutil.which("node"), "POSIX managed group and Node required")
+    def test_managed_cancellation_retains_worktree_lock_until_group_cleanup(self):
+        (self.root / ".gitignore").write_text("target/\n")
+        target = self.root / "target"
+        target.mkdir()
+        ready = target / "worker-pid"
+        cancel = target / "cancel"
+        aborting = target / "aborting"
+        worker = (
+            "import os,signal,time; from pathlib import Path\n"
+            "signal.signal(signal.SIGTERM, lambda *_: None)\n"
+            f"Path({str(ready)!r}).write_text(str(os.getpid()))\n"
+            "while True: time.sleep(.05)"
+        )
+        command = [sys.executable, str(SCRIPT), "--root", str(self.root),
+                   "run", "--", sys.executable, "-c", worker]
+        stage = SCRIPT.with_name("validation") / "stage.mjs"
+        program = f"""
+            import {{ runStage }} from {json.dumps(stage.as_uri())};
+            import {{ existsSync, writeFileSync }} from 'node:fs';
+            const controller = new AbortController();
+            const timer = setInterval(() => {{
+              if (existsSync({json.dumps(str(cancel))})) {{
+                clearInterval(timer);
+                controller.abort();
+                writeFileSync({json.dumps(str(aborting))}, 'yes');
+              }}
+            }}, 10);
+            const result = await runStage({{
+              root: {json.dumps(str(self.root))}, name: 'retention-cancellation',
+              command: {json.dumps(command)}, signal: controller.signal,
+              env: {{ ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined }},
+              log: () => {{}}
+            }});
+            clearInterval(timer);
+            console.log('RESULT ' + result.code);
+        """
+        process = subprocess.Popen(
+            [shutil.which("node"), "--input-type=module", "-e", program],
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < deadline and process.poll() is None:
+                time.sleep(.02)
+            if not ready.exists():
+                output, error = process.communicate(timeout=2)
+                self.fail("managed worker did not start: " + output + error)
+            worker_pid = int(ready.read_text())
+            cancel.touch()
+            while not aborting.exists() and time.monotonic() < deadline and process.poll() is None:
+                time.sleep(.01)
+            self.assertTrue(aborting.exists(), "outer supervisor did not cancel")
+            time.sleep(.1)
+            os.kill(worker_pid, 0)  # Work is still running in the grace period.
+            with self.assertRaises(BlockingIOError):
+                with RETENTION.lock(self.state, name=RETENTION.worktree_lock_name(self.root), blocking=False):
+                    pass
+            output, error = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, output + error)
+            self.assertIn("RESULT 130", output)
+            state = subprocess.run(["ps", "-p", str(worker_pid), "-o", "stat="], capture_output=True, text=True)
+            self.assertFalse(state.returncode == 0 and state.stdout.strip() and not state.stdout.strip().startswith("Z"),
+                             "worker survived managed group cleanup")
+            with RETENTION.lock(self.state, name=RETENTION.worktree_lock_name(self.root), blocking=False):
+                pass
+        finally:
+            cancel.touch()
+            try:
+                process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=5)
+            if ready.exists():
+                try:
+                    os.kill(int(ready.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    @unittest.skipIf(os.name == "nt", "POSIX signal dispositions")
+    def test_unmanaged_or_invalid_owner_preserves_signal_handlers(self):
+        previous = {value: signal.getsignal(value) for value in (signal.SIGTERM, signal.SIGINT)}
+        for owner in ("", "invalid", "0", str(os.getpid()), "9" * 100):
+            with self.subTest(owner=owner), patch.dict(os.environ, {"MESH_VALIDATION_PROCESS_GROUP_OWNER": owner}):
+                with RETENTION.managed_cancellation():
+                    self.assertEqual(previous, {value: signal.getsignal(value) for value in previous})
+                self.assertEqual(previous, {value: signal.getsignal(value) for value in previous})
+
+    @unittest.skipIf(os.name == "nt", "POSIX exec signal dispositions")
+    def test_managed_handler_restores_parent_and_keeps_child_default(self):
+        previous = signal.getsignal(signal.SIGTERM)
+        with patch.dict(os.environ, {"MESH_VALIDATION_PROCESS_GROUP_OWNER": "123456"}), patch.object(
+            RETENTION.os, "getpgid", return_value=os.getpgrp() + 1
+        ):
+            with RETENTION.managed_cancellation():
+                self.assertTrue(callable(signal.getsignal(signal.SIGTERM)))
+                result = subprocess.run(
+                    [sys.executable, "-c", "import signal; print(signal.getsignal(signal.SIGTERM))"],
+                    capture_output=True, text=True, check=True,
+                )
+                self.assertEqual(result.stdout.strip(), str(int(signal.SIG_DFL)))
+        self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
 
     def test_raw_cargo_profile_lock_protects_only_that_profile(self):
         busy = self.cache(self.root)

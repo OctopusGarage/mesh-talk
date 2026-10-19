@@ -215,3 +215,63 @@ test("misspelled contract fields cannot silently drop downstream checks", () => 
     /unknown contract field.*consumer/i,
   );
 });
+
+test("frontend configuration and runtime assets invalidate all registered unit consumers", () => {
+  const frontend = graph({ "frontend/src/a.test.ts": "", "frontend/src/b.test.ts": "" });
+  for (const file of ["frontend/vite.config.ts", "frontend/package-lock.json", "docs/help/catalog.json", "site/market/catalog.json", "Cargo.toml"]) {
+    const plan = buildAffectedPlan([file], { contracts, frontend });
+    assert.deepEqual(plan.blockers, [], file);
+    assert.deepEqual(plan.frontend, ["src/a.test.ts", "src/b.test.ts"], file);
+    assert.match(plan.frontendReasons["src/a.test.ts"].join(" "), /global|shared/i);
+  }
+});
+
+test("shared Cargo configuration selects every workspace crate via owning contracts", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const roots = ["scripts/validation", "frontend", "crates/mesh-talk-core", "src-tauri", "crates/mesh-talk-integrations", "crates/mesh-talk-mcp"];
+  const registered = (await Promise.all(roots.map(async root => JSON.parse(await readFile(new URL(`../../${root}/validation.json`, import.meta.url), "utf8")).contracts))).flat();
+  for (const file of ["Cargo.lock", ".cargo/config.toml", "rust-toolchain.toml"]) {
+    const plan = buildAffectedPlan([file], { contracts: registered });
+    assert.deepEqual(plan.blockers, [], file);
+    assert.deepEqual(plan.rust.map(item => item.package), ["mesh-talk", "mesh-talk-core", "mesh-talk-integrations", "mesh-talk-mcp"]);
+  }
+  const profile = buildAffectedPlan(["crates/mesh-talk-core/src/node/account_profile.rs"], { contracts: registered });
+  assert(!profile.owners.some(owner => owner.id === "core-node"), "established focused ownership must not widen through the catch-all Node prefix");
+  assert.equal(profile.rust.find(item => item.package === "mesh-talk-core").filters.length, 5);
+  const consentFixture = buildAffectedPlan(["crates/mesh-talk-core/src/node/file_consent_tests.rs"], {contracts:registered});
+  assert.deepEqual(consentFixture.owners.map(owner => owner.id), ["core-file-consent-tests"]);
+  assert.deepEqual(consentFixture.rust, [{package:"mesh-talk-core",filters:["node::file_consent_tests::"]}]);
+});
+
+test("fallback exclusions are literal validated ownership paths, not a way to skip consumers", () => {
+  const registered = [
+    { id: "fallback", paths: ["core/"], excludePaths: ["core/profile.rs"], rust: [{package:"core",filters:["node::"]}] },
+    { id: "profile", paths: ["core/profile.rs"], rust: [{package:"core",filters:["profile::"]}], consumers: ["fallback"] },
+  ];
+  const selected = buildAffectedPlan(["core/profile.rs"], {contracts:registered});
+  assert.deepEqual(selected.owners.map(owner => owner.id), ["fallback", "profile"]);
+  assert.throws(() => buildAffectedPlan([], {contracts:[{...registered[0],excludePaths:["../unsafe"]}]}), /exclude/i);
+});
+
+test("business capability references accompany owners without changing mandatory consumers", () => {
+  const capability = {
+    summary: "Keep local intents distinct from accepted events",
+    guide: "docs/rules.md",
+    invariants: [{ name: "Exact accepted identity", reference: "CONTEXT.md#acceptance-and-delivery" }],
+  };
+  const plan = buildAffectedPlan(["core/profile.rs"], {
+    contracts: contracts.map(item => item.id === "profile" ? { ...item, capability } : item),
+  });
+  assert.deepEqual(plan.owners.find(item => item.id === "profile").capability, capability);
+  assert.deepEqual(plan.rust.map(item => item.package), ["core", "host"]);
+});
+
+test("capability contracts reject misspellings, missing obligations and nonlocal references", () => {
+  const valid = { summary: "Session authority", guide: "docs/rules.md", invariants: [{ name: "Session generation", reference: "CONTEXT.md#identity-and-access" }] };
+  for (const capability of [
+    { ...valid, typo: true }, { ...valid, summary: "" }, { ...valid, invariants: [] },
+    { ...valid, guide: "https://example.com/rules.md" }, { ...valid, guide: "../rules.md" },
+    { ...valid, invariants: [{ name: "Session", reference: "docs/missing.txt" }] },
+    { ...valid, invariants: [{ name: "Session", reference: "docs/rules.md", typo: true }] },
+  ]) assert.throws(() => buildAffectedPlan([], { contracts: [{ ...contracts[0], consumers: [], capability }] }), /capability/i);
+});

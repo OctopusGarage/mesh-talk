@@ -6,6 +6,7 @@ import {
   writeFileSync,
   rmSync,
   renameSync,
+  chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,7 +19,10 @@ import {
   parseOptions,
   prepareRust,
   validateFrontendReport,
+  executionFingerprint,
 } from "../validation/changed.mjs";
+
+const isolatedEnv = { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: undefined };
 
 function repository(t) {
   const root = mkdtempSync(path.join(tmpdir(), "mesh-affected-"));
@@ -89,6 +93,26 @@ test("comparison uses merge base and includes committed changes", (t) => {
   ]);
   assert.deepEqual(discoverChanges(f.root, base).files, ["committed"]);
   assert.throws(() => discoverChanges(f.root, "--output=unsafe"), /base/i);
+});
+
+test("phase fingerprints bind dirty source bytes, absent inputs and mode changes", async t => {
+  const f = repository(t);
+  const selected = { files: ["dirty", "deleted"] };
+  const before = await executionFingerprint(f.root, selected);
+  f.write("dirty", "two");
+  assert.notEqual(await executionFingerprint(f.root, selected), before);
+  f.write("dirty", "one");
+  assert.equal(await executionFingerprint(f.root, selected), before);
+  rmSync(path.join(f.root, "deleted"));
+  const removed = await executionFingerprint(f.root, selected);
+  assert.notEqual(removed, before);
+  f.write("deleted", "absent");
+  assert.notEqual(await executionFingerprint(f.root, selected), removed);
+  if (process.platform !== "win32") {
+    const regular = await executionFingerprint(f.root, selected);
+    chmodSync(path.join(f.root, "dirty"), 0o755);
+    assert.notEqual(await executionFingerprint(f.root, selected), regular);
+  }
 });
 
 test("CLI defaults to preview and requires explicit run, strict options and selection reason", () => {
@@ -371,6 +395,74 @@ const cli = fileURLToPath(
   new URL("../validation/changed.mjs", import.meta.url),
 );
 
+for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWhileQueued: true }, { editWhileQueued: true, managed: true }]) test(
+  `cheap static checks run before a busy ${managed ? "managed" : "heavy"} lock${editWhileQueued ? " and edits invalidate their proof" : ""}`,
+  { timeout: 20000, skip: process.platform === "win32" ? "POSIX executable fixture; phase partitioning is platform-independent" : false },
+  async t => {
+    const f = repository(t);
+    configureCLI(f, "import test from 'node:test'; test('fixture', () => {});");
+    const { readFile, mkdir, rm, access } = await import("node:fs/promises");
+    const { createHash } = await import("node:crypto");
+    for (const name of ["stage.mjs", "stage-inputs.mjs"])
+      f.write(`scripts/validation/${name}`, await readFile(new URL(`../validation/${name}`, import.meta.url), "utf8"));
+    const manifest = "scripts/validation/validation.json";
+    const data = JSON.parse(await readFile(path.join(f.root, manifest), "utf8"));
+    data.contracts[0].rust = [{ package: "core", filters: ["fixture::"] }];
+    f.write(manifest, JSON.stringify(data));
+    if (managed) f.write("scripts/build-retention.py", "import pathlib,subprocess,sys,time\npathlib.Path('target/managed-wrapper-entered').write_text('waiting')\nwhile not pathlib.Path('target/allow-managed').exists(): time.sleep(.05)\nsys.exit(subprocess.call(sys.argv[sys.argv.index('--')+1:]))\n");
+    await mkdir(path.join(f.root, "target/bin"), { recursive: true });
+    const cargo = path.join(f.root, "target/bin/cargo");
+    f.write("target/bin/cargo", `#!/usr/bin/env node\nconst fs=require('node:fs'); if(process.argv[2]==='--version'){console.log('cargo fixture');}else if(process.argv[2]==='fmt'){fs.writeFileSync('target/fast-static-ran','yes');}else{fs.writeFileSync('target/heavy-command-ran','yes');process.exit(9);}`);
+    chmodSync(cargo, 0o755);
+    const lock = path.join(f.root, ".git/validation-resources", createHash("sha256").update("heavy").digest("hex"));
+    await mkdir(lock, { recursive: true });
+    writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: process.pid }));
+    const child = spawn(process.execPath, [cli, "--checks", "--run", "--report", "target/validation/feedback/queued.json", ...(managed ? ["--managed"] : []), "--owner", "fixture", "--reason", "phase fixture"], {
+      cwd: f.root, env: { ...isolatedEnv, NODE_TEST_CONTEXT: undefined, MESH_VALIDATION_AFFECTED_CHILD: undefined, MESH_VALIDATION_AFFECTED_PHASE: undefined, MESH_VALIDATION_AFFECTED_INPUTS: undefined, PATH: `${path.dirname(cargo)}${path.delimiter}${process.env.PATH}` },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", chunk => output += chunk);
+    child.stderr.on("data", chunk => output += chunk);
+    const exited = new Promise(resolve => child.once("exit", code => resolve(code)));
+    t.after(() => child.kill("SIGKILL"));
+    let ready = false;
+    for (let tries = 0; tries < 150; tries++) {
+      try { await access(path.join(f.root, "target/fast-static-ran")); ready = true; break; }
+      catch { await delay(50); }
+    }
+    assert(ready, `cheap formatting waited for the heavy lock: ${output}`);
+    // Wait until the complete fast phase passed, so this tests the queued handoff.
+    if (managed) {
+      let waiting = false;
+      for (let tries = 0; tries < 150; tries++) {
+        try { await access(path.join(f.root, "target/managed-wrapper-entered")); waiting = true; break; }
+        catch { await delay(50); }
+      }
+      assert(waiting, output);
+    } else {
+      for (let tries = 0; tries < 150 && !output.includes("waiting for another validation stage"); tries++) await delay(50);
+      assert.match(output, /waiting for another validation stage/);
+    }
+    await assert.rejects(access(path.join(f.root, "target/heavy-command-ran")));
+    if (editWhileQueued) {
+      f.write("scripts/fixture.test.mjs", "import test from 'node:test'; test('changed fixture', () => {});");
+      if (managed) f.write("target/allow-managed", "release");
+      await rm(lock, { recursive: true });
+      assert.notEqual(await exited, 0);
+      assert.match(output, /inputs changed|plan changed/i);
+      const feedback = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/queued.json"), "utf8"));
+      assert.equal(feedback.status, "invalidated");
+      assert.equal(feedback.phases[0].status, "passed");
+      assert.equal(feedback.phases[1].status, "invalidated");
+      await assert.rejects(access(path.join(f.root, "target/heavy-command-ran")));
+    } else {
+      child.kill("SIGTERM");
+      assert.notEqual(await exited, 0);
+    }
+  },
+);
+
 test("real CLI preview is read-only and emits an explainable plan without executing selected tests", (t) => {
   const f = repository(t);
   configureCLI(f, "throw Error('preview executed a test');");
@@ -384,6 +476,18 @@ test("real CLI preview is read-only and emits an explainable plan without execut
   assert.deepEqual(plan.node, ["scripts/fixture.test.mjs"]);
   assert.match(plan.owners[0].reasons[0], /preview fixture/);
   assert.equal(f.git(["status", "--porcelain"]), "");
+});
+
+test("an empty recomputed child plan still validates the queued phase handoff", t => {
+  const f = repository(t);
+  configureCLI(f, "import test from 'node:test'; test('fixture', () => {});");
+  const result = spawnSync(process.execPath, [cli, "--checks"], {
+    cwd: f.root, encoding: "utf8", env: { ...isolatedEnv,
+      MESH_VALIDATION_AFFECTED_CHILD: "focused-node", MESH_VALIDATION_AFFECTED_PHASE: "tests",
+      MESH_VALIDATION_AFFECTED_INPUTS: "old-source-fingerprint" },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /inputs changed/i);
 });
 
 test(
@@ -403,11 +507,11 @@ test(
     );
     const child = spawn(
       process.execPath,
-      [cli, "--run", "--owner", "fixture", "--reason", "cancellation fixture"],
+      [cli, "--run", "--owner", "fixture", "--reason", "cancellation fixture", "--report", "target/validation/feedback/cancelled.json"],
       {
         cwd: f.root,
         env: {
-          ...process.env,
+          ...isolatedEnv,
           NODE_TEST_CONTEXT: undefined,
           MESH_VALIDATION_AFFECTED_CHILD: undefined,
         },
@@ -444,6 +548,9 @@ test(
     child.kill("SIGTERM");
     const result = await exited;
     assert.notEqual(result.code, 0, output);
+    const feedback = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/cancelled.json"), "utf8"));
+    assert.equal(feedback.status, "cancelled");
+    assert.equal(feedback.candidateReady, false);
     let alive = true;
     for (let attempts = 0; attempts < 50; attempts++) {
       try {
@@ -487,7 +594,7 @@ test(
     const child = spawn(process.execPath, [cli, "--run"], {
       cwd: f.root,
       env: {
-        ...process.env,
+        ...isolatedEnv,
         NODE_TEST_CONTEXT: undefined,
         MESH_VALIDATION_AFFECTED_CHILD: undefined,
       },
@@ -520,3 +627,116 @@ test(
     assert.match(output, /resource class changed/i);
   },
 );
+
+test("boundary additions require an explanation and report output requires execution", () => {
+  assert.throws(() => parseOptions(["--browser", "e2e/a.spec.ts"]), /reason/i);
+  assert.throws(() => parseOptions(["--native", "host"]), /reason/i);
+  assert.throws(() => parseOptions(["--report", "tmp/result.json"]), /run/i);
+  const options = parseOptions(["--browser", "e2e/a.spec.ts", "--native", "host", "--reason", "IPC consumer review"]);
+  assert.deepEqual(options.browser, ["e2e/a.spec.ts"]);
+  assert.deepEqual(options.native, ["host"]);
+});
+
+test("real preview unions mandatory boundary evidence with semantic additions without executing it", async t => {
+  const f = repository(t);
+  configureCLI(f, "throw Error('must not execute preview');");
+  f.write("scripts/fixture.test.mjs", "throw Error('must not execute preview'); // changed");
+  f.write("frontend/e2e/mandatory.spec.ts", "// browser");
+  f.write("frontend/e2e/additional.spec.ts", "// browser");
+  f.write("frontend/validation.json", JSON.stringify({ schema: 1, contracts: [], prScenarios: [{ id: "required-visual", paths: ["scripts/fixture.test.mjs"], browser: ["e2e/mandatory.spec.ts"], native: ["host"] }] }));
+  f.git(["add", "."]);
+  f.git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "boundary fixtures"]);
+  f.write("scripts/fixture.test.mjs", "throw Error('must not execute preview'); // another change");
+  const result = spawnSync(process.execPath, [cli, "--json", "--owner", "fixture", "--browser", "e2e/additional.spec.ts", "--reason", "dynamic behavior"], { cwd: f.root, encoding: "utf8", env: isolatedEnv });
+  assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(result.stdout);
+  assert.deepEqual(plan.requirements.browser, ["e2e/additional.spec.ts", "e2e/mandatory.spec.ts"]);
+  assert.deepEqual(plan.requirements.native, [process.platform]);
+  const missing = spawnSync(process.execPath, [cli, "--json", "--owner", "fixture", "--browser", "e2e/missing.spec.ts", "--reason", "dynamic behavior"], { cwd: f.root, encoding: "utf8", env: isolatedEnv });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /missing.*browser/i);
+});
+
+for (const failing of [false, true]) test(`real run reports ${failing ? "failing" : "passing"} development tests while candidate acceptance remains pending`, async t => {
+  const f = repository(t);
+  configureCLI(f, `import test from 'node:test'; test('observed assertion', () => { ${failing ? "console.log('private output sentinel'); throw Error('assertion failed');" : ""} });`);
+  const reportPath = path.join(f.root, "target/validation/feedback/result.json");
+  const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "report fixture", "--report", reportPath], { cwd: f.root, encoding: "utf8", env: { ...isolatedEnv, NODE_TEST_CONTEXT: undefined }, timeout: 15000 });
+  assert.equal(result.status, failing ? 1 : 0, result.stdout + result.stderr);
+  const { readFile } = await import("node:fs/promises");
+  const report = JSON.parse(await readFile(reportPath, "utf8"));
+  assert.equal(report.status, failing ? "failed" : "passed");
+  assert.equal(report.timingOrigin, "invocation");
+  assert(report.timing.firstCommandSeconds >= 0);
+  assert(report.timing.completionSeconds >= report.timing.firstCommandSeconds);
+  assert.equal(report.timing.firstIssue?.kind ?? null, failing ? "failed" : null);
+  assert(!JSON.stringify(report).includes("private output sentinel"));
+  assert.equal(report.candidateReady, false);
+  assert.equal(report.phases[0].commands[0].status, failing ? "failed" : "passed");
+  assert(report.next.some(item => item.kind === "candidate" && item.status === "not-run"));
+});
+
+for (const blocked of [false, true]) test(`real ${blocked ? "blocked" : "empty"} run produces a report without claiming tests passed`, async t => {
+  const f = repository(t);
+  configureCLI(f, "throw Error('unselected test must not execute');");
+  f.write(blocked ? "unmapped.rs" : "docs/example.md", "changed");
+  const result = spawnSync(process.execPath, [cli, "--run", "--report", "target/validation/feedback/terminal.json"], { cwd: f.root, encoding: "utf8", env: isolatedEnv, timeout: 10000 });
+  assert.equal(result.status, blocked ? 2 : 0, result.stdout + result.stderr);
+  const { readFile } = await import("node:fs/promises");
+  const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/terminal.json"), "utf8"));
+  assert.equal(report.status, blocked ? "blocked" : "no-checks");
+  assert.equal(report.candidateReady, false);
+});
+
+test("clean receipt reuse survives changing only the report destination and invents no commands", async t => {
+  const f = repository(t);
+  configureCLI(f, "import test from 'node:test'; test('reusable assertion', () => {});");
+  const { readFile } = await import("node:fs/promises");
+  for (const name of ["first", "second"]) {
+    const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "reuse", "--report", `target/validation/feedback/${name}.json`], { cwd: f.root, encoding: "utf8", env: { ...isolatedEnv, CI: "", NODE_TEST_CONTEXT: undefined }, timeout: 15000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  }
+  const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/second.json"), "utf8"));
+  assert.equal(report.status, "passed");
+  assert.equal(report.phases[0].reused, true);
+  assert.equal(report.timing.firstCommandSeconds, null);
+  assert.equal(report.timing.reusedPhases, 1);
+  assert.deepEqual(report.phases[0].commands, []);
+  assert(report.phases[0].evidence.receipt);
+});
+
+test("report destinations cannot overwrite source or keep the supervisor alive after rejection", t => {
+  const f = repository(t);
+  configureCLI(f, "throw Error('must not execute');");
+  const result = spawnSync(process.execPath, [cli, "--run", "--report", "frontend/source.json"], { cwd: f.root, encoding: "utf8", env: isolatedEnv, timeout: 3000 });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /ignored target/);
+  assert.equal(result.error, undefined);
+});
+
+test("dirty edits during a test-only run invalidate its report even after assertions pass", async t => {
+  const f = repository(t);
+  configureCLI(f, "import test from 'node:test'; import {writeFileSync} from 'node:fs'; test('changing input', async () => { await new Promise(resolve => setTimeout(resolve, 50)); writeFileSync('dirty','changed during validation'); });");
+  f.write("dirty", "dirty before validation");
+  const result = spawnSync(process.execPath, [cli, "--run", "--owner", "fixture", "--reason", "dirty source identity", "--report", "target/validation/feedback/dirty.json"], { cwd: f.root, encoding: "utf8", env: { ...isolatedEnv, NODE_TEST_CONTEXT: undefined }, timeout: 15000 });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  const { readFile } = await import("node:fs/promises");
+  const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/dirty.json"), "utf8"));
+  assert.equal(report.status, "invalidated");
+  assert.equal(report.timing.firstIssue.kind, "invalidated");
+  assert.equal(report.dirty, true);
+  assert.equal(report.phases[0].commands[0].status, "passed");
+  assert.equal(report.candidateReady, false);
+});
+
+test("a malformed planning contract produces blocked feedback instead of a passing or missing report", async t => {
+  const f = repository(t);
+  configureCLI(f, "throw Error('must not execute');");
+  f.write("frontend/validation.json", JSON.stringify({ schema: 1, contracts: [{ id: "broken", paths: [], capability: { summary: "missing required fields" } }] }));
+  const result = spawnSync(process.execPath, [cli, "--run", "--report", "target/validation/feedback/blocked.json"], { cwd: f.root, encoding: "utf8", env: isolatedEnv, timeout: 10000 });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  const { readFile } = await import("node:fs/promises");
+  const report = JSON.parse(await readFile(path.join(f.root, "target/validation/feedback/blocked.json"), "utf8"));
+  assert.equal(report.status, "blocked");
+  assert(report.blockers.some(item => /capability/i.test(item)));
+});

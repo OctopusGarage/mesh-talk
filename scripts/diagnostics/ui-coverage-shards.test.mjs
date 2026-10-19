@@ -62,3 +62,73 @@ for (const [name, message, change] of [
     assert.deepEqual(await readdir(f.output), ["previous.json"]);
   });
 }
+
+const unitArtifact = new URL("../ci/unit-coverage-artifact.mjs", import.meta.url);
+
+async function unitFixture(t) {
+  const root = await mkdtemp(path.join(tmpdir(), "mesh-unit-coverage-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = path.join(root, "unit.lcov");
+  const artifact = path.join(root, "artifact");
+  const output = path.join(root, "restored/lcov.info");
+  const lcov = "SF:src/app.tsx\nDA:1,1\nDA:2,0\nend_of_record\n";
+  await writeFile(source, lcov);
+  const env = { ...process.env, GITHUB_SHA: sha, GITHUB_RUN_ID: "1234", GITHUB_RUN_ATTEMPT: "2", GITHUB_WORKFLOW: "UI E2E" };
+  const run = (mode, overrides = {}) => spawnSync(process.execPath, [fileURLToPath(unitArtifact), mode, mode === "seal" ? source : artifact, mode === "seal" ? artifact : output], { env: { ...env, ...overrides }, encoding: "utf8" });
+  return { root, source, artifact, output, lcov, run };
+}
+
+test("unit coverage artifact restores the exact line map for this source and workflow attempt", async t => {
+  const f = await unitFixture(t);
+  assert.equal(f.run("seal").status, 0);
+  const restored = f.run("restore");
+  assert.equal(restored.status, 0, restored.stderr);
+  assert.equal(await readFile(f.output, "utf8"), f.lcov);
+  // The existing browser merger still receives all coverable unit lines,
+  // while browser hits (rather than unit hits) determine its numerator.
+  await mkdir(path.join(f.root, "coverage/e2e-parts"), { recursive: true });
+  await writeFile(path.join(f.root, "coverage/lcov.info"), await readFile(f.output));
+  await writeFile(path.join(f.root, "coverage/e2e-parts/case.json"), JSON.stringify({ "http://localhost/src/app.tsx": [2] }));
+  const merged = spawnSync(process.execPath, [fileURLToPath(merger)], { cwd: f.root, encoding: "utf8" });
+  assert.equal(merged.status, 0, merged.stderr);
+  assert.match(await readFile(path.join(f.root, "coverage/e2e.lcov"), "utf8"), /DA:1,0\nDA:2,1\nLF:2\nLH:1/);
+});
+
+for (const [name, overrides] of [
+  ["revision", { GITHUB_SHA: "b".repeat(40) }],
+  ["run", { GITHUB_RUN_ID: "5678" }],
+  ["rerun attempt", { GITHUB_RUN_ATTEMPT: "3" }],
+  ["workflow", { GITHUB_WORKFLOW: "Other workflow" }],
+]) {
+  test(`unit coverage artifact rejects the wrong ${name} before replacing output`, async t => {
+    const f = await unitFixture(t);
+    assert.equal(f.run("seal").status, 0);
+    await mkdir(path.dirname(f.output), { recursive: true });
+    await writeFile(f.output, "previous");
+    const result = f.run("restore", overrides);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Coverage provenance mismatch/);
+    assert.equal(await readFile(f.output, "utf8"), "previous");
+  });
+}
+
+for (const [name, change] of [
+  ["missing manifest", f => rm(path.join(f.artifact, "provenance.json"))],
+  ["missing line map", f => rm(path.join(f.artifact, "lcov.info"))],
+  ["tampered line map", f => writeFile(path.join(f.artifact, "lcov.info"), "SF:src/other.ts\nDA:1,1\nend_of_record\n")],
+  ["unsupported manifest", f => writeFile(path.join(f.artifact, "provenance.json"), JSON.stringify({ schemaVersion: 999 }))],
+]) {
+  test(`unit coverage artifact fails closed for ${name}`, async t => {
+    const f = await unitFixture(t);
+    assert.equal(f.run("seal").status, 0);
+    await change(f);
+    assert.notEqual(f.run("restore").status, 0);
+  });
+}
+
+test("unit coverage artifact cannot be sealed without complete identity or measured lines", async t => {
+  const f = await unitFixture(t);
+  assert.notEqual(f.run("seal", { GITHUB_RUN_ATTEMPT: "" }).status, 0);
+  await writeFile(f.source, "");
+  assert.notEqual(f.run("seal").status, 0);
+});

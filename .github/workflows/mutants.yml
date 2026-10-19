@@ -9,6 +9,8 @@ name: Mutation Testing
 # Surviving mutants are surfaced as annotations + an artifact but do NOT block
 # (this is an existing codebase; treat results as a coverage-quality signal).
 on:
+  merge_group:
+    types: [checks_requested]
   pull_request:
     branches: [main]
   push:

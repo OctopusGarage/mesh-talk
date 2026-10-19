@@ -1,4 +1,4 @@
-import { chat } from "@/lib/api";
+import { chat } from "@/lib/api/chat";
 import type { HistoryItem } from "@/lib/types";
 import { captureChatOwner } from "./ownership";
 import {

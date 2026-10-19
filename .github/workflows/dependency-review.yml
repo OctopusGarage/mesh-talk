@@ -4,10 +4,16 @@ name: Dependency Review
 # license) before it ever lands on main. Complements cargo-deny / cargo-audit (which guard
 # the whole tree on every push) by reviewing exactly what a PR changes.
 on:
+  merge_group:
+    types: [checks_requested]
   pull_request:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 jobs:
   review:
@@ -18,7 +24,10 @@ jobs:
       - name: Dependency review
         uses: actions/dependency-review-action@v5
         with:
+          # Merge groups have no pull_request payload: scan the actual queued delta.
+          base-ref: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          head-ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
           fail-on-severity: high
           # MIT-licensed project; flag copyleft/unknown licenses pulled in by a PR.
           deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
-          comment-summary-in-pr: on-failure
+          comment-summary-in-pr: ${{ github.event_name == 'pull_request' && 'on-failure' || 'never' }}

@@ -17,7 +17,25 @@
         "frontend/src/store/outgoingIntent.test.ts"
       ],
       "frontend": ["src/store/outgoingIntent.test.ts"],
-      "consumers": ["frontend-chat"]
+      "consumers": ["frontend-chat"],
+      "capability": {
+        "summary": "Own optimistic outgoing intents and project backend acceptance within the current frontend owner lifetime.",
+        "guide": "docs/module-boundaries.md#coordinated-state-owners",
+        "invariants": [
+          {
+            "name": "Accepted intents reconcile by exact event identity",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Presentation failure preserves backend acceptance",
+            "reference": "CONTEXT.md#acceptance-and-delivery"
+          },
+          {
+            "name": "Retired frontend owners cannot publish send completion",
+            "reference": "docs/ARCHITECTURE.md"
+          }
+        ]
+      }
     },
     {
       "id": "frontend-conversation-state",
