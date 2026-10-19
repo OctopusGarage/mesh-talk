@@ -70,6 +70,8 @@ test("full health holds a managed checkout lease and never reuses its aggregate 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/validation"), { recursive: true });
   mkdirSync(join(root, "frontend")); mkdirSync(join(root, "src-tauri"));
+  mkdirSync(join(root, "frontend/node_modules"));
+  writeFileSync(join(root, "frontend/node_modules/.package-lock.json"), "{}");
   writeFileSync(join(root, "Makefile"), "");
   copyFileSync(resolve("scripts/check-health.sh"), join(root, "scripts/check-health.sh"));
   const trace = join(root, "trace.json");
@@ -86,4 +88,22 @@ test("full health holds a managed checkout lease and never reuses its aggregate 
     assert.deepEqual(seen.args.slice(python + 2, python + 5), ["run", "--", "bash"]);
     assert.equal(seen.args.at(-1), "--fast");
   }
+});
+
+test("health primes fresh frontend dependencies before capturing supervised inputs", { skip: process.platform === "win32" ? "POSIX npm shim; aggregate supervision remains tested on Windows" : false }, async t => {
+  const { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, rmSync } = await import("node:fs");
+  const { join, resolve, delimiter } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const root = mkdtempSync(join(tmpdir(), "mesh health bootstrap "));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const name of ["scripts/validation", "frontend", "src-tauri", "bin"]) mkdirSync(join(root, name), { recursive: true });
+  writeFileSync(join(root, "Makefile"), "");
+  copyFileSync(resolve("scripts/check-health.sh"), join(root, "scripts/check-health.sh"));
+  writeFileSync(join(root, "bin/npm"), "#!/bin/sh\nmkdir -p node_modules\nprintf '{}' > node_modules/.package-lock.json\n", { mode: 0o755 });
+  const trace = join(root, "trace.json");
+  writeFileSync(join(root, "scripts/validation/stage.mjs"), "import fs from 'node:fs';fs.writeFileSync(process.env.TRACE,JSON.stringify({primed:fs.existsSync('frontend/node_modules/.package-lock.json')}));process.exit(17);\n");
+  const result = spawnSync("bash", [join(root, "scripts/check-health.sh"), "--fast"], { cwd: root, encoding: "utf8", env: { ...process.env, TRACE: trace, MESH_VALIDATION_HEALTH_GUARDED: "0", PATH: `${join(root, "bin")}${delimiter}${process.env.PATH}` } });
+  assert.equal(result.status, 17, result.stderr || result.stdout);
+  assert.equal(JSON.parse(readFileSync(trace, "utf8")).primed, true);
 });

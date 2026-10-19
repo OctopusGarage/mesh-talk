@@ -60,9 +60,29 @@ if [ ! -f "Makefile" ] || [ ! -d "src-tauri" ] || [ ! -d "frontend" ]; then
     exit 1
 fi
 
+# Check Node.js and npm
+print_status "success" "Checking Node.js and npm..."
+if ! command_exists node || ! command_exists npm; then
+    print_status "error" "Node.js or npm not found. Please install Node.js: https://nodejs.org/"
+    exit 1
+fi
+
+# Cargo resolves dependencies during Clippy, tests, and builds below; an eager
+# `cargo build` here compiled the app twice. Install frontend dependencies only
+# on a fresh checkout, and surface installation failures instead of hiding them.
+if [ ! -f "frontend/node_modules/.package-lock.json" ] ||
+   [ "frontend/package-lock.json" -nt "frontend/node_modules/.package-lock.json" ]; then
+    print_status "success" "Installing frontend dependencies..."
+    if ! { cd frontend && npm ci; }; then
+        print_status "error" "Frontend dependency installation failed."
+        exit 1
+    fi
+    cd ..
+fi
+
 if [ "${MESH_VALIDATION_HEALTH_GUARDED:-0}" != 1 ]; then
     # Cargo releases its compiler lock before running test executables. Keep a
-    # managed checkout lease across the complete gate, including browser gaps,
+    # managed checkout lease across build/test execution, including browser gaps,
     # so scheduled cleanup cannot remove pending executables or warm caches.
     # The aggregate always executes; individual stages retain their own reuse.
     health_requested_fresh="${MESH_VALIDATION_FRESH:-0}"
@@ -100,26 +120,6 @@ print_status "success" "Checking Rust code formatting..."
 if ! cargo fmt --all -- --check; then
     print_status "error" "Rust code formatting issues found. Run 'cargo fmt --all' to fix."
     exit 1
-fi
-
-# Check Node.js and npm
-print_status "success" "Checking Node.js and npm..."
-if ! command_exists node || ! command_exists npm; then
-    print_status "error" "Node.js or npm not found. Please install Node.js: https://nodejs.org/"
-    exit 1
-fi
-
-# Cargo resolves dependencies during Clippy, tests, and builds below; an eager
-# `cargo build` here compiled the app twice. Install frontend dependencies only
-# on a fresh checkout, and surface installation failures instead of hiding them.
-if [ ! -f "frontend/node_modules/.package-lock.json" ] ||
-   [ "frontend/package-lock.json" -nt "frontend/node_modules/.package-lock.json" ]; then
-    print_status "success" "Installing frontend dependencies..."
-    if ! { cd frontend && npm ci; }; then
-        print_status "error" "Frontend dependency installation failed."
-        exit 1
-    fi
-    cd ..
 fi
 
 # Check code formatting (Frontend)
