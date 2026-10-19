@@ -162,7 +162,9 @@
       "id": "MT-SYNC-AI-011",
       "name": "linked appearance does not overwrite a fresh device with defaults",
       "subject_file": "frontend/src/lib/linkedAppearance.ts",
-      "context_files": ["frontend/src/lib/theme.ts"],
+      "context_files": [
+        "frontend/src/lib/theme.ts"
+      ],
       "min_score": 0.85,
       "scenario": "Review browser integration for linked theme and wallpaper preferences. Check initial pairing migration, remote application, per-device policy, owner lifecycle, and write feedback. Trace the supplied theme projection when checking whether a local value was explicitly saved.",
       "rubric": [
@@ -172,6 +174,25 @@
         "Applying a remote value does not echo the same change back as a newer local edit.",
         "Polls and subscriptions stop after cleanup, and asynchronous responses do not update state after cleanup."
       ]
+    },
+    {
+      "id": "MT-SYNC-AI-012",
+      "name": "personal sends persist freshly discovered sibling bindings before durable enqueue",
+      "subject_file": "crates/mesh-talk-core/src/node/dm.rs",
+      "context_files": [
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/privacy_routing.rs",
+        "crates/mesh-talk-core/src/node/delivery_store.rs"
+      ],
+      "scenario": "A certified sibling announcement reaches the live roster before the next host peer-snapshot query has persisted its account proof. The user immediately sends a personal text or sticker. Trace the self-target path, certificate persistence, destination account binding and WAL validation. Also consider persistence errors and owner invalidation while awaiting snapshot persistence.",
+      "rubric": [
+        "Personal account sends persist verified discovery proofs before selecting sibling destinations, rather than accepting an unbound account from an endpoint hint.",
+        "Snapshot persistence failures propagate without acknowledging a message whose delivery binding cannot be validated.",
+        "Personal sends do not grant external-contact permissions or mark own-device replication as recipient delivery.",
+        "Final durable acceptance still executes through the owner authorization callback after asynchronous preparation.",
+        "The existing delivery event signature, conversation, account and receipt binding checks remain enforced."
+      ],
+      "min_score": 0.85
     }
   ]
 }

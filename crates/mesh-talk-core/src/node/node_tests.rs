@@ -6392,6 +6392,44 @@ fn personal_message_node(
 }
 
 #[tokio::test]
+async fn personal_message_caches_new_sibling_binding_before_enqueue() {
+    use crate::{discovery::DiscoveryVisibility, identity::account::Account};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let target = account.account_id();
+    let sibling = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&sibling, &account, "Sibling", 1);
+    let node = personal_message_node(dir.path(), DeviceIdentity::generate(), account);
+    node.configure_privacy(
+        dir.path(),
+        "pw",
+        &node.signed_announce("Own device", 1),
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    // Discovery is visible before the host's next durable peer-snapshot query.
+    node.roster.lock().unwrap().update(
+        &proof,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        &node.user_id(),
+    );
+    assert!(
+        node.historical_author(&sibling.public().ed25519_pub)
+            .is_none()
+    );
+    let id = node
+        .enqueue_to_account(&target, b"new sibling note", None)
+        .await
+        .unwrap();
+    assert_eq!(node.account_history(&target, 10)[0].id, id);
+    assert!(node.account_delivery_statuses(&target, &[id]).is_empty());
+    let stored = node.delivery.lock().unwrap();
+    let destination = &stored.message(id).unwrap().destinations[0];
+    assert_eq!(destination.account.as_deref(), Some(target.as_str()));
+    assert!(!destination.receipt_eligible);
+}
+
+#[tokio::test]
 async fn personal_message_is_durable_without_siblings() {
     use crate::identity::account::Account;
     let dir = tempfile::tempdir().unwrap();
