@@ -929,7 +929,15 @@
     "title": "Saved Messages",
     "description": "Notes and files across your devices",
     "saved": "Saved on this device",
-    "fileCardSaved": "File card saved on this device"
+    "fileCardSaved": "File card saved on this device",
+    "devices": "Devices",
+    "onlineCount": "{{count}} online",
+    "devicesDescription": "Devices linked to this account, including those currently offline.",
+    "thisDevice": "This device",
+    "linkedDevice": "Linked device",
+    "noOtherDevices": "No other linked devices yet",
+    "devicesLoading": "Loading linked devices…",
+    "devicesFailed": "Could not load linked devices. Trying again shortly."
   },
   "help": {
     "title": "Help",

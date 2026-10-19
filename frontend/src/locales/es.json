@@ -929,7 +929,15 @@
     "title": "Mensajes guardados",
     "description": "Notas y archivos entre tus dispositivos",
     "saved": "Guardado en este dispositivo",
-    "fileCardSaved": "Ficha del archivo guardada en este dispositivo"
+    "fileCardSaved": "Ficha del archivo guardada en este dispositivo",
+    "devices": "Dispositivos",
+    "onlineCount": "{{count}} en línea",
+    "devicesDescription": "Dispositivos vinculados a esta cuenta, incluidos los que están desconectados.",
+    "thisDevice": "Este dispositivo",
+    "linkedDevice": "Dispositivo vinculado",
+    "noOtherDevices": "Todavía no hay otros dispositivos vinculados",
+    "devicesLoading": "Cargando dispositivos vinculados…",
+    "devicesFailed": "No se pudieron cargar los dispositivos vinculados. Se volverá a intentar en breve."
   },
   "help": {
     "title": "Ayuda",

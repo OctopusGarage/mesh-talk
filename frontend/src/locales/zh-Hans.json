@@ -929,7 +929,15 @@
     "title": "收藏消息",
     "description": "在你的设备之间同步笔记和文件",
     "saved": "已保存在此设备上",
-    "fileCardSaved": "文件信息已保存在此设备上"
+    "fileCardSaved": "文件信息已保存在此设备上",
+    "devices": "设备",
+    "onlineCount": "{{count}} 台在线",
+    "devicesDescription": "此账号已关联的设备，包括当前离线的设备。",
+    "thisDevice": "当前设备",
+    "linkedDevice": "已关联设备",
+    "noOtherDevices": "尚无其他已关联设备",
+    "devicesLoading": "正在加载已关联设备…",
+    "devicesFailed": "无法加载已关联设备，稍后将自动重试。"
   },
   "help": {
     "title": "帮助",

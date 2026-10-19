@@ -929,7 +929,15 @@
     "title": "收藏訊息",
     "description": "喺你嘅裝置之間同步筆記同檔案",
     "saved": "已儲存喺呢部裝置",
-    "fileCardSaved": "檔案資料已儲存喺呢部裝置"
+    "fileCardSaved": "檔案資料已儲存喺呢部裝置",
+    "devices": "裝置",
+    "onlineCount": "{{count}} 部在線",
+    "devicesDescription": "呢個帳戶已連結嘅裝置，包括而家離線嘅裝置。",
+    "thisDevice": "呢部裝置",
+    "linkedDevice": "已連結裝置",
+    "noOtherDevices": "暫時未有其他已連結裝置",
+    "devicesLoading": "載入緊已連結裝置…",
+    "devicesFailed": "載入唔到已連結裝置，稍後會自動再試。"
   },
   "help": {
     "title": "使用說明",
