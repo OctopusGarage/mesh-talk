@@ -93,13 +93,15 @@ options and proposed later stages. The usage guide above owns current behavior.
 These documents distinguish inspected behavior from proposed changes. They do not
 establish shipped capabilities or completed validation.
 
-| Doc | What it covers |
-| --- | --- |
-| [Multi-device synchronization research](research/multi-device-sync-patterns.md) | Dated primary-source comparison of Signal, Matrix, Syncthing and document CRDTs. |
-| [Personal messaging and synchronization design](multi-device-sync-design.md) | Existing-code gaps, recommended models/protocols, conflict rules, settings, offline limits and device-security boundaries. |
-| [Synchronization implementation plan](multi-device-sync-plan.md) | Sequenced work packages, file owners, focused tests, compatibility and release gates. |
+| Doc                                                                             | What it covers                                                                                                             |
+| ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| [Multi-device synchronization research](research/multi-device-sync-patterns.md) | Dated primary-source comparison of Signal, Matrix, Syncthing and document CRDTs.                                           |
+| [Personal messaging and synchronization design](multi-device-sync-design.md)    | Existing-code gaps, recommended models/protocols, conflict rules, settings, offline limits and device-security boundaries. |
+| [Synchronization implementation plan](multi-device-sync-plan.md)                | Sequenced work packages, file owners, focused tests, compatibility and release gates.                                      |
 
 ## Evaluation records
+
+[Feature responsibility and reuse review — 2026-10-19](evals/feature-responsibility-review-2026-10-19.md) maps feature owners, existing reuse, justified component extractions, and selective validation. It records one coordination hotspot and three smaller reuse opportunities.
 
 [Bot integration implementation evidence, 2026-10-19](evals/bot-integrations-2026-10-19.md) records focused test commands, standalone binary checks and platform limits.
 
