@@ -27,8 +27,6 @@ const VIEWPORTS = [
   { width: 760, height: 620 },
 ] as const;
 
-test.describe.configure({ mode: "serial" });
-
 test("first-run sign-in keeps a quiet, bounded surface", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");
@@ -138,7 +136,7 @@ for (const viewport of VIEWPORTS) {
           viewport.width === 760 &&
           ((theme === "oled" &&
             ["linux", "win32"].includes(process.platform)) ||
-            (theme === "light" && process.platform === "linux"));
+            (["light", "dark"].includes(theme) && process.platform === "linux"));
         const reference = needsPlatformReference
           ? name.replace(".png", `-${profile}.png`)
           : name;
