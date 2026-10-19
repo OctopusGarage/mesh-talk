@@ -107,6 +107,20 @@ vi.mock("@/components/GroupAvatar", () => ({
 
 import { Sidebar } from "./Sidebar";
 
+function expectConversation(
+  html: string,
+  id: string,
+  name: string,
+  preview: string,
+) {
+  const row = html.match(
+    new RegExp(`data-testid="conversation-row-${id}"[^>]*>(.*?)</button>`, "s"),
+  );
+  expect(row).not.toBeNull();
+  expect(row?.[1]).toContain(name);
+  expect(row?.[1]).toContain(preview);
+}
+
 beforeEach(async () => {
   chatState.accounts = [
     { account_id: "alice", names: ["Alice"], device_count: 1 },
@@ -169,7 +183,7 @@ it("shows a contact's latest message and unread count in the peer list", () => {
 
   expect(html).toContain('data-testid="conversation-row-alice"');
   expect(html).toContain("See you on the LAN");
-  expect(html).toContain('aria-label="Alice, See you on the LAN"');
+  expectConversation(html, "alice", "Alice", "See you on the LAN");
   expect(html).toContain(">2</span>");
   expect(html).toContain('data-testid="contact-profile-alice"');
 });
@@ -188,7 +202,7 @@ it("keeps a pinned active contact identifiable by its personal alias", () => {
   const html = renderToStaticMarkup(createElement(Sidebar));
 
   expect(html).toContain('aria-current="true"');
-  expect(html).toContain('aria-label="Ally, See you on the LAN"');
+  expectConversation(html, "alice", "Ally", "See you on the LAN");
   expect(html).toContain('aria-label="More Ally"');
 });
 
@@ -198,7 +212,7 @@ it("uses an attachment name as the latest peer preview", () => {
   };
   const html = renderToStaticMarkup(createElement(Sidebar));
 
-  expect(html).toContain('aria-label="Alice, project.pdf"');
+  expectConversation(html, "alice", "Alice", "project.pdf");
 });
 
 it("falls back to presence and member count when conversations have no messages", () => {
@@ -208,8 +222,8 @@ it("falls back to presence and member count when conversations have no messages"
   ];
   const html = renderToStaticMarkup(createElement(Sidebar));
 
-  expect(html).toContain('aria-label="Alice, Offline"');
-  expect(html).toContain('aria-label="Study, 3 members · 0 known online"');
+  expectConversation(html, "alice", "Alice", "Offline");
+  expectConversation(html, "group", "Study", "3 members · 0 known online");
 });
 
 it("labels a recovered channel as an archive", () => {
@@ -224,7 +238,7 @@ it("labels a recovered channel as an archive", () => {
     },
   ];
   const html = renderToStaticMarkup(createElement(Sidebar));
-  expect(html).toContain('aria-label="Study, Archived channel"');
+  expectConversation(html, "group", "Study", "Archived channel");
 });
 
 it("keeps a hidden channel in a restore section instead of the active list", () => {
@@ -252,7 +266,7 @@ it("shows a left channel status ahead of its last message", () => {
   ];
   chatState.messages = { "channel:group": [{ text: "Old message" }] };
   const html = renderToStaticMarkup(createElement(Sidebar));
-  expect(html).toContain('aria-label="Study, Left channel"');
+  expectConversation(html, "group", "Study", "Left channel");
   expect(html).not.toContain("Old message");
 });
 
@@ -273,8 +287,8 @@ it.each([80, 81])(
     const html = renderToStaticMarkup(createElement(Sidebar));
     expect(html).toContain('data-nav-position="1"');
     expect(html).toContain(`data-nav-position="${count + 2}"`);
-    expect(html).toContain('aria-label="First, Offline"');
-    expect(html).toContain('aria-label="Study, 3 members · 0 known online"');
+    expectConversation(html, "person-0", "First", "Offline");
+    expectConversation(html, "group", "Study", "3 members · 0 known online");
     expect(html.includes('data-testid="virtual-section"')).toBe(count === 81);
     expect(html.indexOf('conversation-row-person-1"')).toBeLessThan(
       html.indexOf('conversation-row-group"'),
