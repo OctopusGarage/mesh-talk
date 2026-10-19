@@ -184,7 +184,7 @@ jobs:
       # pass (avoids compiling/running the suite twice).
       - name: Install cargo-llvm-cov
         if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2.87.27
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-llvm-cov
 
