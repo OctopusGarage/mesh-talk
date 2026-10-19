@@ -6496,7 +6496,7 @@ async fn personal_message_unavailable_storage_is_unaccepted() {
         .unwrap()
         .fail_journal_appends_for_test(false)
         .unwrap();
-    assert!(matches!(result, Err(NodeError::Log(_))), "{result:?}");
+    assert!(matches!(result, Err(NodeError::Log(_))));
     assert!(
         node.delivery
             .lock()
