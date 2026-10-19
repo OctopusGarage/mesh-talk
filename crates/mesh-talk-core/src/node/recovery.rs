@@ -372,16 +372,12 @@ impl Node {
                     SnapshotRecordV1::DmLanguageProfile { payload } => {
                         let profile = super::profile::ProfilePayload::decode(&payload)
                             .ok_or(SnapshotError::InvalidEncoding)?;
-                        node.language_state
-                            .lock()
-                            .expect("language state mutex not poisoned")
-                            .record_profile(&profile)
+                        node.account_profiles
+                            .restore_language(&profile)
                             .map_err(|_| SnapshotError::Io)?;
                     }
                     SnapshotRecordV1::DmLanguageDecision { id, hidden } => {
-                        node.language_state
-                            .lock()
-                            .expect("language state mutex not poisoned")
+                        node.account_profiles
                             .decide(EventId::new(id), hidden)
                             .map_err(|_| SnapshotError::Io)?;
                     }
@@ -390,10 +386,8 @@ impl Node {
                         updated_at,
                         avatar,
                     } => {
-                        node.profiles
-                            .lock()
-                            .expect("profiles mutex not poisoned")
-                            .record(&account_id, updated_at, avatar)
+                        node.account_profiles
+                            .restore_avatar(&account_id, updated_at, avatar)
                             .map_err(|_| SnapshotError::Io)?;
                     }
                     SnapshotRecordV1::MediaDescriptor { file_conv, .. } => {
@@ -612,18 +606,11 @@ impl Node {
             .lock()
             .expect("recalls mutex not poisoned")
             .snapshot_marks();
-        let profiles = self
-            .profiles
-            .lock()
-            .expect("profiles mutex not poisoned")
-            .snapshot_entries();
-        let (language_profiles, language_decisions) = {
-            let language = self
-                .language_state
-                .lock()
-                .expect("language state mutex not poisoned");
-            (language.snapshot_profiles(), language.snapshot_decisions())
-        };
+        let super::account_profile::ProfileSnapshot {
+            avatars: profiles,
+            language_profiles,
+            language_decisions,
+        } = self.account_profiles.snapshot();
         let mut record_count = u64::try_from(
             sent_count
                 .checked_add(received_count)

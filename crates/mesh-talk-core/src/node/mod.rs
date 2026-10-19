@@ -9,6 +9,7 @@
 pub(crate) mod account_devices;
 pub(crate) mod account_file_proofs;
 pub(crate) mod account_preferences;
+mod account_profile;
 pub(crate) mod account_suppression;
 pub(crate) mod account_sync;
 pub(crate) mod account_sync_policy;

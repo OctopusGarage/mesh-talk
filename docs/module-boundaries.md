@@ -77,6 +77,44 @@ example, discovery TTL and conversation presence need not share a constant just
 because both measure time; session admission and mailbox admission must retain
 their distinct authorization contracts.
 
+### Coordinated state owners
+
+`ui/store/conversationHistory.ts` owns active history reloads, bounded background
+coverage scans and expansion to a requested Event. It shares history selection
+and coverage/reception commits across those paths. The roster supplies discovered
+Conversations and import revisions; `outgoingIntent.ts` retains acceptance and
+retry. `reception.ts` owns identity-based receipt/unread decisions, including the
+legacy unread projection. `conversationState.ts` retains cache, deletion and
+optimistic-message reconciliation. History callers do not coordinate those
+internal transitions or import back into the chat composition module at runtime.
+The history module defines its own state/context interface; `chat.ts` composes it
+and supplies runtime generations plus status refresh. Its patches cannot mutate
+that session context. `conversationModel.ts` owns shared Conversation/message data
+types, with established chat exports preserved. History and cache initialization
+are defined by their respective owners and reused by production session resets
+and standalone history tests, which do not initialize the aggregate chat store.
+Outgoing intents likewise define their own state/context contract, composing the
+shared cache state with runtime validity, sender identity, reload, status refresh
+and error-reporting capabilities. Their patches cannot mutate unrelated chat
+state. Chat supplies these capabilities; standalone send/status tests use the
+same cache defaults without initializing chat. Feature work should extend these
+owners instead of importing the aggregate chat getter/setter into them.
+
+`core/node/account_profile.rs` owns signed Account profile state: startup
+reconstruction, local revision allocation, legacy/modern incoming merge and
+coordinated avatar/language persistence. Its internal state owns the journals and
+current publication together. Node profile/language paths retain authenticated
+Event processing, authorization and delivery. Immutable receive decisions retain
+their first-wins semantics; recovery uses explicit snapshot/import operations.
+The existing signed payload and encrypted record formats remain the same.
+
+`src-tauri/src/desktop_session.rs` owns the active desktop user, token, password
+and exact-session generation. Credential authentication and profile persistence
+delegate active-session transitions to that shared owner. Commands retain auth
+operation lifetime, runtime installation and retirement, without maintaining a
+second active user/token representation. `state.rs` preserves established exports;
+`runtime_admission.rs` continues to own runtime/session commit authority.
+
 ## 3. Sidebar responsibilities
 
 `ui/features/chat/Sidebar.tsx` is the composition root: it selects application

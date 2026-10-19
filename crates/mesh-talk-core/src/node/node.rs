@@ -339,11 +339,8 @@ pub struct Node {
     /// `history`/`account_history` read this to tombstone our recalled messages; it survives
     /// restart (unlike own reactions).
     pub(in crate::node) recalls: Mutex<crate::node::recall::RecallLog>,
-    /// Avatars peers PROPAGATED to us via signed profiles, keyed by account id (one per
-    /// account, newest-wins, durable). Read by `peer_avatar`/`peer_avatars` and surfaced
-    /// live on `profile_incoming`.
-    pub(in crate::node) profiles: Mutex<crate::node::profile_store::ProfileStore>,
-    pub(in crate::node) language_state: Mutex<super::language_state::LanguageState>,
+    /// Owns profile journals, local publication and coordinated account transitions.
+    pub(in crate::node) account_profiles: super::account_profile::AccountProfiles,
     /// Live stream of received peer profiles (avatar updates), surfaced to the app. The
     /// node owns BOTH ends (created in `open_with_account`) so the constructor signature
     /// is unchanged across its many call sites; the runtime claims the receiver once via
@@ -361,10 +358,6 @@ pub struct Node {
     /// Profile events we've already surfaced this session (dedup), so re-syncing a peer's
     /// device-pair conversation doesn't re-emit a profile we already applied.
     pub(in crate::node) profiles_emitted: Mutex<HashSet<EventId>>,
-    /// Our OWN current profile (the avatar we last set), held so we can re-publish it to a
-    /// peer the moment it's freshly discovered. `None` until the user sets/clears one this
-    /// session (or it's reloaded on open). Behind a mutex; cheap to clone for a send.
-    pub(in crate::node) my_profile: Mutex<Option<crate::node::profile::ProfilePayload>>,
     /// Durable latest local actions; outbound sealed reactions cannot be reopened by us.
     pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::ReactionStore>,
 }
@@ -522,24 +515,8 @@ impl Node {
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let language_state =
             language_res.unwrap_or_else(|error| std::panic::resume_unwind(error))?;
-        let my_profile = profiles
-            .snapshot_entries()
-            .into_iter()
-            .find(|(id, _, _)| id == &account.account_id())
-            .map(|(_, updated_at, avatar)| {
-                crate::node::profile::ProfilePayload::new(&account, avatar, updated_at)
-            });
-        let my_profile = match (my_profile, language_state.profile(&account.account_id())) {
-            (Some(avatar), Some(policy)) => {
-                Some(crate::node::profile::ProfilePayload::new_with_language(
-                    &account,
-                    avatar.avatar,
-                    avatar.updated_at.max(policy.updated_at),
-                    policy.language,
-                ))
-            }
-            (avatar, policy) => policy.or(avatar),
-        };
+        let account_profiles =
+            super::account_profile::AccountProfiles::new(&account, profiles, language_state);
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -747,14 +724,12 @@ impl Node {
             account_sync_notify: tokio::sync::Notify::new(),
             account_history_revision: std::sync::atomic::AtomicU64::new(0),
             account_sync_status: Mutex::new(std::collections::HashMap::new()),
-            profiles: Mutex::new(profiles),
-            language_state: Mutex::new(language_state),
+            account_profiles,
             profile_incoming: profile_tx,
             profile_rx: Mutex::new(Some(profile_rx)),
             call_signal_incoming: call_signal_tx,
             call_signal_rx: Mutex::new(Some(call_signal_rx)),
             profiles_emitted: Mutex::new(HashSet::new()),
-            my_profile: Mutex::new(my_profile),
             pending_link: Mutex::new(None),
             log: Mutex::new(log),
             sentlog: Mutex::new(sentlog),
@@ -890,30 +865,18 @@ impl Node {
     /// The avatar a peer ACCOUNT propagated to us (data-URL bytes), or `None` if unknown
     /// or cleared. Durable across restart.
     pub fn peer_avatar(&self, account_id: &str) -> Option<Vec<u8>> {
-        self.profiles
-            .lock()
-            .expect("profiles mutex not poisoned")
-            .avatar(account_id)
+        self.account_profiles.avatar(account_id)
     }
 
     /// Every peer avatar we hold, as `account_id -> data-URL bytes`. For seeding the UI
     /// on startup so received avatars survive a relaunch.
     pub fn peer_avatars(&self) -> HashMap<String, Vec<u8>> {
-        self.profiles
-            .lock()
-            .expect("profiles mutex not poisoned")
-            .all()
+        self.account_profiles.avatars()
     }
 
     /// Durable signed profile state, including clear tombstones for startup reconciliation.
     pub fn peer_profile_states(&self) -> HashMap<String, Option<Vec<u8>>> {
-        self.profiles
-            .lock()
-            .expect("profiles mutex not poisoned")
-            .snapshot_entries()
-            .into_iter()
-            .map(|(account, _, avatar)| (account, avatar))
-            .collect()
+        self.account_profiles.avatar_states()
     }
 
     /// Summaries of all channels this node is a member of.

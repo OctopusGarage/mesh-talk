@@ -1,14 +1,10 @@
-import { reconcileHistory } from "./reception";
-import { receptionPatch } from "./chat";
 import { chat } from "@/lib/api";
 import { errorMessage, sendFailReason } from "@/lib/error";
 import { captureChatOwner } from "./ownership";
 import { useTransfers } from "./transfers";
 import {
-  boundedConversationMap,
+  type ConversationCacheState,
   convKey,
-  fromHistoryItem,
-  reconcileMessages,
   applyProjection,
   completeSendIntentState,
 } from "./conversationState";
@@ -17,7 +13,28 @@ export {
   applyProjection,
   fromHistoryItem,
 } from "./conversationState";
-import type { ChatMessage, Conversation, Set, Get } from "./chat";
+import type { ChatMessage, Conversation } from "./conversationModel";
+/** Outgoing work owns intent/cache transitions and serial delivery projection. */
+export interface OutgoingIntentState extends ConversationCacheState {
+  statusBusy: boolean;
+}
+
+export interface OutgoingIntentContext extends OutgoingIntentState {
+  runEpoch: number;
+  identityEpoch: number;
+  active: Conversation | null;
+  myId: string;
+  reload: () => Promise<boolean>;
+  refreshStatuses: (conversation?: Conversation) => Promise<void>;
+  setError: (message: string) => void;
+}
+
+type Get = () => OutgoingIntentContext;
+type Set = (
+  partial:
+    | Partial<OutgoingIntentState>
+    | ((state: OutgoingIntentContext) => Partial<OutgoingIntentState>),
+) => void;
 
 export const SEND_INTENT_CAP = 256;
 export type SendPayload =
@@ -75,123 +92,6 @@ function sendStickerFor(
     c.kind === "channel",
     expiresAtMs,
   );
-}
-
-const HISTORY_LIMIT = 200;
-
-function historyFor(c: Conversation, owner: string, limit = HISTORY_LIMIT) {
-  return c.kind === "account"
-    ? chat.ownerHistory(owner, c.id, limit)
-    : chat.channelHistory(c.id, limit);
-}
-function reactionsFor(c: Conversation) {
-  return c.kind === "account"
-    ? chat.accountReactions(c.id)
-    : chat.channelReactions(c.id);
-}
-
-export async function reloadConversation(
-  rawSet: Set,
-  get: Get,
-  discoverChanges = true,
-) {
-  const lease = captureChatOwner(get);
-  const set: Set = (partial) => {
-    if (lease.current()) rawSet(partial);
-  };
-  if (!lease.current()) return false;
-  const c = get().active;
-  if (!c) return false;
-  const key = convKey(c);
-  const loadingRequest = get().loadingRequest + 1;
-  const request = loadingRequest;
-  set({
-    loading: true,
-    loadingRequest,
-    historyRequests: boundedConversationMap(
-      get().historyRequests,
-      key,
-      request,
-    ),
-  });
-  try {
-    const [items, reacts] = await Promise.all([
-      historyFor(c, lease.owner!, get().historyLimits[key]),
-      reactionsFor(c),
-    ]);
-    if (
-      !lease.current() ||
-      get().historyRequests[key] !== request ||
-      (!get().cacheOrder.includes(key) &&
-        get().active &&
-        convKey(get().active!) !== key)
-    )
-      return false;
-    set((s) => ({
-      ...receptionPatch(
-        s,
-        reconcileHistory(
-          s,
-          key,
-          items.map((h) => ({ id: h.id, fromMe: h.from_me })),
-          discoverChanges &&
-            s.historyBaselines.includes(key) &&
-            Object.prototype.hasOwnProperty.call(s.ledger, key),
-        ),
-      ),
-      historyBaselines: [
-        ...s.historyBaselines.filter((k) => k !== key),
-        key,
-      ].slice(-4096),
-      ...((s.historyLimits[key] ?? 200) >= 500
-        ? {
-            historyFullBaselines: [
-              ...s.historyFullBaselines.filter((k) => k !== key),
-              key,
-            ].slice(-4096),
-          }
-        : {}),
-      messages: {
-        ...s.messages,
-        [key]: reconcileMessages(
-          items.map((h) => ({
-            ...fromHistoryItem(h),
-            receivedAt: s.ledger[key]?.[h.id ?? ""]?.receivedAt,
-            arrivalKind: s.ledger[key]?.[h.id ?? ""]?.arrivalKind,
-          })),
-          s.messages[key] ?? [],
-          Object.values(s.intents).filter(
-            (i) => convKey(i.conversation) === key,
-          ),
-          s.deleted[key] ?? [],
-        ),
-      },
-      intents: Object.fromEntries(
-        Object.entries(s.intents).filter(
-          ([, intent]) =>
-            convKey(intent.conversation) !== key ||
-            !intent.message.id ||
-            (!intent.acceptanceHistoryOnly &&
-              !items.some((h) => h.id === intent.message.id)),
-        ),
-      ),
-      reactions: { ...s.reactions, [key]: reacts },
-      ...(s.loadingRequest === loadingRequest
-        ? { loading: false, historyError: null }
-        : {}),
-    }));
-    if (lease.current() && get().active && convKey(get().active!) === key)
-      await get().refreshStatuses();
-    return lease.current();
-  } catch {
-    if (
-      get().loadingRequest === loadingRequest &&
-      get().active &&
-      convKey(get().active!) === key
-    )
-      set({ loading: false, historyError: key });
-    return false;
-  }
 }
 
 export async function refreshDeliveryStatuses(
@@ -349,10 +249,9 @@ export function beginSendIntent(
   options: { waitForHydration?: boolean } = {},
 ): Promise<boolean> | null {
   if (Object.keys(get().intents).length >= SEND_INTENT_CAP) {
-    set({
-      error:
-        "Too many pending messages. Resolve a failed send before sending more.",
-    });
+    get().setError(
+      "Too many pending messages. Resolve a failed send before sending more.",
+    );
     return null;
   }
   const clientId = nextClientId();
@@ -511,12 +410,12 @@ export async function dispatchIntent(
       failed: true,
       failReason: sendFailReason(e),
     });
-    if (payload.kind === "file")
-      guarded({
-        error: /file manifest exceeds transport frame/i.test(errorMessage(e))
+    if (payload.kind === "file" && lease.current())
+      get().setError(
+        /file manifest exceeds transport frame/i.test(errorMessage(e))
           ? "This attachment has too much metadata to send. Try a shorter name or a smaller folder."
           : `Couldn't send file: ${errorMessage(e)}`,
-      });
+      );
     return false;
   }
 }

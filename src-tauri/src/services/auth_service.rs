@@ -3,11 +3,12 @@ use mesh_talk_core::identity::manager::IdentityManager;
 use mesh_talk_core::storage::file_manager::FileManager;
 
 use rand::distr::{Alphanumeric, Distribution};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Session duration in seconds (24 hours)
+/// Issued token duration in seconds (24 hours).
 const SESSION_DURATION_SECS: u64 = 24 * 60 * 60;
 
 #[cfg(test)]
@@ -91,10 +92,19 @@ pub struct AuthService {
     rename_persisted: RenamePersistenceGate,
     /// Identity manager for user authentication
     identity_manager: Arc<IdentityManager>,
-    /// In-memory storage of sessions (key: session token, value: Session)
-    sessions: Arc<Mutex<HashMap<String, Session>>>,
-    /// Currently logged in user (if any)
-    current_user: Arc<Mutex<Option<User>>>,
+    /// Sole live desktop-session owner, shared with host admission.
+    session: crate::desktop_session::SessionState,
+}
+
+impl From<crate::desktop_session::SessionTransitionError> for AuthError {
+    fn from(error: crate::desktop_session::SessionTransitionError) -> Self {
+        use crate::desktop_session::SessionTransitionError;
+        match error {
+            SessionTransitionError::AlreadyLoggedIn => Self::AlreadyLoggedIn,
+            SessionTransitionError::NotLoggedIn => Self::NotLoggedIn,
+            SessionTransitionError::InvalidToken => Self::InvalidCredentials,
+        }
+    }
 }
 
 static INSTANCE: std::sync::OnceLock<AuthService> = std::sync::OnceLock::new();
@@ -113,9 +123,12 @@ impl AuthService {
             #[cfg(test)]
             rename_persisted: Arc::new(Mutex::new(None)),
             identity_manager,
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            current_user: Arc::new(Mutex::new(None)),
+            session: crate::desktop_session::SessionState::default(),
         }
+    }
+
+    pub(crate) fn session(&self) -> &crate::desktop_session::SessionState {
+        &self.session
     }
 
     /// Get the global authentication service instance
@@ -196,6 +209,15 @@ impl AuthService {
 
     /// Login a user
     pub fn login(&self, name: String, password: String) -> AuthResult<(User, String)> {
+        self.login_session(name, password)
+            .map(|(user, token, _)| (user, token))
+    }
+
+    pub(crate) fn login_session(
+        &self,
+        name: String,
+        password: String,
+    ) -> AuthResult<(User, String, crate::desktop_session::SessionLease)> {
         let normalized_name = name.trim();
         if normalized_name.is_empty() {
             return Err(AuthError::InvalidInput(
@@ -233,37 +255,33 @@ impl AuthService {
         };
 
         user.update_last_seen();
-        let user_id = user.user_id.clone();
-
-        {
-            let mut current_user = self.current_user.lock().unwrap();
-            if let Some(existing) = current_user.as_ref()
-                && existing.user_id != user_id
-            {
-                return Err(AuthError::AlreadyLoggedIn);
-            }
-            *current_user = Some(user.clone());
-        }
-
-        let mut sessions = self.sessions.lock().unwrap();
-        sessions.retain(|_, session| session.user_id != user_id && !session.is_expired());
-
-        let session = Session::new(user_id, SESSION_DURATION_SECS);
-        let token = session.token.clone();
-        sessions.insert(token.clone(), session);
-
-        Ok((user, token))
+        // Reauthentication revokes the previous token. The desktop has one live
+        // session; the former registry never expired active admission or logout.
+        let token = Session::new(user.user_id.clone(), SESSION_DURATION_SECS).token;
+        let lease = self
+            .session
+            .activate(token.clone(), user.clone(), password)?;
+        Ok((user, token, lease))
     }
 
     /// Change the current user's editable display name (nickname). Persists it to the
     /// identity store (verifying `password`) and updates the in-memory current user.
     /// The login `username` is unchanged. Returns the updated session user.
     pub fn set_display_name(&self, password: &str, new_display_name: &str) -> AuthResult<User> {
-        let (username, owner) = {
-            let guard = self.current_user.lock().unwrap();
-            let user = guard.as_ref().ok_or(AuthError::NotLoggedIn)?;
-            (user.name.clone(), user.user_id.clone())
-        };
+        let lease = self.session.capture().map_err(|_| AuthError::NotLoggedIn)?;
+        self.rename_session(&lease, password, new_display_name)
+    }
+
+    pub(crate) fn rename_session(
+        &self,
+        lease: &crate::desktop_session::SessionLease,
+        password: &str,
+        new_display_name: &str,
+    ) -> AuthResult<User> {
+        let username = self
+            .session
+            .matching(lease, |info| info.user.name.clone())
+            .map_err(|_| AuthError::NotLoggedIn)?;
 
         let identity_user = self
             .identity_manager
@@ -286,44 +304,17 @@ impl AuthService {
             entered.send(()).unwrap();
             release.recv().unwrap();
         }
-        let mut guard = self.current_user.lock().unwrap();
-        let user = guard.as_mut().ok_or(AuthError::NotLoggedIn)?;
-        if user.user_id != owner {
-            return Err(AuthError::NotLoggedIn);
-        }
-        user.display_name = identity_user.effective_display_name().to_string();
-        Ok(user.clone())
+        self.session
+            .matching(lease, |info| {
+                info.user.display_name = identity_user.effective_display_name().to_string();
+                info.user.clone()
+            })
+            .map_err(|_| AuthError::NotLoggedIn)
     }
 
-    /// Logout the current user
+    /// Logout the current user and invalidate its host admission generation.
     pub fn logout(&self, token: String) -> AuthResult<()> {
-        let active_user = {
-            let guard = self.current_user.lock().unwrap();
-            guard.clone().ok_or(AuthError::NotLoggedIn)?
-        };
-
-        let mut sessions = self.sessions.lock().unwrap();
-        if sessions.remove(&token).is_none() {
-            return Err(AuthError::InvalidCredentials);
-        }
-
-        sessions.retain(|_, session| session.user_id != active_user.user_id);
-
-        let _now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        // Update user presence to offline
-        // Note: In a file-based system, we might want to persist this information
-        // For now, we'll just update the in-memory representation
-
-        let mut current_user = self.current_user.lock().unwrap();
-        if current_user.as_ref().map(|user| user.user_id.clone()) == Some(active_user.user_id) {
-            *current_user = None;
-        }
-
-        Ok(())
+        self.session.logout(&token).map_err(Into::into)
     }
 }
 
@@ -360,15 +351,77 @@ mod tests {
             rename.join().unwrap().is_err(),
             "completed A persistence must reject a replaced current user"
         );
+        assert_eq!(auth.session.get().unwrap().user.display_name, "bob");
+    }
+
+    #[test]
+    fn active_session_is_shared_by_authentication_and_host_admission() {
+        let (auth, _) = setup_test_context();
+        auth.register("alice".into(), "password-a".into(), "fixture".into())
+            .unwrap();
+        let app = crate::state::AppState::new(auth.clone());
+        let (user, token) = auth.login("alice".into(), " password-a ".into()).unwrap();
+        let info = app
+            .session()
+            .get()
+            .expect("authentication publishes host session");
+        assert_eq!(info.user.user_id, user.user_id);
+        assert_eq!(info.token, token);
+        assert_eq!(info.password, "password-a");
+        let lease = app.session().capture().unwrap();
+        auth.register("bob".into(), "password-b".into(), "fixture".into())
+            .unwrap();
+        assert!(matches!(
+            auth.login("bob".into(), "password-b".into()),
+            Err(AuthError::AlreadyLoggedIn)
+        ));
+        assert!(matches!(
+            auth.login("alice".into(), "wrong-password".into()),
+            Err(AuthError::InvalidCredentials)
+        ));
+        assert!(app.session().matching(&lease, |_| ()).is_ok());
+
+        auth.set_display_name("password-a", "Alice renamed")
+            .unwrap();
         assert_eq!(
-            auth.current_user
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .display_name,
-            "bob"
+            app.session().get().unwrap().user.display_name,
+            "Alice renamed"
         );
+        assert!(app.session().matching(&lease, |_| ()).is_ok());
+        let (_, replacement) = auth.login("alice".into(), "password-a".into()).unwrap();
+        assert!(app.session().matching(&lease, |_| ()).is_err());
+        assert!(matches!(
+            auth.logout(token),
+            Err(AuthError::InvalidCredentials)
+        ));
+        assert!(app.session().get().is_some());
+        auth.logout(replacement).unwrap();
+        assert!(app.session().get().is_none());
+    }
+
+    #[test]
+    fn delayed_rename_rejects_same_owner_reauthentication() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = AuthService::new(Arc::new(IdentityManager::new(FileManager::new(
+            dir.path().to_owned(),
+        ))));
+        auth.register("alice".into(), "password-a".into(), "fixture".into())
+            .unwrap();
+        auth.login("alice".into(), "password-a".into()).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *auth.rename_persisted.lock().unwrap() = Some((entered_tx, release_rx));
+        let worker = auth.clone();
+        let rename = std::thread::spawn(move || worker.set_display_name("password-a", "Renamed"));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        auth.login("alice".into(), "password-a".into()).unwrap();
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            rename.join().unwrap(),
+            Err(AuthError::NotLoggedIn)
+        ));
     }
 
     fn setup_test_context() -> (

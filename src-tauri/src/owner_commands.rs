@@ -387,13 +387,11 @@ mod tests {
                     .auth_service()
                     .register("alice".into(), password.into(), "fixture".into())
                     .unwrap();
-                let (user, token) = app_state
+                let (user, _) = app_state
                     .auth_service()
                     .login("alice".into(), password.into())
                     .unwrap();
-                let owner = user.user_id.clone();
-                app_state.session().publish(token, user, password.into());
-                owner
+                user.user_id.clone()
             } else {
                 app_state
                     .session()
@@ -1666,15 +1664,11 @@ mod tests {
         let logged_out = fixture.app_state.session().get().is_none();
         // Real registered logout publication above; direct authenticated re-publication
         // below models the same host UUID's replacement generation, not runtime startup.
-        let (user, token) = fixture
+        let (_, _, replacement) = fixture
             .app_state
             .auth_service()
-            .login("alice".into(), "password-owner".into())
+            .login_session("alice".into(), "password-owner".into())
             .unwrap();
-        let replacement = fixture
-            .app_state
-            .session()
-            .publish(token, user, "password-owner".into());
         let replaced = replacement.owner() == owner && replacement != lease;
         release_tx.send(()).unwrap();
         let holder_result = holder.join().unwrap();

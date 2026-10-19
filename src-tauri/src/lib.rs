@@ -21,6 +21,7 @@ pub mod chat_commands;
 pub mod commands;
 pub mod config_store;
 pub mod contact_policy;
+mod desktop_session;
 pub mod diagnostics;
 mod easytier_discovery;
 pub mod events;

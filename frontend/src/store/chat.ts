@@ -1,7 +1,7 @@
 import { saveAttachment } from "@/lib/attachmentSave";
 import { create } from "zustand";
 import { chat, contactPolicy, favorites as favoritesApi } from "@/lib/api";
-import { errorMessage, type SendFailReason } from "@/lib/error";
+import { errorMessage } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import {
   loadPendingUnread,
@@ -17,8 +17,7 @@ import {
   emptyReception,
   receiveIdentity,
   viewIdentities,
-  reconcileHistory,
-  type ReceptionState,
+  receptionPatch,
   type ConversationReception,
 } from "./reception";
 import {
@@ -36,20 +35,24 @@ import {
   registerRuntimeSnapshot,
 } from "./ownership";
 import {
-  type SendIntent,
+  type OutgoingIntentContext,
   sendIntent,
   beginSendIntent,
   dispatchIntent,
-  reloadConversation,
   refreshDeliveryStatuses,
 } from "./outgoingIntent";
 import {
+  type ConversationHistoryState,
+  emptyConversationHistory,
+  reloadConversation,
+  revealConversationIdentity,
+  scanConversationHistory,
+} from "./conversationHistory";
+import {
   convKey,
-  boundedConversationMap,
   openConversationState,
   deleteConversationMessage,
   clearConversationMessages,
-  invalidateConversationIdentity,
 } from "./conversationState";
 export { convKey, fromHistoryItem } from "./conversationState";
 import type {
@@ -61,53 +64,22 @@ import type {
   FavoriteInfo,
   FileReceivedEvent,
   PeerInfo,
-  ReactionInfo,
 } from "@/lib/types";
+
+import type {
+  ChatMessage,
+  Conversation,
+  SearchTarget,
+} from "./conversationModel";
+export type {
+  ConvKind,
+  ChatMessage,
+  Conversation,
+  SearchTarget,
+} from "./conversationModel";
 
 /** Cap on the received-files tray list. */
 const INCOMING_FILES_CAP = 300;
-
-export type ConvKind = "account" | "channel";
-
-export interface Conversation {
-  kind: ConvKind;
-  id: string; // account_id (hex) | channel_id (hex)
-  name: string;
-}
-
-export interface SearchTarget {
-  wallClock: number;
-  text: string;
-  fromMe: boolean;
-}
-
-export interface ChatMessage {
-  receivedAt?: number;
-  arrivalKind?: import("@/lib/types").ArrivalKind;
-  delivery?: "awaiting" | "delivered";
-  replicas?: number;
-  metadataPending?: boolean;
-  id: string | null; // hex EventId; null while pending
-  fromMe: boolean;
-  who: string;
-  text: string;
-  wallClock: number;
-  replyTo: string | null;
-  pending?: boolean;
-  failed?: boolean; // a send that errored — kept visible (not silently dropped)
-  failReason?: SendFailReason; // coarse, frontend-derived cause (drives the label + help)
-  clientId?: string; // stable id for an optimistic bubble (survives a concurrent reload)
-  recalled?: boolean; // true when recalled → render a placeholder, no content
-  recalledText?: string | null; // our own recalled text, for "re-edit"
-  sticker?: string | null; // animated-sticker id when this message is a sticker
-  file?: {
-    name: string;
-    size: number;
-    mime: string;
-    fileConv: string;
-    media: boolean;
-  } | null;
-}
 
 export interface IncomingFile {
   fromName: string;
@@ -191,7 +163,7 @@ async function pollUntilReady(
               (pendingUnknownUnread[sender] ?? 0) + count,
             );
         return {
-          ...(replacedScope ? invalidateConversationIdentity() : {}),
+          ...(replacedScope ? invalidateConversationIdentity(state) : {}),
           ...(!sameScope
             ? {
                 ...persistedReception,
@@ -238,44 +210,22 @@ function reactFor(
  * commands; 1:1 chats are account-addressed). */
 const isChannelConv = (c: Conversation) => c.kind === "channel";
 
-export interface ChatState extends ReceptionState {
-  identityEpoch: number;
-  historyRevision: number | null;
-  historyScanBusy: boolean;
-  historyScanQueue: Conversation[];
-  historyScanRevision: number | null;
-  historyBaselines: string[];
-  historyFullBaselines: string[];
+export interface ChatState
+  extends ConversationHistoryState, OutgoingIntentContext {
   bootBusy: boolean;
   bootRequest: number;
-  intents: Record<string, SendIntent>;
-  deleted: Record<string, string[]>;
-  statusBusy: boolean;
-  runEpoch: number;
-  historyRequests: Record<string, number>;
-  historyLimits: Record<string, number>;
-  activeRequest: number;
   rosterRequest: number;
   favoritesRequest: number;
-  loadingRequest: number;
   ready: boolean;
-  myId: string;
   myAccountId: string;
   peers: PeerInfo[];
   accounts: AccountInfo[];
   channels: ChannelInfo[];
   /** Each channel's members (by channel_id), cached for the composite group avatar. */
   channelMembersById: Record<string, ChannelMemberInfo[]>;
-  active: Conversation | null;
   searchTarget: (SearchTarget & { key: string; request: number }) | null;
-  messages: Record<string, ChatMessage[]>;
-  reactions: Record<string, ReactionInfo[]>;
-  unread: Record<string, number>;
   unreadOwner: string;
   pendingUnknownUnread: Record<string, number>;
-  // Conversation keys in open-recency order (most-recent-last); drives cache eviction.
-  // Not read by any component selector — purely internal LRU bookkeeping.
-  cacheOrder: string[];
   members: ChannelMemberInfo[];
   // The active channel's owner (device user_id). Only the owner may change membership.
   channelOwner: string;
@@ -283,8 +233,6 @@ export interface ChatState extends ReceptionState {
   // Per-contact UI prefs (pin + custom alias), keyed by account_id/channel_id. Persisted
   // on the Rust side; mirrored here so the sidebar can sort/rename without a roundtrip.
   favorites: Record<string, FavoriteInfo>;
-  loading: boolean;
-  historyError: string | null;
   error: string | null; // transient action error (file/reaction send), surfaced to the user
   bootFailed: boolean; // the node never came up within the boot window
 
@@ -297,7 +245,6 @@ export interface ChatState extends ReceptionState {
   setAlias: (id: string, alias: string | null) => Promise<void>;
   dismissFile: (fileConv: string) => void;
   clearError: () => void;
-  setError: (msg: string) => void;
   refreshRoster: () => Promise<void>;
   deleteContact: (account: string) => Promise<boolean>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
@@ -305,8 +252,6 @@ export interface ChatState extends ReceptionState {
   markLegacyActiveRead: () => void;
   markMessagesViewed: (key: string, ids: string[]) => void;
   revealUnread: (key: string, id: string) => Promise<boolean>;
-  reload: () => Promise<boolean>;
-  refreshStatuses: (conversation?: Conversation) => Promise<void>;
   send: (text: string, replyTo: string | null) => Promise<void>;
   admitTextAndWait: (
     text: string,
@@ -349,28 +294,32 @@ export interface ChatState extends ReceptionState {
   renameChannel: (channelId: string, name: string) => Promise<void>;
 }
 
+function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
+  return {
+    ...emptyConversationHistory(),
+    historyRevision: state.historyRevision,
+    activeRequest: state.activeRequest,
+    loadingRequest: state.loadingRequest,
+    ready: false,
+    unreadOwner: "",
+    pendingUnknownUnread: {},
+    searchTarget: null,
+    members: [],
+    channelOwner: "",
+    statusBusy: false,
+  };
+}
+
 /** One empty session snapshot for initial state, login, and app lock. */
 function emptySessionData() {
   return {
-    ...emptyReception(),
+    ...emptyConversationHistory(),
     identityEpoch: 0,
-    historyRevision: null,
-    historyScanBusy: false,
-    historyScanQueue: [],
-    historyScanRevision: null,
-    historyBaselines: [],
-    historyFullBaselines: [],
     bootBusy: false,
     bootRequest: 0,
-    intents: {},
-    deleted: {},
     statusBusy: false,
-    historyRequests: {},
-    historyLimits: {},
-    activeRequest: 0,
     rosterRequest: 0,
     favoritesRequest: 0,
-    loadingRequest: 0,
     ready: false,
     myId: "",
     myAccountId: "",
@@ -378,20 +327,13 @@ function emptySessionData() {
     accounts: [],
     channels: [],
     channelMembersById: {},
-    active: null,
     searchTarget: null,
-    messages: {},
-    reactions: {},
-    unread: {},
     unreadOwner: "",
     pendingUnknownUnread: {},
-    cacheOrder: [],
     members: [],
     channelOwner: "",
     incomingFiles: [],
     favorites: NO_FAVORITES,
-    loading: false,
-    historyError: null,
     error: null,
     bootFailed: false,
   };
@@ -716,7 +658,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         // old in-flight conversation work; the run's owned ticker performs fresh boot.
         resetChatFileAvailability();
         rawSet((state) => ({
-          ...invalidateConversationIdentity(),
+          ...invalidateConversationIdentity(state),
           identityEpoch: state.identityEpoch + 1,
         }));
         get().retryBoot();
@@ -795,104 +737,26 @@ export const useChat = create<ChatState>((rawSet, get) => ({
             }).slice(-64),
           ),
         }));
-      // Imports are durable before this process-local revision advances. Reuse
-      // the owner-scoped poll so an open conversation updates without notifications.
       if (identity.history_revision !== undefined) {
-        const changed = get().historyRevision !== identity.history_revision;
-        let loaded = true;
-        const conversations: Conversation[] = [
-          ...accounts.map((account) => ({
-            kind: "account" as const,
-            id: account.account_id,
-            name: "",
-          })),
-          ...channels.map((channel) => ({
-            kind: "channel" as const,
-            id: channel.channel_id,
-            name: channel.name,
-          })),
-        ];
-        const revision = identity.history_revision;
-        // Keep a bounded rotating work queue: later conversations receive a turn,
-        // and an individual failure cannot force earlier snapshots to repeat.
-        if (get().historyScanRevision !== revision) {
-          set({
-            historyScanRevision: revision,
-            historyScanQueue: [
-              ...get().historyScanQueue,
-              ...conversations.filter(
-                (c) =>
-                  !get().historyScanQueue.some(
-                    (pending) => convKey(pending) === convKey(c),
-                  ) &&
-                  (get().historyScanRevision === null ||
-                    changed ||
-                    !get().historyBaselines.includes(convKey(c))),
-              ),
-            ].slice(0, 4096),
-          });
-        } else if (!get().historyScanQueue.length && !changed) {
-          const missing = conversations.filter(
-            (c) => !get().historyBaselines.includes(convKey(c)),
-          );
-          if (missing.length) set({ historyScanQueue: missing.slice(0, 4096) });
-        }
-        const round = get().historyScanQueue.slice(0, 8);
-        if (round.length) {
-          set({ historyScanBusy: true });
-          try {
-            for (const conversation of round) {
-              const key = convKey(conversation);
-              const initialized = Object.prototype.hasOwnProperty.call(
-                get().ledger,
-                key,
-              );
-              try {
-                const rows =
-                  conversation.kind === "channel"
-                    ? await chat.channelHistory(conversation.id, 500)
-                    : await chat.ownerHistory(
-                        lease.owner!,
-                        conversation.id,
-                        500,
-                      );
-                if (!lease.current()) return;
-                set((state) => ({
-                  ...receptionPatch(
-                    state,
-                    reconcileSnapshotCoverage(state, key, rows, initialized),
-                  ),
-                  historyFullBaselines: [
-                    ...state.historyFullBaselines.filter((k) => k !== key),
-                    key,
-                  ].slice(-4096),
-                  historyScanQueue: state.historyScanQueue.filter(
-                    (c) => convKey(c) !== key,
-                  ),
-                  historyBaselines: [
-                    ...state.historyBaselines.filter((k) => k !== key),
-                    key,
-                  ].slice(-4096),
-                }));
-              } catch {
-                loaded = false;
-                set((state) => ({
-                  historyScanQueue: [
-                    ...state.historyScanQueue.filter((c) => convKey(c) !== key),
-                    conversation,
-                  ],
-                }));
-              }
-            }
-          } finally {
-            set({ historyScanBusy: false });
-          }
-        }
-        if (!lease.current()) return;
-        if (changed && get().active) loaded = (await get().reload()) && loaded;
-        if (!lease.current()) return;
-        if (loaded && !get().historyScanQueue.length)
-          set({ historyRevision: get().historyScanRevision ?? revision });
+        await scanConversationHistory(
+          rawSet,
+          get,
+          [
+            ...accounts.map((account): Conversation => ({
+              kind: "account",
+              id: account.account_id,
+              name: "",
+            })),
+            ...channels.map((channel): Conversation => ({
+              kind: "channel",
+              id: channel.channel_id,
+              name: channel.name,
+            })),
+          ],
+          identity.history_revision,
+          () => lease.current() && get().rosterRequest === request,
+        );
+        if (!lease.current() || get().rosterRequest !== request) return;
       }
       // Cache each channel's members for the composite group avatar (best-effort per
       // channel; a single failure just leaves that channel's montage on its fallback).
@@ -1009,30 +873,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     );
   },
 
-  revealUnread: async (key, id) => {
-    const lease = captureChat(get);
-    if (!lease.current() || !get().active || convKey(get().active!) !== key)
-      return false;
-    if (get().messages[key]?.some((row) => row.id === id)) return true;
-    const request = get().activeRequest;
-    rawSet((state) => ({
-      historyLimits: boundedConversationMap(state.historyLimits, key, 500),
-    }));
-    // Expanding an archive is a baseline operation unless an observed import
-    // revision already proves that local history is changing.
-    const imported =
-      get().historyRevision !== null &&
-      get().historyScanRevision !== get().historyRevision;
-    const loaded = await reloadConversation(rawSet, get, imported);
-    return (
-      loaded &&
-      lease.current() &&
-      get().activeRequest === request &&
-      get().active !== null &&
-      convKey(get().active!) === key &&
-      Boolean(get().messages[key]?.some((row) => row.id === id))
-    );
-  },
+  revealUnread: (key, id) => revealConversationIdentity(rawSet, get, key, id),
 
   reload: () => reloadConversation(rawSet, get),
   refreshStatuses: (conversation) =>
@@ -1597,30 +1438,6 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
   if (isActive && !knownIdentity) void get().reload();
 }
 
-/** Merge identity counts without losing legacy-host unread counters. */
-export function receptionPatch(
-  state: ChatState,
-  next: ReceptionState,
-): Partial<ChatState> {
-  if (next === state) return {};
-  const unread = { ...state.unread };
-  for (const key of new Set([
-    ...Object.keys(state.unreadIds),
-    ...Object.keys(next.unreadIds),
-    ...Object.keys(state.overflowUnread),
-    ...Object.keys(next.overflowUnread),
-  ])) {
-    unread[key] = Math.max(
-      0,
-      (unread[key] ?? 0) +
-        (next.unreadIds[key]?.length ?? 0) +
-        (next.overflowUnread[key] ?? 0) -
-        (state.unreadIds[key]?.length ?? 0) -
-        (state.overflowUnread[key] ?? 0),
-    );
-  }
-  return { ...next, unread };
-}
 useChat.subscribe((state, previous) => {
   if (
     state.ledger !== previous.ledger &&
@@ -1649,21 +1466,3 @@ useChat.subscribe((state, previous) => {
       state.historyFullBaselines,
     );
 });
-
-/** Expanded archive coverage is distinct from the latest presentation window. */
-function reconcileSnapshotCoverage(
-  state: ChatState,
-  key: string,
-  rows: import("@/lib/types").HistoryItem[],
-  initialized: boolean,
-): ReceptionState {
-  const messages = rows.map((row) => ({ id: row.id, fromMe: row.from_me }));
-  const known = initialized && state.historyBaselines.includes(key);
-  if (known && !state.historyFullBaselines.includes(key)) {
-    // Only the comparable latest window has a baseline. Older expansion rows are
-    // preexisting archive until a full snapshot establishes local coverage.
-    const recent = reconcileHistory(state, key, messages.slice(-200), true);
-    return reconcileHistory(recent, key, messages, false);
-  }
-  return reconcileHistory(state, key, messages, known);
-}

@@ -581,10 +581,8 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
         .unwrap()
         .record(conversation, EventId::new([5; 32]), 15)
         .unwrap();
-    node.profiles
-        .lock()
-        .unwrap()
-        .record("peer", 16, Some(b"avatar".to_vec()))
+    node.account_profiles
+        .restore_avatar("peer", 16, Some(b"avatar".to_vec()))
         .unwrap();
     let signed = crate::eventlog::event::Event::new(
         &node.identity,
@@ -8303,10 +8301,8 @@ async fn setting_an_avatar_propagates_to_a_peer_account_over_loopback() {
         1, // updated_at far in the past
     );
     let applied = bob_node
-        .profiles
-        .lock()
-        .unwrap()
-        .record(
+        .account_profiles
+        .restore_avatar(
             &alice_acct.account_id(),
             stale.updated_at,
             stale.avatar.clone(),
@@ -8349,13 +8345,13 @@ async fn own_signed_profile_and_clear_survive_restart_for_new_peers() {
         .unwrap();
     drop(node);
     let node = open();
-    let profile = node.my_profile.lock().unwrap().clone().unwrap();
+    let profile = node.account_profiles.current().unwrap();
     assert_eq!(profile.avatar, Some(b"data:image/png;base64,QQ==".to_vec()));
     assert!(profile.verify());
     node.set_avatar(None).await.unwrap();
     drop(node);
     let node = open();
-    let profile = node.my_profile.lock().unwrap().clone().unwrap();
+    let profile = node.account_profiles.current().unwrap();
     assert_eq!(profile.avatar, None);
     assert!(profile.verify());
     assert_eq!(
@@ -8422,10 +8418,7 @@ async fn disabled_profile_sync_defers_sibling_avatar_until_enabled() {
     node.set_device_sync_category(crate::node::SyncCategory::Profile, true)
         .unwrap();
     assert_eq!(node.peer_avatar(&account.account_id()), Some(avatar));
-    assert_eq!(
-        node.my_profile.lock().unwrap().as_ref().unwrap().updated_at,
-        42
-    );
+    assert_eq!(node.account_profiles.current().unwrap().updated_at, 42);
 }
 
 // An oversized avatar is rejected at the publish boundary (never sealed/appended).

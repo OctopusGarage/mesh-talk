@@ -1,11 +1,125 @@
 # Architecture health assessments
 
-## Current architecture-health loop — 2026-10-16
+## Current architecture-health loop — 2026-10-19
 
-**Current maintained result: 95/100 (Round 3). The architecture goal is achieved;
+**Current maintained result: 95/100 after three iterations. The architecture goal is achieved; release/PR gates remain separate.**
+
+Baseline: `491adf4` on `fix/architecture-audit-20261019`, rated **87/100** using
+the explicitly requested improve-codebase-architecture skill. That skill supplies
+no numerical formula. This loop uses five equally weighted dimensions out of 20;
+these are qualitative engineering judgments, not coverage percentages or points
+awarded for moving files. The earlier 100/100 in conversation measured closure
+of enumerated findings and is not this structural rubric.
+
+| Dimension                                    |   Baseline | Iteration 1 | Iteration 2 | Iteration 3 |
+| -------------------------------------------- | ---------: | ----------: | ----------: | ----------: |
+| Responsibility clarity                       |         18 |          19 |          19 |          19 |
+| Module depth and interface simplicity        |         17 |          18 |          19 |          19 |
+| Reuse and locality                           |         17 |          19 |          19 |          19 |
+| Test seams                                   |         18 |          19 |          19 |          19 |
+| AI navigability and parallel change locality |         17 |          18 |          18 |          19 |
+| **Total**                                    | **87/100** |  **93/100** |  **94/100** |  **95/100** |
+
+Per-dimension anchors remain fixed: 20 clear ownership with behavior hidden behind
+useful interfaces, 15 sound structure with recurring coordination friction,
+10 substantial change propagation, 5 pervasive coupling, 0 no coherent ownership.
+Confidence is moderate-high for inspected modules and moderate repository-wide.
+The review samples all four Rust crate roles and frontend ownership, concentrating
+on hot spots in the last 80 non-merge commits; it is not an exhaustive line audit
+or a security, performance, release or platform certification.
+
+### Iteration 1: concentrate three existing decisions
+
+- Conversation history now owns reload, bounded revision scans, expanded archive
+  coverage and coordinated reception updates. Outgoing intents retain acceptance
+  and retry. The chat/outgoing runtime import cycle is removed; reception owns the
+  unread projection used by live Events and history.
+- AccountProfiles owns avatar/language journals and current signed publication,
+  including shared reconstruction, revisions, legacy merging, failure ordering
+  and recovery snapshots/imports. Node retains authenticated Event handling,
+  authorization and delivery. Immutable receive decisions retain their semantics.
+- Desktop session owns one live user/token/password and exact-session generation.
+  Authentication persists/verifies credentials and commits to that same owner;
+  commands no longer synchronize duplicate user/token stores. Runtime startup and
+  retirement remain host responsibilities, with compatibility exports retained.
+
+Independent reviews found no actionable issues. Independent scoring retained
+93/100 because history still depended on aggregate ChatState and tests required
+initializing the entire chat store.
+
+### Iteration 2: history defines its state interface
+
+ConversationHistoryState and its runtime context are defined by the history owner;
+chat composes them. Setters cannot patch session epochs or capabilities. Shared
+Conversation data lives in conversationModel.ts, with existing exports preserved.
+Cache/history defaults are reused by production and standalone history tests,
+which no longer import the chat store. Identity invalidation preserves its prior
+revision and request counters. Independent review found no issues; scoring rose
+to 94/100, retaining the outgoing-intent aggregate getter/setter deduction.
+
+### Iteration 3: outgoing intents define their own interface
+
+OutgoingIntentState and its context replace the aggregate chat getter/setter.
+The context supplies only runtime validity, active Conversation, sender identity,
+reload, status refresh and error reporting. Chat composes the history and outgoing
+contracts. Patches cannot write unrelated chat fields; error reporting reuses the
+existing capability under the captured lease. Standalone tests exercise real
+acceptance, hydration failure, stale-owner completion, file failure/cleanup,
+capacity refusal and status-poll recursion protection without initializing chat.
+
+Independent review found no issues. The assessor raised AI navigability/locality
+from 18 to 19 because both history and outgoing implementation/tests now depend on
+owner-defined contracts, not aggregate composition. The final score is **95/100**.
+
+Remaining deductions are intentional: history/outgoing contexts still expose
+shared mutable state and reload/status ordering; authentication/transfers remain
+environmental dependencies; core sibling modules still access broad crate-visible
+Node state; host auth/runtime/commit lifetimes need coordinated changes; trusted
+integration callbacks still receive a full Node. These are acceptable residuals
+in the inspected evidence, not a claim of architectural perfection. Further
+extraction should follow demonstrated change friction rather than score chasing.
+
+### Validation and limits
+
+Executed focused selections:
+
+```sh
+cd frontend
+npm test -- src/store/conversationHistory.test.ts src/store/chat.test.ts src/store/reception.test.ts src/store/outgoingIntent.test.ts src/lib/moduleBoundaries.test.ts
+npm run lint
+npm run typecheck
+npm run build
+cd ..
+cargo test -p mesh-talk-core --lib --features fast-test-kdf -- profile language recovery avatar
+cargo test -p mesh-talk --lib services::auth_service::tests
+cargo test -p mesh-talk --lib -- desktop_session:: runtime_admission:: commands::tests:: owner_commands::tests::
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+git diff --check
+```
+
+The final implementation passed **158 frontend, 75 core and 74 host tests**
+(**307 distinct selected tests**). The built core/host test executables were also
+rerun with these selections.
+The core selection includes real avatar/language loopback, restart, legacy sibling
+and recovery checks. Frontend lint/type/build, Rust formatting, strict workspace
+Clippy and diff checks passed. Clippy caught one redundant return binding in a
+modified fixture; it was corrected before the successful rerun.
+
+A TypeScript-AST scan of **171 production frontend modules** found no static runtime
+import cycles; baseline had one cycle across 169 modules. Type-only imports are
+excluded; dynamic loading and native/plugin behavior are outside that graph.
+The existing Vite main-chunk size advisory remains. No comprehensive health gate,
+full test suite, E2E or physical-machine validation was run for this loop.
+
+---
+
+## Earlier architecture-health loop — 2026-10-16
+
+**Historical result: 95/100 (Round 3). That architecture goal was achieved;
 release/PR gates are separate and must pass before merge.**
 
-The current loop starts at **85/100** at `cc303ec`. It uses five equally weighted
+That loop started at **85/100** at `cc303ec`. It uses five equally weighted
 architecture dimensions for the whole repository's structure, with deeper
 inspection of recent lifecycle, UI, networking and delivery changes. The goal is
 an evidence-supported **95/100** under this same rubric. Earlier assessments

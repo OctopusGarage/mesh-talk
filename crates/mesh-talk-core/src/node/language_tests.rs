@@ -18,11 +18,7 @@ async fn language_policy_persists_and_blocks_before_enqueue() {
     );
     let profile =
         profile::ProfilePayload::new_with_language(&account, None, 100, Some("en".into()));
-    node.language_state
-        .lock()
-        .unwrap()
-        .record_profile(&profile)
-        .unwrap();
+    node.account_profiles.restore_language(&profile).unwrap();
     assert!(
         !node
             .validate_dm_language(
@@ -68,8 +64,7 @@ async fn language_loopback_filters_unaware_sender_and_preserves_receipts_and_res
     let (a, _, _) = test_support::node_with_files(ad.path(), alice, aa, &bp);
     let (b, mut rx, _) = test_support::node_with_files(bd.path(), bob, bob_account, &ap);
     // The recipient enables a rule while this sender still has no cached policy.
-    b.prepare_own_profile(None, Some(Some("en".into())))
-        .unwrap();
+    b.account_profiles.set_language(Some("en".into())).unwrap();
     let original = "你好，我们明天一起出去吃午饭吧。";
     let id = a
         .enqueue_to_account(&b.account_id(), original.as_bytes(), None)
@@ -133,7 +128,7 @@ async fn language_loopback_filters_unaware_sender_and_preserves_receipts_and_res
             .as_deref(),
         Some("en")
     );
-    reopened.prepare_own_profile(None, Some(None)).unwrap();
+    reopened.account_profiles.set_language(None).unwrap();
     assert_eq!(
         reopened.account_history(&sender, 10)[0].text,
         language_io::HIDDEN_TEXT
@@ -153,14 +148,11 @@ fn language_backup_preserves_preference_and_hidden_decisions() {
         Account::generate(),
         &proof,
     );
-    node.prepare_own_profile(None, Some(Some("zh".into())))
+    node.account_profiles
+        .set_language(Some("zh".into()))
         .unwrap();
     let hidden = crate::eventlog::EventId::new([7; 32]);
-    node.language_state
-        .lock()
-        .unwrap()
-        .decide(hidden, true)
-        .unwrap();
+    node.account_profiles.decide(hidden, true).unwrap();
     let mut snapshot = Vec::new();
     node.write_recovery_snapshot(&mut snapshot, 100).unwrap();
     let restored = Node::install_recovery_snapshot(
@@ -190,8 +182,7 @@ async fn language_reused_logical_id_cannot_expose_changed_plaintext() {
     let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _, _) = test_support::node_with_files(ad.path(), alice, aa, &bp);
     let (b, mut messages, _) = test_support::node_with_files(bd.path(), bob, bob_account, &ap);
-    b.prepare_own_profile(None, Some(Some("en".into())))
-        .unwrap();
+    b.account_profiles.set_language(Some("en".into())).unwrap();
     let conversation = conversation::dm_conversation_id(&a.identity.public(), &b.identity.public());
     for (text, hidden) in [
         (
@@ -258,7 +249,8 @@ fn language_backfill_import_is_filtered_before_projection() {
         Account::generate(),
         &proof,
     );
-    node.prepare_own_profile(None, Some(Some("en".into())))
+    node.account_profiles
+        .set_language(Some("en".into()))
         .unwrap();
     let id = [9; 32];
     let env = DmEnvelope::new(
@@ -306,11 +298,7 @@ async fn language_final_acceptance_rechecks_new_recipient_preference() {
             |accept| {
                 calls += 1;
                 if calls >= 2 {
-                    node.language_state
-                        .lock()
-                        .unwrap()
-                        .record_profile(&policy)
-                        .unwrap();
+                    node.account_profiles.restore_language(&policy).unwrap();
                 }
                 accept()
             },
@@ -331,7 +319,8 @@ async fn language_legacy_sibling_avatar_keeps_modern_preference() {
     let (node, _, _) =
         test_support::node_with_files(dir.path(), DeviceIdentity::generate(), own, &proof);
     let current = node
-        .prepare_own_profile(None, Some(Some("en".into())))
+        .account_profiles
+        .set_language(Some("en".into()))
         .unwrap();
     let legacy = profile::ProfilePayload::new(
         &account,
@@ -357,19 +346,13 @@ async fn language_legacy_sibling_avatar_keeps_modern_preference() {
     );
     node.log.lock().unwrap().append(event).unwrap();
     node.process_profile_events(conversation);
-    let cached = node.my_profile.lock().unwrap().clone().unwrap();
+    let cached = node.account_profiles.current().unwrap();
     assert!(cached.language_supported);
     assert_eq!(cached.language.as_deref(), Some("en"));
     assert_eq!(cached.avatar, legacy.avatar);
     assert_eq!(
-        node.language_state
-            .lock()
-            .unwrap()
-            .profile(&node.account_id())
-            .unwrap()
-            .updated_at,
-        cached.updated_at,
-        "republished and effective policy revisions must agree"
+        node.dm_language_policy(&node.account_id()).as_deref(),
+        Some("en")
     );
     assert!(cached.verify());
     node.set_avatar(Some(b"another avatar".to_vec()))
@@ -395,11 +378,7 @@ async fn language_integration_requests_obey_recipient_policy() {
     );
     let profile =
         profile::ProfilePayload::new_with_language(&account, None, 100, Some("en".into()));
-    node.language_state
-        .lock()
-        .unwrap()
-        .record_profile(&profile)
-        .unwrap();
+    node.account_profiles.restore_language(&profile).unwrap();
     let request = OutgoingMessageRequest {
         request_id: [42; 32],
         destination: MessageDestination::Account(account.account_id()),
