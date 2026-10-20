@@ -273,6 +273,7 @@
     "source_unscoped": "Signed discovery (network scope unspecified)"
   },
   "message": {
+    "expiresIn": "Expires in {{time}} after sending; removed on both sides",
     "delivery": {
       "awaiting": "Awaiting receipt",
       "delivered": "Delivered",

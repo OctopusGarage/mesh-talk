@@ -52,12 +52,29 @@ jobs:
         run: npm ci
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
+      # Fresh browser contexts repeatedly load Vite's module graph. Windows'
+      # default 16K outbound ports can exhaust before TIME_WAIT sockets expire,
+      # leaving unrelated tests with ERR_NO_BUFFER_SPACE and a blank login page.
+      # Keep the server's port 5173 outside this disposable runner's client pool.
+      - name: Reserve Windows browser connection capacity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          netsh int ipv4 set dynamicport tcp start=10000 num=55535
+          if ($LASTEXITCODE -ne 0) { throw "Failed to expand the Windows TCP client port range" }
+          netsh int ipv4 show dynamicport tcp
       # One browser per runner preserves the existing resource budget. Spread
       # tests across machines rather than competing with Vite on one runner.
       - name: Run UI E2E
         run: npx playwright test --workers=1 --retries=0 --shard=${{ matrix.shard }}/4 --reporter=list,blob
         env:
           MESH_TALK_E2E_COVERAGE: ${{ runner.os == 'Linux' && '1' || '0' }}
+      - name: Diagnose Windows browser connection failures
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          netsh int ipv4 show dynamicport tcp
+          Get-NetTCPConnection | Group-Object State | Select-Object Count, Name | Format-Table
       - name: Record Linux coverage identity
         if: runner.os == 'Linux'
         run: >-

@@ -933,6 +933,7 @@ impl Node {
                                 .insert(manifest.file_conv());
                             if !self.certified_sibling(&sender) {
                                 let _ = self.file_incoming.send(ReceivedFile {
+                                    expires_at_ms: crate::expiry::deadline(&entry.plaintext),
                                     conv: original_conv,
                                     is_channel: false,
                                     from: sender.user_id(),

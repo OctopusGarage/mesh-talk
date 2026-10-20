@@ -311,6 +311,7 @@ export const test = base.extend({
       // --- Messages (in-memory, per conversation) ---------------------------
       const BASE = 1_700_000_000_000;
       type Msg = {
+        expires_at_ms?: number | null;
         id: string | null;
         from_me: boolean;
         who: string;
@@ -408,6 +409,7 @@ export const test = base.extend({
         conv: string,
         text: string,
         replyTo: unknown,
+        expiresAtMs?: number | null,
       ): null => {
         (msgs[conv] ||= []).push(
           msg({
@@ -418,6 +420,7 @@ export const test = base.extend({
             // uses an old BASE so it isn't recall-eligible).
             wall_clock: Date.now(),
             reply_to: (replyTo as string) ?? null,
+            expires_at_ms: expiresAtMs,
           }),
         );
         return null;
@@ -718,7 +721,12 @@ export const test = base.extend({
               return status ? [{ id, status }] : [];
             }),
           owner_enqueue_text: (a) => {
-            recordSend(`acc:${a.account}`, String(a.text), a.replyTo);
+            recordSend(
+              `acc:${a.account}`,
+              String(a.text),
+              a.replyTo,
+              a.expiresAtMs as number | null | undefined,
+            );
             return acceptLast(String(a.account));
           },
           owner_enqueue_sticker: (a) => {
@@ -1391,7 +1399,12 @@ export const test = base.extend({
         conv: string,
         text: string,
         who: string,
-        metadata?: { id?: string; index?: number; wall_clock?: number },
+        metadata?: {
+          id?: string;
+          index?: number;
+          wall_clock?: number;
+          expires_at_ms?: number;
+        },
       ) => {
         const entry = msg({ from_me: false, who, text, ...metadata });
         const history = (msgs[conv] ||= []);

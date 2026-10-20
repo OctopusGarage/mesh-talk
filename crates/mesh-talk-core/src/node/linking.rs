@@ -389,6 +389,10 @@ impl Node {
             for conv in sentlog.conversations() {
                 for e in sentlog.entries(&conv) {
                     if let Some(env) = DmEnvelope::decode(&e.plaintext) {
+                        if self.recipient_expired(&env.body, EventId::new(env.msg_id), e.wall_clock)
+                        {
+                            continue;
+                        }
                         if env.route.sender_account != my_account
                             || *super::conversation::account_conversation_id(
                                 &my_account,
@@ -415,6 +419,9 @@ impl Node {
             for conv in received.conversations() {
                 for e in received.entries(&conv) {
                     if let Some(envelope) = DmEnvelope::decode(&e.plaintext) {
+                        if self.recipient_expired(&envelope.body, e.event_id, e.wall_clock) {
+                            continue;
+                        }
                         let other = if envelope.route.sender_account == my_account {
                             &envelope.route.recipient_account
                         } else if envelope.route.recipient_account == my_account {
@@ -476,9 +483,7 @@ impl Node {
             {
                 continue;
             }
-            if envelope.route.sender_account != own
-                && self.recipient_expired(&envelope.body, EventId::new(r.event_id), r.wall_clock)
-            {
+            if self.recipient_expired(&envelope.body, EventId::new(r.event_id), r.wall_clock) {
                 continue;
             }
             let conversation = ConversationId::new(r.conv);

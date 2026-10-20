@@ -281,6 +281,13 @@ impl Node {
                         let Some(env) = DmEnvelope::decode(&entry.plaintext) else {
                             continue;
                         };
+                        if self.recipient_expired(
+                            &env.body,
+                            EventId::new(env.msg_id),
+                            entry.wall_clock,
+                        ) {
+                            continue;
+                        }
                         if env.route.sender_account != own
                             || *account_conversation_id(&own, &env.route.recipient_account)
                                 .as_bytes()
@@ -329,9 +336,7 @@ impl Node {
                         {
                             continue;
                         }
-                        if env.route.sender_account != own
-                            && self.recipient_expired(&env.body, entry.event_id, entry.wall_clock)
-                        {
+                        if self.recipient_expired(&env.body, entry.event_id, entry.wall_clock) {
                             continue;
                         }
                         page.offer(
@@ -377,6 +382,9 @@ impl Node {
                                     .map(|event| event.id)
                             });
                         let Some(id) = id else { continue };
+                        if self.recipient_expired(&entry.plaintext, id, entry.wall_clock) {
+                            continue;
+                        }
                         page.offer(
                             HistoryCursor {
                                 tag: 1,

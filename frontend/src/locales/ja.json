@@ -273,6 +273,7 @@
     "source_unscoped": "署名済み検出記録（ネットワーク範囲不明）"
   },
   "message": {
+    "expiresIn": "送信後 {{time}} で双方のメッセージを削除",
     "delivery": {
       "awaiting": "受領確認待ち",
       "delivered": "配信済み",

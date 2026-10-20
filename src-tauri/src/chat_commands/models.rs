@@ -45,6 +45,7 @@ pub struct HistoryFileInfo {
 /// One merged history line (sent or received) for display.
 #[derive(Serialize)]
 pub struct HistoryItem {
+    pub expires_at_ms: Option<u64>,
     pub id: Option<String>, // hex EventId; null when there is no stable id (see From impl)
     pub from_me: bool,
     pub who: String,
@@ -68,6 +69,7 @@ impl From<mesh_talk_core::node::HistoryEntry> for HistoryItem {
             Some(hex::encode(h.id.as_bytes()))
         };
         HistoryItem {
+            expires_at_ms: h.expires_at_ms,
             id,
             from_me: h.from_me,
             who: h.who,

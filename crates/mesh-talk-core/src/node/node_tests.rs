@@ -379,6 +379,89 @@ async fn channel_message_carries_fixed_deadline_in_sender_history() {
     );
 }
 
+#[tokio::test]
+async fn expired_outgoing_account_message_is_hidden_and_erased() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let mut node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let remote = crate::identity::account::Account::generate();
+    let peer = remote.account_id();
+    let proof = crate::discovery::Announce::new_with_account(
+        &DeviceIdentity::generate(),
+        &remote,
+        "Bob",
+        9,
+    );
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    let deadline = super::now_millis() + 300_000;
+    let id = node
+        .enqueue_to_account_expiring_if(
+            &peer,
+            b"ephemeral secret",
+            None,
+            Some(deadline),
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        node.account_history(&peer, 20)[0].expires_at_ms,
+        Some(deadline)
+    );
+    let backfill = node.export_account_backfill();
+    assert_eq!(backfill.len(), 1);
+    Arc::get_mut(&mut node).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
+    assert!(
+        node.account_history(&peer, 20).is_empty(),
+        "sender history must expire without waiting for maintenance"
+    );
+    assert!(node.search("ephemeral secret").is_empty());
+    assert!(node.export_account_backfill().is_empty());
+    node.import_account_backfill(&backfill).unwrap();
+    let conv = crate::node::conversation::account_conversation_id(&node.account_id(), &peer);
+    assert!(node.received.lock().unwrap().entries(&conv).is_empty());
+    assert!(node.prune_expired_received().unwrap() > 0);
+    let conv = crate::node::conversation::account_conversation_id(&node.account_id(), &peer);
+    assert!(
+        node.sent_entries_for_history(conv).is_empty(),
+        "maintenance must erase sender plaintext including pending delivery"
+    );
+    assert!(node.account_suppression.lock().unwrap().contains(conv, id));
+    let secret = node.identity.secret_bytes();
+    drop(node);
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let reopened = Node::open(
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &dir.path().join("node.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    assert!(reopened.account_history(&peer, 20).is_empty());
+    assert!(reopened.sent_entries_for_history(conv).is_empty());
+}
+
 #[test]
 fn expired_incoming_account_message_is_hidden_from_history() {
     use crate::eventlog::EventId;

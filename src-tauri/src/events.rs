@@ -302,6 +302,7 @@ impl<R: Runtime> ProgressThrottle<R> {
 
 #[derive(serde::Serialize, Clone)]
 pub struct FileReceivedEvent {
+    pub expires_at_ms: Option<u64>,
     pub conv: String, // hex (channel id for a channel file; the DM conv otherwise)
     pub is_channel: bool,
     pub from: String, // sender user-id
@@ -425,6 +426,7 @@ pub fn emit_file_received<R: Runtime>(
 ) {
     use crate::channel_reception::Alert;
     let event = FileReceivedEvent {
+        expires_at_ms: file.expires_at_ms,
         conv: hex::encode(file.conv.as_bytes()),
         is_channel: file.is_channel,
         from: file.from,

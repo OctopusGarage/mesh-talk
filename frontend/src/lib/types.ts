@@ -45,6 +45,7 @@ export interface HistoryFileInfo {
 }
 
 export interface HistoryItem {
+  expires_at_ms?: number | null;
   id: string | null; // null when there is no stable event id yet
   from_me: boolean;
   who: string;
@@ -330,6 +331,7 @@ export interface IntegrationMessageAcceptedEvent {
 }
 
 export interface FileReceivedEvent extends ReceptionMetadata {
+  expires_at_ms?: number | null;
   conv: string;
   is_channel: boolean; // emitted by the same installed native app, not over the network
   from: string;

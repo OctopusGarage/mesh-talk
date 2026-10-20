@@ -148,6 +148,7 @@ mod tests {
     use super::*;
     fn file(n: u8) -> ReceivedFile {
         ReceivedFile {
+            expires_at_ms: None,
             conv: ConversationId::new([1; 32]),
             is_channel: false,
             from: "peer".into(),

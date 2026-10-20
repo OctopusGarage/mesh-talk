@@ -35,6 +35,7 @@ export interface ConversationHistoryState
 
 /** Runtime validity and delivery refresh are supplied by the session composition. */
 export interface ConversationHistoryContext extends ConversationHistoryState {
+  expiryNow?: number;
   runEpoch: number;
   identityEpoch: number;
   refreshStatuses: () => Promise<void>;
@@ -181,6 +182,7 @@ export async function reloadConversation(
               (i) => convKey(i.conversation) === key,
             ),
             s.deleted[key] ?? [],
+            Math.max(Date.now(), s.expiryNow ?? 0),
           ),
         },
         intents: Object.fromEntries(

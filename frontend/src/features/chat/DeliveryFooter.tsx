@@ -1,3 +1,5 @@
+import { Timer } from "lucide-react";
+import { useChat } from "@/store/chat";
 import { useId } from "react";
 import { useTranslation } from "react-i18next";
 import { formatTime } from "@/lib/format";
@@ -17,6 +19,20 @@ export function DeliveryFooter({
 }) {
   const { t } = useTranslation();
   const tooltip = useId();
+  const clock = useChat((state) =>
+    message.expiresAtMs == null ? 0 : state.expiryNow,
+  );
+  const seconds =
+    message.expiresAtMs == null
+      ? null
+      : Math.max(
+          0,
+          Math.ceil((message.expiresAtMs - Math.max(clock, Date.now())) / 1000),
+        );
+  const remaining =
+    seconds == null
+      ? ""
+      : `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   const delayed =
     !message.fromMe &&
     message.arrivalKind === "catch_up" &&
@@ -60,6 +76,7 @@ export function DeliveryFooter({
     !message.pending &&
     !message.failed;
   if (
+    seconds === null &&
     !delayed &&
     !showTime &&
     !message.pending &&
@@ -70,6 +87,17 @@ export function DeliveryFooter({
     return null;
   return (
     <span className="mt-1 flex items-center gap-1 px-1 text-xs tabular-nums text-muted-foreground">
+      {seconds !== null && (
+        <span
+          data-testid="message-expiry"
+          title={t("message.expiresIn", { time: remaining })}
+          aria-label={t("message.expiresIn", { time: remaining })}
+          className="inline-flex items-center gap-1"
+        >
+          <Timer className="h-3 w-3" aria-hidden="true" />
+          <span>{remaining}</span>
+        </span>
+      )}
       {delayed && (
         <span
           title={receiptDetail}

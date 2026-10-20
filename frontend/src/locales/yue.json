@@ -273,6 +273,7 @@
     "source_unscoped": "簽名發現記錄（網絡範圍未確定）"
   },
   "message": {
+    "expiresIn": "傳送後倒數 {{time}}，到期雙方訊息都會消失",
     "delivery": {
       "awaiting": "等候收據",
       "delivered": "已送達",

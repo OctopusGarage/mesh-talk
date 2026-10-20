@@ -15,6 +15,8 @@ export interface SearchTarget {
 }
 
 export interface ChatMessage {
+  /** Authenticated absolute send-time deadline; null/absent means keep. */
+  expiresAtMs?: number | null;
   receivedAt?: number;
   arrivalKind?: import("@/lib/types").ArrivalKind;
   delivery?: "awaiting" | "delivered";

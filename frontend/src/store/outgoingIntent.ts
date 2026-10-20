@@ -26,6 +26,7 @@ export interface OutgoingIntentState extends ConversationCacheState {
 }
 
 export interface OutgoingIntentContext extends OutgoingIntentState {
+  expiryNow?: number;
   runEpoch: number;
   identityEpoch: number;
   active: Conversation | null;
@@ -251,6 +252,7 @@ export function beginSendIntent(
           : "",
     replyTo: payload.kind === "text" ? payload.replyTo : null,
     wallClock: Date.now(),
+    expiresAtMs: payload.expiresAtMs,
     pending: true,
     sticker: payload.kind === "sticker" ? payload.stickerId : null,
     metadataPending: payload.kind === "file",
@@ -289,7 +291,15 @@ export async function dispatchIntent(
   let admitted = false;
   const clientId = message.clientId!;
   const update = (next: ChatMessage | null) =>
-    guarded((state) => completeSendIntentState(state, c, clientId, next));
+    guarded((state) =>
+      completeSendIntentState(
+        state,
+        c,
+        clientId,
+        next,
+        Math.max(Date.now(), get().expiryNow ?? 0),
+      ),
+    );
   try {
     let accepted: ChatMessage | null = null;
     if (c.kind === "account") {

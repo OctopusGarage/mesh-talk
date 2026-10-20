@@ -166,6 +166,11 @@ impl Node {
         {
             let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
             for e in sentlog.entries_ref(&conv) {
+                if super::expiry_policy::plaintext_deadline(&e.plaintext)
+                    .is_some_and(|deadline| deadline <= self.expiry_now())
+                {
+                    continue;
+                }
                 let (id, body, sent_seq) = if matches!(scope, SearchScope::Account(_)) {
                     let (id, body) = decode_account_entry(&e.plaintext);
                     (Some(id), body.text, None)
@@ -189,10 +194,7 @@ impl Node {
                 let inner = envelope
                     .as_ref()
                     .map_or(e.plaintext.as_slice(), |env| env.body.as_slice());
-                if e.from != my_account
-                    && !own_devices.contains(&e.from)
-                    && self.recipient_expired(inner, e.event_id, e.wall_clock)
-                {
+                if self.recipient_expired(inner, e.event_id, e.wall_clock) {
                     continue;
                 }
                 let (from_me, who, body, id) = if matches!(scope, SearchScope::Account(_)) {

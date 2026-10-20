@@ -62,21 +62,29 @@ before returning results. A cloned node handle alone conveys no session authorit
 
 ### Fixed-deadline messages
 
-The composer selects a per-message duration (five minutes by default) and computes
+The composer optionally selects a per-message duration and computes
 one UTC expiry timestamp at send time. The timestamp is inside authenticated DM,
 channel, or file-manifest plaintext (`MTEX1` frame), so every recipient device
-receives the same deadline. The sender's local copy remains in history. Recipient
-history, search, and incoming notifications exclude expired content. A one-second
-maintenance task removes recipient plaintext sidecars, suppresses replay through
-account sync, and removes locally managed media. A monotonic observation timer
-also bounds the lifetime by the sender event's intended duration if the local
+receives the same deadline. Both sender and recipient history and search exclude
+expired content; incoming notifications exclude expired arrivals. History IPC
+returns the authenticated deadline for per-message countdowns. A single desktop
+session monotonic clock removes expired cached messages and outgoing intents and updates
+countdowns without per-message IPC. Focus and visibility changes recheck deadlines;
+the history dialog filters and clears its own expired rows.
+A one-second core maintenance task removes plaintext sidecars on both sides,
+cancels expired outgoing retry work, suppresses replay through account sync, and
+removes locally managed media. Queries enforce deadlines independently of cleanup;
+cleanup errors are logged and retried on the next maintenance pass. A monotonic
+observation timer also bounds the lifetime by the sender event's intended duration if the local
 wall clock was already wrong when the message arrived. On restart the prior monotonic
 clock anchor cannot be recovered; expiring recipient copies are erased early to
 avoid extending their lifetime after a backward clock change. This is a local
 retention feature: a recipient who controls their device can copy content or
 modify the client, so remote deletion cannot be guaranteed. Older clients do
 not understand the `MTEX1` frame and may keep its decrypted bytes; only updated
-recipient devices enforce expiry.
+devices enforce expiry. Delayed delivery never restarts the countdown, and
+already-expired arrivals are hidden. Sender copies keep their deadline across
+restart; conservative early deletion on restart applies to recipient copies only.
 
 - **DeviceIdentity** — per device: Ed25519 (sign) + X25519 (DH). `user_id =
 SHA-256("mesh-talk-id-v1" ‖ ed25519_pub)[:16]` (32 hex).
