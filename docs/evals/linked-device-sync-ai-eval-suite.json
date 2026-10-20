@@ -76,6 +76,10 @@
         "The durable profile store applies only newer updates and retains avatar clears.",
         "An applied own-account update refreshes the profile republished to newly discovered peers.",
         "Local avatar publication uses a timestamp newer than the durable own-account profile state."
+      ],
+      "context_files": [
+        "crates/mesh-talk-core/src/node/account_profile.rs",
+        "crates/mesh-talk-core/src/node/profile_store.rs"
       ]
     },
     {

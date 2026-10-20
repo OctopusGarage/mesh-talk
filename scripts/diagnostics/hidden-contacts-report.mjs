@@ -2,6 +2,7 @@ export const REQUIRED_SCENARIOS = ["hide-cancel", "hide", "restart", "settings-s
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { nativeInvalidCredentialTexts } from "./native-capture.mjs";
 import { inspectPng } from "../evals/png-evidence.mjs";
 REQUIRED_SCENARIOS.push("receipt-offline-awaiting", "receipt-peer-restart-delivered", "receipt-source-restart-durable");
 
@@ -21,6 +22,9 @@ const REQUIRED_TRUE = {
   "settings-theme-persistence": ["visibleSelection", "persistedAfterRestart"],
   "native-profile-layout": ["profileDialogVisible", "profileUsernameVisible"], "native-settings-layout": ["dialogContained", "themePickerVisible"],
 };
+const invalidCredentialTexts = await nativeInvalidCredentialTexts();
+const evidenceFiles = name => [`${name}.json`, ...(name.startsWith("receipt-") ? [`${name}-0.png`, `${name}-1.png`] : []), `${name}.png`, ...(name === "auth-logout-wrong-password" ? [`${name}-error.png`] : []), `${name}.log`];
+
 export function validateObservations(name, observations, platform) {
   const errors = [];
   const require = (condition, message) => { if (!condition) errors.push(`${name}: ${message}`); };
@@ -33,6 +37,9 @@ export function validateObservations(name, observations, platform) {
     const expected = name === "receipt-offline-awaiting" ? "awaiting" : "delivered";
     require(Array.isArray(observations?.statuses) && observations.statuses.length === 3 && observations.statuses.every(status => status === expected), "incorrect receipt state");
     require(observations?.cardsVerified === true, "missing native card projection");
+    const captures = observations?.captures;
+    const pngs = evidenceFiles(name).filter(file => file.endsWith(".png"));
+    require(Array.isArray(captures) && captures.length === 3 && new Set(captures.map(capture => capture?.label)).size === 3 && captures.every((capture, index) => capture?.filename === pngs[index] && typeof capture.label === "string" && capture.label.length > 0 && capture.visible === true && capture.status === expected && [capture.rect?.x, capture.rect?.y, capture.rect?.width, capture.rect?.height].every(Number.isFinite) && capture.rect.width > 0 && capture.rect.height > 0), "missing painted native card captures");
     require(observations?.actualPeerExit === true, "peer did not actually exit");
     if (name !== "receipt-offline-awaiting") require(observations?.sameKeystorePeerRestart === true, "missing same-keystore restart");
     if (name === "receipt-source-restart-durable") {
@@ -43,6 +50,10 @@ export function validateObservations(name, observations, platform) {
       require(Array.isArray(observations?.coldStatuses) && observations.coldStatuses.length === 3 && observations.coldStatuses.every(status => status === "delivered"), "missing cold Delivered projection");
       require(observations?.uiVerifiedAfterPeerRestart === true, "native cards checked after receiver rediscovery");
     }
+  }
+  if (name === "auth-logout-wrong-password") {
+    const capture = observations?.errorCapture;
+    require(observations?.invalidCredentialsKey === "login.invalidCredentials" && capture?.filename === `${name}-error.png` && invalidCredentialTexts.includes(capture?.text) && capture?.visible === true && capture?.chatAbsent === true && [capture.rect?.x, capture.rect?.y, capture.rect?.width, capture.rect?.height].every(Number.isFinite) && capture.rect.x >= 0 && capture.rect.y >= 0 && capture.rect.width > 0 && capture.rect.height > 0, "missing visible localized credential-error capture");
   }
   if (name === "incoming-attachment") require(observations?.bytesVerified === true, "missing exact decrypted bytes");
   for (const key of REQUIRED_TRUE[name] ?? []) require(observations?.[key] === true, `missing successful observation ${key}`);
@@ -88,11 +99,10 @@ export async function validateEvidence(report, root, expected = {}) {
       const observationErrors = validateObservations(name, evidence.observations, report.platform);
       if (observationErrors.length) throw new Error(observationErrors.join("; "));
       if (name.startsWith("receipt-")) receipts.set(name, evidence.observations);
-      const png = await readFile(join(root, `${name}.png`));
-      inspectPng(png);
-      for (const extension of ["json", "png", "log"]) {
-        const file = `${name}.${extension}`;
-        const digest = createHash("sha256").update(await readFile(join(root, file))).digest("hex");
+      for (const file of evidenceFiles(name)) {
+        const bytes = await readFile(join(root, file));
+        if (file.endsWith(".png")) inspectPng(bytes);
+        const digest = createHash("sha256").update(bytes).digest("hex");
         if (digest !== report.scenarios?.[name]?.evidenceDigests?.[file]) throw new Error(`Evidence digest mismatch: ${file}`);
       }
     } catch (error) {
@@ -110,7 +120,7 @@ export function validateReport(report, expected = {}) {
   if (expected.platform !== undefined && expected.platform !== report?.platform) errors.push("Mismatched native platform");
   for (const name of REQUIRED_SCENARIOS) {
     const result = report?.scenarios?.[name];
-    const files = ["json", "png", "log"].map(extension => `${name}.${extension}`);
+    const files = evidenceFiles(name);
     if (result?.passed !== true || !Number.isFinite(result.elapsedMs) || result.elapsedMs < 0 || !Array.isArray(result.evidence) || result.evidence.length !== files.length || files.some((file, index) => result.evidence[index] !== file || !/^[a-f0-9]{64}$/.test(result.evidenceDigests?.[file] ?? ""))) errors.push(`Missing successful evidence: ${name}`);
   }
   return errors;

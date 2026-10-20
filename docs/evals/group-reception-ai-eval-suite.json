@@ -10,7 +10,8 @@
       "context_files": [
         "crates/mesh-talk-core/src/eventlog/store.rs",
         "crates/mesh-talk-core/src/node/timeline.rs",
-        "crates/mesh-talk-core/src/node/channel.rs"
+        "crates/mesh-talk-core/src/node/channel.rs",
+        "crates/mesh-talk-core/src/eventlog/order.rs"
       ],
       "min_score": 0.85,
       "scenario": "Group participants receive the same retained events in different orders, with incorrect author clocks, simultaneous sends, replies, files and older archive imports. Review the production sources for a deterministic causal timeline. Do not assume a logical clock is valid merely because the event is signed. Distinguish supported causal evidence from legacy fallbacks.",
@@ -55,7 +56,8 @@
         "frontend/src/store/reception.ts",
         "frontend/src/store/outgoingIntent.ts",
         "frontend/src/store/ownership.ts",
-        "docs/group-conversation-reception.md"
+        "docs/group-conversation-reception.md",
+        "frontend/src/store/conversationHistory.ts"
       ],
       "min_score": 0.85,
       "scenario": "An unseen old message arrives above the viewport, duplicates arrive through several routes, sibling imports update inactive conversations and the user switches accounts during reload. Review unread identity reconciliation and persistence, including capacity and legacy event behavior. The new identity contract covers group text and file cards; legacy DM or host callbacks without identities intentionally retain counter fallback and cannot promise exact identity deduplication. Assess guarantees where stable identities are available, plus compatibility of fallback. The first retained snapshot is a quiet baseline; subsequent imports and locked-period arrivals must remain discoverable. The maintained guide defines the supported retention contract: exact deduplication is within the bounded retained identity window, reconciliation snapshots cover at most500 retained rows, evicted snapshots quietly rebaseline and overflow remains an explicit aggregate. Evaluate correctness and honest presentation within those declared bounds; do not require an unlimited identity index or unbounded historical pagination. Flag any count loss, focus-clearing of overflow, false completeness claim or retained-window discovery failure.",

@@ -121,7 +121,7 @@ export async function receiptColdRestartCheckpoint(c, state) {
   return { owner: c.owner, account: c.account, ids: [...state.ids], statuses, offlineBackendDurabilityVerified: true, peerOfflineDuringSourceRestart: true };
 }
 
-async function receiptPhase(c, state, name, expected, historical = false, cold = undefined) {
+export async function receiptPhase(c, state, name, expected, historical = false, cold = undefined) {
   assert.equal(c.owner, state.owner, "receipt owner unchanged");
   if (historical) {
     assert.equal(cold?.offlineBackendDurabilityVerified, true, "cold checkpoint precedes receiver restart/UI navigation");
@@ -137,12 +137,14 @@ async function receiptPhase(c, state, name, expected, historical = false, cold =
     const values = orderedReceiptStatuses(state.ids, await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids }));
     return values.every(value => value === expected) && values;
   });
+  const captures = [];
   for (const [index, label] of [...state.labels].reverse().entries()) {
     if (historical && index > 0) await revealHistoricalNativeMessage(c, label);
     else await revealLatestNativeMessage(c, label);
     await c.until(`native ${label} card is ${expected}`, () => c.execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e&&e.querySelectorAll('[data-delivery]').length===1&&e.querySelector('[data-delivery]')?.getAttribute('data-delivery')===arguments[1];", [label, expected]));
+    captures.push(await c.captureReceiptCard(index === 2 ? name : `${name}-${index}`, { label, status: expected }));
   }
-  await c.passed(name, { owner: c.owner, account: c.account, ids: state.ids, originalIds: state.ids, statuses, cardsVerified: true, actualPeerExit: true, sameKeystorePeerRestart: expected === "delivered", actualProcessRestart: historical, peerOfflineDuringSourceRestart: historical && cold.peerOfflineDuringSourceRestart, offlineBackendDurabilityVerified: historical && cold.offlineBackendDurabilityVerified, coldIds: cold?.ids, coldStatuses: cold?.statuses, uiVerifiedAfterPeerRestart: historical, acceptancePath: "text: native composer; sticker/file: real owner IPC plus native history rendering", fileReceiptMeaning: "target durable custody, not user download/read" });
+  await c.passed(name, { captures, owner: c.owner, account: c.account, ids: state.ids, originalIds: state.ids, statuses, cardsVerified: true, actualPeerExit: true, sameKeystorePeerRestart: expected === "delivered", actualProcessRestart: historical, peerOfflineDuringSourceRestart: historical && cold.peerOfflineDuringSourceRestart, offlineBackendDurabilityVerified: historical && cold.offlineBackendDurabilityVerified, coldIds: cold?.ids, coldStatuses: cold?.statuses, uiVerifiedAfterPeerRestart: historical, acceptancePath: "text: native composer; sticker/file: real owner IPC plus native history rendering", fileReceiptMeaning: "target durable custody, not user download/read" }, captures);
 }
 
 export async function receiptScenarios(c) {
@@ -259,9 +261,16 @@ export function nativeSettingsTargets(defaultRect, defaultViewport, minimumViewp
   ];
 }
 
+export async function wrongPasswordCheckpoint(c) {
+  const name = "auth-logout-wrong-password";
+  const errorCapture = await c.captureAuthError(`${name}-error`, { kind: "auth-error", texts: c.invalidCredentialTexts });
+  await c.login(c.userName);
+  await c.passed(name, { loggedOut: true, wrongPasswordRejected: true, signinRestored: true, invalidCredentialsKey: "login.invalidCredentials", errorCapture }, [errorCapture]);
+}
+
 export async function coreScenarios(c) {
   const { execute, observe, until, passed, fill, click, peer, account, userId,
-    fixture, history, row, privacySettings, key, signOut, login, userName } = c;
+    fixture, history, row, privacySettings, key, signOut, userName } = c;
   const rendered = text => until("message rendered in real native webview", () => execute(
     "return Array.from(document.querySelectorAll('[data-testid=message-bubble]')).some(e=>e.textContent.includes(arguments[0]));", [text]));
   await passed("auth-register-signin", { registered: true, signedIn: true, owner: c.owner });
@@ -269,9 +278,7 @@ export async function coreScenarios(c) {
   await fill("login-username", userName);
   await fill("login-password", "incorrect-eval-password");
   await click("login-submit");
-  await until("wrong password rejected visibly", () => execute("return !!document.querySelector('[data-testid=login-form] .text-destructive')?.textContent && !document.querySelector('[data-testid=chat-shell]');"));
-  await login(userName);
-  await passed("auth-logout-wrong-password", { loggedOut: true, wrongPasswordRejected: true, signinRestored: true });
+  await wrongPasswordCheckpoint(c);
   const defaultWindow = await c.command("GET", "/window/rect");
   const defaultLayout = await profileLayout(c);
   await c.command("POST", "/window/rect", nativeMinimumWindowRequest(defaultWindow, defaultLayout.viewport));

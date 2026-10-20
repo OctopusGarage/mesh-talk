@@ -17,7 +17,9 @@ try {
   await new Promise((resolve, reject) => { receiver.once("error", reject); receiver.bind(0, resolve); });
   for (const [name, addresses] of Object.entries(networkInterfaces())) {
     for (const address of addresses ?? []) {
-      if (address.family !== "IPv4" || address.internal) continue;
+      // Winsock may select loopback for co-resident multicast. Match the core's
+      // membership policy instead of falsely declaring that runner incapable.
+      if (address.family !== "IPv4" || (address.internal && process.platform !== "win32")) continue;
       try { receiver.addMembership(group, address.address); report.joins.push(name); }
       catch (error) { report.errors.push(`${name}: ${error.message}`); }
     }

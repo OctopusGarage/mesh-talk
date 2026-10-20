@@ -173,3 +173,17 @@ process.stdin.on("end", () => {
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.deepEqual(JSON.parse(readFileSync(report, "utf8")).cases[0].context_files, [support]);
 });
+
+test("source rubric cases include the owners of delegated guarantees", () => {
+  const contracts = [
+    ["linked-device-sync", "MT-SYNC-AI-005", ["crates/mesh-talk-core/src/node/account_profile.rs", "crates/mesh-talk-core/src/node/profile_store.rs"]],
+    ["group-reception", "MT-GROUP-UX-001", ["crates/mesh-talk-core/src/eventlog/order.rs"]],
+    ["group-reception", "MT-GROUP-UX-003", ["frontend/src/store/conversationHistory.ts"]],
+    ["validation-velocity", "MT-VALIDATION-001", ["scripts/validation/frontend-graph.mjs"]],
+  ];
+  for (const [name, id, owners] of contracts) {
+    const suite = JSON.parse(readFileSync(new URL(`../docs/evals/${name}-ai-eval-suite.json`, import.meta.url), "utf8"));
+    const entry = suite.cases.find(entry => entry.id === id);
+    for (const owner of owners) assert.ok(entry?.context_files?.includes(owner), `${id} cannot verify delegated guarantees without ${owner}`);
+  }
+});

@@ -644,6 +644,8 @@ The diagrams below show an **example operation**, not a permanent socket or an I
 
 #### L1 — one LAN, no post office
 
+On Windows, discovery joins the multicast group on loopback as well as the active IPv4 adapters so co-resident app and CLI processes can discover one another. Public announcements explicitly select each available IPv4 interface rather than relying on the default multicast route; an unavailable adapter does not prevent sends on healthy adapters. The visibility gate and physical-LAN-only scope still apply before sending, and each multicast packet has a TTL of one.
+
 ```mermaid
 sequenceDiagram
   participant A as A / LAN X

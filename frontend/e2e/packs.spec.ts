@@ -26,7 +26,16 @@ test("a missing bundled ZIP does not hide an installed sticker pack", async ({
   await expect(
     page.getByTestId("sticker-option-pack:google-noto:1f602"),
   ).toBeVisible();
-  await page.keyboard.press("Escape");
+});
+
+test("a failed bundled ZIP recovers without restoring a removed theme after restart", async ({
+  page,
+}) => {
+  await page.route("**/builtin-packs/nature.zip", (route) =>
+    route.fulfill({ status: 404, body: "missing" }),
+  );
+  await enterChat(page);
+  await waitForPackBootstrap(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");
   await page

@@ -9,6 +9,7 @@ import { createServer } from "node:net";
 import { createSocket } from "node:dgram";
 import { setTimeout as delay } from "node:timers/promises";
 import { verifyNativeBuild } from "../validation/native-build.mjs";
+import { captureNativeEvidence, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
 import { coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, signedPeerObservation, nativeWindowsKeyboardScript } from "./native-core-scenarios.mjs";
 
@@ -34,7 +35,8 @@ const userName = `eval-user-${randomBytes(4).toString("hex")}`;
 const otherName = `eval-other-${randomBytes(4).toString("hex")}`;
 const started = Date.now();
 let previousScenario = started;
-const report = { schema: 1, platform: process.platform, native: true, mocked: false, scenarios: {}, startedAt: new Date().toISOString(), input: "embedded W3C DOM automation in actual native webview; contextmenu and focus-before-click dialog triggers use execute; keyboard uses in-process AppKit on macOS, owned-PID OS input on Windows/Linux; no physical keyboard user study", driver: { crate: "tauri-plugin-wdio-webdriver", version: "1.4.0", clickOrderingSource: "src/platform/executor.rs:688-701 (click_element)" }, kdf: { example: "fast-test-kdf (existing dev-dependency)", cli: "regular production KDF" } };
+const report = { schema: 1, platform: process.platform, native: true, mocked: false, scenarios: {}, startedAt: new Date().toISOString(), input: "embedded W3C DOM automation in actual native webview; contextmenu and focus-before-click dialog triggers use execute; keyboard uses in-process AppKit on macOS, owned-PID OS input on Windows/Linux; no physical keyboard user study", driver: nativeDriverEvidence(await readFile(new URL("../../Cargo.lock", import.meta.url), "utf8")), kdf: { example: "fast-test-kdf (existing dev-dependency)", cli: "regular production KDF" } };
+const invalidCredentialTexts = await nativeInvalidCredentialTexts();
 const owned = new Set();
 report.schema = 2;
 report.sourceSha = sourceSha;
@@ -198,23 +200,25 @@ async function key(value) {
 }
 async function contextMenu(id) {
   await element(id);
-  // Embedded driver 1.4 synthesizes mousedown/up but omits contextmenu.
+  // The embedded driver synthesizes mousedown/up but omits contextmenu.
   // Trigger the actual webview's UI event through standard W3C execute.
   await execute("const e=document.querySelector(arguments[0]), r=e.getBoundingClientRect(); e.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2,clientX:r.x+r.width/2,clientY:r.y+r.height/2}));", [selector(id)]);
 }
-async function screenshot(name) {
+async function screenshot(name, expected) {
   const filename = `${name}.png`;
-  const png = Buffer.from(await command("GET", "/screenshot"), "base64");
+  const { png, observation } = await captureNativeEvidence({ command, execute, until }, expected);
   assert.ok(png.length > 100 && png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), "native driver returned a PNG screenshot");
   await writeFile(join(output, filename), png);
-  return filename;
+  return expected ? { filename, ...observation } : filename;
 }
-async function passed(name, observations) {
+async function passed(name, observations, captures = []) {
   const filename = `${name}.json`;
   await writeFile(join(output, filename), JSON.stringify({ name, sourceSha, observations, at: new Date().toISOString() }, null, 2));
   const logFile = `${name}.log`;
   await writeFile(join(output, logFile), redact(`APP\n${app?.output ?? ""}\nPEER\n${peer?.output ?? ""}`));
-  report.scenarios[name] = { passed: true, elapsedMs: Date.now() - previousScenario, evidence: [filename, await screenshot(name), logFile] };
+  const pngs = captures.map(capture => capture.filename);
+  if (!pngs.includes(`${name}.png`)) pngs.unshift(await screenshot(name));
+  report.scenarios[name] = { passed: true, elapsedMs: Date.now() - previousScenario, evidence: [filename, ...pngs, logFile] };
   report.scenarios[name].evidenceDigests = Object.fromEntries(await Promise.all(report.scenarios[name].evidence.map(async file => [file, createHash("sha256").update(await readFile(join(output, file))).digest("hex")])));
   previousScenario = Date.now();
   console.log(`PASS ${name}`);
@@ -316,7 +320,7 @@ try {
   account = accounts.account_id;
   await element(row());
   await click(row());
-  const coreContext = { execute, observe, invoke, readFileBytes, until, passed, fill, click, get peer() { return peer; }, account, userId, fixture, history, row, privacySettings, key, signOut, login, userName, peerName, command, focusOwnedWindow, openDialog, settledDialog, element, exists, get owner() { return signedInUser; }, nonce: randomBytes(4).toString("hex"),
+  const coreContext = { execute, observe, invoke, captureReceiptCard: screenshot, captureAuthError: screenshot, invalidCredentialTexts, readFileBytes, until, passed, fill, click, get peer() { return peer; }, account, userId, fixture, history, row, privacySettings, key, signOut, login, userName, peerName, command, focusOwnedWindow, openDialog, settledDialog, element, exists, get owner() { return signedInUser; }, nonce: randomBytes(4).toString("hex"),
     stopPeer: async () => { const old = peer; await stop(old, true); assert.ok(!owned.has(old), "peer actually exited"); },
     peerExited: () => !owned.has(peer) && (peer.exitCode !== null || peer.signalCode !== null),
     restartPeer: async () => { const originalId = /node (\S+) listening/.exec(peer.output)?.[1]; assert.match(originalId ?? "", /^[0-9a-f]{32}$/); peer = launch(nodeBinary, ["--keystore", join(fixture, "peer", "identity.keystore"), "--password", password, "--name", peerName, "--discovery-port", String(discoveryPort)]); const restartedId = await until("same-keystore peer restarted", () => /node (\S+) listening/.exec(peer.output)?.[1], 180000); assert.equal(restartedId, originalId, "restarted peer has original signing identity"); },

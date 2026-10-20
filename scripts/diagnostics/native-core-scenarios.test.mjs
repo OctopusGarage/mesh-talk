@@ -179,3 +179,36 @@ test("destroyed stdin fails immediately", async () => {
   child.stdin.destroy();
   await assert.rejects(writeChildCommand(child, "/quit\n"), /not writable/);
 });
+
+test("each native receipt card is captured while its own expected state is visible", async () => {
+  const { receiptPhase } = await import("./native-core-scenarios.mjs");
+  const ids = ["a", "b", "c"], labels = ["text", "sticker", "file"];
+  let visible, recorded;
+  const c = {
+    owner: "owner", account: "account",
+    observe: async command => command === "owner_account_history" ? ids.map(id => ({ id, from_me: true })) : ids.map(id => ({ id, status: "awaiting" })),
+    until: async (_description, poll) => { const result = await poll(); assert.ok(result); return result; },
+    execute: async (_script, args) => { visible = args[0]; return args.length === 1 ? { visible: true } : true; },
+    command: async () => { throw new Error("already visible"); },
+    captureReceiptCard: async (name, expected) => { assert.equal(expected.label, visible); assert.equal(expected.status, "awaiting"); return { filename: `${name}.png`, label: visible, status: expected.status, visible: true }; },
+    passed: async (_name, observations, captures) => { recorded = { observations, captures }; },
+  };
+  await receiptPhase(c, { owner: "owner", ids, labels }, "receipt-offline-awaiting", "awaiting");
+  assert.deepEqual(recorded.captures.map(capture => capture.label), [...labels].reverse());
+  assert.deepEqual(recorded.observations.captures, recorded.captures);
+});
+
+test("localized wrong-password error is captured before successful sign-in recovery", async () => {
+  const { wrongPasswordCheckpoint } = await import("./native-core-scenarios.mjs");
+  const steps = [], errorCapture = { filename: "auth-logout-wrong-password-error.png", text: "用户名或密码错误", visible: true };
+  let observed;
+  await wrongPasswordCheckpoint({
+    userName: "user", invalidCredentialTexts: ["用户名或密码错误"],
+    captureAuthError: async (name, expected) => { steps.push("error capture"); assert.equal(name, "auth-logout-wrong-password-error"); assert.deepEqual(expected.texts, ["用户名或密码错误"]); return errorCapture; },
+    login: async name => { steps.push("recovery"); assert.equal(name, "user"); },
+    passed: async (name, observations, captures) => { steps.push("passed"); assert.equal(name, "auth-logout-wrong-password"); observed = observations; assert.deepEqual(captures, [errorCapture]); },
+  });
+  assert.deepEqual(steps, ["error capture", "recovery", "passed"]);
+  assert.equal(observed.invalidCredentialsKey, "login.invalidCredentials");
+  assert.equal(observed.errorCapture.text, "用户名或密码错误");
+});

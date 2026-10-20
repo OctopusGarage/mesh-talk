@@ -39,8 +39,9 @@ def project(root):
     """Require project metadata before considering any checkout for deletion."""
     try:
         return (
-            REPOSITORY in (root / "Cargo.toml").read_text()
-            and 'name = "mesh-talk"' in (root / "src-tauri/Cargo.toml").read_text()
+            REPOSITORY in (root / "Cargo.toml").read_text(encoding="utf-8")
+            and 'name = "mesh-talk"'
+            in (root / "src-tauri/Cargo.toml").read_text(encoding="utf-8")
             and (root / "frontend").is_dir()
         )
     except OSError:
@@ -213,7 +214,7 @@ def cache_groups(root):
 
 
 def log_removal(state, root, paths, size, kind):
-    with (state / "cleanup.jsonl").open("a") as handle:
+    with (state / "cleanup.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(
             json.dumps(
                 {
@@ -245,7 +246,7 @@ def prune_packages(state, keep, dry_run):
             continue
         manifest = entry / "manifest.json"
         if manifest.is_file() and not manifest.is_symlink():
-            data = json.loads(manifest.read_text())
+            data = json.loads(manifest.read_text(encoding="utf-8"))
             if data.get("schema") == 1 and data.get("id") == entry.name:
                 sets.append(entry)
     for entry in sorted(sets, reverse=True)[keep:]:
@@ -263,7 +264,10 @@ def clean(args, state):
     try:
         with lock(state, name="cleanup.lock", blocking=False):
             registry = state / "checkouts.json"
-            registered = json.loads(registry.read_text()) if registry.exists() else []
+            registered = (
+                json.loads(registry.read_text(encoding="utf-8"))
+                if registry.exists() else []
+            )
             roots = checkouts(args.root, [*args.checkout, *registered])
             if not args.dry_run:
                 configured = sorted(
@@ -278,7 +282,9 @@ def clean(args, state):
                     }
                 )
                 temporary = state / "checkouts.tmp"
-                temporary.write_text(json.dumps(configured, indent=2) + "\n")
+                temporary.write_text(
+                    json.dumps(configured, indent=2) + "\n", encoding="utf-8"
+                )
                 temporary.replace(registry)
             try:
                 with lock(state, name="packages.lock", blocking=False):
@@ -431,7 +437,7 @@ def custom_cargo_output(root, command):
     configs.extend(cargo_home / name for name in ("config", "config.toml"))
     for config in configs:
         if config.is_file():
-            build = tomllib.loads(config.read_text()).get("build", {})
+            build = tomllib.loads(config.read_text(encoding="utf-8")).get("build", {})
             if any(key in build for key in ("target-dir", "target", "build-dir")):
                 return True
     return False
@@ -505,7 +511,9 @@ def archive(root, state, mode, started):
             "root": str(root),
             "created": datetime.now(timezone.utc).isoformat(),
         }
-        (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        (staging / "manifest.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
         staging.rename(directory / identity)
         print(f"Archived successful build: {directory / identity}")
     finally:
@@ -656,7 +664,9 @@ def main():
     state = Path(os.environ.get("MT_BUILD_STATE_DIR", default)).expanduser().resolve()
     # Archives must live outside all source/target trees to avoid recursive copies.
     registry = state / "checkouts.json"
-    registered = json.loads(registry.read_text()) if registry.exists() else []
+    registered = (
+        json.loads(registry.read_text(encoding="utf-8")) if registry.exists() else []
+    )
     for root in checkouts(args.root, [*args.checkout, *registered]):
         if state == root or root in state.parents or state in root.parents:
             parser.error("build state must be separate from project checkouts")

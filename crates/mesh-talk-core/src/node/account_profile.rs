@@ -72,18 +72,23 @@ impl AccountProfiles {
             return Ok(None);
         }
         let account = self.account.account_id();
-        let revision = super::node::now_millis().max(
-            state
-                .avatars
-                .updated_at(&account)
-                .unwrap_or(0)
-                .saturating_add(1),
-        );
+        let next_revision = state
+            .avatars
+            .updated_at(&account)
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| NodeError::InvalidInput("account profile revision exhausted".into()))?;
+        let revision = super::node::now_millis().max(next_revision);
         let payload = ProfilePayload::new(&self.account, avatar.clone(), revision);
-        state
+        let applied = state
             .avatars
             .record(&account, revision, avatar)
             .map_err(NodeError::Log)?;
+        if !applied {
+            return Err(NodeError::InvalidInput(
+                "avatar update did not advance the durable profile revision".into(),
+            ));
+        }
         state.current = Some(payload.clone());
         Ok(Some(payload))
     }
@@ -194,5 +199,55 @@ mod tests {
         assert_eq!(current.updated_at, 50);
         assert_eq!(current.avatar, None);
         assert!(current.verify());
+    }
+    #[test]
+    fn exhausted_profile_revision_rejects_edits_without_changing_current_or_disk() {
+        for avatar in [Some(b"sibling".to_vec()), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let account = Account::generate();
+            let profiles = open(dir.path(), &account);
+            let exhausted = ProfilePayload::new(&account, avatar.clone(), u64::MAX);
+            assert!(profiles.receive(&exhausted).unwrap());
+            assert!(profiles.set_avatar(avatar.clone()).unwrap().is_none());
+            let path = dir.path().join("profiles.log");
+            let before = std::fs::read(&path).unwrap();
+            let changed = if avatar.is_some() {
+                None
+            } else {
+                Some(b"edit".to_vec())
+            };
+            assert!(
+                profiles.set_avatar(changed).is_err(),
+                "a tied revision cannot be acknowledged as a saved edit"
+            );
+            assert_eq!(profiles.current(), Some(exhausted.clone()));
+            assert_eq!(profiles.avatar(&account.account_id()), avatar);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            drop(profiles);
+            assert_eq!(open(dir.path(), &account).current(), Some(exhausted));
+        }
+    }
+
+    #[test]
+    fn last_profile_revision_is_saved_once_then_further_edits_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let profiles = open(dir.path(), &account);
+        assert!(
+            profiles
+                .receive(&ProfilePayload::new(
+                    &account,
+                    Some(b"prior".to_vec()),
+                    u64::MAX - 1
+                ))
+                .unwrap()
+        );
+        let clear = profiles.set_avatar(None).unwrap().unwrap();
+        assert_eq!(clear.updated_at, u64::MAX);
+        assert!(clear.avatar.is_none());
+        assert!(profiles.set_avatar(Some(b"next".to_vec())).is_err());
+        assert_eq!(profiles.current(), Some(clear.clone()));
+        drop(profiles);
+        assert_eq!(open(dir.path(), &account).current(), Some(clear));
     }
 }

@@ -128,6 +128,25 @@
       "escalation": [
         "Platform predicate unit tests do not execute OS window actions; required browser window-control scenarios and real affected native platform evidence remain necessary."
       ]
+    },
+    {
+      "id": "frontend-pack-acceptance",
+      "paths": ["frontend/e2e/packs.spec.ts"],
+      "frontend": ["src/lib/pack.test.ts", "src/lib/stickerPacks.test.ts"],
+      "escalation": [
+        "Pack browser scenario changes require their complete browser spec; unit tests alone do not prove installation or restart persistence."
+      ]
+    },
+    {
+      "id": "frontend-composer-acceptance",
+      "paths": ["frontend/e2e/ui-audit-composer.spec.ts"],
+      "frontend": [
+        "src/features/chat/ComposerScreenshot.test.ts",
+        "src/features/chat/ComposerAdmission.test.ts"
+      ],
+      "escalation": [
+        "Composer browser scenario changes require keyboard, focus, popover containment and existing visual baseline assertions in the complete browser spec."
+      ]
     }
   ],
   "prScenarios": [
@@ -181,6 +200,16 @@
       "id": "frontend-window-controls-acceptance",
       "paths": ["frontend/src/components/WindowControls.tsx"],
       "browser": ["e2e/window-controls.spec.ts"]
+    },
+    {
+      "id": "frontend-pack-acceptance",
+      "paths": ["frontend/e2e/packs.spec.ts"],
+      "browser": ["e2e/packs.spec.ts"]
+    },
+    {
+      "id": "frontend-composer-acceptance",
+      "paths": ["frontend/e2e/ui-audit-composer.spec.ts"],
+      "browser": ["e2e/ui-audit-composer.spec.ts"]
     }
   ]
 }

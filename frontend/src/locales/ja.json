@@ -101,6 +101,7 @@
     }
   },
   "login": {
+    "invalidCredentials": "ユーザー名またはパスワードが正しくありません",
     "tagline": "サーバー不要 · エンドツーエンド暗号化",
     "signIn": "サインイン",
     "register": "登録",

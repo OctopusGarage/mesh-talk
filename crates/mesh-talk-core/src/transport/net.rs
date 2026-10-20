@@ -19,8 +19,9 @@ pub const DISCOVERY_MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 167);
 /// Bind the shared discovery UDP socket: `SO_REUSEADDR` + `SO_REUSEPORT` (so two
 /// nodes on one host can share the port) + `SO_BROADCAST`, bound to
 /// `0.0.0.0:<discovery_port>`, then join [`DISCOVERY_MULTICAST_GROUP`] on every
-/// non-loopback IPv4 interface (plus an unspecified-interface fallback). The same
-/// socket is used to both send announces and listen.
+/// non-loopback IPv4 interface (plus an unspecified-interface fallback). Windows
+/// also joins loopback for co-resident processes and sends public multicast via
+/// explicitly selected interfaces rather than relying on the default route.
 pub fn discovery_socket(discovery_port: u16) -> std::io::Result<UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
@@ -55,7 +56,7 @@ pub fn routed_ipv6_socket(discovery_port: u16) -> std::io::Result<UdpSocket> {
 }
 
 /// Join [`DISCOVERY_MULTICAST_GROUP`] on every current non-loopback IPv4 interface
-/// (plus an unspecified-interface fallback). A single interface (the default route)
+/// (plus Windows loopback and an unspecified-interface fallback). A single interface (the default route)
 /// is not enough on a multi-NIC / multi-WiFi host. Individual joins may fail (the
 /// interface won't accept it, or it's already joined); that's fine, so per-join
 /// errors are ignored. Called once at bind time and again periodically so interfaces
@@ -64,8 +65,60 @@ pub fn join_discovery_group_all_ifaces(sock: &UdpSocket) {
     for iface in ipv4_interface_addrs() {
         let _ = sock.join_multicast_v4(DISCOVERY_MULTICAST_GROUP, iface);
     }
+    // Winsock can select loopback for local multicast. Co-resident desktop/CLI
+    // processes must receive it even when non-loopback adapters are present.
+    #[cfg(windows)]
+    let _ = sock.join_multicast_v4(DISCOVERY_MULTICAST_GROUP, Ipv4Addr::LOCALHOST);
     // Fallback: let the OS pick the interface, in case enumeration missed one.
     let _ = sock.join_multicast_v4(DISCOVERY_MULTICAST_GROUP, Ipv4Addr::UNSPECIFIED);
+}
+
+/// Winsock's default multicast interface can be loopback or a virtual adapter.
+/// Publish on every joined IPv4 interface instead of silently missing the LAN.
+/// The caller must hold the discovery visibility/scope guard throughout this send.
+#[cfg(windows)]
+pub(crate) async fn send_discovery_multicast(
+    bytes: &[u8],
+    target: SocketAddr,
+) -> std::io::Result<()> {
+    let mut interfaces = ipv4_interface_addrs();
+    if interfaces.is_empty() {
+        // Preserve the OS-selected route when interface enumeration is unavailable.
+        interfaces.push(Ipv4Addr::UNSPECIFIED);
+    }
+    interfaces.push(Ipv4Addr::LOCALHOST);
+    interfaces.sort_unstable();
+    interfaces.dedup();
+    multicast_on_interfaces(bytes, target, &interfaces).await
+}
+
+#[cfg(any(windows, test))]
+async fn multicast_on_interfaces(
+    bytes: &[u8],
+    target: SocketAddr,
+    interfaces: &[Ipv4Addr],
+) -> std::io::Result<()> {
+    let mut sent = false;
+    let mut last_error =
+        std::io::Error::new(std::io::ErrorKind::NotConnected, "no multicast interface");
+    for source in interfaces {
+        let result = async {
+            let sender = UdpSocket::bind((*source, 0)).await?;
+            socket2::SockRef::from(&sender).set_multicast_if_v4(source)?;
+            sender.set_multicast_ttl_v4(1)?;
+            sender.send_to(bytes, target).await?;
+            Ok::<_, std::io::Error>(())
+        }
+        .await;
+        match result {
+            Ok(()) => sent = true,
+            Err(error) => {
+                log::debug!("Discovery multicast on {source} failed: {error}");
+                last_error = error;
+            }
+        }
+    }
+    if sent { Ok(()) } else { Err(last_error) }
 }
 
 /// The local non-loopback IPv4 interface addresses, used as the per-interface
@@ -209,6 +262,72 @@ mod tests {
         // Port 0 → OS-assigned; just proves the bind + option-setting path works.
         let a = discovery_socket(0).unwrap();
         assert!(a.local_addr().is_ok());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discovery_socket_receives_multicast_from_loopback() {
+        let receiver = discovery_socket(0).unwrap();
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        socket2::SockRef::from(&sender)
+            .set_multicast_if_v4(&Ipv4Addr::LOCALHOST)
+            .unwrap();
+        sender
+            .send_to(
+                b"local discovery",
+                (
+                    DISCOVERY_MULTICAST_GROUP,
+                    receiver.local_addr().unwrap().port(),
+                ),
+            )
+            .await
+            .unwrap();
+        let mut bytes = [0; 32];
+        let (size, source) =
+            tokio::time::timeout(Duration::from_secs(2), receiver.recv_from(&mut bytes))
+                .await
+                .expect("a Windows discovery socket must receive co-resident multicast")
+                .unwrap();
+        assert_eq!(&bytes[..size], b"local discovery");
+        assert!(source.ip().is_loopback());
+    }
+
+    #[tokio::test]
+    async fn multicast_uses_selected_interface_and_survives_an_unavailable_adapter() {
+        let receiver = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+        receiver
+            .join_multicast_v4(DISCOVERY_MULTICAST_GROUP, Ipv4Addr::LOCALHOST)
+            .unwrap();
+        let target = (
+            DISCOVERY_MULTICAST_GROUP,
+            receiver.local_addr().unwrap().port(),
+        )
+            .into();
+        multicast_on_interfaces(
+            b"interface discovery",
+            target,
+            &[Ipv4Addr::new(192, 0, 2, 254), Ipv4Addr::LOCALHOST],
+        )
+        .await
+        .unwrap();
+        let mut bytes = [0; 32];
+        let (size, source) =
+            tokio::time::timeout(Duration::from_secs(2), receiver.recv_from(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&bytes[..size], b"interface discovery");
+        assert!(source.ip().is_loopback());
+        assert!(
+            multicast_on_interfaces(b"no adapters", target, &[])
+                .await
+                .is_err()
+        );
+        assert!(
+            multicast_on_interfaces(b"unavailable", target, &[Ipv4Addr::new(192, 0, 2, 254)])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
