@@ -373,6 +373,7 @@ foreach ($ports in @(@(47479,47474), @(47478,47480))) {
     if ($_.Exception.Message -ne 'Managed post offices require UDP 47478 and LAN UDP 47474') { throw }
   }
 }
+exit 0
 `;
     const result = spawnSync(
       "powershell",
