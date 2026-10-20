@@ -78,6 +78,56 @@
       "escalation": [
         "Protocol membership and native admission remain authoritative; changing those requires their focused Rust and loopback evidence."
       ]
+    },
+    {
+      "id": "frontend-bootstrap",
+      "paths": [
+        "frontend/src/App.tsx",
+        "frontend/src/main.tsx",
+        "frontend/src/index.css",
+        "frontend/src/vite-env.d.ts",
+        "frontend/src/components/ErrorBoundary.tsx"
+      ],
+      "frontend": [
+        "src/store/auth.test.ts",
+        "src/store/appLock.test.ts",
+        "src/lib/themeContrast.test.ts"
+      ],
+      "escalation": [
+        "Bootstrap, error-boundary rendering, styling and ambient types have conservative state/theme unit fallback only; these tests do not mount the application root. Required browser shell/visual scenarios and affected native startup/session evidence remain separate."
+      ]
+    },
+    {
+      "id": "frontend-auth-screens",
+      "paths": [
+        "frontend/src/features/auth/LoginScreen.tsx",
+        "frontend/src/features/auth/RestoreBackup.tsx",
+        "frontend/src/components/ui/label.tsx"
+      ],
+      "frontend": ["src/store/auth.test.ts"],
+      "escalation": [
+        "Auth forms and their label primitive use conservative auth-store unit fallback only; required browser login/recovery scenarios verify interaction. Archive crypto, persistence and OS dialog behavior still require their core/native owners."
+      ]
+    },
+    {
+      "id": "frontend-chat-shell",
+      "paths": ["frontend/src/features/chat/ChatApp.tsx"],
+      "frontend": [
+        "src/store/chat.test.ts",
+        "src/store/presence.test.ts",
+        "src/lib/automaticDownloads.test.ts"
+      ],
+      "escalation": [
+        "Chat composition uses conservative state/helper unit fallback only; required browser lifecycle scenarios and affected native session evidence are separate obligations."
+      ]
+    },
+    {
+      "id": "frontend-window-controls",
+      "paths": ["frontend/src/components/WindowControls.tsx"],
+      "frontend": ["src/lib/platform.test.ts"],
+      "escalation": [
+        "Platform predicate unit tests do not execute OS window actions; required browser window-control scenarios and real affected native platform evidence remain necessary."
+      ]
     }
   ],
   "prScenarios": [
@@ -101,6 +151,36 @@
         "frontend/src/store/theme.ts"
       ],
       "browser": ["e2e/ui-visual-regression.spec.ts"]
+    },
+    {
+      "id": "frontend-bootstrap-acceptance",
+      "paths": [
+        "frontend/src/App.tsx",
+        "frontend/src/main.tsx",
+        "frontend/src/index.css",
+        "frontend/src/vite-env.d.ts",
+        "frontend/src/components/ErrorBoundary.tsx"
+      ],
+      "browser": ["e2e/chat.spec.ts", "e2e/ui-visual-regression.spec.ts"]
+    },
+    {
+      "id": "frontend-auth-screens-acceptance",
+      "paths": [
+        "frontend/src/features/auth/LoginScreen.tsx",
+        "frontend/src/features/auth/RestoreBackup.tsx",
+        "frontend/src/components/ui/label.tsx"
+      ],
+      "browser": ["e2e/chat.spec.ts", "e2e/recovery.spec.ts"]
+    },
+    {
+      "id": "frontend-chat-shell-acceptance",
+      "paths": ["frontend/src/features/chat/ChatApp.tsx"],
+      "browser": ["e2e/chat.spec.ts", "e2e/message-lifecycle.spec.ts"]
+    },
+    {
+      "id": "frontend-window-controls-acceptance",
+      "paths": ["frontend/src/components/WindowControls.tsx"],
+      "browser": ["e2e/window-controls.spec.ts"]
     }
   ]
 }

@@ -35,7 +35,17 @@
         "scripts/test_build_retention.py",
         "scripts/validation/feedback.mjs",
         "scripts/diagnostics/validation-feedback.test.mjs",
-        "scripts/diagnostics/capability-contracts.test.mjs"
+        "scripts/diagnostics/capability-contracts.test.mjs",
+        "scripts/validation/contracts.mjs",
+        "scripts/pr-platform/rust-packages.mjs",
+        "scripts/validation/standards.mjs",
+        "scripts/diagnostics/validation-standards.test.mjs",
+        "scripts/diagnostics/standards-wiring.test.mjs",
+        ".github/pull_request_template.md",
+        ".github/ISSUE_TEMPLATE/feature_request.yml",
+        "docs/evals/validation-velocity-ai-eval-suite.json",
+        "scripts/patch-coverage.mjs",
+        "scripts/diagnostics/patch-coverage.test.mjs"
       ],
       "node": [
         "scripts/diagnostics/affected-plan.test.mjs",
@@ -49,7 +59,11 @@
         "scripts/diagnostics/libtest-timing.test.mjs",
         "scripts/diagnostics/validation-feedback.test.mjs",
         "scripts/diagnostics/capability-contracts.test.mjs",
-        "scripts/diagnostics/pr-scenarios.test.mjs"
+        "scripts/diagnostics/pr-scenarios.test.mjs",
+        "scripts/diagnostics/validation-standards.test.mjs",
+        "scripts/diagnostics/standards-wiring.test.mjs",
+        "scripts/test-ai-eval.mjs",
+        "scripts/diagnostics/patch-coverage.test.mjs"
       ],
       "escalation": [
         "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI."
@@ -63,7 +77,10 @@
         "scripts/check-repository-hygiene.mjs",
         "scripts/diagnostics/repository-hygiene.test.mjs"
       ],
-      "node": ["scripts/diagnostics/repository-hygiene.test.mjs"],
+      "node": [
+        "scripts/diagnostics/repository-hygiene.test.mjs",
+        "scripts/diagnostics/standards-wiring.test.mjs"
+      ],
       "escalation": [
         "Changes to health or CI entry points also require the affected workflow diagnostic tests."
       ]
@@ -88,7 +105,8 @@
         "scripts/diagnostics/pr-scenarios.test.mjs",
         "scripts/diagnostics/pr-preflight-output.test.mjs",
         "scripts/diagnostics/health-workflow.test.mjs",
-        "scripts/diagnostics/native-build.test.mjs"
+        "scripts/diagnostics/native-build.test.mjs",
+        "scripts/diagnostics/standards-wiring.test.mjs"
       ],
       "escalation": [
         "Before publication run full preparation; focused diagnostic success alone does not certify native or platform execution."
@@ -132,7 +150,8 @@
         ".github/workflows/gitleaks.yml",
         ".github/workflows/dependency-review.yml",
         "scripts/ci/collect-ui-coverage.mjs",
-        "scripts/ci/unit-coverage-artifact.mjs"
+        "scripts/ci/unit-coverage-artifact.mjs",
+        "scripts/diagnostics/health-workflow.test.mjs"
       ],
       "node": [
         "scripts/diagnostics/ci-latency.test.mjs",

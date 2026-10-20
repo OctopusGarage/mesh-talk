@@ -76,12 +76,16 @@ jobs:
           node --test tools/help/*.test.mjs
           npm audit --prefix tools/help --audit-level=high
 
+      - name: Install frontend dependencies and check standards
+        shell: bash
+        run: |
+          npm ci --prefix frontend
+          node scripts/validation/standards.mjs
+
       # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend
         working-directory: frontend
-        run: |
-          npm ci
-          npm run build
+        run: npm run build
 
       - name: Check built JavaScript for macOS 12 WKWebView
         working-directory: frontend

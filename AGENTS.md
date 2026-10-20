@@ -91,6 +91,22 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   **`docs/network-design-reference.md`** owns the communication invariants,
   module contracts, resource budgets and topology acceptance boundaries.
 
+## Maintaining standards as requirements change
+
+- Before implementation, identify the existing decision owner, authoritative rule,
+  observable acceptance criteria, affected consumers and required boundary evidence.
+  Extend the owning implementation and `validation.json`; new business capabilities
+  should link their guide and invariants. Explain an unchanged contract in the PR.
+- Run `make standards-check` after adding/moving source or changing contracts. It
+  checks structural ownership and maintained references, including new files; it
+  does not prove assertion quality, semantic completeness or candidate readiness.
+  Hooks inspect the working tree, so partially staged commits still need a clean
+  committed-candidate check in CI. Frontend dependencies must be installed.
+- When CI exposes a local omission or flaky fixture, fix the owning selector, task
+  or fixture and add a focused regression. Review timing and selection evidence
+  before changing policy. Follow the maintained
+  [requirement maintenance loop](docs/testing-feedback-loop.md#maintaining-standards-across-requirements).
+
 ## Testing Guidelines
 
 - Integration coverage in `crates/mesh-talk-core/tests/` and `node/node_tests.rs`; embed

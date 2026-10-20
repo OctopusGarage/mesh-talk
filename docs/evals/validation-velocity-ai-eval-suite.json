@@ -1,6 +1,6 @@
 {
   "name": "mesh-talk-validation-velocity-eval",
-  "version": 1,
+  "version": 3,
   "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
   "cases": [
     {
@@ -11,7 +11,8 @@
         "scripts/validation/affected.mjs",
         "scripts/validation/checks.mjs",
         "scripts/validation/changed.mjs",
-        "src-tauri/validation.json"
+        "src-tauri/validation.json",
+        "scripts/diagnostics/changed-validation.test.mjs"
       ],
       "min_score": 0.9,
       "scenario": "Review the changed-boundary development runner for false-green selections after a Rust, frontend or shared-input change. Evaluate current implementation, not aspirations.",
@@ -77,6 +78,53 @@
         "Failures, unavailable tools, invalidated source, cancellation, blocked and empty selections are kept distinct; cancellation does not erase an earlier issue.",
         "Missing or invalid timestamps stay unknown, snapshots are replayable, repeated observations deduplicate without collapsing distinct invocations.",
         "Scope/platform/timing origin and cache reuse stay visible; selection audits and small sample quantiles do not prove zero misses or unmeasured speed improvements."
+      ]
+    },
+    {
+      "id": "MT-VALIDATION-005",
+      "name": "future requirements maintain structural standards without overstating coverage",
+      "subject_file": "scripts/validation/standards.mjs",
+      "context_files": [
+        "scripts/validation/contracts.mjs",
+        "scripts/validation/affected.mjs",
+        "frontend/validation.json",
+        "hooks/pre-commit",
+        "scripts/prepare-pr.sh",
+        ".github/workflows/ci.yml",
+        "AGENTS.md",
+        "docs/testing-feedback-loop.md",
+        "scripts/check-health.sh",
+        "scripts/pr-platform/rust-packages.mjs",
+        "scripts/validation/pr-scenarios.mjs",
+        "scripts/diagnostics/validation-standards.test.mjs",
+        "scripts/diagnostics/standards-wiring.test.mjs"
+      ],
+      "min_score": 0.9,
+      "scenario": "Review the automatic maintenance mechanism for newly added source, dormant broken contracts, missing tests and guide references. Assess actual structural guarantees and remaining semantic and native obligations.",
+      "rubric": [
+        "The checker and development planner share registered contracts and selection semantics; tracked and untracked source cannot silently bypass ownership, and invalid references or missing dependencies fail.",
+        "All registered contracts are checked, including ones unrelated to the current diff; explicit tests and supported documentation anchors must exist. Structural selection does not prove tests executed or assert meaningful behavior.",
+        "Exact-path conservative composition fallbacks retain owning browser rules and disclose their limited unit coverage; new unrelated source cannot inherit a blanket exemption.",
+        "Pre-commit, preparation, health and CI propagate structural failures without weakening existing acceptance; working-tree versus staged-candidate limits remain explicit.",
+        "Guidance connects new requirements to owners, acceptance criteria and evidence; local misses produce focused corrections and regression cases. Metrics and model judgments do not automatically relax policies."
+      ]
+    },
+    {
+      "id": "MT-VALIDATION-006",
+      "name": "patch coverage distinguishes inapplicable diffs from missing production evidence",
+      "subject_file": "scripts/patch-coverage.mjs",
+      "context_files": [
+        "scripts/diagnostics/patch-coverage.test.mjs",
+        "frontend/vite.config.ts",
+        "docs/testing-feedback-loop.md"
+      ],
+      "min_score": 0.9,
+      "scenario": "Review the fix for a test-only frontend change rejected because tests are excluded from coverage. Check that the fix scopes the denominator rather than bypassing failed production coverage.",
+      "rubric": [
+        "Only the registered .test.ts and .d.ts exclusions are removed from production diff accounting; production .ts and .tsx additions remain measured.",
+        "Empty added-production scope, including deletions, reports not applicable without fabricating 100 percent coverage or claiming tests executed.",
+        "When added production source has no measured lines in supplied reports the gate still fails; measured production changes remain subject to the unchanged minimum. This does not claim complete classification of every unmeasured line in mixed diffs.",
+        "Actual committed-diff CLI regressions demonstrate test/declaration/deletion applicability and both missing and zero-hit production evidence failures; source assertions alone are insufficient."
       ]
     }
   ]

@@ -135,8 +135,10 @@ boundaries and [quality gates](../quality-gates.md) for evidence requirements.
   remote-network and model-provider evidence explicit in the PR.
 
 The [validation velocity suite](validation-velocity-ai-eval-suite.json) evaluates
-selection completeness, local reuse and cancellation, CI gate preservation, and
-feedback measurement limits (`MT-VALIDATION-001` through `MT-VALIDATION-004`). Run
+selection completeness, local reuse and cancellation, CI gate preservation,
+feedback measurement limits, future requirement maintenance and patch-coverage
+applicability
+(`MT-VALIDATION-001` through `MT-VALIDATION-006`). Run
 `node scripts/ai-eval.mjs --suite docs/evals/validation-velocity-ai-eval-suite.json`
 with the model provider described above. Model review complements executable
 regressions and hosted checks; it cannot certify timing improvements or replace

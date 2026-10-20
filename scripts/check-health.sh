@@ -80,6 +80,9 @@ if [ ! -f "frontend/node_modules/.package-lock.json" ] ||
     cd ..
 fi
 
+print_status "success" "Checking validation ownership and references..."
+node scripts/validation/standards.mjs
+
 if [ "${MESH_VALIDATION_HEALTH_GUARDED:-0}" != 1 ]; then
     # Cargo releases its compiler lock before running test executables. Keep a
     # managed checkout lease across build/test execution, including browser gaps,
