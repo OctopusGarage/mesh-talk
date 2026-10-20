@@ -2,6 +2,20 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "post-office-service-installers",
+      "paths": [
+        "scripts/install-post-office-macos.sh",
+        "scripts/install-post-office-windows.ps1",
+        "scripts/diagnostics/post-office-installer.test.mjs",
+        "docs/post-office-macos-service.md",
+        "docs/post-office-windows-service.md"
+      ],
+      "node": ["scripts/diagnostics/post-office-installer.test.mjs"],
+      "escalation": [
+        "Preserve mesh identity, credentials, custody data and service configuration during updates. macOS local-build updates must retain the installed code-signing identifier and verify the staged signature before replacement; publisher-issued signatures remain intact. See docs/post-office-macos-service.md. Validate real service restart, LAN multicast and routed discovery on the affected host; fixture tests and listener checks do not establish local-network access."
+      ]
+    },
+    {
       "id": "validation-tooling",
       "paths": [
         "scripts/validation/affected.mjs",
