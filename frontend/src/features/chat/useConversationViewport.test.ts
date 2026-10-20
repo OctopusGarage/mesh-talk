@@ -540,3 +540,54 @@ it("updates jump visibility when restored rows grow after the first measurement"
   expect(scroller.scrollTop).toBe(0);
   expect(viewport.showJump).toBe(true);
 });
+
+it("reveals latest navigation when initial long-row measurement leaves viewport above bottom", async () => {
+  await render("account:initial-hydration");
+  const scroller = container.firstElementChild as HTMLElement;
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 2465, configurable: true },
+    clientHeight: { value: 551, configurable: true },
+  });
+  scroller.scrollTop = 220;
+  // Virtuoso has requested an initial position but has not yet applied its
+  // correction after a variable-height row grows; no user scroll occurred.
+  const scrollTo = vi.fn();
+  Object.assign(viewport.virtuosoRef, { current: { scrollTo } });
+  await act(async () => viewport.atBottomStateChange(false));
+  await nextAnimationFrame();
+  expect(scrollTo).toHaveBeenCalled();
+  expect(
+    scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop,
+  ).toBeGreaterThan(48);
+  expect(viewport.showJump).toBe(true);
+});
+
+it("reveals a measured content-growth gap without giving up live-edge following", async () => {
+  await render("account:growing-row");
+  const scroller = container.firstElementChild as HTMLElement;
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 1000, configurable: true },
+    clientHeight: { value: 300, configurable: true },
+  });
+  scroller.scrollTop = 700;
+  const scrollTo = vi.fn();
+  Object.assign(viewport.virtuosoRef, { current: { scrollTo } });
+  await nextAnimationFrame();
+  expect(viewport.showJump).toBe(false);
+  Object.defineProperty(scroller, "scrollHeight", {
+    value: 2465,
+    configurable: true,
+  });
+  await act(async () => viewport.atBottomStateChange(false));
+  expect(viewport.showJump).toBe(true);
+  // A measurement gap does not become a user reading anchor. A later real
+  // virtualizer correction can still follow the live edge and hide the control.
+  scrollTo.mockImplementation(() => {
+    scroller.scrollTop = 2165;
+  });
+  window.dispatchEvent(new Event("focus"));
+  await nextAnimationFrame();
+  expect(scrollTo).toHaveBeenCalled();
+  expect(scroller.scrollTop).toBe(2165);
+  expect(viewport.showJump).toBe(false);
+});

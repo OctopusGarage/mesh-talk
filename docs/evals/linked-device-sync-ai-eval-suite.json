@@ -32,7 +32,8 @@
         "crates/mesh-talk-core/src/transport/handshake.rs",
         "crates/mesh-talk-core/src/transport/channel.rs",
         "crates/mesh-talk-core/src/transport/session.rs",
-        "crates/mesh-talk-core/src/discovery/announce.rs"
+        "crates/mesh-talk-core/src/discovery/announce.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
       ]
     },
     {
@@ -48,7 +49,10 @@
         "Record chunks cannot be empty or larger than MAX_CHUNK.",
         "Device frames verify their account certificate and bind it to the transmitted device signing key."
       ],
-      "context_files": ["crates/mesh-talk-core/src/identity/account.rs"]
+      "context_files": [
+        "crates/mesh-talk-core/src/identity/account.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
+      ]
     },
     {
       "id": "MT-SYNC-AI-003",
@@ -66,7 +70,8 @@
       "context_files": [
         "crates/mesh-talk-core/src/identity/account.rs",
         "crates/mesh-talk-core/src/storage/record_log.rs",
-        "crates/mesh-talk-core/src/storage/encryption.rs"
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
       ]
     },
     {
@@ -110,7 +115,8 @@
         "crates/mesh-talk-core/src/discovery/roster.rs",
         "crates/mesh-talk-core/src/discovery/announce.rs",
         "crates/mesh-talk-core/src/identity/account.rs",
-        "crates/mesh-talk-core/src/storage/encryption.rs"
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
       ]
     },
     {
@@ -141,7 +147,10 @@
         "crates/mesh-talk-core/src/node/account_profile.rs",
         "src-tauri/src/config_store.rs",
         "crates/mesh-talk-core/src/storage/record_log.rs",
-        "crates/mesh-talk-core/src/storage/encryption.rs"
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "frontend/src/store/chatRuntimeEffects.ts",
+        "crates/mesh-talk-core/src/node/runtime.rs",
+        "crates/mesh-talk-core/src/node/node.rs"
       ]
     },
     {
@@ -166,7 +175,8 @@
         "crates/mesh-talk-core/src/storage/encryption.rs",
         "crates/mesh-talk-core/src/channel/model.rs",
         "crates/mesh-talk-core/src/node/channel.rs",
-        "crates/mesh-talk-core/src/eventlog/event.rs"
+        "crates/mesh-talk-core/src/eventlog/event.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
       ]
     },
     {
@@ -227,7 +237,20 @@
         "crates/mesh-talk-core/src/node/account_sync_wire.rs",
         "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/media_store.rs",
-        "crates/mesh-talk-core/src/storage/encryption.rs"
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "crates/mesh-talk-core/src/identity/account.rs",
+        "crates/mesh-talk-core/src/identity/device.rs",
+        "crates/mesh-talk-core/src/eventlog/event.rs",
+        "crates/mesh-talk-core/src/channel/model.rs",
+        "crates/mesh-talk-core/src/node/account_suppression.rs",
+        "crates/mesh-talk-core/src/node/delivery_store.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/transport/channel.rs",
+        "crates/mesh-talk-core/src/transport/presence_auth.rs",
+        "crates/mesh-talk-core/src/transport/auth.rs",
+        "crates/mesh-talk-core/src/transport/handshake.rs",
+        "crates/mesh-talk-core/src/transport/mod.rs",
+        "crates/mesh-talk-core/src/transport/session.rs"
       ]
     },
     {
@@ -265,7 +288,8 @@
         "crates/mesh-talk-core/src/storage/record_log.rs",
         "crates/mesh-talk-core/src/storage/encryption.rs",
         "crates/mesh-talk-core/src/discovery/announce.rs",
-        "crates/mesh-talk-core/src/identity/account.rs"
+        "crates/mesh-talk-core/src/identity/account.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
       ],
       "scenario": "A certified sibling announcement reaches the live roster before the next host peer-snapshot query has persisted its account proof. The user immediately sends a personal text or sticker. Trace the self-target path, certificate persistence, destination account binding and WAL validation. Also consider persistence errors and owner invalidation while awaiting snapshot persistence.",
       "rubric": [

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { inspectPng } from "../evals/png-evidence.mjs";
 
 export const nativeInvalidCredentialTexts = () => Promise.all(["en", "es", "ja", "zh-Hans", "zh-Hant", "yue"].map(async language => JSON.parse(await readFile(new URL(`../../frontend/src/locales/${language}.json`, import.meta.url), "utf8")).login.invalidCredentials));
 
@@ -23,12 +24,12 @@ const matches=Array.from(document.querySelectorAll('[data-testid=message-bubble]
 const e=matches.length===1?matches[0]:null, badges=e?.querySelectorAll('[data-delivery]'), badge=badges?.length===1?badges[0]:null;
 const r=e?.getBoundingClientRect(), b=badge?.getBoundingClientRect(), l=document.querySelector('[role=log]')?.getBoundingClientRect();
 const visible=!!r&&!!b&&!!l&&r.width>0&&r.height>0&&b.width>0&&b.height>0&&b.top>=Math.max(0,l.top)&&b.bottom<=Math.min(innerHeight,l.bottom)&&b.left>=Math.max(0,l.left)&&b.right<=Math.min(innerWidth,l.right);
-return {label:arguments[0],status:badge?.getAttribute('data-delivery'),visible,rect:r?{x:r.x,y:r.y,width:r.width,height:r.height}:null,badgeRect:b?{x:b.x,y:b.y,width:b.width,height:b.height}:null};`;
+return {viewport:{width:innerWidth,height:innerHeight},label:arguments[0],status:badge?.getAttribute('data-delivery'),visible,rect:r?{x:r.x,y:r.y,width:r.width,height:r.height}:null,badgeRect:b?{x:b.x,y:b.y,width:b.width,height:b.height}:null};`;
 
 const authErrorObservation = `
 const e=document.querySelector('[data-testid=login-form] [role=alert]'),r=e?.getBoundingClientRect(),form=document.querySelector('[data-testid=login-form]'),f=form?.getBoundingClientRect(),style=e&&getComputedStyle(e);
 const visible=!!r&&!!f&&r.width>0&&r.height>0&&f.width>0&&f.height>0&&r.top>=0&&r.left>=0&&r.bottom<=innerHeight&&r.right<=innerWidth&&style.visibility==='visible'&&style.display!=='none'&&Number(style.opacity)>0;
-return {text:e?.textContent?.trim(),visible,chatAbsent:!document.querySelector('[data-testid=chat-shell]'),rect:r?{x:r.x,y:r.y,width:r.width,height:r.height}:null};`;
+return {viewport:{width:innerWidth,height:innerHeight},text:e?.textContent?.trim(),visible,chatAbsent:!document.querySelector('[data-testid=chat-shell]'),rect:r?{x:r.x,y:r.y,width:r.width,height:r.height}:null};`;
 
 const captureSurface = `
 const rect=e=>{const r=e?.getBoundingClientRect();return r?{x:r.x,y:r.y,width:r.width,height:r.height}:null;};
@@ -44,7 +45,7 @@ const dialogs=Array.from(document.querySelectorAll('[role=dialog],[role=alertdia
 return {settled:!foregroundLoader&&finiteAnimations===0,foregroundLoader,finiteAnimations,loaderBlockers,animationBlockers,dialogs,main:rect(document.querySelector('main'))};`;
 
 export async function captureNativeEvidence({ command, execute, until }, expected) {
-  let diagnostics;
+  let diagnostics, previousPaint;
   try {
     return await until("native evidence visibly painted and stable", async () => {
       await command("POST", "/execute/async", { script: "const done=arguments[arguments.length-1]; requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)));", args: [] });
@@ -52,17 +53,27 @@ export async function captureNativeEvidence({ command, execute, until }, expecte
       const sample = async () => expected ? execute(auth ? authErrorObservation : receiptObservation, auth ? [] : [expected.label]) : undefined;
       const surfaceBefore = await execute(captureSurface);
       diagnostics = { phase: "surface-before", surfaceBefore };
-      if (!surfaceBefore.settled) return false;
+      if (!surfaceBefore.settled) { previousPaint = undefined; return false; }
       const before = await sample();
       const valid = value => !expected || (value?.visible === true && (auth ? value.chatAbsent === true && expected.texts.includes(value.text) : value.status === expected.status));
       diagnostics = { phase: "expected-before", surfaceBefore, before };
-      if (!valid(before)) return false;
+      if (!valid(before)) { previousPaint = undefined; return false; }
       const png = Buffer.from(await command("GET", "/screenshot"), "base64");
       const after = await sample();
       const surfaceAfter = await execute(captureSurface);
       diagnostics = { phase: "surface-after", surfaceBefore, surfaceAfter, before, after };
-      if (!surfaceAfter.settled || JSON.stringify(surfaceBefore) !== JSON.stringify(surfaceAfter) || !valid(after) || JSON.stringify(before) !== JSON.stringify(after)) return false;
-      return { png, observation: after, surface: surfaceAfter };
+      if (!surfaceAfter.settled || JSON.stringify(surfaceBefore) !== JSON.stringify(surfaceAfter) || !valid(after) || JSON.stringify(before) !== JSON.stringify(after)) { previousPaint = undefined; return false; }
+      let paint;
+      if (expected) {
+        paint = inspectPng(png, { rect: auth ? after.rect : after.badgeRect, viewport: after.viewport }).region;
+        diagnostics = { ...diagnostics, paint };
+        if (!paint.painted) { previousPaint = undefined; return false; }
+        const current = JSON.stringify({ observation: after, bounds: paint.bounds, digest: paint.pixelDigest });
+        const matched = current === previousPaint;
+        previousPaint = current;
+        if (!matched) return false;
+      }
+      return { png, observation: after, surface: surfaceAfter, ...(paint ? { paint: { ...paint, matchingFrames: 2 } } : {}) };
     });
   } catch (error) {
     error.captureDiagnostics = diagnostics;

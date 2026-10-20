@@ -182,14 +182,14 @@ test("source rubric cases include the owners of delegated guarantees", () => {
     ["validation-velocity", "MT-VALIDATION-001", ["scripts/validation/frontend-graph.mjs"]],
   ];
   contracts.push(
-    ["base", "MT-AI-007", ["scripts/install-post-office-macos.sh", "scripts/e2e-post-office-lan.py", "scripts/e2e-four-machine-tailnet.py", "scripts/e2e-federation-recovery.py", "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs"]],
+    ["base", "MT-AI-007", ["scripts/install-post-office-macos.sh", "scripts/e2e-post-office-lan.py", "scripts/e2e-four-machine-tailnet.py", "scripts/e2e-federation-recovery.py", "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs", "crates/mesh-talk-core/src/node/files.rs", "crates/mesh-talk-core/examples/network-acceptance.rs"]],
     ["base", "MT-AI-008", ["scripts/install-post-office-windows.ps1", "crates/mesh-talk-core/src/bin/mesh-talk-node.rs", "scripts/e2e-post-office-lan.py", "scripts/e2e-four-machine-tailnet.py", "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs"]],
     ["base", "MT-AI-010", ["docs/network-design-reference.md", "docs/post-office-federation.md", "scripts/e2e-four-machine-tailnet.py", "scripts/e2e-federation-recovery.py"]],
-    ["group-reception", "MT-GROUP-UX-004", ["frontend/src/store/chat.ts", "frontend/src/store/reception.ts", "frontend/src/store/conversationHistory.ts"]],
-    ["group-reception", "MT-GROUP-UX-005", ["frontend/src/locales/en.json", "frontend/src/features/chat/ReceiveProgress.tsx", "frontend/src/features/chat/TransferBar.tsx", "frontend/src/store/conversationHistory.ts", "frontend/src/store/ownership.ts"]],
+    ["group-reception", "MT-GROUP-UX-004", ["frontend/src/store/chat.ts", "frontend/src/store/reception.ts", "frontend/src/store/conversationHistory.ts", "frontend/src/store/conversationState.ts"]],
+    ["group-reception", "MT-GROUP-UX-005", ["frontend/src/locales/en.json", "frontend/src/features/chat/ReceiveProgress.tsx", "frontend/src/features/chat/TransferBar.tsx", "frontend/src/store/conversationHistory.ts", "frontend/src/store/ownership.ts", "src-tauri/src/chat_commands/files.rs", "crates/mesh-talk-core/src/node/files.rs"]],
     ["group-reception", "MT-GROUP-UX-006", ["crates/mesh-talk-core/src/storage/record_log.rs", "crates/mesh-talk-core/src/node/expiry_policy.rs", "crates/mesh-talk-core/src/expiry.rs"]],
-    ["linked-device-sync", "MT-SYNC-AI-002", ["crates/mesh-talk-core/src/identity/account.rs"]],
-    ["linked-device-sync", "MT-SYNC-AI-003", ["crates/mesh-talk-core/src/identity/account.rs", "crates/mesh-talk-core/src/storage/record_log.rs", "crates/mesh-talk-core/src/storage/encryption.rs"]],
+    ["linked-device-sync", "MT-SYNC-AI-002", ["crates/mesh-talk-core/src/identity/account.rs", "crates/mesh-talk-core/src/identity/device.rs"]],
+    ["linked-device-sync", "MT-SYNC-AI-003", ["crates/mesh-talk-core/src/identity/account.rs", "crates/mesh-talk-core/src/identity/device.rs", "crates/mesh-talk-core/src/storage/record_log.rs", "crates/mesh-talk-core/src/storage/encryption.rs"]],
     ["linked-device-sync", "MT-SYNC-AI-004", ["crates/mesh-talk-core/src/node/account_suppression.rs", "crates/mesh-talk-core/src/storage/record_log.rs", "crates/mesh-talk-core/src/storage/encryption.rs"]],
     ["person-presence", "MT-PRESENCE-002", ["crates/mesh-talk-core/src/discovery/roster.rs"]],
   );

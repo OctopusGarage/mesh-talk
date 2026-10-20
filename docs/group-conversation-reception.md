@@ -109,6 +109,17 @@ preserve the legacy message-only callback contract; configured
 `RuntimeEvents.on_channel` callbacks and raw `Node` channel receivers also receive
 controls and must branch on `reception_only`. The desktop host uses this explicit
 reception-aware contract.
+If an append fails and its rollback also fails, the encrypted writer retains
+its confirmed pre-append boundary and refuses further appends. The received
+plaintext store explicitly retries truncation and file synchronization through
+the original owned file handle before its next write. It clears the poisoned
+state only after both operations succeed, leaving the acknowledged prefix
+unchanged and discarding the uncertain tail. A continuing storage failure keeps
+reception paused; the existing background timer retries without new traffic.
+Generic encrypted-log appends remain closed until explicit repair or reopen.
+This repair does not reopen a path, retain a password, or adopt an uncertain
+partial frame as a saved message.
+
 A replay cursor traverses the validated graph once per processing pass rather
 than rebuilding its order for each bounded chunk. Channel file projection waits
 behind this local processing boundary so it cannot

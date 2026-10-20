@@ -238,3 +238,55 @@ it("starts with independent history snapshots for each session", () => {
   expect(second.historyScanQueue).toEqual([]);
   expect(second.deleted).toEqual({});
 });
+
+it("commits recovered history with historical arrival metadata while preserving live arrivals", async () => {
+  const { receiveIdentity, receptionPatch } = await import("./reception");
+  const store = session();
+  const channel: Conversation = { kind: "channel", id: "team", name: "Team" };
+  const channelKey = "channel:team";
+  store.setState({
+    active: channel,
+    cacheOrder: [channelKey],
+    historyBaselines: [channelKey],
+  });
+  store.setState(
+    receptionPatch(
+      store.getState(),
+      receiveIdentity(store.getState(), channelKey, {
+        event_id: "live",
+        arrival_kind: "live",
+        received_at: 42,
+      }),
+    ),
+  );
+  const committed: Array<
+    Array<{ id: string | null; arrivalKind?: string; receivedAt?: number }>
+  > = [];
+  const stop = store.subscribe((next, previous) => {
+    if (next.messages[channelKey] !== previous.messages[channelKey])
+      committed.push(next.messages[channelKey]);
+  });
+  invoke.mockImplementation((command: string) =>
+    Promise.resolve(
+      command === "channel_history" ? [row("recovered"), row("live")] : [],
+    ),
+  );
+  try {
+    await reloadConversation(store.setState, store.getState);
+    expect(committed).toHaveLength(1);
+    expect(committed[0]).toEqual([
+      expect.objectContaining({ id: "recovered", arrivalKind: "history_sync" }),
+      expect.objectContaining({
+        id: "live",
+        arrivalKind: "live",
+        receivedAt: 42,
+      }),
+    ]);
+    expect(store.getState().unreadIds[channelKey]).toEqual([
+      "live",
+      "recovered",
+    ]);
+  } finally {
+    stop();
+  }
+});

@@ -8779,6 +8779,15 @@ async fn group_reception_history_respects_signed_ancestry_despite_clock_skew() {
 
 #[tokio::test]
 async fn group_reception_multiple_chunks_complete_once_and_reopen_preserves_erases() {
+    group_reception_projection_failure_case(false).await;
+}
+
+#[tokio::test]
+async fn group_reception_failed_rollback_retries_without_new_traffic() {
+    group_reception_projection_failure_case(true).await;
+}
+
+async fn group_reception_projection_failure_case(failed_rollback: bool) {
     let dir = tempfile::tempdir().unwrap();
     let owner = DeviceIdentity::generate();
     let receiver = DeviceIdentity::generate();
@@ -8840,21 +8849,52 @@ async fn group_reception_multiple_chunks_complete_once_and_reopen_preserves_eras
         ));
     }
     append(68, EventKind::ChannelDissolve, vec![]);
-    // One projection write fails after a saved prefix; later writes would work.
-    // Publication must still retain the entire uncommitted causal suffix.
-    node.received.lock().unwrap().fail_once_after_for_test(1);
+    if failed_rollback {
+        node.received
+            .lock()
+            .unwrap()
+            .fail_next_append_rollback_for_test(7);
+    } else {
+        node.received.lock().unwrap().fail_once_after_for_test(1);
+    }
     node.process_channel_reception(conv, "catch_up");
-    assert_eq!(node.channel_history(conv, 100).len(), 1);
-    let prefix = rx.try_recv().unwrap();
-    assert_eq!(prefix.event_id, ids[0]);
-    assert!(!prefix.reception_only && !prefix.batch_complete);
+    let prefix = if failed_rollback {
+        assert!(node.channel_history(conv, 100).is_empty());
+        None
+    } else {
+        assert_eq!(node.channel_history(conv, 100).len(), 1);
+        let prefix = rx.try_recv().unwrap();
+        assert_eq!(prefix.event_id, ids[0]);
+        assert!(!prefix.reception_only && !prefix.batch_complete);
+        Some(prefix)
+    };
     assert!(
         rx.try_recv().is_err(),
         "a failed suffix must not be published or complete the batch"
     );
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    node.retry_channel_plaintext();
-    let events = std::iter::once(prefix).chain(std::iter::from_fn(|| rx.try_recv().ok()));
+    if failed_rollback {
+        // No new signed traffic or manual plaintext retry: the serving host's
+        // existing recovery timer must repair storage and finish publication.
+        let recovery = tokio::spawn(
+            node.clone()
+                .run_channel_recovery_loop(Arc::new(tokio::sync::Notify::new())),
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while node.channel_history(conv, 100).len() != 65 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("background recovery must resume after storage recovers");
+        recovery.abort();
+        let _ = recovery.await;
+    } else {
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        node.retry_channel_plaintext();
+    }
+    let events = prefix
+        .into_iter()
+        .chain(std::iter::from_fn(|| rx.try_recv().ok()));
     let (terminals, received): (Vec<_>, Vec<_>) = events.partition(|event| event.reception_only);
     assert_eq!(terminals.len(), 1);
     assert!(terminals[0].batch_complete);

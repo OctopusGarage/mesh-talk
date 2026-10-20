@@ -9,6 +9,12 @@ test("Windows native helper only emits bounded owned-PID control keys with ABI-s
     assert.ok(script.includes(`[NativeKeyboard]::SendOwned(12345, ${vk})`));
     for (const text of ["GetForegroundWindow", "GetWindowThreadProcessId", "actualPid != ownedPid", "Marshal.SizeOf(typeof(INPUT))", "SendInput(2", "inserted != 2", "GetLastWin32Error", "LayoutKind.Explicit", "MOUSEINPUT", "KEYEVENTF_KEYUP", "EnumWindows", "IsWindowVisible", "SetForegroundWindow", "FocusOwned", "Mark 'start'", "Mark 'activate'", "Mark 'compiled'", "keyboard:owned", "Mark 'sent'", "Out.Flush"]) assert.ok(script.includes(text), text);
     assert.ok(!script.includes("SendWait") && !script.includes("dispatchEvent") && !script.includes("WScript.Shell"));
+    assert.match(script, /static string DescribeWindow\(IntPtr window\)/);
+    assert.match(script, /GetWindowRect\(window, out rect\)/);
+    assert.match(script, /GetProcessById\(\(int\)process\).SessionId/);
+    assert.match(script, /SetLastError\(0\);\s*bool activated = SetForegroundWindow\(target\);\s*int\? activationError = activated \? \(int\?\)null : Marshal.GetLastWin32Error\(\);/);
+    assert.match(script, /Owned application did not become foreground[\s\S]*DescribeWindow\(GetForegroundWindow\(\)\)[\s\S]*DescribeWindow\(target\)[\s\S]*activationError.HasValue/);
+    assert.ok(!script.includes("GetWindowText"), "foreground diagnostics never collect window titles");
   }
   for (const pid of [0, -1, NaN, 1.5, "123;evil"]) assert.throws(() => nativeWindowsKeyboardScript(pid, "\uE00C"));
   for (const key of ["a", "{ESC}", "\uE008"]) assert.throws(() => nativeWindowsKeyboardScript(12345, key));

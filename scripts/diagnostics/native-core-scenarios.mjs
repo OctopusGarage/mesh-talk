@@ -62,9 +62,26 @@ public static class NativeKeyboard {
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, System.Text.StringBuilder name, int length);
   [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr window, int command);
-  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
+  [DllImport("user32.dll", SetLastError=true)] static extern bool SetForegroundWindow(IntPtr window);
+  [DllImport("kernel32.dll")] static extern void SetLastError(uint error);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll", SetLastError=true)] static extern bool GetWindowRect(IntPtr window, out RECT rect);
   [DllImport("user32.dll", SetLastError=true)] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
   [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+  static string DescribeWindow(IntPtr window) {
+    uint process;
+    GetWindowThreadProcessId(window, out process);
+    var name = new System.Text.StringBuilder(64);
+    GetClassName(window, name, name.Capacity);
+    RECT rect;
+    bool hasRect = GetWindowRect(window, out rect);
+    int? rectError = hasRect ? (int?)null : Marshal.GetLastWin32Error();
+    string session;
+    try { session = System.Diagnostics.Process.GetProcessById((int)process).SessionId.ToString(); }
+    catch (Exception) { session = "unavailable"; }
+    return "pid=" + process + ",class=" + name + ",session=" + session + ",rect=" +
+      (hasRect ? rect.Left + "," + rect.Top + "," + rect.Right + "," + rect.Bottom : "unavailable(error=" + rectError + ")");
+  }
   public static void FocusOwned(uint ownedPid) {
     uint actualPid;
     if (GetWindowThreadProcessId(GetForegroundWindow(), out actualPid) != 0 && actualPid == ownedPid) return;
@@ -77,14 +94,18 @@ public static class NativeKeyboard {
       if (process == ownedPid && IsWindowVisible(window) && name.ToString() == "Tauri Window") { target = window; return false; }
       return true;
     }, IntPtr.Zero);
-    if (target == IntPtr.Zero) throw new InvalidOperationException("Owned application window not found");
+    if (target == IntPtr.Zero) throw new InvalidOperationException("Owned application window not found; ownedPid=" + ownedPid + "; foreground={" + DescribeWindow(GetForegroundWindow()) + "}");
     ShowWindowAsync(target, 9);
-    SetForegroundWindow(target);
+    SetLastError(0);
+    bool activated = SetForegroundWindow(target);
+    int? activationError = activated ? (int?)null : Marshal.GetLastWin32Error();
     for (int attempt = 0; attempt < 20; attempt++) {
       if (GetWindowThreadProcessId(GetForegroundWindow(), out actualPid) != 0 && actualPid == ownedPid) return;
       Thread.Sleep(50);
     }
-    throw new InvalidOperationException("Owned application did not become foreground");
+    throw new InvalidOperationException("Owned application did not become foreground; ownedPid=" + ownedPid +
+      "; foreground={" + DescribeWindow(GetForegroundWindow()) + "}; ownedTarget={" + DescribeWindow(target) +
+      "}; SetForegroundWindow=" + activated + (activationError.HasValue ? "; SetForegroundWindowError=" + activationError.Value : ""));
   }
   public static void SendOwned(uint ownedPid, ushort vk) {
     if (vk != 9 && vk != 13 && vk != 27 && vk != 33) throw new InvalidOperationException("Unsupported control key");

@@ -213,6 +213,86 @@ test.describe("Mesh-Talk UI flow", () => {
       .toBeLessThan(48);
   });
 
+  test("initial variable-height history keeps latest navigation available across resize", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await page.evaluate(({ account }) => {
+      const inject = (
+        window as unknown as {
+          __mockInject: (
+            conversation: string,
+            text: string,
+            who: string,
+            metadata: { id: string },
+          ) => void;
+        }
+      ).__mockInject;
+      // Populate backend history before opening: Virtuoso must measure a cold
+      // list with oversized multilingual rows, without a reader scroll event.
+      for (let i = 0; i < 4; i++)
+        inject(
+          `acc:${account}`,
+          `hydrated-long-${i} ${"mesh消息🙂 café ".repeat(180)}`,
+          "bob",
+          { id: `hydrated-long-${i}` },
+        );
+      inject(`acc:${account}`, "latest-hydrated-tail", "bob", {
+        id: "hydrated-tail",
+      });
+    }, BOB);
+    await page.getByTestId(`conversation-row-${BOB.account}`).click();
+    const log = page.getByRole("log");
+    const tail = log.getByText("latest-hydrated-tail", { exact: true });
+    const jump = page.getByTestId("jump-to-latest");
+    const revealLatest = async () => {
+      await expect
+        .poll(() =>
+          log.evaluate((element) => {
+            const bounds = element.getBoundingClientRect();
+            const row = [
+              ...element.querySelectorAll('[data-testid="message-bubble"]'),
+            ].find((bubble) =>
+              bubble.textContent?.includes("latest-hydrated-tail"),
+            );
+            const rect = row?.getBoundingClientRect();
+            const button = document
+              .querySelector('[data-testid="jump-to-latest"]')
+              ?.getBoundingClientRect();
+            return (
+              (!!rect &&
+                rect.bottom > bounds.top &&
+                rect.top < bounds.bottom) ||
+              (!!button && button.width > 0 && button.height > 0)
+            );
+          }),
+        )
+        .toBe(true);
+      if (await jump.isVisible()) {
+        try {
+          await jump.click({ timeout: 1000 });
+        } catch {
+          // Live-edge correction can remove the control between observation
+          // and click. Accept that race only when the actual tail is visible.
+          await expect(tail).toBeInViewport();
+        }
+      }
+      await expect(tail).toBeInViewport();
+    };
+    await revealLatest();
+    await expect
+      .poll(() =>
+        log.evaluate((element) => element.scrollHeight - element.clientHeight),
+      )
+      .toBeGreaterThan(48);
+    // Actual layout reflows the long rows. No scrollTop assignment, fabricated
+    // scroll event, or virtualizer stub supplies the expected movement.
+    await page.setViewportSize({ width: 760, height: 520 });
+    await revealLatest();
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await revealLatest();
+  });
+
   test("Enter sends, Shift+Enter inserts a newline", async ({ page }) => {
     await enterChat(page);
     await openBobDm(page);

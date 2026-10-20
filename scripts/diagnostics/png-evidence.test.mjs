@@ -1,47 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deflateSync } from "node:zlib";
 
-function crc32(bytes) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-function chunk(type, bytes) {
-  const out = Buffer.alloc(12 + bytes.length);
-  out.writeUInt32BE(bytes.length); out.write(type, 4); bytes.copy(out, 8);
-  out.writeUInt32BE(crc32(out.subarray(4, 8 + bytes.length)), 8 + bytes.length);
-  return out;
-}
-export function pngFixture({ width = 64, height = 64, solid = false, alpha = 255, filter = 0, malformedPixels = false } = {}) {
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
-  header[8] = 8; header[9] = 6;
-  const rows = [];
-  let previous = Buffer.alloc(width * 4);
-  for (let y = 0; y < height; y++) {
-    const raw = Buffer.alloc(width * 4);
-    for (let x = 0; x < width; x++) {
-      raw[x * 4] = solid ? 0 : (x * 7) % 256;
-      raw[x * 4 + 1] = solid ? 0 : (y * 11) % 256;
-      raw[x * 4 + 2] = solid ? 0 : (x + y) % 256;
-      raw[x * 4 + 3] = alpha;
-    }
-    const row = Buffer.alloc(raw.length + 1); row[0] = filter;
-    for (let i = 0; i < raw.length; i++) {
-      const a = i >= 4 ? raw[i - 4] : 0, b = previous[i], c = i >= 4 ? previous[i - 4] : 0;
-      const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
-      const prediction = [0, a, b, Math.floor((a + b) / 2), pa <= pb && pa <= pc ? a : pb <= pc ? b : c][filter] ?? 0;
-      row[i + 1] = (raw[i] - prediction) & 255;
-    }
-    rows.push(row); previous = raw;
-  }
-  const pixels = Buffer.concat(rows);
-  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header), chunk("IDAT", deflateSync(malformedPixels ? pixels.subarray(0, 2) : pixels)), chunk("IEND", Buffer.alloc(0))]);
-}
+import { pngFixture, chunk } from "./test-fixtures/png.mjs";
+
 // Import in the test so missing implementation is an explicit feature failure.
 async function inspect() { return (await import("../evals/png-evidence.mjs")).inspectPng; }
 test("decodes all five PNG filters and proves screenshot pixels are not blank", async () => {
@@ -66,4 +27,25 @@ test("rejects oversized declared dimensions before decompression", async () => {
   const bytes = pngFixture(); const header = Buffer.from(bytes.subarray(16, 29)); header.writeUInt32BE(100000, 0);
   const oversized = Buffer.concat([bytes.subarray(0, 8), chunk("IHDR", header), bytes.subarray(33)]);
   assert.throws(() => inspectPng(oversized), /dimension|size|limit/i);
+});
+
+test("expected native receipt region rejects blank and gradient frames at screenshot scale", async () => {
+  const inspectPng = await inspect();
+  const region = { rect: { x: 20, y: 20, width: 20, height: 12 }, viewport: { width: 64, height: 64 } };
+  for (const kind of ["blank", "gradient", "glyph"]) {
+    const bytes = pngFixture({ width: 128, height: 128, pixel: (x,y) => {
+      if (x >= 40 && x < 80 && y >= 40 && y < 64) {
+        const glyph = kind === "glyph" && x % 8 < 3 && y > 44 && y < 60;
+        const value = glyph ? 85 : kind === "gradient" ? 220 + Math.floor(x / 4) : 247;
+        return [value,value,value,255];
+      }
+      return [x % 256,y % 256,(x+y)%256,255];
+    } });
+    const result = inspectPng(bytes, region);
+    assert.equal(result.region.painted, kind === "glyph", kind);
+    assert.deepEqual(result.region.bounds, { x: 40, y: 40, width: 40, height: 24 });
+    assert.match(result.region.pixelDigest, /^[a-f0-9]{64}$/);
+  }
+  assert.throws(() => inspectPng(pngFixture(), { ...region, viewport: { width: 0, height: 64 } }), /viewport/i);
+  assert.throws(() => inspectPng(pngFixture(), { ...region, rect: { x: 60, y: 20, width: 20, height: 12 } }), /region/i);
 });

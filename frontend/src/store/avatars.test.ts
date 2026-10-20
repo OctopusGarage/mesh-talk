@@ -379,3 +379,46 @@ for (const boundary of ["generation", "runEpoch", "identityEpoch"] as const) {
     });
   }
 }
+
+for (const avatar of ["new-photo", null]) {
+  it(`rejects a peer snapshot started during an own-avatar ${avatar ? "edit" : "clear"} that returns after publication`, async () => {
+    let finishPublish!: () => void;
+    let finishPeers!: (profiles: Record<string, string | null>) => void;
+    const persisted: Record<string, string> = { own: "old-photo" };
+    invoke.mockImplementation(
+      (command: string, args?: { id?: string; dataUrl?: string | null }) => {
+        if (command === "set_avatar") {
+          if (args?.dataUrl) persisted[args.id!] = args.dataUrl;
+          else delete persisted[args!.id!];
+        }
+        if (command === "publish_avatar")
+          return new Promise<void>((resolve) => {
+            finishPublish = resolve;
+          });
+        if (command === "peer_avatars")
+          return new Promise<Record<string, string | null>>((resolve) => {
+            finishPeers = resolve;
+          });
+        return Promise.resolve();
+      },
+    );
+    useAvatars.setState({
+      local: { own: "old-photo" },
+      received: {},
+      ownProfileSeen: false,
+    });
+    const saving = useAvatars.getState().setAvatar("own", avatar);
+    await vi.waitFor(() => expect(finishPublish).toBeDefined());
+    const loading = useAvatars.getState().loadPeers();
+    finishPublish();
+    await saving;
+    finishPeers({ own: "old-photo" });
+    expect(await loading).toBe(false);
+    expect(useAvatars.getState().local.own).toBe(avatar ?? undefined);
+    expect(useAvatars.getState().received.own).toBeUndefined();
+    expect(persisted.own).toBe(avatar ?? undefined);
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "publish_avatar"),
+    ).toEqual([["publish_avatar", { avatar }]]);
+  });
+}

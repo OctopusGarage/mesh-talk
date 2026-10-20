@@ -41,11 +41,15 @@ pub struct EncryptedRecordLog<R> {
     repair: File,
     #[cfg(test)]
     append_fault: Option<File>,
+    #[cfg(test)]
+    append_rollback_fault: Option<usize>,
     key: EncryptionKey,
     salt: [u8; SALT_SIZE],
     magic: [u8; 6],
     path: PathBuf,
     poisoned: bool,
+    // Confirmed prefix before an append whose rollback could not finish.
+    rollback_boundary: u64,
     #[cfg(test)]
     pub(crate) before_rewrite_rename: Option<Box<dyn FnOnce() + Send + Sync>>,
     _marker: PhantomData<R>,
@@ -60,6 +64,10 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             None
         };
         Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn fail_next_append_rollback_for_test(&mut self, bytes: usize) {
+        self.append_rollback_fault = Some(bytes);
     }
     /// Open the log at `path`, creating it (with a fresh random salt and `magic`
     /// header) if absent, else verifying the magic and loading + decrypting every
@@ -93,11 +101,14 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                         repair,
                         #[cfg(test)]
                         append_fault: None,
+                        #[cfg(test)]
+                        append_rollback_fault: None,
                         key,
                         salt,
                         magic: *magic,
                         path: path.to_path_buf(),
                         poisoned: false,
+                        rollback_boundary: 0,
                         #[cfg(test)]
                         before_rewrite_rename: None,
                         _marker: PhantomData,
@@ -145,11 +156,14 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                 repair,
                 #[cfg(test)]
                 append_fault: None,
+                #[cfg(test)]
+                append_rollback_fault: None,
                 key,
                 salt,
                 magic: *magic,
                 path: path.to_path_buf(),
                 poisoned: false,
+                rollback_boundary: 0,
                 #[cfg(test)]
                 before_rewrite_rename: None,
                 _marker: PhantomData,
@@ -219,7 +233,24 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         self.append_inner(record, true)
     }
 
-    /// Sync all successful appends. A poisoned handle must first be reopened.
+    /// Retry a failed append's rollback on the original owned file. No uncertain
+    /// frame can become visible: only the previously confirmed prefix survives.
+    /// Callers opt in once storage becomes writable; other appends stay closed.
+    pub(crate) fn recover_failed_append(&mut self) -> Result<(), LogError> {
+        if !self.poisoned {
+            return Ok(());
+        }
+        #[cfg(windows)]
+        let repair_file = &self.repair;
+        #[cfg(not(windows))]
+        let repair_file = &self.file;
+        repair_file.set_len(self.rollback_boundary)?;
+        repair_file.sync_all()?;
+        self.poisoned = false;
+        Ok(())
+    }
+
+    /// Sync all successful appends. A poisoned handle requires repair or reopen.
     pub fn sync(&self) -> Result<(), LogError> {
         if self.poisoned {
             return Err(LogError::CorruptFile("record log requires reopen".into()));
@@ -245,9 +276,17 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
         let buf = self.encode_record(record)?;
         let boundary = self.file.metadata()?.len();
         #[cfg(test)]
-        let write_result = match self.append_fault.as_mut() {
-            Some(readonly) => readonly.write_all(&buf),
-            None => write(&mut self.file, &buf),
+        let append_rollback_fault = self.append_rollback_fault.take();
+        #[cfg(test)]
+        let write_result = if let Some(bytes) = append_rollback_fault {
+            self.file
+                .write_all(&buf[..bytes.min(buf.len())])
+                .and_then(|()| Err(std::io::Error::other("injected partial write")))
+        } else {
+            match self.append_fault.as_mut() {
+                Some(readonly) => readonly.write_all(&buf),
+                None => write(&mut self.file, &buf),
+            }
         };
         #[cfg(not(test))]
         let write_result = write(&mut self.file, &buf);
@@ -263,11 +302,20 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             let repair_file = &self.repair;
             #[cfg(not(windows))]
             let repair_file = &self.file;
+            #[cfg(test)]
+            let readonly_repair = if append_rollback_fault.is_some() {
+                Some(File::open(&self.path)?)
+            } else {
+                None
+            };
+            #[cfg(test)]
+            let repair_file = readonly_repair.as_ref().unwrap_or(repair_file);
             if repair_file
                 .set_len(boundary)
                 .and_then(|()| repair_file.sync_all())
                 .is_err()
             {
+                self.rollback_boundary = boundary;
                 self.poisoned = true;
             }
             return Err(error.into());
@@ -279,6 +327,9 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
     /// fresh per-record nonces). Written to a temp file and atomically renamed over
     /// the original, so an interrupted rewrite leaves the old file intact.
     pub fn rewrite(&mut self, records: &[R]) -> Result<(), LogError> {
+        if self.poisoned {
+            return Err(LogError::CorruptFile("record log requires reopen".into()));
+        }
         let tmp = self.path.with_extension("compact-tmp");
         {
             let f = OpenOptions::new()
@@ -490,6 +541,9 @@ mod tests {
         assert!(log.poisoned);
         assert!(log.append_durable(&rec(3, b"poisoned")).is_err());
         assert!(log.sync().is_err());
+        assert!(log.recover_failed_append().is_err());
+        assert!(log.rewrite(&[rec(9, b"must not replace")]).is_err());
+        assert!(log.poisoned);
         drop(log);
         let (mut log, records) = EncryptedRecordLog::<Rec>::open(&path, "pw", TEST_MAGIC).unwrap();
         assert_eq!(records, vec![rec(1, b"before")]);

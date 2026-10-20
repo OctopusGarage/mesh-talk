@@ -33,6 +33,15 @@
         "Each known destination opens its matching dialog and closes other utility dialogs; unknown destinations leave state unchanged.",
         "The event listener is cleaned up on unmount, including when asynchronous registration finishes after unmount.",
         "The sidebar About action still opens the same controlled dialog. Do not infer native window activation or signed-out navigation behavior from this frontend source."
+      ],
+      "context_files": [
+        "frontend/src/features/chat/Sidebar.tsx",
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/src/features/chat/DiagnosticsDialog.tsx",
+        "frontend/src/features/chat/SettingsDialog.tsx",
+        "frontend/src/features/chat/AboutDialog.tsx",
+        "frontend/src/features/help/HelpDialog.tsx",
+        "frontend/src/components/ui/dialog.tsx"
       ]
     },
     {
@@ -46,6 +55,9 @@
         "The trigger can be hidden without hiding the dialog content, so the external sidebar trigger does not produce a duplicate button.",
         "Version data loads when opened, and the existing update panel and project or license links remain available.",
         "About does not register a tray listener inside conditionally mounted popover content."
+      ],
+      "context_files": [
+        "frontend/src/components/ui/dialog.tsx"
       ]
     }
   ]

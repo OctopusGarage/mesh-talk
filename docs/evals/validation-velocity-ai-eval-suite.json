@@ -22,7 +22,10 @@
         "scripts/validation/stage.mjs",
         "scripts/validation/stage-inputs.mjs",
         "scripts/validation/feedback.mjs",
-        "scripts/validation/selectors.mjs"
+        "scripts/validation/selectors.mjs",
+        "scripts/pr-platform/guest.mjs",
+        "scripts/validation/pr-scenarios.mjs",
+        "frontend/validation.json"
       ],
       "min_score": 0.9,
       "scenario": "Review the changed-boundary development runner for false-green selections after a Rust, frontend or shared-input change. Evaluate current implementation, not aspirations.",

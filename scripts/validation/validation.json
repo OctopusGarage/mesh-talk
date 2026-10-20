@@ -204,14 +204,18 @@
         "scripts/diagnostics/native-capture.test.mjs",
         "scripts/diagnostics/native-core-scenarios.mjs",
         "scripts/diagnostics/native-core-scenarios.test.mjs",
-        "scripts/diagnostics/native-ipc-boundary.test.mjs"
+        "scripts/diagnostics/native-ipc-boundary.test.mjs",
+        "scripts/evals/png-evidence.mjs",
+        "scripts/diagnostics/png-evidence.test.mjs",
+        "scripts/diagnostics/test-fixtures/png.mjs"
       ],
       "node": [
         "scripts/diagnostics/hidden-contacts-report.test.mjs",
         "scripts/diagnostics/native-capture.test.mjs",
         "scripts/diagnostics/native-core-scenarios.test.mjs",
         "scripts/diagnostics/native-ipc-boundary.test.mjs",
-        "scripts/diagnostics/native-build.test.mjs"
+        "scripts/diagnostics/native-build.test.mjs",
+        "scripts/diagnostics/png-evidence.test.mjs"
       ],
       "escalation": [
         "Native harness and evidence-validation changes require fresh real desktop acceptance on the affected platforms with clean source and verified build provenance; diagnostic unit checks cannot certify native behavior."

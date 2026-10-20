@@ -117,7 +117,13 @@
         "crates/mesh-talk-core/src/postoffice/election.rs",
         "crates/mesh-talk-core/src/node/opaque_relay.rs",
         "crates/mesh-talk-core/src/node/file_consent.rs",
-        "crates/mesh-talk-core/src/node/file_completion.rs"
+        "crates/mesh-talk-core/src/node/file_completion.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/examples/network-acceptance.rs",
+        "crates/mesh-talk-core/src/file/mod.rs",
+        "crates/mesh-talk-core/src/file/crypto.rs",
+        "crates/mesh-talk-core/src/node/media_store.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs"
       ]
     },
     {

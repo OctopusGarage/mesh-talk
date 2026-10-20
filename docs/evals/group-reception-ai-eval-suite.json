@@ -82,7 +82,8 @@
         "frontend/src/store/chat.ts",
         "frontend/src/store/reception.ts",
         "frontend/src/store/conversationHistory.ts",
-        "frontend/src/store/ownership.ts"
+        "frontend/src/store/ownership.ts",
+        "frontend/src/store/conversationState.ts"
       ],
       "min_score": 0.85,
       "scenario": "While a user reads the middle of a virtual conversation, older messages are prepended or inserted between existing messages, then a catch-up batch and fresh messages arrive. Review stable anchoring, navigation and assistive announcements.",
@@ -120,7 +121,9 @@
         "frontend/src/store/transfers.ts",
         "frontend/src/store/conversationHistory.ts",
         "frontend/src/store/ownership.ts",
-        "frontend/src/store/auth.ts"
+        "frontend/src/store/auth.ts",
+        "src-tauri/src/chat_commands/files.rs",
+        "crates/mesh-talk-core/src/node/files.rs"
       ],
       "min_score": 0.85,
       "scenario": "A conversation has reachable members, offline members and partial history. A file card is present before its bytes. Review status copy and transitions for false global completeness, fabricated progress and conflation of custody, delivery, read and download.",
@@ -146,7 +149,9 @@
         "crates/mesh-talk-core/src/storage/record_log.rs",
         "crates/mesh-talk-core/src/storage/encryption.rs",
         "crates/mesh-talk-core/src/node/expiry_policy.rs",
-        "crates/mesh-talk-core/src/expiry.rs"
+        "crates/mesh-talk-core/src/expiry.rs",
+        "crates/mesh-talk-core/src/node/message.rs",
+        "crates/mesh-talk-core/src/node/account_suppression.rs"
       ],
       "min_score": 0.85,
       "scenario": "The encrypted group event arrives, decryption consumes a sender key, then local plaintext persistence fails due to disk or IO error. Storage later recovers without a new incoming message. Review whether the exact message can still be saved and emitted once, without an unbounded plaintext queue, busy-loop or incorrect batch completion. State the process-crash durability boundary explicitly; do not invent an atomic cryptographic journal that is absent.",

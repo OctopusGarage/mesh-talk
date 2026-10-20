@@ -51,6 +51,7 @@ impl ReceivedLog {
         &mut self,
         entry: &ReceivedEntry,
     ) -> Result<(), LogError> {
+        self.file.recover_failed_append()?;
         if !self.allow_aliases {
             return Err(LogError::CorruptFile("file alias in message log".into()));
         }
@@ -86,6 +87,10 @@ impl ReceivedLog {
         self.file.fail_appends_for_test(enabled)
     }
     #[cfg(test)]
+    pub(crate) fn fail_next_append_rollback_for_test(&mut self, bytes: usize) {
+        self.file.fail_next_append_rollback_for_test(bytes);
+    }
+    #[cfg(test)]
     pub(crate) fn fail_once_after_for_test(&mut self, successful: usize) {
         self.fail_once_after = Some(successful);
     }
@@ -97,6 +102,7 @@ impl ReceivedLog {
     /// when the identical record is already indexed; conflicting plaintext or
     /// routing for the same signed event is rejected.
     pub fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError> {
+        self.file.recover_failed_append()?;
         if let Some((conversation, index)) = self.seen.get(&entry.event_id) {
             let existing = &self.by_conversation[conversation][*index];
             if existing != entry {
@@ -172,6 +178,7 @@ impl ReceivedLog {
             }
             *remaining -= 1;
         }
+        self.file.recover_failed_append()?;
         // Idempotent on event id: skip a duplicate (e.g. a re-imported account backfill) so it
         // can't durably double the conversation's history.
         if self.seen.contains_key(&event_id) {
@@ -203,6 +210,7 @@ impl ReceivedLog {
         &mut self,
         should_remove: impl Fn(&ReceivedEntry) -> bool,
     ) -> Result<usize, LogError> {
+        self.file.recover_failed_append()?;
         let total: usize = self.by_conversation.values().map(Vec::len).sum();
         let kept: Vec<ReceivedEntry> = self
             .by_conversation
@@ -263,6 +271,80 @@ mod tests {
 
     fn conv(n: u8) -> ConversationId {
         ConversationId::new([n; 32])
+    }
+
+    #[test]
+    fn partial_rollback_failure_recovers_same_live_received_log_without_duplicates() {
+        for durable in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("received");
+            let mut log = ReceivedLog::open(&path, "pw").unwrap();
+            let record = |log: &mut ReceivedLog, n, plaintext: &[u8]| {
+                let entry = ReceivedEntry {
+                    event_id: EventId::new([n; 32]),
+                    conversation: conv(1),
+                    from: "alice".into(),
+                    wall_clock: u64::from(n),
+                    plaintext: plaintext.to_vec(),
+                };
+                if durable {
+                    log.record_durable(&entry)
+                } else {
+                    log.record(
+                        entry.conversation,
+                        entry.from,
+                        entry.wall_clock,
+                        &entry.plaintext,
+                        entry.event_id,
+                    )
+                }
+            };
+            record(&mut log, 1, b"prefix").unwrap();
+            let prefix = std::fs::read(&path).unwrap();
+            log.fail_next_append_rollback_for_test(7);
+            assert!(record(&mut log, 2, b"suffix").is_err());
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                prefix.len() as u64 + 7
+            );
+            assert_eq!(log.entries(&conv(1)).len(), 1);
+            record(&mut log, 2, b"suffix").unwrap();
+            record(&mut log, 2, b"suffix").unwrap();
+            assert!(
+                std::fs::read(&path).unwrap().starts_with(&prefix),
+                "recovery must not rewrite the acknowledged encrypted prefix"
+            );
+            assert_eq!(log.entries(&conv(1)).len(), 2);
+            let reopened = ReceivedLog::open(&path, "pw").unwrap();
+            assert_eq!(reopened.entries(&conv(1)), log.entries(&conv(1)));
+        }
+    }
+
+    #[test]
+    fn zero_match_erase_repairs_uncommitted_receive_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("received");
+        let mut log = ReceivedLog::open(&path, "pw").unwrap();
+        log.record(conv(1), "alice".into(), 1, b"prefix", EventId::new([1; 32]))
+            .unwrap();
+        let prefix = std::fs::read(&path).unwrap();
+        log.fail_next_append_rollback_for_test(usize::MAX);
+        assert!(
+            log.record(
+                conv(1),
+                "alice".into(),
+                2,
+                b"uncertain",
+                EventId::new([2; 32])
+            )
+            .is_err()
+        );
+        assert_eq!(log.remove_where(|_| false).unwrap(), 0);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            prefix,
+            "even a no-match erase must first discard an uncertain append"
+        );
     }
 
     #[test]

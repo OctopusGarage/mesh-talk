@@ -97,6 +97,20 @@ for a current build. See [the feedback loop](testing-feedback-loop.md#native-req
 for commands. An uncommitted or unverified local run is development evidence; its
 HEAD SHA identifies the base revision, not certification of that commit.
 
+Keep the native build and its acceptance run inside one
+[managed build lease](build-retention.md#commands). Cargo's compiler lock ends
+before the example is launched; scheduled cache cleanup can otherwise remove
+the example executable between those steps. For macOS or Linux, a single lease
+can cover both commands:
+
+```sh
+python3 scripts/build-retention.py run -- bash -c \
+  'node scripts/validation/native-build.mjs && node scripts/diagnostics/hidden-contacts.mjs'
+```
+
+On Windows, place both commands in the same managed PowerShell runner, retaining
+the interactive desktop session and the configured D-drive state directory.
+
 Native attachment evidence requires incoming manifest persistence, exact received
 bytes and a rendered ready file card without a pending progress indicator. The
 runner creates an isolated download directory and configures it through the

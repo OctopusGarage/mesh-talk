@@ -304,7 +304,8 @@
         "scripts/diagnostics/hidden-contacts.mjs",
         "scripts/diagnostics/hidden-contacts-report.mjs",
         "scripts/diagnostics/native-core-scenarios.mjs",
-        "scripts/diagnostics/native-capture.mjs"
+        "scripts/diagnostics/native-capture.mjs",
+        "scripts/evals/png-evidence.mjs"
       ],
       "native": ["darwin", "linux", "win32"]
     }
