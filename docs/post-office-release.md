@@ -57,14 +57,14 @@ docker run -d --name mesh-talk-post-office --restart unless-stopped \
   ghcr.io/octopusgarage/mesh-talk-post-office:<tag> \
   --keystore /var/lib/mesh-talk/identity.keystore \
   --password-file /var/lib/mesh-talk/password \
-  --name post-office --port 47475 --discovery-port 47474
+  --name post-office --port 47479 --discovery-port 47478 --lan-announce-port 47474
 ```
 
 Replace `<tag>` with the release tag, for example `v0.4.0`. Back up the
 directory, including its password and keystore, if queued custody matters.
 Check startup with `docker logs mesh-talk-post-office` and confirm clients
-discover its signed post-office announcement. Allow LAN TCP 47475 and signed
-UDP multicast discovery on 47474 through the host firewall. The container
+discover its signed post-office announcement. Allow LAN TCP 47479 and signed
+UDP multicast discovery on 47474 and dedicated UDP queries on 47478 through the host firewall. The container
 must use `--network host` so the relay can join the LAN multicast group and
 advertise an address peers can reach. Docker Desktop's host network has
 different network semantics, so use the native relay package on macOS and

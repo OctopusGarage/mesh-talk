@@ -4,7 +4,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 prepare --binary PATH --name NAME --port PORT [--discovery-port PORT] [--lan-announce-port PORT] [--bridge] [--bridge-peer IP:PORT --bridge-peer-id ID --bridge-proxy-port PORT] [--federation-peer ID@IP:PORT ... | --federation-config PATH] | activate" >&2
+    echo "usage: $0 prepare --binary PATH --name NAME [--port 47479] [--discovery-port PORT] [--lan-announce-port PORT] [--bridge] [--bridge-peer IP:PORT --bridge-peer-id ID --bridge-proxy-port PORT] [--federation-peer ID@IP:PORT ... | --federation-config PATH] | activate" >&2
     exit 2
 }
 
@@ -24,23 +24,47 @@ installed_plist=/Library/LaunchDaemons/$label.plist
 if [[ $phase == activate ]]; then
     [[ $# -eq 0 && -f $staged_plist ]] || usage
     plutil -lint "$staged_plist" >/dev/null
+    # Reject old prepared files as well as invalid prepare arguments.
+    python3 - "$staged_plist" <<'PYPORTS'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as source:
+    args = plistlib.load(source)["ProgramArguments"]
+if args.count("--port") != 1 or args[args.index("--port") + 1:args.index("--port") + 2] != ["47479"]:
+    raise SystemExit("Managed post offices require TCP 47479")
+for flag, port in [("--discovery-port", "47478"), ("--lan-announce-port", "47474")]:
+    if args.count(flag) != 1 or args[args.index(flag) + 1:args.index(flag) + 2] != [port]:
+        raise SystemExit("Managed post offices require UDP 47478 and LAN UDP 47474")
+PYPORTS
     sudo -v
     sudo install -o root -g wheel -m 644 "$staged_plist" "$installed_plist"
     # The previous per-login agent and the new boot daemon cannot own the same ports.
     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
     sudo launchctl bootout "system/$label" 2>/dev/null || true
-    sudo launchctl bootstrap system "$installed_plist"
+    # bootout can return before launchd finishes removing the job. Loading
+    # immediately then fails with "Operation already in progress".
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        if ! sudo launchctl print "system/$label" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.2
+    done
+    if ((attempt == 100)); then
+        echo "Timed out waiting for launchd to remove the old post office" >&2
+        exit 1
+    fi
     sudo launchctl enable "system/$label"
-    sudo launchctl kickstart -k "system/$label"
+    sudo launchctl bootstrap system "$installed_plist"
     sudo launchctl print "system/$label" | grep -E 'state =|pid =|last exit code ='
     exit 0
 fi
 
 source_binary=
 name=
-port=
-discovery_port=47474
-lan_announce_port=
+port=47479
+discovery_port=47478
+lan_announce_port=47474
 bridge=false
 bridge_peer=
 bridge_peer_id=
@@ -73,6 +97,16 @@ done
 if [[ -n $lan_announce_port ]]; then
     [[ $lan_announce_port =~ ^[0-9]+$ ]] || usage
     ((lan_announce_port >= 1 && lan_announce_port <= 65535)) || usage
+fi
+if [[ $port != 47479 ]]; then
+    echo "Managed post offices require TCP 47479" >&2
+    exit 2
+fi
+# Managed services share one role-based discovery contract on every host.
+# The raw CLI still supports isolated custom-port test networks.
+if [[ $discovery_port != 47478 || $lan_announce_port != 47474 ]]; then
+    echo "Managed post offices require UDP 47478 and LAN UDP 47474" >&2
+    exit 2
 fi
 if [[ -n $bridge_peer || -n $bridge_peer_id || -n $bridge_proxy_port ]]; then
     [[ -n $bridge_peer && $bridge_peer_id =~ ^[0-9a-fA-F]{32}$ && $bridge_proxy_port =~ ^[0-9]+$ ]] || usage

@@ -4,8 +4,8 @@ The machine reached through SSH alias `windows10` currently runs Windows 11
 Home (build 26200). Its `MeshTalk-PostOffice` Scheduled Task runs the headless
 relay as `SYSTEM` at boot. The binary is
 `D:\ProgramData\MeshTalk\PostOffice\mesh-talk-node.exe`; its keystore, password
-file, `relay.log`, and `node.lock` are in the `data` subdirectory. TCP 47475
-serves peers; its dedicated signed-query UDP port is 47478 and it announces
+file, `relay.log`, and `node.lock` are in the `data` subdirectory. TCP 47479
+serves peers; its dedicated signed-query UDP port is 47478 (the managed post-office port on every platform) and it announces
 to clients on the shared LAN port 47474. The optional legacy gateway listens
 on TCP 47476. The equal-relay federation uses the same trusted seed list as
 mac2015 and mac-mini. Firewall rules allow the relay listener ports from
@@ -56,6 +56,11 @@ Tailscale endpoints for a relay where appropriate; each pins the same identity.
 and revocation require restarting all affected services after distribution;
 editing a file does not hot-revoke a running connection.
 
+The installer fixes the main TCP listener at 47479 and enforces
+`-DiscoveryPort 47478 -LanAnnouncePort 47474` and rejects
+other discovery ports before changing service state. Different hosts use the
+same role ports, distinguished by IP.
+
 `-LanAnnouncePort 47474` also listens on the shared LAN discovery port. The
 dedicated port remains available for routed signed queries when shared-port
 multicast reaches only one local process.
@@ -77,13 +82,13 @@ terminated process on Windows; it refuses a lock held by a live process.
 ## Check and operate
 
 ```bash
-ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).State; (Get-ScheduledTaskInfo -TaskName MeshTalk-PostOffice).LastTaskResult; Get-NetTCPConnection -State Listen -LocalPort 47475,47476 | Select-Object LocalAddress,LocalPort,OwningProcess"'
+ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).State; (Get-ScheduledTaskInfo -TaskName MeshTalk-PostOffice).LastTaskResult; Get-NetTCPConnection -State Listen -LocalPort 47479,47476 | Select-Object LocalAddress,LocalPort,OwningProcess"'
 ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).Principal.UserId; icacls D:\ProgramData\MeshTalk\PostOffice\data\password; icacls D:\ProgramData\MeshTalk\PostOffice\data\identity.keystore"'
 ssh windows10 'powershell -NoProfile -Command "Get-Content D:\ProgramData\MeshTalk\PostOffice\data\node.lock"'
 ssh windows10 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName MeshTalk-PostOffice; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName MeshTalk-PostOffice"'
 ```
 
-The task state should be `Running`, and TCP 47475 should have a listener.
+The task state should be `Running`, and TCP 47479 should have a listener.
 The task principal must be `SYSTEM`; the password and keystore ACLs must grant
 only `SYSTEM` and `Administrators`. The listener's owning PID should match the
 PID in `node.lock`.

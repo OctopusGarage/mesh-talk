@@ -113,6 +113,11 @@ async fn command(node: &NodeRuntime, line: &str) -> Result<(), Box<dyn std::erro
                 ));
             }
         }
+        // Only the disposable fixture host supplies this explicit user decision;
+        // discovery itself never grants proactive DM/mailbox recovery.
+        "verify-peer" => node
+            .handle()
+            .replace_verified_dm_pull_peers(vec![argument()?.to_owned()]),
         "relay" => node.handle().set_post_office_enabled(argument()? == "on"),
         "bridge" => node
             .handle()

@@ -171,6 +171,20 @@
       ],
       "node": ["scripts/diagnostics/background-command.test.mjs"],
       "consumers": ["desktop-session"],
+      "capability": {
+        "summary": "Discover desktop and standard dedicated post-office endpoints from optional VPN inventories without trusting inventory identities.",
+        "guide": "docs/routed-network-discovery.md",
+        "invariants": [
+          {
+            "name": "Provider fairness and the 256-endpoint budget include both standard service ports",
+            "reference": "docs/routed-network-discovery.md"
+          },
+          {
+            "name": "Core signature and independent nonce validation owns discovery authority",
+            "reference": "docs/routed-network-discovery.md"
+          }
+        ]
+      },
       "escalation": [
         "Discovery inventories/fixtures and routing require focused native live-network acceptance; nonignored parser tests do not execute ignored physical client tests."
       ]

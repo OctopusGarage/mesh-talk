@@ -90,7 +90,7 @@ fi
         "--name",
         "relay",
         "--port",
-        "47475",
+        "47479",
         ...extras,
       ],
       {
@@ -300,5 +300,261 @@ exit 0
       !existsSync(target),
       "rejected configuration must not create service state",
     );
+  },
+);
+
+test(
+  "macOS service uses the standard post-office and shared LAN discovery ports",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const f = fixture(t);
+    const result = f.run();
+    assert.equal(result.status, 0, result.stderr);
+    const plist = path.join(
+      f.home,
+      ".local/state/mesh-talk-post-office/LaunchDaemon.plist",
+    );
+    const parsed = spawnSync(
+      "python3",
+      [
+        "-c",
+        "import json,plistlib,sys; print(json.dumps(plistlib.load(open(sys.argv[1], 'rb'))['ProgramArguments']))",
+        plist,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(parsed.status, 0, parsed.stderr);
+    const args = JSON.parse(parsed.stdout);
+    assert.equal(args[args.indexOf("--discovery-port") + 1], "47478");
+    assert.ok(args.includes("--lan-announce-port"));
+    assert.equal(args[args.indexOf("--lan-announce-port") + 1], "47474");
+  },
+);
+
+test(
+  "macOS rejects nonstandard service discovery ports before changing private state",
+  { skip: process.platform === "win32" },
+  (t) => {
+    for (const extra of [
+      ["--discovery-port", "47479"],
+      ["--lan-announce-port", "47480"],
+    ]) {
+      const f = fixture(t);
+      const result = f.run(...extra);
+      assert.notEqual(result.status, 0, extra.join(" "));
+      assert.match(
+        result.stderr,
+        /Managed post offices require UDP 47478 and LAN UDP 47474/,
+      );
+      assert.ok(!existsSync(path.join(f.home, ".local")));
+    }
+  },
+);
+
+test(
+  "Windows rejects nonstandard discovery ports before creating service state",
+  { skip: process.platform !== "win32" },
+  (t) => {
+    const dir = mkdtempSync(path.join(tmpdir(), "relay-standard-ports-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const installer = path.join(
+      root,
+      "scripts/install-post-office-windows.ps1",
+    );
+    const target = path.join(dir, "not-installed");
+    const quote = (value) => "'" + value.replaceAll("'", "''") + "'";
+    const command = `
+$ErrorActionPreference = 'Stop'
+foreach ($ports in @(@(47479,47474), @(47478,47480))) {
+  try {
+    & ${quote(installer)} -StagedBinary ${quote(process.execPath)} -Root ${quote(target)} -DiscoveryPort $ports[0] -LanAnnouncePort $ports[1]
+    throw 'Nonstandard discovery ports were accepted'
+  } catch {
+    if ($_.Exception.Message -ne 'Managed post offices require UDP 47478 and LAN UDP 47474') { throw }
+  }
+}
+exit 0
+`;
+    const result = spawnSync(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", command],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.ok(!existsSync(target));
+  },
+);
+
+test(
+  "macOS activation waits for launchd to remove the old service before bootstrapping",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const f = fixture(t);
+    assert.equal(f.run().status, 0);
+    const installer = path.join(f.dir, "installer.sh");
+    const installed = path.join(f.dir, "installed.plist");
+    writeFileSync(
+      installer,
+      readFileSync(installer, "utf8").replace(
+        "installed_plist=/Library/LaunchDaemons/$label.plist",
+        `installed_plist='${installed}'`,
+      ),
+    );
+    const tools = path.join(f.dir, "tools");
+    writeFileSync(
+      path.join(tools, "sudo"),
+      `#!/usr/bin/env python3
+import shutil, subprocess, sys
+args=sys.argv[1:]
+if args==['-v']: sys.exit(0)
+if args[0]=='install':
+    shutil.copyfile(args[-2],args[-1])
+    sys.exit(0)
+sys.exit(subprocess.call(args))
+`,
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      path.join(tools, "launchctl"),
+      `#!/usr/bin/env python3
+import json, os, pathlib, sys
+path=pathlib.Path(os.environ['MESH_TALK_LAUNCHD_STATE'])
+state=json.loads(path.read_text()) if path.exists() else {'pending':0,'running':True,'enabled':False}
+args=sys.argv[1:]
+code=0
+if args[0]=='bootout':
+    if args[1].startswith('gui/'): sys.exit(113)
+    state.update(pending=2,running=False)
+elif args[0]=='print':
+    if state['pending']:
+        state['pending']-=1
+        print('state = terminating')
+    elif state['running']: print('state = running\\npid = 123')
+    else: code=113
+elif args[0]=='enable': state['enabled']=True
+elif args[0]=='bootstrap':
+    if state['pending'] or not state['enabled']:
+        print('Bootstrap failed: 37: Operation already in progress',file=sys.stderr)
+        code=37
+    else: state['running']=True
+path.write_text(json.dumps(state))
+sys.exit(code)
+`,
+      { mode: 0o755 },
+    );
+    const result = spawnSync("bash", [installer, "activate"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        MESH_TALK_INSTALLER_TEST_HOME: f.home,
+        MESH_TALK_LAUNCHD_STATE: path.join(f.dir, "launchd.json"),
+        PATH: `${tools}:${process.env.PATH}`,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /state = running/);
+    assert.ok(existsSync(installed));
+  },
+);
+
+test(
+  "macOS activation rejects a legacy staged discovery port before requesting sudo",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const f = fixture(t);
+    assert.equal(f.run().status, 0);
+    const plist = path.join(
+      f.home,
+      ".local/state/mesh-talk-post-office/LaunchDaemon.plist",
+    );
+    const edited = spawnSync("python3", [
+      "-c",
+      "import plistlib,sys; p=sys.argv[1]; d=plistlib.load(open(p,'rb')); a=d['ProgramArguments']; a[a.index('--discovery-port')+1]='47479'; plistlib.dump(d,open(p,'wb'))",
+      plist,
+    ]);
+    assert.equal(edited.status, 0);
+    const tools = path.join(f.dir, "tools");
+    const sudoLog = path.join(f.dir, "sudo-called");
+    writeFileSync(
+      path.join(tools, "sudo"),
+      '#!/bin/sh\ntouch "$MESH_TALK_SUDO_LOG"\nexit 97\n',
+      { mode: 0o755 },
+    );
+    const result = spawnSync(
+      "bash",
+      [path.join(f.dir, "installer.sh"), "activate"],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          MESH_TALK_INSTALLER_TEST_HOME: f.home,
+          MESH_TALK_SUDO_LOG: sudoLog,
+          PATH: `${tools}:${process.env.PATH}`,
+        },
+      },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /Managed post offices require UDP 47478 and LAN UDP 47474/,
+    );
+    assert.ok(!existsSync(sudoLog));
+  },
+);
+
+test(
+  "macOS service defaults to TCP 47479 without a per-host port argument",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const f = fixture(t);
+    const result = spawnSync(
+      "bash",
+      [
+        path.join(f.dir, "installer.sh"),
+        "prepare",
+        "--binary",
+        f.binary,
+        "--name",
+        "relay",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          MESH_TALK_INSTALLER_TEST_HOME: f.home,
+          MESH_TALK_SIGNING_LOG: f.signingLog,
+          PATH: `${path.join(f.dir, "tools")}:${process.env.PATH}`,
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const plist = path.join(
+      f.home,
+      ".local/state/mesh-talk-post-office/LaunchDaemon.plist",
+    );
+    const parsed = spawnSync(
+      "python3",
+      [
+        "-c",
+        "import json,plistlib,sys; print(json.dumps(plistlib.load(open(sys.argv[1], 'rb'))['ProgramArguments']))",
+        plist,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(parsed.status, 0, parsed.stderr);
+    const args = JSON.parse(parsed.stdout);
+    assert.equal(args[args.indexOf("--port") + 1], "47479");
+  },
+);
+
+test(
+  "macOS rejects nonstandard managed TCP ports before changing private state",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const f = fixture(t);
+    const result = f.run("--port", "47476");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Managed post offices require TCP 47479/);
+    assert.ok(!existsSync(path.join(f.home, ".local")));
   },
 );

@@ -17,6 +17,22 @@ const MAX_RELAY_CUSTODY_HINTS: usize = 256;
 const FILE_TRANSFER_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 const FILE_RELAY_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 
+// Whole authenticated control exchanges need several routed round trips. Keep
+// them off the serial file scheduler, with independent capacity for each lane.
+const CONTROL_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum ControlWork {
+    Destination(EventId),
+    Receipt(EventId),
+    Pull(String),
+}
+
+struct ControlRoutes {
+    peer: PublicIdentity,
+    endpoints: std::collections::BTreeSet<(String, std::net::SocketAddr)>,
+}
+
 // Test-only timing: a dropped span records cancellation/early return, not success.
 #[cfg(test)]
 pub(super) struct TestTiming {
@@ -1420,6 +1436,37 @@ impl Node {
         false
     }
 
+    fn control_routes(&self, peer: &PublicIdentity) -> ControlRoutes {
+        let roster = self.roster.lock().expect("roster mutex not poisoned");
+        let mut endpoints = std::collections::BTreeSet::new();
+        if let Some(record) = roster
+            .get(&peer.user_id())
+            .filter(|record| record.public == *peer)
+        {
+            endpoints.extend(
+                record
+                    .routes
+                    .iter()
+                    .filter(|route| {
+                        route.source != crate::discovery::roster::RouteSource::PostOffice
+                    })
+                    .map(|route| (peer.user_id(), route.addr)),
+            );
+        }
+        if self
+            .post_office_enabled
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            for relay in self.post_office_candidates_for(&roster, peer) {
+                endpoints.insert((relay.public.user_id(), relay.addr));
+            }
+        }
+        ControlRoutes {
+            peer: peer.clone(),
+            endpoints,
+        }
+    }
+
     /// Shared by desktop, CLI and SDK accept-loop hosts. The future owns all
     /// cursors and network work, so dropping it cancels scheduling and dials.
     pub(in crate::node) async fn run_delivery_loop(self: std::sync::Arc<Self>) {
@@ -1431,11 +1478,65 @@ impl Node {
         let mut peer_cursor = None;
         let mut file_scheduler = FileDeliveryScheduler::default();
         let mut diagnostic = DeliveryDiagnosticThrottle::default();
+        // JoinSet aborts its tasks on drop: retiring the worker also retires
+        // every control dial/exchange. Never detach work from this lifetime.
+        let mut controls = tokio::task::JoinSet::new();
+        let mut active: std::collections::HashMap<ControlWork, ControlRoutes> =
+            std::collections::HashMap::new();
+        let mut network = self.network_changes.subscribe();
         loop {
             tokio::select! {
                 _ = interval.tick() => {},
                 _ = self.delivery_notify.notified() => {},
+                _ = network.changed() => {
+                    self.sessions.clear();
+                    controls.shutdown().await;
+                    active.clear();
+                    self.channel_recovery_notify.notify_one();
+                    self.account_sync_notify.notify_one();
+                    self.bridge_notify.notify_one();
+                    continue;
+                },
+                result = controls.join_next(), if !controls.is_empty() => {
+                    match result {
+                        Some(Ok((key, persistence_failed))) => {
+                            active.remove(&key);
+                            if persistence_failed {
+                                diagnostic.warn_if_due();
+                            }
+                        }
+                        // A panicked child cannot leave a permanently occupied
+                        // lane. Retire this worker and cancel its remaining work.
+                        Some(Err(error)) => {
+                            log::error!("automatic delivery control task failed: {error}");
+                            return;
+                        }
+                        None => {}
+                    }
+                    continue;
+                },
             }
+            // A new route for an active peer/eligible relay must not wait behind
+            // an exchange still blocked on its old endpoint. Refresh timestamps
+            // and unrelated peers do not invalidate the bounded control batch.
+            if active
+                .values()
+                .any(|routes| self.control_routes(&routes.peer).endpoints != routes.endpoints)
+            {
+                controls.shutdown().await;
+                active.clear();
+            }
+            // Reading next_destination advances its per-message cursor. Only
+            // select work when its lane can admit it, so busy lanes preserve
+            // the next queued turn instead of repeatedly skipping it.
+            let destination_capacity = active
+                .keys()
+                .filter(|key| matches!(key, ControlWork::Destination(_)))
+                .count()
+                < 2;
+            let receipt_capacity = !active
+                .keys()
+                .any(|key| matches!(key, ControlWork::Receipt(_)));
             let file_scan = file_scheduler.scan(&self);
             let node = self.clone();
             let Some(work) = self.runtime_work.admit() else {
@@ -1451,7 +1552,9 @@ impl Node {
                 if node.recover_delivery(&mut store).is_err() {
                     return None;
                 }
-                let next = store.next_destination(destination_cursor);
+                let next = destination_capacity
+                    .then(|| store.next_destination(destination_cursor))
+                    .flatten();
                 let destination = next.and_then(|(id, reference)| {
                     let event = node
                         .log
@@ -1469,11 +1572,15 @@ impl Node {
                         },
                     ))
                 });
-                let receipt = store
-                    .retry_receipts_after(receipt_cursor, 1)
-                    .into_iter()
-                    .next()
-                    .or_else(|| store.retry_receipts_after(None, 1).into_iter().next());
+                let receipt = if receipt_capacity {
+                    store
+                        .retry_receipts_after(receipt_cursor, 1)
+                        .into_iter()
+                        .next()
+                        .or_else(|| store.retry_receipts_after(None, 1).into_iter().next())
+                } else {
+                    None
+                };
                 let (files, cursor) = file_scan.read(&store);
                 Some((destination, receipt, files, cursor))
             })
@@ -1484,38 +1591,72 @@ impl Node {
             };
             if let Some((id, destination)) = destination {
                 destination_cursor = Some(id);
-                let live = self
-                    .delivery
-                    .lock()
-                    .expect("delivery lock not poisoned")
-                    .contains_destination(id, destination.event.id);
-                if live && self.retry_one_destination(&destination).await {
-                    let mut store = self.delivery.lock().expect("delivery lock not poisoned");
-                    if store.completed_work(id).is_some()
-                        && store.retire_destination(id, destination.event.id).is_err()
-                    {
-                        diagnostic.warn_if_due();
-                    }
+                let key = ControlWork::Destination(destination.event.id);
+                if active
+                    .keys()
+                    .filter(|key| matches!(key, ControlWork::Destination(_)))
+                    .count()
+                    < 2
+                    && !active.contains_key(&key)
+                {
+                    let Some(work) = self.runtime_work.admit() else {
+                        return;
+                    };
+                    let node = self.clone();
+                    active.insert(key.clone(), self.control_routes(&destination.device));
+                    controls.spawn(work.track(async move {
+                        let live = node
+                            .delivery
+                            .lock()
+                            .expect("delivery lock not poisoned")
+                            .contains_destination(id, destination.event.id);
+                        let failed = if live && node.retry_one_destination(&destination).await {
+                            let mut store =
+                                node.delivery.lock().expect("delivery lock not poisoned");
+                            store.completed_work(id).is_some()
+                                && store.retire_destination(id, destination.event.id).is_err()
+                        } else {
+                            false
+                        };
+                        (key, failed)
+                    }));
                 }
             }
             if let Some(receipt) = receipt {
                 receipt_cursor = Some(receipt.destination.event.id);
-                if self.retry_one_destination(&receipt.destination).await
-                    && self
-                        .delivery
-                        .lock()
-                        .expect("delivery lock not poisoned")
-                        .finish_receipt(receipt.conversation, receipt.original_event_id)
-                        .is_err()
+                let key = ControlWork::Receipt(receipt.destination.event.id);
+                if !active
+                    .keys()
+                    .any(|key| matches!(key, ControlWork::Receipt(_)))
+                    && !active.contains_key(&key)
                 {
-                    diagnostic.warn_if_due();
+                    let Some(work) = self.runtime_work.admit() else {
+                        return;
+                    };
+                    let node = self.clone();
+                    active.insert(
+                        key.clone(),
+                        self.control_routes(&receipt.destination.device),
+                    );
+                    controls.spawn(work.track(async move {
+                        let failed = node.retry_one_destination(&receipt.destination).await
+                            && node
+                                .delivery
+                                .lock()
+                                .expect("delivery lock not poisoned")
+                                .finish_receipt(receipt.conversation, receipt.original_event_id)
+                                .is_err();
+                        (key, failed)
+                    }));
                 }
             }
             file_scheduler.admit(&self, files, cursor);
             file_scheduler.advance(&self, &mut diagnostic).await;
             // Historical identity authorizes a control pull even with its sender
             // offline. The cursor advances before any bounded network await.
-            let peer = {
+            let peer = if active.keys().any(|key| matches!(key, ControlWork::Pull(_))) {
+                None
+            } else {
                 let state = self
                     .privacy
                     .state
@@ -1539,45 +1680,57 @@ impl Node {
                 {
                     continue;
                 }
-                let conv = super::delivery_receipt::delivery_conversation_id(
-                    &self.identity.public(),
-                    &peer.public(),
-                );
-                let dm = super::conversation::dm_conversation_id(
-                    &self.identity.public(),
-                    &peer.public(),
-                );
-                let direct_dm = tokio::time::timeout(
-                    Duration::from_millis(400),
-                    self.pull_delivery_scope(&peer, dm, false),
-                )
-                .await
-                .unwrap_or(false);
-                // An online sender is the preferred source. The desktop/CLI
-                // post-office drain still runs periodically; this worker asks
-                // the relay only when direct reconciliation did not complete.
-                if !direct_dm {
-                    let _ = tokio::time::timeout(
-                        Duration::from_millis(400),
-                        self.pull_delivery_scope(&peer, dm, true),
-                    )
-                    .await;
+                let key = ControlWork::Pull(peer.user_id.clone());
+                if !active.keys().any(|key| matches!(key, ControlWork::Pull(_)))
+                    && !active.contains_key(&key)
+                {
+                    let Some(work) = self.runtime_work.admit() else {
+                        return;
+                    };
+                    let node = self.clone();
+                    active.insert(key.clone(), self.control_routes(&peer.public()));
+                    controls.spawn(work.track(async move {
+                        node.reconcile_delivery_peer(&peer).await;
+                        (key, false)
+                    }));
                 }
-                self.emit_new_messages(dm);
-                self.process_file_events(dm);
-                let _ = tokio::time::timeout(
-                    Duration::from_millis(400),
-                    self.pull_delivery_scope(&peer, conv, true),
-                )
-                .await;
-                let _ = tokio::time::timeout(
-                    Duration::from_millis(400),
-                    self.pull_delivery_scope(&peer, conv, false),
-                )
-                .await;
-                self.emit_new_messages(conv);
             }
         }
+    }
+
+    async fn reconcile_delivery_peer(&self, peer: &crate::discovery::Announce) {
+        // Scheduling captured a proof, not lasting recovery permission.
+        if !self.verified_dm_pull_peer(&peer.user_id) {
+            return;
+        }
+        let conv = super::delivery_receipt::delivery_conversation_id(
+            &self.identity.public(),
+            &peer.public(),
+        );
+        let dm = super::conversation::dm_conversation_id(&self.identity.public(), &peer.public());
+        let direct_dm = tokio::time::timeout(
+            CONTROL_EXCHANGE_TIMEOUT,
+            self.pull_delivery_scope(peer, dm, false),
+        )
+        .await
+        .unwrap_or(false);
+        if !direct_dm {
+            let _ = tokio::time::timeout(
+                CONTROL_EXCHANGE_TIMEOUT,
+                self.pull_delivery_scope(peer, dm, true),
+            )
+            .await;
+        }
+        self.emit_new_messages(dm);
+        self.process_file_events(dm);
+        for relay in [true, false] {
+            let _ = tokio::time::timeout(
+                CONTROL_EXCHANGE_TIMEOUT,
+                self.pull_delivery_scope(peer, conv, relay),
+            )
+            .await;
+        }
+        self.emit_new_messages(conv);
     }
 
     async fn pull_delivery_scope(
@@ -1587,11 +1740,13 @@ impl Node {
         relay: bool,
     ) -> bool {
         let current = || {
-            self.historical_author(&proof.ed25519_pub).is_some_and(|p| {
-                p.public() == proof.public() && p.account_id() == proof.account_id()
-            }) && !self
-                .delivery_suspended
-                .load(std::sync::atomic::Ordering::Acquire)
+            self.verified_dm_pull_peer(&proof.user_id)
+                && self.historical_author(&proof.ed25519_pub).is_some_and(|p| {
+                    p.public() == proof.public() && p.account_id() == proof.account_id()
+                })
+                && !self
+                    .delivery_suspended
+                    .load(std::sync::atomic::Ordering::Acquire)
         };
         if !current() {
             return false;
@@ -1642,7 +1797,6 @@ impl Node {
     }
 
     async fn retry_one_destination(&self, destination: &DeliveryDestination) -> bool {
-        use std::time::Duration;
         if !self.delivery_destination_allowed(destination) {
             return false;
         }
@@ -1656,7 +1810,7 @@ impl Node {
             })
         {
             held = tokio::time::timeout(
-                Duration::from_millis(400),
+                CONTROL_EXCHANGE_TIMEOUT,
                 self.transfer_delivery_destination(
                     &peer,
                     destination,
@@ -1668,7 +1822,7 @@ impl Node {
             self.emit_new_messages(destination.event.conversation_id);
         }
         let relay_held = tokio::time::timeout(
-            Duration::from_millis(400),
+            CONTROL_EXCHANGE_TIMEOUT,
             self.replicate_delivery_destination(destination),
         )
         .await
@@ -2522,5 +2676,41 @@ mod diagnostic_tests {
         assert!(throttle.admit(start + Duration::from_secs(30)));
         assert!(!throttle.admit(start + Duration::from_secs(30)));
         assert!(throttle.admit(start + Duration::from_secs(60)));
+    }
+    #[tokio::test]
+    async fn revoked_verification_snapshot_cannot_start_proactive_delivery_pull() {
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        use std::time::Duration;
+        use tokio::net::TcpListener;
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(
+            &peer,
+            &Account::generate(),
+            "Peer",
+            listener.local_addr().unwrap().port(),
+        );
+        let (sender, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        sender.replace_verified_dm_pull_peers(vec![proof.user_id.clone()]);
+        // A worker can hold an owned peer snapshot while the host revokes manual
+        // verification before the scheduled task first runs.
+        let pending = sender.reconcile_delivery_peer(&proof);
+        sender.replace_verified_dm_pull_peers(Vec::new());
+        let (finished, incoming) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(1), pending),
+            tokio::time::timeout(Duration::from_secs(1), listener.accept()),
+        );
+        assert!(
+            incoming.is_err(),
+            "revoked verification must prevent a new proactive recovery connection"
+        );
+        assert!(finished.is_ok());
     }
 }

@@ -35,6 +35,7 @@ directories and temporary files belong on drive D.
 | `e2e-tailnet-two-bridges.py`               | Legacy reciprocal gateway compatibility; not equal-federation acceptance.                                                |
 | `e2e-four-machine-tailnet.py`              | Four-host gateway/federation/installed-relay modes and consented cross-site files.                                       |
 | `e2e-four-machine-hub.py`                  | Explicit selected-hub compatibility with another local relay; not a mandatory global-hub architecture.                   |
+| `e2e-network-handoff.py`                   | Real Linux interface/IP handoff, queued/new DM receipts and relocated post-office custody; separate from Wi-Fi hardware. |
 | `e2e-post-office-lan.py`                   | Directly consented offline custody/restart and optional mailbox-only local alternative.                                  |
 | `e2e-federation-recovery.py`               | Preferred outage, surviving three-relay chain, file completion after sender restart and partition/rejoin.                |
 | `e2e-routed-sibling.py`                    | Actual SDK pairing/restarts, controlled history sharing and ongoing sibling replay over Tailscale.                       |

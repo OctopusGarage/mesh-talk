@@ -98,7 +98,7 @@ def restart_relay(host, remote_os="macos"):
     if remote_os == "windows":
         pid_command = (
             'powershell -NoProfile -Command '
-            '"(Get-NetTCPConnection -State Listen -LocalPort 47475 '
+            '"(Get-NetTCPConnection -State Listen -LocalPort 47479 '
             '-ErrorAction SilentlyContinue | Select-Object -First 1 '
             '-ExpandProperty OwningProcess)"'
         )
@@ -147,7 +147,7 @@ def restart_relay(host, remote_os="macos"):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         result = subprocess.run(
-            ["ssh", host, "lsof -nP -iTCP:47475 -sTCP:LISTEN"],
+            ["ssh", host, "lsof -nP -iTCP:47479 -sTCP:LISTEN"],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0 and "mesh-talk" in result.stdout:

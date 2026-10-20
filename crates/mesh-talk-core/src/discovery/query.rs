@@ -23,28 +23,31 @@ const MAX_PENDING: usize = 256;
 /// never refresh online presence through the routed query path.
 #[derive(Default)]
 pub struct QueryTracker {
-    pending: HashMap<IpAddr, (Nonce, Instant)>,
+    pending: HashMap<(IpAddr, Nonce), Instant>,
 }
 
 impl QueryTracker {
     pub fn record(&mut self, ip: IpAddr, nonce: Nonce, now: Instant) -> bool {
         self.pending
-            .retain(|_, (_, sent)| now.saturating_duration_since(*sent) <= QUERY_LIFETIME);
-        if !self.pending.contains_key(&ip) && self.pending.len() >= MAX_PENDING {
+            .retain(|_, sent| now.saturating_duration_since(*sent) <= QUERY_LIFETIME);
+        if !self.pending.contains_key(&(ip, nonce)) && self.pending.len() >= MAX_PENDING {
             return false;
         }
-        self.pending.insert(ip, (nonce, now));
+        self.pending.insert((ip, nonce), now);
         true
     }
 
     pub fn accept(&mut self, ip: IpAddr, bytes: &[u8], now: Instant) -> Option<Announce> {
-        let (nonce, sent) = *self.pending.get(&ip)?;
+        // Read only the bounded nonce field before the full authenticated decode.
+        let nonce: Nonce = bytes.get(5..21)?.try_into().ok()?;
+        let key = (ip, nonce);
+        let sent = *self.pending.get(&key)?;
         if now.saturating_duration_since(sent) > QUERY_LIFETIME {
-            self.pending.remove(&ip);
+            self.pending.remove(&key);
             return None;
         }
         let announce = decode_response(bytes, nonce)?;
-        self.pending.remove(&ip);
+        self.pending.remove(&key);
         Some(announce)
     }
 }
@@ -166,6 +169,62 @@ mod tests {
         let mut tampered = reply;
         *tampered.last_mut().unwrap() ^= 1;
         assert!(decode_response(&tampered, nonce).is_none());
+    }
+
+    #[test]
+    fn independent_queries_to_colocated_services_accept_both_replies() {
+        let desktop = DeviceIdentity::generate();
+        let relay = DeviceIdentity::generate();
+        let desktop_announce = Announce::new(&desktop, "Desktop", 50001);
+        let relay_announce = Announce::new_post_office(&relay, "Post office", 47475);
+        let now = Instant::now();
+        let ip = "100.64.0.10".parse().unwrap();
+        for relay_first in [false, true] {
+            let mut tracker = QueryTracker::default();
+            assert!(tracker.record(ip, [1; 16], now));
+            assert!(tracker.record(ip, [2; 16], now));
+            let desktop_reply = encode_response([1; 16], &desktop_announce, &desktop).unwrap();
+            let relay_reply = encode_response([2; 16], &relay_announce, &relay).unwrap();
+            let replies = if relay_first {
+                [&relay_reply, &desktop_reply]
+            } else {
+                [&desktop_reply, &relay_reply]
+            };
+            for reply in replies {
+                assert!(
+                    tracker.accept(ip, reply, now).is_some(),
+                    "one pending query must not replace another service on the same host"
+                );
+                assert!(
+                    tracker.accept(ip, reply, now).is_none(),
+                    "a consumed nonce cannot refresh presence again"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn colocated_queries_remain_bounded_and_invalid_replies_do_not_consume_them() {
+        let identity = DeviceIdentity::generate();
+        let announce = Announce::new(&identity, "Desktop", 50001);
+        let ip = "::1".parse().unwrap();
+        let now = Instant::now();
+        let mut tracker = QueryTracker::default();
+        for index in 0..MAX_PENDING {
+            assert!(tracker.record(ip, (index as u128).to_be_bytes(), now));
+        }
+        assert!(!tracker.record(ip, [255; 16], now));
+        let reply = encode_response([0; 16], &announce, &identity).unwrap();
+        let mut invalid = reply.clone();
+        *invalid.last_mut().unwrap() ^= 1;
+        assert!(tracker.accept(ip, &invalid, now).is_none());
+        assert!(tracker.accept(ip, &reply[..20], now).is_none());
+        assert_eq!(tracker.accept(ip, &reply, now), Some(announce));
+        assert!(tracker.record(ip, [255; 16], now));
+        let later = now + QUERY_LIFETIME + Duration::from_millis(1);
+        assert!(tracker.accept(ip, &reply, later).is_none());
+        assert!(tracker.record(ip, [254; 16], later));
+        assert_eq!(tracker.pending.len(), 1);
     }
 
     #[test]

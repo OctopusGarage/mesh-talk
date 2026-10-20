@@ -445,7 +445,10 @@ the message delivery WAL; portable recovery snapshots currently omit reactions.
     departed peer's ICMP port-unreachable response as receive error 10054. Local
     socket failures remain fatal and are logged with their OS error.
     The roster and encrypted route cache retain multiple addresses per device and
-    a pinned dial tries alternatives. See [routed network discovery](routed-network-discovery.md)
+    a pinned dial tries alternatives. Shared discovery observes interface names,
+    addresses and indexes every two seconds; changes rejoin multicast and wake
+    privacy-gated LAN/routed producers without restarting the participant. A
+    30-second multicast retry remains as a fallback. See [routed network discovery](routed-network-discovery.md)
     for the protocol, limitations, and cross-network release checks; see
     [network topologies](network-topologies.md) for the A–F deployment scenarios.
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
@@ -702,8 +705,16 @@ CLI and SDK hosts. It wakes on local acceptance and periodically retries missed
 wakes, selects one destination and one receipt per iteration, and rotates logical
 messages and their independent destination cursors. It takes owned bounded
 snapshots after local recovery on the blocking pool, releases store locks before
-network awaits, and bounds each network operation to 400 ms. Dropping the accept
-loop cancels its worker and the worker's outstanding network operations.
+network awaits. Control exchanges run in a worker-owned task set with at most
+two destination retries, one receipt retry and one peer reconciliation in flight.
+Each complete direct or relay exchange has a 15-second deadline so routed
+round trips can finish without blocking another lane or file scheduling. Active
+immutable event IDs prevent duplicate scheduling within a lane. Busy lanes leave
+their pending cursors unchanged so waiting destinations, receipts and peers retain
+their next scheduling turn. Dropping the
+accept loop cancels its worker and aborts the worker's control tasks, releasing
+channels and their admission permits. File phases retain their separate 400 ms
+budgets below.
 Historical DM and control pulls for manually verified contacts use a
 receive-only reconciliation projection; DM bodies prefer the direct sender
 route and fall back to the relay, while controls can be pulled directly or

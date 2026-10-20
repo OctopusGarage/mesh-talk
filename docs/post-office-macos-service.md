@@ -37,17 +37,16 @@ path. The repository's `scripts/install-post-office-macos.sh` has two phases:
    authorization, installs a root-owned plist in `/Library/LaunchDaemons`,
    stops the old per-login agent if present, and starts the boot service.
 
-For a relay, use `--bridge` and a dedicated discovery port if another Mesh Talk
-process on the same host already owns UDP 47474. In that case, also set
-`--lan-announce-port 47474`: the relay keeps receiving routed queries on its
-dedicated port and also listens and advertises on the shared LAN port. This
-lets it discover other local relays and lets clients use it when another post
-office on the LAN is offline.
-For equal relays across LANs, create and distribute the same public trust file
-using the [federation operator workflow](post-office-federation.md). Routed UDP
-discovery and TCP must be permitted over LAN/Tailscale. The optional older
-`--bridge-peer` gateway remains a migration mechanism; equal federation does
-not require a designated hub or a TCP proxy port.
+Managed post offices use dedicated UDP **47478** on every host and also
+participate on shared LAN UDP **47474**. The installer supplies both defaults
+and fixes the main TCP listener at **47479**. Preparation and activation reject
+other main TCP or discovery ports before changing service state. Desktop
+apps use UDP 47474; routed inventories probe both role ports. Different hosts
+are distinguished by IP, so their post offices do not need different ports.
+The raw CLI permits custom ports for isolated test networks; those endpoints
+require explicit discovery and are outside the managed deployment contract.
+The signed discovery response advertises TCP 47479. Optional legacy gateways
+use a separate TCP listener; their port must differ from the main listener.
 
 Example for the Intel relay on LAN X (paths and addresses are deployment-specific):
 
@@ -56,7 +55,7 @@ ssh mac2015 'install -d -m 700 "$HOME/.local/state/mesh-talk-post-office"'
 scp target/x86_64-apple-darwin/release/mesh-talk-node scripts/install-post-office-macos.sh relays.conf mac2015:~/.local/state/mesh-talk-post-office/
 ssh mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare \
   --binary ~/.local/state/mesh-talk-post-office/mesh-talk-node \
-  --name mac2015-post-office --port 47475 --discovery-port 47479 \
+  --name mac2015-post-office --port 47479 --discovery-port 47478 \
   --lan-announce-port 47474 --bridge \
   --federation-config ~/.local/state/mesh-talk-post-office/relays.conf'
 ssh -tt mac2015 'bash ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
@@ -94,7 +93,7 @@ ssh mac2015 'scp ~/.local/state/mesh-talk-post-office/mesh-talk-node-arm mac-min
 ssh mac2015 'scp ~/.local/state/mesh-talk-post-office/install-post-office-macos.sh ~/.local/state/mesh-talk-post-office/relays.conf mac-mini:~/.local/state/mesh-talk-post-office/'
 ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post-office/install-post-office-macos.sh prepare \
   --binary /Users/stella/.local/state/mesh-talk-post-office/mesh-talk-node-arm \
-  --name mac-mini-post-office --port 47476 --discovery-port 47480 \
+  --name mac-mini-post-office --port 47479 --discovery-port 47478 \
   --lan-announce-port 47474 --bridge \
   --federation-config /Users/stella/.local/state/mesh-talk-post-office/relays.conf'
 ssh -tt mac2015 'ssh -tt mac-mini bash /Users/stella/.local/state/mesh-talk-post-office/install-post-office-macos.sh activate'
@@ -142,8 +141,8 @@ Check boot-service state, credentials, and listeners as the service user:
 
 ```bash
 sudo launchctl print system/com.octopusgarage.mesh-talk.post-office
-lsof -nP -iTCP:47475 -sTCP:LISTEN
-lsof -nP -iUDP:47479
+lsof -nP -iTCP:47479 -sTCP:LISTEN
+lsof -nP -iUDP:47478
 shasum -a 256 ~/.local/bin/mesh-talk-node
 chmod 600 "$HOME/.local/share/mesh-talk-post-office/password"
 stat -f '%Su %Sp %N' "$HOME/.local/share/mesh-talk-post-office" "$HOME/.local/share/mesh-talk-post-office/password"

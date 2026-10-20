@@ -138,6 +138,12 @@ fn bounds_and_deduplicates_candidates() {
     assert_eq!(parse_routes(&serde_json::to_vec(&output).unwrap(), 0), None);
 }
 
+// Fresh executable fixtures compete for OS process-launch resources. Keep
+// each bounded CLI sequence isolated from the other subprocess fixtures; the
+// production snapshot deadline and cancellation assertions remain unchanged.
+#[cfg(unix)]
+static INVENTORY_CLI_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(unix)]
 fn fake_cli(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -150,6 +156,7 @@ fn fake_cli(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
 #[cfg(unix)]
 #[tokio::test]
 async fn inventory_falls_back_and_queries_only_the_selected_rpc_routes() {
+    let _cli = INVENTORY_CLI_TEST.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let fixture = dir.path().join("routes.json");
     std::fs::write(
@@ -179,6 +186,7 @@ async fn inventory_falls_back_and_queries_only_the_selected_rpc_routes() {
 #[cfg(unix)]
 #[tokio::test]
 async fn oversized_or_failed_output_never_becomes_candidates() {
+    let _cli = INVENTORY_CLI_TEST.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let oversized = fake_cli(dir.path(), "oversized", "head -c 1048577 /dev/zero");
     let failed = fake_cli(dir.path(), "failed", "exit 1");
@@ -192,6 +200,7 @@ async fn oversized_or_failed_output_never_becomes_candidates() {
 #[cfg(unix)]
 #[tokio::test]
 async fn cancelling_inventory_kills_the_running_cli() {
+    let _cli = INVENTORY_CLI_TEST.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("pid");
     let hung = fake_cli(
@@ -230,6 +239,7 @@ async fn cancelling_inventory_kills_the_running_cli() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_hung_cli_returns_no_candidates_within_the_snapshot_budget() {
+    let _cli = INVENTORY_CLI_TEST.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let hung = fake_cli(dir.path(), "hung", "exec sleep 30");
     let result = tokio::time::timeout(

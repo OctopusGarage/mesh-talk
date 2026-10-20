@@ -19,6 +19,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($DiscoveryPort -ne 47478 -or $LanAnnouncePort -ne 47474) {
+    throw 'Managed post offices require UDP 47478 and LAN UDP 47474'
+}
 $taskName = 'MeshTalk-PostOffice'
 $Root = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Root)
 $Root = [System.IO.Path]::GetFullPath($Root)
@@ -29,8 +32,8 @@ $passwordFile = Join-Path $data 'password'
 if ([bool]$BridgePeer -ne [bool]$BridgePeerId) {
     throw 'BridgePeer and BridgePeerId must be supplied together'
 }
-if ($BridgePeer -and $BridgeProxyPort -eq 47475) {
-    throw 'The bridge proxy port must differ from the local relay port 47475'
+if ($BridgePeer -and $BridgeProxyPort -eq 47479) {
+    throw 'The bridge proxy port must differ from the local relay port 47479'
 }
 foreach ($seed in $FederationPeer) {
     if ($seed -notmatch '^[0-9A-Fa-f]{32}@.+:[0-9]+$') {
@@ -125,7 +128,7 @@ if ($existing) {
 }
 Copy-Item -LiteralPath $StagedBinary -Destination $binary -Force
 
-$arguments = '--keystore "{0}" --password-file "{1}" --name "{2}" --post-office --port 47475 --discovery-port {3} --lan-announce-port {4}' -f (Join-Path $data 'identity.keystore'), $passwordFile, $Name, $DiscoveryPort, $LanAnnouncePort
+$arguments = '--keystore "{0}" --password-file "{1}" --name "{2}" --post-office --port 47479 --discovery-port {3} --lan-announce-port {4}' -f (Join-Path $data 'identity.keystore'), $passwordFile, $Name, $DiscoveryPort, $LanAnnouncePort
 if ($BridgePeer) {
     $arguments += ' --bridge --bridge-peer "{0}" --bridge-peer-id "{1}" --bridge-proxy-port {2}' -f $BridgePeer, $BridgePeerId.ToLowerInvariant(), $BridgeProxyPort
 } elseif ($Bridge -or $FederationConfig -or $FederationPeer.Count -gt 0) {
@@ -144,7 +147,7 @@ $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 
 $firewallRules = @(
-    @{ Name = 'MeshTalk PostOffice TCP 47475'; Protocol = 'TCP'; Port = 47475 },
+    @{ Name = 'MeshTalk PostOffice TCP 47479'; Protocol = 'TCP'; Port = 47479 },
     @{ Name = "MeshTalk PostOffice UDP $DiscoveryPort"; Protocol = 'UDP'; Port = $DiscoveryPort }
 )
 if ($BridgePeer) {
@@ -159,7 +162,7 @@ foreach ($rule in $firewallRules) {
 Start-ScheduledTask -TaskName $taskName
 $deadline = (Get-Date).AddSeconds(30)
 do {
-    $listener = Get-NetTCPConnection -State Listen -LocalPort 47475 -ErrorAction SilentlyContinue |
+    $listener = Get-NetTCPConnection -State Listen -LocalPort 47479 -ErrorAction SilentlyContinue |
         Where-Object { $_.OwningProcess -in @(Get-Process -Name 'mesh-talk-node' -ErrorAction SilentlyContinue | ForEach-Object Id) } |
         Select-Object -First 1
     if ($listener -and (Get-ScheduledTask -TaskName $taskName).State -eq 'Running') {
@@ -168,7 +171,7 @@ do {
     Start-Sleep -Milliseconds 500
 } while ((Get-Date) -lt $deadline)
 if (-not $listener -or (Get-ScheduledTask -TaskName $taskName).State -ne 'Running') {
-    throw 'Post-office task did not start a TCP 47475 listener within 30 seconds'
+    throw 'Post-office task did not start a TCP 47479 listener within 30 seconds'
 }
 if ($BridgePeer) {
     $proxyDeadline = (Get-Date).AddSeconds(45)

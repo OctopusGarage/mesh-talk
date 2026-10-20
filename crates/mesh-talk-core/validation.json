@@ -237,6 +237,20 @@
         }
       ],
       "consumers": ["desktop-session", "integration-service"],
+      "capability": {
+        "summary": "Retry immutable delivery work across routed latency with bounded independent control lanes and cancellation-owned tasks.",
+        "guide": "docs/ARCHITECTURE.md",
+        "invariants": [
+          {
+            "name": "Slow destinations cannot monopolize receipt or file scheduling",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Participant retirement drains admitted control tasks and only authenticated recipient evidence confirms delivery",
+            "reference": "docs/network-design-reference.md"
+          }
+        ]
+      },
       "escalation": [
         "Node wiring has broad shared state and dynamic consumers: retain conservative Node library coverage; crypto/wire/storage changes need loopback, restart and protocol integration evidence. Runtime/discovery lifecycle changes require focused native acceptance."
       ],

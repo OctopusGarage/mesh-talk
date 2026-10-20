@@ -549,18 +549,62 @@ async fn scan_addresses(
     true
 }
 
-/// Periodic multicast re-join: every `REJOIN_INTERVAL`, re-enumerate interfaces and
-/// re-join the discovery group on each. Picks up interfaces that come up after
-/// launch (WiFi associating late, network changes). Joining an already-joined or
-/// down interface just errors harmlessly (ignored inside the helper).
+// Interface identity matters even when a replacement adapter has the same IP.
+// Inventory failures retain the last observation instead of inventing a handoff.
+type InterfaceSnapshot = BTreeSet<(String, IpAddr, Option<u32>)>;
+const INTERFACE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const REJOIN_INTERVAL: Duration = Duration::from_secs(30);
 
-async fn run_rejoin(socket: Arc<UdpSocket>) {
-    let mut tick = tokio::time::interval(REJOIN_INTERVAL);
-    tick.tick().await; // the bind already joined once; skip the immediate tick
+fn interface_snapshot() -> Option<InterfaceSnapshot> {
+    Some(
+        if_addrs::get_if_addrs()
+            .ok()?
+            .into_iter()
+            .filter(|iface| !iface.is_loopback())
+            .map(|iface| (iface.name.clone(), iface.ip(), iface.index))
+            .collect(),
+    )
+}
+
+fn update_interface_snapshot(
+    previous: &mut Option<InterfaceSnapshot>,
+    current: Option<InterfaceSnapshot>,
+) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    let changed = previous.as_ref() != Some(&current);
+    *previous = Some(current);
+    changed
+}
+
+/// Rejoin and wake the existing privacy-gated producers when interfaces change.
+/// The periodic fallback still retries joins that failed without another change.
+async fn run_rejoin(
+    socket: Arc<UdpSocket>,
+    trigger: Arc<Notify>,
+    network_changes: Option<tokio::sync::watch::Sender<u64>>,
+) {
+    let mut previous = interface_snapshot();
+    let mut last_rejoin = Instant::now();
+    let mut tick = tokio::time::interval(INTERFACE_POLL_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tick.tick().await;
     loop {
         tick.tick().await;
-        join_discovery_group_all_ifaces(&socket);
+        let changed = update_interface_snapshot(&mut previous, interface_snapshot());
+        if changed || last_rejoin.elapsed() >= REJOIN_INTERVAL {
+            join_discovery_group_all_ifaces(&socket);
+            last_rejoin = Instant::now();
+        }
+        if changed {
+            // Includes the desktop's routed candidate task when supplied by its
+            // participant owner; headless hosts share the same LAN wake path.
+            if let Some(changes) = &network_changes {
+                changes.send_modify(|generation| *generation = generation.wrapping_add(1));
+            }
+            trigger.notify_waiters();
+        }
     }
 }
 
@@ -648,6 +692,31 @@ pub fn spawn_discovery_with_routed(
     visibility: Arc<DiscoveryVisibility>,
     routed: Option<Arc<RoutedDiscovery>>,
 ) -> Vec<JoinHandle<()>> {
+    spawn_discovery_with_network_changes(
+        socket,
+        roster,
+        announce,
+        self_user_id,
+        discovery_port,
+        trigger,
+        visibility,
+        routed,
+        None,
+    )
+}
+
+pub(crate) fn spawn_discovery_with_network_changes(
+    socket: Arc<UdpSocket>,
+    roster: Arc<Mutex<Roster>>,
+    announce: SharedAnnounce,
+    self_user_id: String,
+    discovery_port: u16,
+    trigger: Option<Arc<Notify>>,
+    visibility: Arc<DiscoveryVisibility>,
+    routed: Option<Arc<RoutedDiscovery>>,
+    network_changes: Option<tokio::sync::watch::Sender<u64>>,
+) -> Vec<JoinHandle<()>> {
+    let trigger = trigger.unwrap_or_else(|| Arc::new(Notify::new()));
     let target: SocketAddr = (
         crate::transport::net::DISCOVERY_MULTICAST_GROUP,
         discovery_port,
@@ -668,17 +737,17 @@ pub fn spawn_discovery_with_routed(
             Arc::clone(&announce),
             target,
             Duration::from_secs(2),
-            trigger.clone(),
+            Some(Arc::clone(&trigger)),
             Arc::clone(&visibility),
         )),
         tokio::spawn(run_scan_with_visibility(
             Arc::clone(&socket),
             announce,
             discovery_port,
-            trigger,
+            Some(Arc::clone(&trigger)),
             visibility,
         )),
-        tokio::spawn(run_rejoin(socket)),
+        tokio::spawn(run_rejoin(socket, trigger, network_changes)),
     ]
 }
 
@@ -709,6 +778,29 @@ mod privacy_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn interface_changes_refresh_discovery_without_waiting_for_periodic_rejoin() {
+        let first = [("en0".to_owned(), "192.168.1.10".parse().unwrap(), Some(2))].into();
+        let mut previous = Some(first);
+        assert!(!update_interface_snapshot(&mut previous, None));
+        let first = previous.clone();
+        assert!(!update_interface_snapshot(&mut previous, first));
+        let moved = [("en0".to_owned(), "192.168.2.10".parse().unwrap(), Some(2))].into();
+        assert!(update_interface_snapshot(&mut previous, Some(moved)));
+        let changed_adapter = [("en1".to_owned(), "192.168.2.10".parse().unwrap(), Some(3))].into();
+        assert!(update_interface_snapshot(
+            &mut previous,
+            Some(changed_adapter)
+        ));
+        assert!(update_interface_snapshot(
+            &mut previous,
+            Some(BTreeSet::new())
+        ));
+        let returned = [("en1".to_owned(), "192.168.2.10".parse().unwrap(), Some(3))].into();
+        assert!(update_interface_snapshot(&mut previous, Some(returned)));
+        assert!(INTERFACE_POLL_INTERVAL <= Duration::from_secs(2));
+    }
+
     #[test]
     fn udp_peer_reset_and_refusal_are_retryable_but_local_socket_failures_are_fatal() {
         use std::io::{Error, ErrorKind};

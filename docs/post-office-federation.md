@@ -1,6 +1,10 @@
 # Equal post-office federation
 
 A federation connects equal post offices over reachable LAN or Tailscale paths.
+Managed post offices all use UDP 47478 for their dedicated discovery endpoint,
+plus UDP 47474 for shared LAN discovery, with main TCP 47479 for encrypted data. When migrating older per-host ports,
+update every affected federation seed and legacy bridge endpoint together with
+the service listener; preserve device fingerprints, credentials and custody.
 Each relay keeps its own private identity and encrypted storage. All relays may
 use the same **public trust manifest**; there is no primary hub. Discovery finds
 candidates, but only explicitly pinned identities can exchange federation data.
@@ -30,9 +34,9 @@ keystore or providing a password:
 ```bash
 mesh-talk-node federation --file relays.conf init
 mesh-talk-node federation --file relays.conf enroll d2c86ed557d201fa877f0ef72dc00a67@192.168.3.16:47478
-mesh-talk-node federation --file relays.conf enroll edbbf0daac94d930e687ba86c20d3f06@192.168.3.72:47479
-mesh-talk-node federation --file relays.conf enroll edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479
-mesh-talk-node federation --file relays.conf enroll e2bc2167aab97af10cb893de4ae2fb0c@100.109.255.49:47480
+mesh-talk-node federation --file relays.conf enroll edbbf0daac94d930e687ba86c20d3f06@192.168.3.72:47478
+mesh-talk-node federation --file relays.conf enroll edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47478
+mesh-talk-node federation --file relays.conf enroll e2bc2167aab97af10cb893de4ae2fb0c@100.109.255.49:47478
 mesh-talk-node federation --file relays.conf list
 ```
 
@@ -46,8 +50,8 @@ The format is UTF-8, bounded to 64 KiB and 256 entries before deduplication:
 ```text
 mesh-talk-federation-v1
 # Full device fingerprint followed by numeric IP and discovery UDP port.
-edbbf0daac94d930e687ba86c20d3f06@192.168.3.72:47479
-edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47479
+edbbf0daac94d930e687ba86c20d3f06@192.168.3.72:47478
+edbbf0daac94d930e687ba86c20d3f06@100.82.240.19:47478
 ```
 
 Deploy the same public file to every participating relay. Each ignores its own
