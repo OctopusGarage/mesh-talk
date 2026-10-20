@@ -2874,13 +2874,13 @@ async fn expiring_account_message_arrives_over_loopback_and_expires_on_both_side
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (mut a, _) = node(ad.path(), alice, aa, &bp);
-    let (mut b, mut incoming) = node(bd.path(), bob, ba, &ap);
+    let (mut b, mut incoming) = node(bd.path(), bob, bob_account, &ap);
     let deadline = super::node::now_millis() + 300_000;
     let id = a
         .enqueue_to_account_expiring_if(
