@@ -163,10 +163,10 @@ export function ChatApp() {
   // Presence polls on its own slow interval into an isolated store — kept apart from the
   // chat store so a presence tick never re-renders the virtualized message list.
   useEffect(() => {
-    if (!owner) return;
+    if (!owner || !ready) return;
     const stop = startPresence();
     return stop;
-  }, [startPresence, owner, generation, presenceRun, presenceIdentity]);
+  }, [startPresence, owner, generation, ready, presenceRun, presenceIdentity]);
 
   return (
     <div
