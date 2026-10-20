@@ -2868,6 +2868,120 @@ async fn accepted_account_file_card_carries_fixed_deadline() {
 }
 
 #[tokio::test]
+async fn expired_pending_acceptance_erases_text_and_file_before_sidecar_recovery() {
+    for file in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = Account::generate();
+        let proof = Announce::new_with_account(&DeviceIdentity::generate(), &remote, "Bob", 9);
+        let (mut sender, _) = node(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let deadline = super::node::now_millis() + 300_000;
+        if file {
+            sender
+                .received_files
+                .lock()
+                .unwrap()
+                .fail_appends_for_test(true)
+                .unwrap();
+        } else {
+            sender
+                .sentlog
+                .lock()
+                .unwrap()
+                .fail_appends_for_test(true)
+                .unwrap();
+        }
+        let id = if file {
+            let path = dir.path().join("pending.txt");
+            std::fs::write(&path, b"pending attachment").unwrap();
+            sender
+                .enqueue_file_to_account_progress_expiring_if(
+                    &remote.account_id(),
+                    &path,
+                    crate::file::FileKind::File,
+                    |_| {},
+                    Some(deadline),
+                    |accept| accept(),
+                )
+                .await
+                .unwrap()
+                .0
+        } else {
+            sender
+                .enqueue_to_account_expiring_if(
+                    &remote.account_id(),
+                    b"pending text",
+                    None,
+                    Some(deadline),
+                    |accept| accept(),
+                )
+                .await
+                .unwrap()
+        };
+        assert_eq!(
+            sender.delivery.lock().unwrap().pending_transactions().len(),
+            1
+        );
+        assert_eq!(sender.account_history(&remote.account_id(), 10)[0].id, id);
+        sender
+            .received_files
+            .lock()
+            .unwrap()
+            .fail_appends_for_test(false)
+            .unwrap();
+        sender
+            .sentlog
+            .lock()
+            .unwrap()
+            .fail_appends_for_test(false)
+            .unwrap();
+        // The deadline passes while the accepted WAL is still the only plaintext copy.
+        Arc::get_mut(&mut sender).unwrap().expiry_clock_start =
+            (std::time::Instant::now(), deadline + 1);
+        assert!(sender.prune_expired_received().unwrap() > 0);
+        assert!(sender.account_history(&remote.account_id(), 10).is_empty());
+        assert_eq!(sender.delivery_status(id), None);
+        assert!(
+            sender
+                .delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        assert!(sender.sentlog.lock().unwrap().conversations().is_empty());
+        assert!(
+            sender
+                .received_files
+                .lock()
+                .unwrap()
+                .conversations()
+                .is_empty()
+        );
+        assert!(sender.files.lock().unwrap().file_convs().is_empty());
+        assert_eq!(sender.prune_expired_received().unwrap(), 0);
+    }
+}
+
+#[test]
+fn outgoing_expiry_rejects_past_and_unbounded_deadlines() {
+    use super::expiry_policy::validate_outgoing;
+    let now = super::node::now_millis();
+    assert!(validate_outgoing(None).is_ok());
+    assert!(validate_outgoing(Some(now + 300_000)).is_ok());
+    assert!(
+        matches!(validate_outgoing(Some(0)), Err(NodeError::InvalidInput(reason)) if reason == "expiration time has passed")
+    );
+    assert!(
+        matches!(validate_outgoing(Some(u64::MAX)), Err(NodeError::InvalidInput(reason)) if reason == "expiration time is too far away")
+    );
+}
+
+#[tokio::test]
 async fn expiring_account_message_arrives_over_loopback_and_expires_on_both_sides() {
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();

@@ -264,7 +264,9 @@
             "node::node::tests::restart_erases_unexpired_recipient_copy_without_erasing_sender_copy",
             "node::node::tests::monotonic_observation_bounds_expiry_even_with_a_future_deadline",
             "node::delivery_runtime_tests::expiring_account_message_arrives_over_loopback_and_expires_on_both_sides",
-            "node::delivery_runtime_tests::accepted_account_file_card_carries_fixed_deadline"
+            "node::delivery_runtime_tests::accepted_account_file_card_carries_fixed_deadline",
+            "node::delivery_runtime_tests::expired_pending_acceptance_erases_text_and_file_before_sidecar_recovery",
+            "node::delivery_runtime_tests::outgoing_expiry_rejects_past_and_unbounded_deadlines"
           ]
         }
       ],
