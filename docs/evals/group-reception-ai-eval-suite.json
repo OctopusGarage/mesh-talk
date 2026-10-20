@@ -34,7 +34,10 @@
         "src-tauri/src/channel_reception.rs",
         "crates/mesh-talk-core/src/node/channels.rs",
         "crates/mesh-talk-core/src/node/filebook.rs",
-        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "src-tauri/src/chat_commands/state.rs",
+        "src-tauri/src/desktop_session.rs",
+        "src-tauri/src/state.rs"
       ],
       "min_score": 0.85,
       "scenario": "A group recovers many retained messages while live traffic continues and duplicate paths overlap. Review reception identity, arrival classification, notification batching and privacy. Sender clock age alone is not reliable evidence of backfill.",
@@ -75,7 +78,11 @@
       "subject_file": "frontend/src/features/chat/useConversationViewport.ts",
       "context_files": [
         "frontend/src/features/chat/ConversationView.tsx",
-        "frontend/src/features/chat/ReceptionStatus.tsx"
+        "frontend/src/features/chat/ReceptionStatus.tsx",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/reception.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/ownership.ts"
       ],
       "min_score": 0.85,
       "scenario": "While a user reads the middle of a virtual conversation, older messages are prepended or inserted between existing messages, then a catch-up batch and fresh messages arrive. Review stable anchoring, navigation and assistive announcements.",
@@ -101,7 +108,19 @@
         "frontend/src/store/chat.ts",
         "frontend/src/features/chat/MessageBubble.tsx",
         "frontend/src/store/fileAvailability.ts",
-        "docs/group-conversation-reception.md"
+        "docs/group-conversation-reception.md",
+        "frontend/src/locales/en.json",
+        "frontend/src/locales/zh-Hans.json",
+        "frontend/src/locales/zh-Hant.json",
+        "frontend/src/locales/yue.json",
+        "frontend/src/locales/es.json",
+        "frontend/src/locales/ja.json",
+        "frontend/src/features/chat/ReceiveProgress.tsx",
+        "frontend/src/features/chat/TransferBar.tsx",
+        "frontend/src/store/transfers.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/ownership.ts",
+        "frontend/src/store/auth.ts"
       ],
       "min_score": 0.85,
       "scenario": "A conversation has reachable members, offline members and partial history. A file card is present before its bytes. Review status copy and transitions for false global completeness, fabricated progress and conflation of custody, delivery, read and download.",
@@ -123,7 +142,11 @@
         "crates/mesh-talk-core/src/node/channels.rs",
         "crates/mesh-talk-core/src/node/lifecycle.rs",
         "docs/group-conversation-reception.md",
-        "crates/mesh-talk-core/src/node/received_log.rs"
+        "crates/mesh-talk-core/src/node/received_log.rs",
+        "crates/mesh-talk-core/src/storage/record_log.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "crates/mesh-talk-core/src/node/expiry_policy.rs",
+        "crates/mesh-talk-core/src/expiry.rs"
       ],
       "min_score": 0.85,
       "scenario": "The encrypted group event arrives, decryption consumes a sender key, then local plaintext persistence fails due to disk or IO error. Storage later recovers without a new incoming message. Review whether the exact message can still be saved and emitted once, without an unbounded plaintext queue, busy-loop or incorrect batch completion. State the process-crash durability boundary explicitly; do not invent an atomic cryptographic journal that is absent.",

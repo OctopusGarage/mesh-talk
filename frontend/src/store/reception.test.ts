@@ -258,3 +258,61 @@ it("does not apply an old terminal to a different active recovery batch", () => 
     }),
   ).toBe(state);
 });
+
+it("merges disk and boot identities once while keeping viewed evidence and legacy counts", async () => {
+  const { mergeReception } = await import("./reception");
+  const disk = emptyReception({
+    "channel:a": {
+      read: { seen: true, late: false },
+      unread: { seen: false, late: true },
+    },
+  });
+  let pending = receiveIdentity(emptyReception(), "channel:a", {
+    event_id: "read",
+  });
+  pending = receiveIdentity(pending, "channel:a", { event_id: "unread" });
+  pending = receiveIdentity(pending, "channel:a", { event_id: "live" });
+  pending = receiveIdentity(pending, "channel:a", {
+    event_id: "own",
+    own_device: true,
+  });
+  const merged = mergeReception(
+    { ...disk, unread: { "channel:a": 3 } },
+    { ...pending, unread: { "channel:a": 4 } },
+  );
+  expect(new Set(merged.unreadIds["channel:a"])).toEqual(
+    new Set(["unread", "live"]),
+  );
+  expect(merged.unread["channel:a"]).toBe(5); // three legacy counts, two exact identities
+  expect(merged.ledger["channel:a"].read.seen).toBe(true);
+  expect(merged.ledger["channel:a"].own.seen).toBe(true);
+});
+
+it("moves merged boot identities beyond the retained budget into persistent overflow", async () => {
+  const { mergeReception } = await import("./reception");
+  const ledger = (start: number) => ({
+    "channel:a": Object.fromEntries(
+      Array.from({ length: 1024 }, (_, i) => [
+        `id-${start + i}`,
+        { seen: false, late: true },
+      ]),
+    ),
+  });
+  const merged = mergeReception(
+    { ...emptyReception(ledger(0)), unread: { "channel:a": 1024 } },
+    { ...emptyReception(ledger(1024)), unread: { "channel:a": 1024 } },
+  );
+  expect(merged.unreadIds["channel:a"]).toHaveLength(1024);
+  expect(merged.overflowUnread["channel:a"]).toBe(1024);
+  expect(merged.unread["channel:a"]).toBe(2048);
+  saveReceptionLedger("host", "account", merged.ledger);
+  saveUnreadOverflow("host", "account", merged.overflowUnread);
+  const restored = emptyReception(
+    loadReceptionLedger("host", "account"),
+    loadUnreadOverflow("host", "account"),
+  );
+  expect(
+    restored.unreadIds["channel:a"].length +
+      restored.overflowUnread["channel:a"],
+  ).toBe(2048);
+});

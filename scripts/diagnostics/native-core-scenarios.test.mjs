@@ -242,3 +242,29 @@ test("attachment completion retains the verified backend checkpoint after automa
   await assert.rejects(settledIncomingAttachment(c,'conv','file'),/not ready/);
   assert.deepEqual(await settledIncomingAttachment(c,'conv','file',true),{backendReady:true,renderedComplete:true});
 });
+
+test("native attachment fixture creates an owned download directory before configuring real settings", async () => {
+  const { mkdtemp, stat, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { prepareNativeDownloadFixture } = await import("./native-core-scenarios.mjs");
+  const fixture = await mkdtemp(join(tmpdir(), "native-download-fixture-"));
+  const owner = "fixture-user";
+  let settings = { download_dir: "", stay_signed_in: false, retention_days: 30 };
+  const calls = [];
+  try {
+    await assert.rejects(stat(join(fixture, "downloads")), { code: "ENOENT" });
+    const invoke = async (command, args) => {
+      assert.equal(args.owner, owner, "fixture settings remain scoped to the signed-in owner");
+      calls.push(command);
+      if (command === "get_app_settings") return settings;
+      assert.equal(command, "set_app_settings");
+      assert.equal((await stat(args.settings.download_dir)).isDirectory(), true, "save destination exists before it is configured");
+      settings = args.settings;
+    };
+    const directory = await prepareNativeDownloadFixture({ fixture, owner, invoke });
+    assert.equal(directory, join(fixture, "downloads"));
+    assert.deepEqual(settings, { download_dir: directory, stay_signed_in: false, retention_days: 30 });
+    assert.deepEqual(calls, ["get_app_settings", "set_app_settings", "get_app_settings"]);
+  } finally { await rm(fixture, { recursive: true, force: true }); }
+});

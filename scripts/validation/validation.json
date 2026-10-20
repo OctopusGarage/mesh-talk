@@ -179,8 +179,11 @@
       "id": "evaluation-context-integrity",
       "paths": [
         "docs/evals/README.md",
+        "docs/evals/ai-eval-suite.json",
         "docs/evals/group-reception-ai-eval-suite.json",
         "docs/evals/linked-device-sync-ai-eval-suite.json",
+        "docs/evals/person-presence-ai-eval-suite.json",
+        "docs/evals/tray-menu-ai-eval-suite.json",
         "docs/evals/validation-velocity-ai-eval-suite.json",
         "docs/evals/prompts/agent-contract-evaluator.md",
         "scripts/test-ai-eval.mjs"

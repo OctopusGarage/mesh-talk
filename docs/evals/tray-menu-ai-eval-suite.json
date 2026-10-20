@@ -12,6 +12,14 @@
         "Unread title, tooltip, and menu summary handle zero, singular, and large counts without showing message previews or contact names.",
         "Navigation actions show and focus the main window before emitting their known destination, while hide and quit retain their explicit behavior.",
         "Unread updates use the same registered tray and retained native menu item; the menu remains owned for the app lifetime."
+      ],
+      "context_files": [
+        "src-tauri/src/window_visibility.rs",
+        "frontend/src/features/chat/sidebar/SidebarUtilities.tsx",
+        "frontend/src/features/auth/LoginScreen.tsx",
+        "src-tauri/src/lib.rs",
+        "src-tauri/Cargo.toml",
+        "docs/platform-validation.md"
       ]
     },
     {

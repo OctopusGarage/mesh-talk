@@ -74,6 +74,20 @@ fn add_peer(out: &mut HashMap<String, PresenceInfo>, peer: &PeerRecord, now: Ins
     }
 }
 
+fn add_current_peer(
+    out: &mut HashMap<String, PresenceInfo>,
+    peer: &PeerRecord,
+    current_binding: Option<&str>,
+    now: Instant,
+) {
+    // Certification can arrive while an unbound cached snapshot is in flight.
+    // Only project evidence when the entire optional binding is still current.
+    if current_binding != peer.account_id.as_deref() {
+        return;
+    }
+    add_peer(out, peer, now);
+}
+
 fn add_group(
     out: &mut HashMap<String, PresenceInfo>,
     id: String,
@@ -125,10 +139,12 @@ pub async fn get_presence(
     for peer in &peers {
         // Cached snapshots already reject invalid/retired certificates. Resolve the
         // current binding again rather than assigning evidence to an obsolete account.
-        if peer.account_id.is_some() && rt.account_id_for_device(&peer.public) != peer.account_id {
-            continue;
-        }
-        add_peer(&mut out, peer, now);
+        add_current_peer(
+            &mut out,
+            peer,
+            rt.account_id_for_device(&peer.public).as_deref(),
+            now,
+        );
     }
     let own = out.entry(rt.account_id().to_owned()).or_default();
     own.online = true;
@@ -186,6 +202,32 @@ mod tests {
         discovery::{Announce, Roster},
         identity::{account::Account, device::DeviceIdentity},
     };
+    #[test]
+    fn presence_rejects_a_cached_unbound_device_after_account_binding_arrives() {
+        let device = DeviceIdentity::generate();
+        let announce = Announce::new(&device, "Legacy peer", 1);
+        let mut roster = Roster::default();
+        roster.update(&announce, "127.0.0.2".parse().unwrap(), "self");
+        let cached = roster.get(&device.user_id()).unwrap().clone();
+        assert!(cached.account_id.is_none());
+        let now = Instant::now();
+        let fallback = format!("device:{}", device.user_id());
+
+        let mut unchanged = HashMap::new();
+        add_current_peer(&mut unchanged, &cached, None, now);
+        assert!(
+            unchanged[&fallback].online,
+            "unbound devices remain visible while their binding is unchanged"
+        );
+
+        let mut raced = HashMap::new();
+        add_current_peer(&mut raced, &cached, Some("newly-certified-account"), now);
+        assert!(
+            raced.is_empty(),
+            "a stale unbound snapshot must not publish a fallback after certification"
+        );
+    }
+
     #[test]
     fn presence_stale_devices_and_infrastructure_cannot_override_fresh_people() {
         let account = Account::generate();

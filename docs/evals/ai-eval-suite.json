@@ -102,6 +102,22 @@
         "Distinguishes legacy nonreplication from opportunistic version-3 federation without guaranteed replicated custody, and identifies remaining routing metadata exposure.",
         "Provides an executable cross-machine delivery test that stops the sender before the recipient returns.",
         "Separately explains offline file offers, recipient-authorized encrypted file bytes recovered and verified completion after relay restart with the sender stopped. States that current federated consent/completion does not require direct sender-recipient overlap; labels older direct-overlap or LaunchAgent-only harness limits as historical evidence, not current protocol requirements."
+      ],
+      "context_files": [
+        "scripts/install-post-office-macos.sh",
+        "crates/mesh-talk-core/src/bin/mesh-talk-node.rs",
+        "scripts/e2e-post-office-lan.py",
+        "scripts/e2e-four-machine-tailnet.py",
+        "scripts/e2e-federation-recovery.py",
+        "scripts/e2e-routed-sibling.py",
+        "scripts/e2e-tailnet-macos.py",
+        "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs",
+        "crates/mesh-talk-core/src/postoffice/federation.rs",
+        "crates/mesh-talk-core/src/postoffice/opaque.rs",
+        "crates/mesh-talk-core/src/postoffice/election.rs",
+        "crates/mesh-talk-core/src/node/opaque_relay.rs",
+        "crates/mesh-talk-core/src/node/file_consent.rs",
+        "crates/mesh-talk-core/src/node/file_completion.rs"
       ]
     },
     {
@@ -117,6 +133,22 @@
         "Explains stale lock recovery after a task restart and requires evidence that the service is listening.",
         "Separately tests offline DM and channel delivery, file offer, complete encrypted file bytes, and multi-relay election against the installed Windows relay.",
         "States that current signed consent/completion can use encrypted federated mailboxes without direct sender overlap; distinguishes opportunistic version-3 reconciliation from guaranteed replicated custody and identifies exposed routing metadata."
+      ],
+      "context_files": [
+        "scripts/install-post-office-windows.ps1",
+        "crates/mesh-talk-core/src/bin/mesh-talk-node.rs",
+        "scripts/e2e-post-office-lan.py",
+        "scripts/e2e-four-machine-tailnet.py",
+        "scripts/e2e-federation-recovery.py",
+        "scripts/e2e-routed-sibling.py",
+        "scripts/e2e-tailnet-macos.py",
+        "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs",
+        "crates/mesh-talk-core/src/postoffice/federation.rs",
+        "crates/mesh-talk-core/src/postoffice/opaque.rs",
+        "crates/mesh-talk-core/src/postoffice/election.rs",
+        "crates/mesh-talk-core/src/node/opaque_relay.rs",
+        "crates/mesh-talk-core/src/node/file_consent.rs",
+        "crates/mesh-talk-core/src/node/file_completion.rs"
       ]
     },
     {
@@ -144,9 +176,21 @@
         "Both relays run equal roles with unique persistent private identities and explicit mutual federation enrollment; shared configuration never means shared keys. Identical TCP ports are valid on different hosts, while co-located listeners must avoid conflicts.",
         "Clients explicitly opt in and use directly reachable verified local/Tailscale relays; signed short-lived directory introductions do not establish direct remote reachability or group membership.",
         "Relay links authenticate enrolled identities over Noise, while user payloads remain encrypted for recipients end to end; distinguishes hop transport authentication from the legacy forwarded end-to-end Noise gateway.",
-        "Explains A\u2192E\u2192F\u2192C delivery and reverse signed consent/completion without requiring direct A\u2194C overlap; optional direct-relay preference can fail over, but remote-only federation relays are not direct client choices.",
+        "Explains A→E→F→C delivery and reverse signed consent/completion without requiring direct A↔C overlap; optional direct-relay preference can fail over, but remote-only federation relays are not direct client choices.",
         "Version-3 reconciliation is opportunistic, not guaranteed replicated custody; legacy relay-specific mailboxes do not replicate. Cross-site delivery requires surviving onward routes and respects policy, expiry and capacity; custody is not recipient completion.",
         "Names executable cross-machine federation checks and links dated evidence for claimed scenarios; distinguishes current federation from historical gateway, loopback-only and unobserved platform/route evidence instead of claiming all physical topologies are proved."
+      ],
+      "context_files": [
+        "docs/network-design-reference.md",
+        "docs/post-office-federation.md",
+        "scripts/e2e-four-machine-tailnet.py",
+        "scripts/e2e-federation-recovery.py",
+        "scripts/e2e-routed-sibling.py",
+        "scripts/e2e-tailnet-macos.py",
+        "crates/mesh-talk-core/src/postoffice/federation.rs",
+        "crates/mesh-talk-core/src/postoffice/opaque.rs",
+        "crates/mesh-talk-core/src/node/file_consent.rs",
+        "crates/mesh-talk-core/src/node/file_completion.rs"
       ]
     }
   ]

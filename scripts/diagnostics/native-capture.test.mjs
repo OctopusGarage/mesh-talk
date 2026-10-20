@@ -98,3 +98,57 @@ test("settled capture permits an infinite sidebar search spinner but rejects a r
     else {const capture=await captureNativeEvidence(c);assert.equal(capture.surface.settled,true);assert.equal(c.shots(),1);}
   }
 });
+
+test("capture timeout preserves the last blocking native surface", async () => {
+  const { captureNativeEvidence } = await load();
+  const c = webview();
+  const surface = { settled: false, foregroundLoader: false, finiteAnimations: 1, animationBlockers: [{ tag: "DIV", testId: "message-bubble", duration: 220, endTime: 220 }] };
+  c.execute = async () => surface;
+  await assert.rejects(captureNativeEvidence(c), error => {
+    assert.match(error.message, /capture never settled/);
+    assert.deepEqual(error.captureDiagnostics, { phase: "surface-before", surfaceBefore: surface });
+    return true;
+  });
+  assert.equal(c.shots(), 0, "diagnostics do not bypass capture readiness");
+});
+
+test("raw failure capture records an unsettled screen only as diagnostic evidence", async () => {
+  const { captureNativeFailure } = await load();
+  const surface = { settled: false, foregroundLoader: true, finiteAnimations: 0 };
+  let shots = 0;
+  const result = await captureNativeFailure({
+    command: async (method, path) => { assert.equal(method, "GET"); assert.equal(path, "/screenshot"); shots++; return Buffer.from("raw failure png").toString("base64"); },
+    execute: async () => surface,
+    until: () => { throw new Error("failure diagnostics must not await passing readiness"); },
+  });
+  assert.equal(result.png.toString(), "raw failure png");
+  assert.deepEqual(result.surface, surface);
+  assert.equal(shots, 1);
+});
+
+test("long-message offscreen CSS transitions cannot block a painted viewport", async () => {
+  const { captureNativeEvidence } = await load();
+  for (const config of [
+    { top: 1200, opacity: "0", accepted: true },
+    { top: 30, opacity: "0", accepted: false },
+    { top: 30, opacity: "1", accepted: false },
+    { top: 480, opacity: "1", accepted: false },
+  ]) {
+    const c = webview();
+    const target = { tagName: "DIV", getAttribute: () => "opacity-0 transition-opacity group-hover:opacity-100", getBoundingClientRect: () => ({ x: 20, y: config.top, left: 20, right: 86, top: config.top, bottom: config.top + 32, width: 66, height: 32 }) };
+    const animation = { playState: "running", transitionProperty: "opacity", effect: { target, getComputedTiming: () => ({ duration: 150, endTime: 150, iterations: 1 }) } };
+    const document = { querySelector: () => null, querySelectorAll: () => [], getAnimations: () => [animation] };
+    c.execute = async script => runInNewContext(`(function(){${script}})()`, { document, innerWidth: 500, innerHeight: 500, getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: config.opacity }) });
+    if (config.accepted) {
+      const result = await captureNativeEvidence(c);
+      assert.equal(result.surface.settled, true);
+      assert.equal(c.shots(), 1);
+    } else {
+      await assert.rejects(captureNativeEvidence(c), /never settled/);
+      assert.equal(c.shots(), 0, "visible finite transitions block even at opacity zero");
+      animation.playState = "finished";
+      await captureNativeEvidence(c);
+      assert.equal(c.shots(), 1, "the viewport is ready after its transition ends");
+    }
+  }
+});

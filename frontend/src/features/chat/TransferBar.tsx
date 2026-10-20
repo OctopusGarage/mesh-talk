@@ -18,8 +18,11 @@ export function TransferBar({
   const direction = tr?.direction ?? waitingDirection;
   const done = tr?.done ?? 0;
   const total = tr?.total ?? 0;
-  const pct =
-    total > 0 ? Math.min(99, Math.max(0, Math.floor((done / total) * 100))) : 0;
+  const hasProgress =
+    Number.isFinite(done) && Number.isFinite(total) && done >= 0 && total > 0;
+  const pct = hasProgress
+    ? Math.min(100, Math.floor((done / total) * 100))
+    : undefined;
   const verb =
     direction === "prepare"
       ? t("transfer.preparing")
@@ -28,14 +31,20 @@ export function TransferBar({
           ? t("transfer.recipientDeclined")
           : tr?.consent === "pending"
             ? t("transfer.awaitingApproval")
-            : tr && tr.total > 0 && tr.done >= tr.total
+            : hasProgress && done >= total
               ? t("transfer.confirming")
               : tr?.done === 0
                 ? t("transfer.awaitingRecipient")
                 : t("transfer.sending")
         : t("transfer.saving");
   const eta =
-    direction === "send" && tr?.etaSeconds != null
+    direction === "send" &&
+    hasProgress &&
+    done > 0 &&
+    done < total &&
+    tr?.etaSeconds != null &&
+    Number.isFinite(tr.etaSeconds) &&
+    tr.etaSeconds >= 0
       ? tr.etaSeconds < 60
         ? t("transfer.remainingSeconds", {
             seconds: Math.max(1, tr.etaSeconds),
@@ -48,13 +57,16 @@ export function TransferBar({
     <div className="px-3 py-1.5">
       <div className="mb-1 flex justify-between text-xs">
         <span className="text-muted-foreground">{verb}</span>
-        <span className="font-mono text-signal tabular-nums">{pct}%</span>
+        {pct !== undefined && (
+          <span className="font-mono text-signal tabular-nums">{pct}%</span>
+        )}
       </div>
       {eta && (
         <div className="mb-1 text-[11px] text-muted-foreground">{eta}</div>
       )}
       <span className="sr-only" role="status" aria-live="polite">
-        {verb} {Math.floor(pct / 10) * 10}%
+        {verb}
+        {pct !== undefined ? ` ${Math.floor(pct / 10) * 10}%` : ""}
       </span>
       <div
         role="progressbar"
@@ -67,7 +79,7 @@ export function TransferBar({
         <div
           className="h-full w-full origin-left rounded-full bg-signal"
           style={{
-            transform: `scaleX(${total > 0 ? Math.max(0, Math.min(1, done / total)) : 0})`,
+            transform: `scaleX(${hasProgress ? Math.min(1, done / total) : 0})`,
           }}
         />
       </div>

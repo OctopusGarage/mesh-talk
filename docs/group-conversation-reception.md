@@ -60,6 +60,14 @@ or focusing a conversation does not clear offscreen tracked identities. An
 explicit mark-read action can clear the conversation. Older events without IDs
 retain legacy counter behavior without clearing tracked unread exceptions.
 
+Live identities received while the desktop is still resolving its owner identity
+are merged with that owner's persisted reception state before the initial history
+baseline. Retained identities are deduplicated, previously read identities stay
+read, and authoritative own-message history corrects provisional unread state.
+Opening or focusing the conversation still preserves offscreen unread identities.
+Owner, account and runtime-generation changes discard superseded session work.
+The same retention and overflow limits apply to the merged state.
+
 The virtual message log does not announce every inserted row. A polite status
 region batches newly discovered unread identities in fixed windows; duplicates
 and read-count decreases do not deliberately replay announcements. Recovered
@@ -77,6 +85,13 @@ Group custody indicators report historical retained copies, not universal delive
 or reading. A file card can appear before the file bytes are available. Receiving
 the card, retaining chunks, downloading the contents and reading the conversation
 remain separate facts.
+
+Transfer percentages require finite received-byte and total-byte counts with a
+positive total. Preparation or waiting without those counts remains
+indeterminate, including its accessible progress state. Reaching the byte total
+shows 100% while the separate confirmation label remains until recipient custody
+is confirmed; byte progress alone does not establish delivery. Remaining-time
+estimates appear only for measured, incomplete progress.
 
 ## Local storage recovery
 

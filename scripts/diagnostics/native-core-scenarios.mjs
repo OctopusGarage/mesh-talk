@@ -1,7 +1,7 @@
 // Runtime assertions against the owned native webview, real CLI, and read-only
 // production observations. This module does not replace any application IPC.
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export function writeChildCommand(child, text) {
@@ -19,6 +19,17 @@ export function writeChildCommand(child, text) {
       });
     } catch (error) { reject(error); }
   });
+}
+
+/** Keep attachment output inside the disposable profile, independent of OS home folders. */
+export async function prepareNativeDownloadFixture({ fixture, owner, invoke }) {
+  assert.ok(owner, "native download setup requires the signed-in fixture owner");
+  const directory = join(fixture, "downloads");
+  await mkdir(directory, { recursive: true });
+  const settings = await invoke("get_app_settings", { owner });
+  await invoke("set_app_settings", { owner, settings: { ...settings, download_dir: directory } });
+  assert.equal((await invoke("get_app_settings", { owner })).download_dir, directory, "production settings retain the owned download directory");
+  return directory;
 }
 
 export function nativeMessageContents(nonce) {
@@ -360,6 +371,7 @@ export async function coreScenarios(c) {
   await rendered(groupText);
   await passed("group-message", { channelId: group.channel_id, rendered: true, persisted: true });
   await click(row());
+  await prepareNativeDownloadFixture(c);
   const fileName = `native-attachment-${c.nonce}.txt`;
   const bytes = Buffer.from(`fixture attachment 你好 ${c.nonce}\n`);
   const filePath = join(fixture, fileName);

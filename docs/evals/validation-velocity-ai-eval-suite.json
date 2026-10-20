@@ -13,7 +13,16 @@
         "scripts/validation/changed.mjs",
         "src-tauri/validation.json",
         "scripts/diagnostics/changed-validation.test.mjs",
-        "scripts/validation/frontend-graph.mjs"
+        "scripts/validation/frontend-graph.mjs",
+        "scripts/validation/contracts.mjs",
+        "crates/mesh-talk-core/validation.json",
+        "crates/mesh-talk-integrations/validation.json",
+        "crates/mesh-talk-mcp/validation.json",
+        "scripts/validation/validation.json",
+        "scripts/validation/stage.mjs",
+        "scripts/validation/stage-inputs.mjs",
+        "scripts/validation/feedback.mjs",
+        "scripts/validation/selectors.mjs"
       ],
       "min_score": 0.9,
       "scenario": "Review the changed-boundary development runner for false-green selections after a Rust, frontend or shared-input change. Evaluate current implementation, not aspirations.",
@@ -52,7 +61,9 @@
         "scripts/ci/unit-coverage-artifact.mjs",
         ".github/workflows/ci.yml",
         ".github/workflows/check-health.yml",
-        ".github/workflows/dependency-review.yml"
+        ".github/workflows/dependency-review.yml",
+        "scripts/ci/collect-ui-coverage.mjs",
+        ".github/workflows/gitleaks.yml"
       ],
       "min_score": 0.9,
       "scenario": "Evaluate workflow optimization for missing checks, skipped-success aggregates and cross-run artifact substitution. Source review is not evidence of hosted execution or enabled branch settings.",
@@ -70,7 +81,13 @@
       "context_files": [
         "scripts/validation/latency.mjs",
         "scripts/validation/selection-audit.mjs",
-        "docs/testing-feedback-loop.md"
+        "docs/testing-feedback-loop.md",
+        "scripts/validation/changed.mjs",
+        "scripts/validation/selectors.mjs",
+        "scripts/validation/checks.mjs",
+        "scripts/validation/affected.mjs",
+        "scripts/validation/stage.mjs",
+        "scripts/validation/stage-inputs.mjs"
       ],
       "min_score": 0.9,
       "scenario": "Assess whether reports distinguish first observed command, first actionable issue, total completion, cache reuse and actual acceptance. Look for unsupported zero-miss, regression-rate or latency-improvement claims.",
@@ -98,7 +115,8 @@
         "scripts/pr-platform/rust-packages.mjs",
         "scripts/validation/pr-scenarios.mjs",
         "scripts/diagnostics/validation-standards.test.mjs",
-        "scripts/diagnostics/standards-wiring.test.mjs"
+        "scripts/diagnostics/standards-wiring.test.mjs",
+        "scripts/validation/frontend-graph.mjs"
       ],
       "min_score": 0.9,
       "scenario": "Review the automatic maintenance mechanism for newly added source, dormant broken contracts, missing tests and guide references. Assess actual structural guarantees and remaining semantic and native obligations.",

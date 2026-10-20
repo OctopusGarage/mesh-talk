@@ -9,7 +9,7 @@ import { createServer } from "node:net";
 import { createSocket } from "node:dgram";
 import { setTimeout as delay } from "node:timers/promises";
 import { verifyNativeBuild } from "../validation/native-build.mjs";
-import { captureNativeEvidence, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
+import { captureNativeEvidence, captureNativeFailure, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
 import { coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode } from "./native-core-scenarios.mjs";
 
@@ -514,12 +514,19 @@ try {
   assert.deepEqual(errors, []);
 } catch (error) {
   report.failure = redact(error.stack ?? error);
+  if (error.captureDiagnostics) report.captureDiagnostics = error.captureDiagnostics;
   console.error(redact(error.message));
   process.exitCode = 1;
   try {
     if (session && owned.has(app)) report.dialogDiagnostics = await execute("return {documentHasFocus:document.hasFocus(),activeElement:{tag:document.activeElement?.tagName,testId:document.activeElement?.getAttribute('data-testid'),connected:document.activeElement?.isConnected},dialogs:Array.from(document.querySelectorAll('[role=dialog]')).map(e=>({testId:e.getAttribute('data-testid'),state:e.getAttribute('data-state'),hidden:e.getAttribute('aria-hidden'),pointerEvents:getComputedStyle(e).pointerEvents}))};");
   } catch { /* Preserve the original failure if the webview has already exited. */ }
-  try { if (session && owned.has(app)) await screenshot("failure"); } catch { /* driver may already have exited */ }
+  try {
+    if (session && owned.has(app)) {
+      const diagnostic = await captureNativeFailure({ command, execute });
+      report.failureSurface = diagnostic.surface;
+      await writeFile(join(output, "failure.png"), diagnostic.png);
+    }
+  } catch { /* Preserve the original failure if the native driver has exited. */ }
 } finally {
   for (const child of [...owned]) {
     try { await stop(child, child === peer); } catch (error) { report.cleanupFailure = redact(error.message); process.exitCode = 1; }

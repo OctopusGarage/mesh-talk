@@ -18,6 +18,7 @@ import {
 } from "@/lib/unreadStorage";
 import {
   emptyReception,
+  mergeReception,
   receiveIdentity,
   viewIdentities,
   receptionPatch,
@@ -139,24 +140,20 @@ async function pollUntilReady(
       set((state) => {
         const sameScope =
           state.unreadOwner === owner && state.myAccountId === acct;
-        const replacedScope = state.unreadOwner !== "" && !sameScope;
-        const unread = sameScope ? state.unread : { ...persistedUnread };
-        if (!sameScope)
-          for (const key of new Set([
-            ...Object.keys(persistedReception.unreadIds),
-            ...Object.keys(persistedReception.overflowUnread),
-          ]))
-            unread[key] = Math.max(
-              unread[key] ?? 0,
-              (persistedReception.unreadIds[key]?.length ?? 0) +
-                (persistedReception.overflowUnread[key] ?? 0),
+        const invalidateScope = state.unreadOwner !== "" && !sameScope;
+        const replacedScope =
+          invalidateScope ||
+          (state.myAccountId !== "" && state.myAccountId !== acct);
+        const reception = sameScope
+          ? state
+          : mergeReception(
+              { ...persistedReception, unread: persistedUnread },
+              replacedScope ? { ...emptyReception(), unread: {} } : state,
             );
+        const unread = reception.unread;
         const pendingUnknownUnread = sameScope
           ? state.pendingUnknownUnread
           : { ...persistedPendingUnread };
-        if (!sameScope && !replacedScope)
-          for (const [key, count] of Object.entries(state.unread))
-            unread[key] = (unread[key] ?? 0) + count;
         if (!sameScope && !replacedScope)
           for (const [sender, count] of Object.entries(
             state.pendingUnknownUnread,
@@ -166,15 +163,15 @@ async function pollUntilReady(
               (pendingUnknownUnread[sender] ?? 0) + count,
             );
         return {
-          ...(replacedScope ? invalidateConversationIdentity(state) : {}),
+          ...(invalidateScope ? invalidateConversationIdentity(state) : {}),
           ...(!sameScope
             ? {
-                ...persistedReception,
+                ...reception,
                 historyBaselines: Object.keys(persistedReception.ledger),
                 historyFullBaselines: loadFullHistoryBaselines(owner, acct),
               }
             : {}),
-          identityEpoch: replacedScope
+          identityEpoch: invalidateScope
             ? state.identityEpoch + 1
             : state.identityEpoch,
           historyRevision: identity.history_revision ?? null,
@@ -656,6 +653,10 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         rawSet((state) => ({
           ...invalidateConversationIdentity(state),
           identityEpoch: state.identityEpoch + 1,
+          // The replacement identity is already resolved. Bind new arrivals to it
+          // while retryBoot hydrates its persisted state, after dropping old work.
+          myId: identity.device_id,
+          myAccountId: identity.account_id,
         }));
         get().retryBoot();
         return;
