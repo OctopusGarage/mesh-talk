@@ -760,16 +760,22 @@ fn main() {
         )
         profile = self.root / "target/debug"
         try:
-            deadline = time.monotonic() + 30
+            # A cold Windows linker can take longer than 30 seconds on shared
+            # runners. This bounds fixture compilation, not lock acquisition.
+            deadline = time.monotonic() + 120
             while (
                 not ready.exists()
                 and process.poll() is None
                 and time.monotonic() < deadline
             ):
                 time.sleep(0.02)
-            self.assertTrue(
-                ready.exists(), "tiny Cargo build did not reach its build script"
-            )
+            if not ready.exists():
+                release.touch()
+                output, errors = process.communicate(timeout=60)
+                self.fail(
+                    "tiny Cargo build did not reach its build script "
+                    f"(exit={process.returncode})\n{output}\n{errors}"
+                )
             idle = self.root / "target/release/deps"
             idle.mkdir(parents=True)
             (idle / "cache").write_text("rebuildable")
