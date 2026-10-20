@@ -69,6 +69,23 @@ and validates `~/.local/bin/mesh-talk-node.next`, then replaces the binary with
 keystore, and queued relay data. If existing state has no password file, recover
 the original password instead of creating a new relay identity.
 
+`prepare` also preserves the installed executable's code-signing identifier
+when updating an ad hoc or unsigned local build. A first local installation uses
+`com.octopusgarage.mesh-talk.node`. Publisher-issued signatures are preserved,
+and signature verification must succeed before the installed executable is
+replaced. The code-signing identifier is separate from the cryptographic relay
+device ID: both need continuity, but preserving the keystore alone does not
+preserve macOS's local-network permission tracking. See Apple's
+[local network privacy guidance](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
+
+Use `prepare` for updates rather than copying a freshly linked executable over
+the installed binary. After restarting, check actual LAN discovery as well as
+the TCP listener and routed signed query. A running service or a successful
+Tailscale connection does not prove that LAN multicast is working. If an older
+manual update changed the signing identifier, preserve the identifier from the
+known working binary backup when preparing the repair; do not disable
+system-wide local-network privacy.
+
 Example for the reciprocal relay on another LAN:
 
 ```bash
