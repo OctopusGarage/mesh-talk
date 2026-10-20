@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { delimiter, resolve as resolvePath } from "node:path";
 
 const repo = "owner/mesh-talk";
 const sha = "a".repeat(40);
@@ -122,17 +122,28 @@ test("CLI appends only a numeric run output and hides API failure details", () =
   try {
     const gh = `${directory}/gh`;
     const output = `${directory}/output`;
-    writeFileSync(gh, `#!/usr/bin/env node
+    const reply = `
 if (process.env.FIXTURE_FAIL) { console.error("sensitive API failure"); process.exit(1); }
 const endpoint = process.argv.at(-1);
 const result = endpoint.includes("/workflows/") ? [{ workflow_runs: ${JSON.stringify([run(10)])} }]
   : endpoint.includes("/jobs") ? [{ jobs: ${JSON.stringify(jobs())} }]
   : [{ artifacts: ${JSON.stringify([artifact()])} }];
 console.log(JSON.stringify(result));
-`);
-    chmodSync(gh, 0o755);
+`;
+    const fixtureEnv = {};
+    if (process.platform === "win32") {
+      // execFileSync cannot launch a shebang or .cmd stub on Windows. Use a real
+      // executable with a preload that replies only inside the fake gh process.
+      copyFileSync(process.execPath, `${gh}.exe`);
+      const preload = `${directory}/reply.cjs`;
+      writeFileSync(preload, `if (process.execPath.toLowerCase().endsWith('gh.exe')) { ${reply}\nprocess.exit(0); }`);
+      fixtureEnv.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ""} --require "${preload}"`;
+    } else {
+      writeFileSync(gh, `#!/usr/bin/env node\n${reply}`);
+      chmodSync(gh, 0o755);
+    }
     writeFileSync(output, "existing=value\n");
-    const env = { ...process.env, PATH: `${directory}:${process.env.PATH}`, SOURCE_REPO: repo,
+    const env = { ...process.env, ...fixtureEnv, PATH: `${directory}${delimiter}${process.env.PATH}`, SOURCE_REPO: repo,
       SOURCE_SHA: sha, RELEASE_TAG: tag, GITHUB_RUN_ID: "99", GITHUB_OUTPUT: output };
     assert.equal(execFileSync(process.execPath, ["scripts/release/verified-build.mjs"], { env, encoding: "utf8" }), "");
     assert.equal(readFileSync(output, "utf8"), "existing=value\nrun_id=10\n");
