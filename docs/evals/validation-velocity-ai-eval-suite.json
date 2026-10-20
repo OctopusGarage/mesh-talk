@@ -1,6 +1,6 @@
 {
   "name": "mesh-talk-validation-velocity-eval",
-  "version": 2,
+  "version": 3,
   "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
   "cases": [
     {
@@ -106,6 +106,24 @@
         "Exact-path conservative composition fallbacks retain owning browser rules and disclose their limited unit coverage; new unrelated source cannot inherit a blanket exemption.",
         "Pre-commit, preparation, health and CI propagate structural failures without weakening existing acceptance; working-tree versus staged-candidate limits remain explicit.",
         "Guidance connects new requirements to owners, acceptance criteria and evidence; local misses produce focused corrections and regression cases. Metrics and model judgments do not automatically relax policies."
+      ]
+    },
+    {
+      "id": "MT-VALIDATION-006",
+      "name": "patch coverage distinguishes inapplicable diffs from missing production evidence",
+      "subject_file": "scripts/patch-coverage.mjs",
+      "context_files": [
+        "scripts/diagnostics/patch-coverage.test.mjs",
+        "frontend/vite.config.ts",
+        "docs/testing-feedback-loop.md"
+      ],
+      "min_score": 0.9,
+      "scenario": "Review the fix for a test-only frontend change rejected because tests are excluded from coverage. Check that the fix scopes the denominator rather than bypassing failed production coverage.",
+      "rubric": [
+        "Only the registered .test.ts and .d.ts exclusions are removed from production diff accounting; production .ts and .tsx additions remain measured.",
+        "Empty added-production scope, including deletions, reports not applicable without fabricating 100 percent coverage or claiming tests executed.",
+        "When added production source has no measured lines in supplied reports the gate still fails; measured production changes remain subject to the unchanged minimum. This does not claim complete classification of every unmeasured line in mixed diffs.",
+        "Actual committed-diff CLI regressions demonstrate test/declaration/deletion applicability and both missing and zero-hit production evidence failures; source assertions alone are insufficient."
       ]
     }
   ]

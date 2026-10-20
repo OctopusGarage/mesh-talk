@@ -565,6 +565,13 @@ reconciliation sleep with an observed completed round when that round is the
 actual invariant. Preserve real loopback, restart, expiry and concurrency budgets;
 neither reducing delays nor increasing Windows workers is a default speed fix.
 
+Patch line coverage follows the frontend unit-coverage exclusions: registered
+`.test.ts` files and `.d.ts` declarations do not enter its production denominator.
+A test/declaration-only or deletion-only diff reports `not applicable`, without a
+coverage percentage. Added production lines with no matching measured lines in
+any supplied report still fail; the existing minimum remains required for measured
+production changes. This scope decision does not establish that tests executed.
+
 ## Qualify affected selection alongside full gates
 
 Generate a clean committed candidate's explainable plan against the intended

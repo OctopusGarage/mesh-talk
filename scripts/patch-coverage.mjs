@@ -9,14 +9,19 @@ export function addedSourceLines(diff) {
   for (const row of diff.split("\n")) {
     if (row.startsWith("+++ ")) {
       const path = row.slice(4).replace(/^b\//, "");
-      file = /^frontend\/src\/.*\.tsx?$/.test(path)
-        ? path.slice("frontend/".length)
-        : undefined;
+      // Match the unit coverage exclusions; test/declaration changes have no
+      // production-line denominator and cannot be measured by these reports.
+      file =
+        /^frontend\/src\/.*\.tsx?$/.test(path) &&
+        !/\.(?:test|d)\.ts$/.test(path)
+          ? path.slice("frontend/".length)
+          : undefined;
     } else if (file && row.startsWith("@@ ")) {
       const hunk = row.match(/\+(\d+)(?:,(\d+))? @@/);
       if (!hunk) throw new Error(`Cannot read diff hunk: ${row}`);
       const start = Number(hunk[1]);
       const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      if (count === 0) continue;
       const lines = added.get(file) ?? new Set();
       for (let line = start; line < start + count; line++) lines.add(line);
       added.set(file, lines);
@@ -77,12 +82,19 @@ async function main() {
   }).trim();
   const diff = execFileSync(
     "git",
-    ["diff", "--unified=0", "--no-ext-diff", mergeBase, "HEAD", "--", "frontend/src"],
+    [
+      "diff",
+      "--unified=0",
+      "--no-ext-diff",
+      mergeBase,
+      "HEAD",
+      "--",
+      "frontend/src",
+    ],
     { encoding: "utf8" },
   );
   const paths = process.argv.slice(2);
-  if (paths.length === 0)
-    throw new Error("Pass at least one LCOV report path");
+  if (paths.length === 0) throw new Error("Pass at least one LCOV report path");
   const reports = await Promise.all(
     paths.map(async (path) => parseLcov(await readFile(resolve(path), "utf8"))),
   );
@@ -90,8 +102,12 @@ async function main() {
   const result = summarizePatchCoverage(added, reports);
   if (result.total === 0) {
     if (added.size > 0)
-      throw new Error("No changed frontend source lines were found in the coverage reports.");
-    console.log("No changed frontend source lines to cover.");
+      throw new Error(
+        "No changed frontend source lines were found in the coverage reports.",
+      );
+    console.log(
+      "Frontend patch coverage: not applicable; no added production source lines to cover.",
+    );
     return;
   }
   const percent = (100 * result.covered) / result.total;
@@ -105,5 +121,8 @@ async function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href)
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
+)
   await main();
