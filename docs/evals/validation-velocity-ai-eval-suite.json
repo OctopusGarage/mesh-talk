@@ -11,7 +11,8 @@
         "scripts/validation/affected.mjs",
         "scripts/validation/checks.mjs",
         "scripts/validation/changed.mjs",
-        "src-tauri/validation.json"
+        "src-tauri/validation.json",
+        "scripts/diagnostics/changed-validation.test.mjs"
       ],
       "min_score": 0.9,
       "scenario": "Review the changed-boundary development runner for false-green selections after a Rust, frontend or shared-input change. Evaluate current implementation, not aspirations.",
