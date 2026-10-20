@@ -82,9 +82,13 @@ or skipped/inconclusive native scenarios as passed.
 
 ## Release workflow
 
-The normal sequence is:
+Tag pushes and dispatches with `publish_release=false` build and verify a draft:
 
-`preflight → six native builds → aggregate verification → draft upload → downloaded-draft verification → optional publication`
+`preflight → 12 desktop edition/target jobs → aggregate verification → draft upload → downloaded-draft verification`
+
+A dispatch with `publish_release=true` reuses that verified build:
+
+`preflight → resolve verified build → download evidence and draft → re-verify → current-source CI and container checks → final snapshot guard → publication`
 
 Preflight rejects version/tag mismatches, tags not already merged into main and
 published releases. Workflow runs for the same ref are serialized. A branch dry run
@@ -92,8 +96,8 @@ uses `v<version>-ci.<run-id>` archive names and never writes a GitHub release.
 
 Each platform signs its ZIP and records build provenance. Builds only upload workflow
 artifacts; they cannot independently publish or update a release. The aggregate job
-downloads all six outputs and requires exactly six ZIPs, six signature bundles
-and one nonempty CycloneDX SBOM.
+requires exactly 18 ZIPs (12 desktop edition/target archives and six headless
+archives), 18 signature bundles and one nonempty CycloneDX SBOM: 37 release assets.
 Native builds reuse the Tauri CLI installed by `npm ci` from the committed lockfile,
 instead of compiling an unpinned latest CLI independently on every runner.
 
@@ -134,14 +138,26 @@ Tag pushes keep releases as drafts. To explicitly publish a verified stable tag:
 gh workflow run release.yml --ref vX.Y.Z -f publish_release=true
 ```
 
-This rebuilds and verifies the draft, then requires current-source CI, both full health
-jobs, UI/backend E2E, Gitleaks, Scorecard, all three CodeQL languages and no unresolved
-main code-scanning alerts. Missing, running, skipped or failed checks stop publication.
-The latest check run is used; an older success cannot mask a newer failure.
+The publishing dispatch does not compile again. It resolves the latest eligible
+successful build for the exact repository, source commit, stable tag and release
+workflow, including successful downloaded-draft verification. A newer failed or
+incomplete build blocks publication; an older success cannot mask it. Missing,
+expired or ambiguous verification evidence also blocks publication.
+
+The dispatch downloads that build's `verified-release-evidence` and container
+artifacts, then downloads the current draft. It re-verifies signatures, provenance,
+installer metadata and the recorded snapshot, including repository/source/tag,
+release and asset IDs, sizes, digests and actual file bytes. It then requires
+current-source CI, both full health jobs, UI/backend E2E, Gitleaks, Scorecard, all
+three CodeQL languages and no unresolved main code-scanning alerts, plus container
+smoke tests before publishing relay images. Missing, running, skipped or failed
+checks stop publication. The latest check run is used; an older success cannot mask
+a newer failure.
 
 Immediately before publication, the gate rechecks draft state and all bound asset
 identities/digests, then publishes by the verified release ID, not just a mutable tag
-lookup. If checks are pending, wait and rerun after they complete. Do not manually
+lookup. If checks are pending, wait and rerun the publishing dispatch after they
+complete; no duplicate compilation or manual cancellation is needed. Do not manually
 publish, edit assets or move tags while a release workflow is active: GitHub does not
 provide one atomic transaction covering asset writes and publication, and workflow
 concurrency cannot lock external administrator actions. Published versions are never
@@ -151,7 +167,7 @@ The `verified-release-evidence` workflow artifact and job summary retain source 
 asset hashes. A failed build, verifier or metadata tool leaves the release unpublished.
 
 To run the gate locally (requires cosign, gh, Python 3.11+, exiftool, msiinfo, dpkg-deb,
-rpm, 7zz/7z and unsquashfs from `squashfs-tools`; the directory must contain only the thirteen release assets):
+rpm, 7zz/7z and unsquashfs from `squashfs-tools`; the directory must contain only the 37 release assets):
 
 ```sh
 bash scripts/release/verify-release.sh /path/to/assets vX.Y.Z X.Y.Z \

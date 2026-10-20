@@ -37,7 +37,7 @@ async function main() {
   const repo = process.env.SOURCE_REPO;
   assert.match(repo, /^[\w.-]+\/[\w.-]+$/);
   assert.match(tag, /^v\d+\.\d+\.\d+$/);
-  assert.ok(["guard", "record", "publish"].includes(mode), "unsupported release-state operation");
+  assert.ok(["guard", "record", "verify", "publish"].includes(mode), "unsupported release-state operation");
   const release = getReleaseByTag(repo, tag);
   if (mode === "guard") {
     if (release === null) return;
@@ -62,6 +62,13 @@ async function main() {
   assert.equal(evidence.repository, repo, "verification repository changed");
   assert.equal(evidence.snapshot.tag, tag, "verification tag changed");
   requireSameDraft(release, evidence.snapshot);
+  if (mode === "verify") {
+    assert.deepEqual(evidence.snapshot.assets.map((asset) => asset.name).sort(), readdirSync(directory).sort(), "downloaded release asset set changed");
+    for (const asset of evidence.snapshot.assets) {
+      assert.equal(await fileDigest(join(directory, asset.name)), asset.digest, "downloaded release asset digest changed");
+    }
+    return;
+  }
   execFileSync("gh", ["api", "--method", "PATCH", `repos/${repo}/releases/${evidence.snapshot.id}`, "-F", "draft=false", "-f", "make_latest=true"], { stdio: "inherit" });
 }
 

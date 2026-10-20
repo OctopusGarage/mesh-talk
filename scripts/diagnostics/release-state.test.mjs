@@ -38,7 +38,19 @@ test("release-state CLI binds downloaded bytes and refuses changed publication e
     writeFileSync(join(root, folder, "package.zip"), bytes);
   }
   assert.equal(run("record").status, 0);
+  const verified = run("verify");
+  assert.equal(verified.status, 0, verified.stderr);
+  assert.equal(existsSync(env.PATCH_LOG), false);
+  writeFileSync(join(root, "draft", "package.zip"), "tampered");
+  assert.notEqual(run("verify").status, 0);
+  writeFileSync(join(root, "draft", "package.zip"), bytes);
+  writeFileSync(join(root, "draft", "unexpected.zip"), bytes);
+  assert.notEqual(run("verify").status, 0);
+  rmSync(join(root, "draft", "unexpected.zip"));
+  assert.notEqual(run("verify", { SOURCE_SHA: "b".repeat(40) }).status, 0);
+  assert.notEqual(run("verify", { SOURCE_REPO: "other/repo" }).status, 0);
   writeFileSync(api, JSON.stringify({ ...current, assets: [{ ...current.assets[0], id: 99 }] }));
+  assert.notEqual(run("verify").status, 0);
   assert.notEqual(run("publish").status, 0);
   assert.equal(existsSync(env.PATCH_LOG), false);
   writeFileSync(api, JSON.stringify(current));
