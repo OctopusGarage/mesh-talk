@@ -15,8 +15,8 @@ when explicitly requested or when the changed behavior needs process/browser evi
 
 | Changed boundary            | Fast local command                                                                                          | Broader trigger                                             |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Core unit module            | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync`                              | `make test` locally or matching CI before merge              |
-| Host settings/session       | `make test-focused TEST_PACKAGE=mesh-talk TEST_FILTER=owner_scoped_node_handle`                             | `make test` locally or matching CI before merge              |
+| Core unit module            | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync`                              | `make test` locally or matching CI before merge             |
+| Host settings/session       | `make test-focused TEST_PACKAGE=mesh-talk TEST_FILTER=owner_scoped_node_handle`                             | `make test` locally or matching CI before merge             |
 | One Rust integration target | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_TARGET=decoder_smoke`                                   | `make e2e` when requested or for release validation         |
 | Frontend state/controller   | `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts`                                | `npm run test:coverage` in PR preflight                     |
 | Frontend rendering          | Run the affected component test, for example `cd frontend && npm test -- src/features/chat/Sidebar.test.ts` | Pass relevant Playwright specs to `scripts/pr-preflight.sh` |
@@ -448,6 +448,14 @@ retries per runner. This keeps the existing per-machine rendering budget while
 running all scenarios. Portable/native scenarios and snapshot assertions remain
 in place. Sharding trades more concurrent runner slots and setup work for shorter
 elapsed time; account concurrency limits can reduce the gain.
+
+Windows full-regression runners expand the IPv4 TCP client port pool to
+10000–65534 before browser execution. Repeated fresh contexts load Vite's module
+graph over loopback; the default 16K pool can exhaust while closed connections
+remain in `TIME_WAIT`, producing `ERR_NO_BUFFER_SPACE` or a blank login page.
+The pool excludes Vite's port 5173. Failed Windows jobs print the configured
+range and socket-state counts; retain those diagnostics when investigating
+resource failures rather than increasing assertion timeouts or enabling retries.
 
 Each Linux shard uploads raw browser coverage plus its source SHA and shard
 identity. A single same-workflow Linux unit-coverage producer supplies the line map to
