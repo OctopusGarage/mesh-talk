@@ -3025,6 +3025,16 @@ async fn expiring_account_message_arrives_over_loopback_and_expires_on_both_side
     bt.abort();
     let _ = at.await;
     let _ = bt.await;
+    // JoinSet abort requests are asynchronous, and a blocking cleanup may still
+    // own the node after the accept-loop future has finished. Wait for teardown
+    // before changing the test clock through exclusive ownership.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while Arc::strong_count(&a) != 1 || Arc::strong_count(&b) != 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("connection and cleanup tasks must release both nodes");
     Arc::get_mut(&mut a).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
     Arc::get_mut(&mut b).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
     assert!(a.account_history(&b.account_id(), 10).is_empty());
