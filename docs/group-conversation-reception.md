@@ -60,6 +60,14 @@ or focusing a conversation does not clear offscreen tracked identities. An
 explicit mark-read action can clear the conversation. Older events without IDs
 retain legacy counter behavior without clearing tracked unread exceptions.
 
+Live identities received while the desktop is still resolving its owner identity
+are merged with that owner's persisted reception state before the initial history
+baseline. Retained identities are deduplicated, previously read identities stay
+read, and authoritative own-message history corrects provisional unread state.
+Opening or focusing the conversation still preserves offscreen unread identities.
+Owner, account and runtime-generation changes discard superseded session work.
+The same retention and overflow limits apply to the merged state.
+
 The virtual message log does not announce every inserted row. A polite status
 region batches newly discovered unread identities in fixed windows; duplicates
 and read-count decreases do not deliberately replay announcements. Recovered
@@ -78,6 +86,13 @@ or reading. A file card can appear before the file bytes are available. Receivin
 the card, retaining chunks, downloading the contents and reading the conversation
 remain separate facts.
 
+Transfer percentages require finite received-byte and total-byte counts with a
+positive total. Preparation or waiting without those counts remains
+indeterminate, including its accessible progress state. Reaching the byte total
+shows 100% while the separate confirmation label remains until recipient custody
+is confirmed; byte progress alone does not establish delivery. Remaining-time
+estimates appear only for measured, incomplete progress.
+
 ## Local storage recovery
 
 A failed plaintext save pauses further group decryption instead of discarding a
@@ -94,6 +109,17 @@ preserve the legacy message-only callback contract; configured
 `RuntimeEvents.on_channel` callbacks and raw `Node` channel receivers also receive
 controls and must branch on `reception_only`. The desktop host uses this explicit
 reception-aware contract.
+If an append fails and its rollback also fails, the encrypted writer retains
+its confirmed pre-append boundary and refuses further appends. The received
+plaintext store explicitly retries truncation and file synchronization through
+the original owned file handle before its next write. It clears the poisoned
+state only after both operations succeed, leaving the acknowledged prefix
+unchanged and discarding the uncertain tail. A continuing storage failure keeps
+reception paused; the existing background timer retries without new traffic.
+Generic encrypted-log appends remain closed until explicit repair or reopen.
+This repair does not reopen a path, retain a password, or adopt an uncertain
+partial frame as a saved message.
+
 A replay cursor traverses the validated graph once per processing pass rather
 than rebuilding its order for each bounded chunk. Channel file projection waits
 behind this local processing boundary so it cannot

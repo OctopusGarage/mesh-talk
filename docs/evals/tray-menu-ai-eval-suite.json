@@ -12,6 +12,14 @@
         "Unread title, tooltip, and menu summary handle zero, singular, and large counts without showing message previews or contact names.",
         "Navigation actions show and focus the main window before emitting their known destination, while hide and quit retain their explicit behavior.",
         "Unread updates use the same registered tray and retained native menu item; the menu remains owned for the app lifetime."
+      ],
+      "context_files": [
+        "src-tauri/src/window_visibility.rs",
+        "frontend/src/features/chat/sidebar/SidebarUtilities.tsx",
+        "frontend/src/features/auth/LoginScreen.tsx",
+        "src-tauri/src/lib.rs",
+        "src-tauri/Cargo.toml",
+        "docs/platform-validation.md"
       ]
     },
     {
@@ -25,6 +33,15 @@
         "Each known destination opens its matching dialog and closes other utility dialogs; unknown destinations leave state unchanged.",
         "The event listener is cleaned up on unmount, including when asynchronous registration finishes after unmount.",
         "The sidebar About action still opens the same controlled dialog. Do not infer native window activation or signed-out navigation behavior from this frontend source."
+      ],
+      "context_files": [
+        "frontend/src/features/chat/Sidebar.tsx",
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/src/features/chat/DiagnosticsDialog.tsx",
+        "frontend/src/features/chat/SettingsDialog.tsx",
+        "frontend/src/features/chat/AboutDialog.tsx",
+        "frontend/src/features/help/HelpDialog.tsx",
+        "frontend/src/components/ui/dialog.tsx"
       ]
     },
     {
@@ -38,6 +55,9 @@
         "The trigger can be hidden without hiding the dialog content, so the external sidebar trigger does not produce a duplicate button.",
         "Version data loads when opened, and the existing update panel and project or license links remain available.",
         "About does not register a tray listener inside conditionally mounted popover content."
+      ],
+      "context_files": [
+        "frontend/src/components/ui/dialog.tsx"
       ]
     }
   ]

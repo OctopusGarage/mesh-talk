@@ -4,6 +4,7 @@ import type { Page } from "@playwright/test";
 import { test, expect } from "./helpers/portable-evidence";
 import {
   waitForChatShell,
+  enterChatShell,
   enterChat,
   openBobDm,
   BOB,
@@ -15,6 +16,75 @@ import {
   expectMinTargetSize,
   expectNoHorizontalOverflow,
 } from "./helpers/ui-audit";
+
+test("presence waits for node readiness without showing a startup failure", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const state = {
+      ready: false,
+      bootRequests: 0,
+      earlyCalls: 0,
+      readyCalls: 0,
+    };
+    const host = window as unknown as {
+      __presenceBootProbe: typeof state;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    host.__presenceBootProbe = state;
+    const original = host.__TAURI_INTERNALS__.invoke;
+    host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "owner_node_identity") {
+        state.bootRequests++;
+        if (!state.ready) throw new Error("Node not started");
+      }
+      if (command === "get_presence") {
+        if (!state.ready) {
+          state.earlyCalls++;
+          throw new Error("Node not started");
+        }
+        state.readyCalls++;
+      }
+      return original(command, args);
+    };
+  });
+  await enterChatShell(page);
+  const probe = () =>
+    page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __presenceBootProbe: {
+              ready: boolean;
+              bootRequests: number;
+              earlyCalls: number;
+              readyCalls: number;
+            };
+          }
+        ).__presenceBootProbe,
+    );
+  await expect
+    .poll(async () => (await probe()).bootRequests)
+    .toBeGreaterThan(0);
+  expect((await probe()).earlyCalls).toBe(0);
+  const warning = page.getByText(/Presence updates are unavailable/);
+  await expect(warning).toHaveCount(0);
+  await page.evaluate(() => {
+    (
+      window as unknown as { __presenceBootProbe: { ready: boolean } }
+    ).__presenceBootProbe.ready = true;
+  });
+  await expect(
+    page.getByTestId(`conversation-row-${BOB.account}`),
+  ).toBeVisible();
+  await expect.poll(async () => (await probe()).readyCalls).toBeGreaterThan(0);
+  await expect(warning).toHaveCount(0);
+});
 
 test("chat startup does not import each preset image as a module", async ({
   page,

@@ -147,6 +147,11 @@ impl DiscoveryVisibility {
                 return Ok(false);
             }
         }
+        #[cfg(windows)]
+        if target.ip() == std::net::IpAddr::V4(crate::transport::net::DISCOVERY_MULTICAST_GROUP) {
+            crate::transport::net::send_discovery_multicast(bytes, target).await?;
+            return Ok(true);
+        }
         socket.send_to(bytes, target).await?;
         drop(public);
         Ok(true)

@@ -101,6 +101,7 @@
     }
   },
   "login": {
+    "invalidCredentials": "用戶名或密碼錯誤",
     "tagline": "無需伺服器 · 端對端加密",
     "signIn": "登入",
     "register": "註冊",

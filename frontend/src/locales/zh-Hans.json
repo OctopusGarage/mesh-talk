@@ -101,6 +101,7 @@
     }
   },
   "login": {
+    "invalidCredentials": "用户名或密码错误",
     "tagline": "无服务器 · 端到端加密",
     "signIn": "登录",
     "register": "注册",

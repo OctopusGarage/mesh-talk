@@ -115,31 +115,37 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   `cd frontend && npm run e2e` (CI: `e2e-ui.yml`).
 - Do not run full suites or E2E automatically during ordinary feature work. Run
   the affected unit or integration tests as changes are made; run E2E and the
-  comprehensive health gate on explicit request, before PR/review, or in CI.
+  comprehensive health gate on explicit request, for optional full local preparation,
+  or in CI.
 - See `docs/testing-feedback-loop.md` for selection examples and escalation triggers.
-- Document executed validation commands in every PR (minimum `make test`).
+- Document executed validation commands in every PR; ensure `make test` passes
+  locally or through its matching CI workspace suite before merge.
 
 ## Commit & Pull Request Guidelines
 
 - Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
   `specifications/git_standards.md`. Squash WIP; link issues.
-- Create PRs through `./scripts/create-pr.sh <preflight selectors/specs> -- <gh pr create options>`.
-  It runs `prepare-pr.sh` (full health plus platform preflight) and refuses to publish if verification fails or the candidate changes.
-  Before opening or updating a PR, commit the branch and run `./scripts/prepare-pr.sh` with only the
-  Playwright specs relevant to changed frontend behavior (for example,
-  `./scripts/prepare-pr.sh e2e/avatar-gallery.spec.ts e2e/theme-picker.spec.ts`).
-  Preflight automatically runs the same selected tests in Linux Docker and through SSH to
-  `windows10`; Windows workspaces, caches and temporary data stay on drive D. For changed
-  Rust crates, pass repeated `--core-filter <test filter>` / `--host-filter <test filter>`
-  selectors; use `--integration-filter` and `--mcp-filter` for those crates.
-  Owning scenario rules automatically add visual specs and require real native
-  evidence for lifecycle/discovery changes. Missing environments or empty Rust selections fail the gate; do not silently
-  skip them. See `docs/testing-feedback-loop.md` for configuration and plan preview.
-  Include `e2e/ui-visual-regression.spec.ts` when a change affects theme layout or snapshots.
-  It checks the changed-line coverage estimate and portable scenario evidence; add focused
-  tests or specs named by its uncovered-line report before broadening the run. Fetch
-  `origin/main` first if the base ref is stale. Keep the full suite for the final gate.
-- Request review only after `./scripts/check-health.sh` passes (it mirrors CI exactly).
+- Create PRs through `./scripts/create-pr.sh -- <gh pr create options>`.
+  The default checks the clean committed candidate, comparison base, argument safety,
+  whitespace, structural standards and repository hygiene before publication.
+  Full cross-platform CI runs after publication; all required checks must pass on the
+  current PR head before merging. Creating a PR does not certify test acceptance.
+- To run comprehensive checks locally before publication, use
+  `./scripts/create-pr.sh --full-preflight <selectors/specs> -- <gh pr create options>`.
+  This invokes `prepare-pr.sh` (platform preflight plus full health). For an existing
+  PR, `./scripts/prepare-pr.sh <selectors/specs>` provides the same optional local gate.
+  Use Playwright specs relevant to changed frontend behavior and repeated
+  `--core-filter` / `--host-filter` / `--integration-filter` / `--mcp-filter` selectors
+  for changed Rust crates. Preflight runs selected tests in Linux Docker and through
+  SSH to `windows10`; Windows workspaces, caches and temporary data stay on drive D.
+  Owning scenario rules add visual specs and require real native evidence for
+  lifecycle/discovery changes. Missing environments or empty Rust selections fail
+  full preflight. Include `e2e/ui-visual-regression.spec.ts` for theme/layout changes.
+  See `docs/testing-feedback-loop.md` for configuration, coverage and plan preview.
+  Fetch `origin/main` first if the comparison base is stale.
+- Record focused validation and outstanding checks in the PR. Use
+  `./scripts/check-health.sh` when comprehensive local evidence is needed; protected
+  CI remains required before merge regardless of local results.
 
 ## Security & Adjustments
 

@@ -173,3 +173,48 @@ process.stdin.on("end", () => {
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.deepEqual(JSON.parse(readFileSync(report, "utf8")).cases[0].context_files, [support]);
 });
+
+test("source rubric cases include the owners of delegated guarantees", () => {
+  const contracts = [
+    ["linked-device-sync", "MT-SYNC-AI-005", ["crates/mesh-talk-core/src/node/account_profile.rs", "crates/mesh-talk-core/src/node/profile_store.rs"]],
+    ["group-reception", "MT-GROUP-UX-001", ["crates/mesh-talk-core/src/eventlog/order.rs"]],
+    ["group-reception", "MT-GROUP-UX-003", ["frontend/src/store/conversationHistory.ts"]],
+    ["validation-velocity", "MT-VALIDATION-001", ["scripts/validation/frontend-graph.mjs"]],
+  ];
+  contracts.push(
+    ["base", "MT-AI-007", ["scripts/install-post-office-macos.sh", "scripts/e2e-post-office-lan.py", "scripts/e2e-four-machine-tailnet.py", "scripts/e2e-federation-recovery.py", "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs", "crates/mesh-talk-core/src/node/files.rs", "crates/mesh-talk-core/examples/network-acceptance.rs"]],
+    ["base", "MT-AI-008", ["scripts/install-post-office-windows.ps1", "crates/mesh-talk-core/src/bin/mesh-talk-node.rs", "scripts/e2e-post-office-lan.py", "scripts/e2e-four-machine-tailnet.py", "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs"]],
+    ["base", "MT-AI-010", ["docs/network-design-reference.md", "docs/post-office-federation.md", "scripts/e2e-four-machine-tailnet.py", "scripts/e2e-federation-recovery.py"]],
+    ["group-reception", "MT-GROUP-UX-004", ["frontend/src/store/chat.ts", "frontend/src/store/reception.ts", "frontend/src/store/conversationHistory.ts", "frontend/src/store/conversationState.ts"]],
+    ["group-reception", "MT-GROUP-UX-005", ["frontend/src/locales/en.json", "frontend/src/features/chat/ReceiveProgress.tsx", "frontend/src/features/chat/TransferBar.tsx", "frontend/src/store/conversationHistory.ts", "frontend/src/store/ownership.ts", "src-tauri/src/chat_commands/files.rs", "crates/mesh-talk-core/src/node/files.rs"]],
+    ["group-reception", "MT-GROUP-UX-006", ["crates/mesh-talk-core/src/storage/record_log.rs", "crates/mesh-talk-core/src/node/expiry_policy.rs", "crates/mesh-talk-core/src/expiry.rs"]],
+    ["linked-device-sync", "MT-SYNC-AI-002", ["crates/mesh-talk-core/src/identity/account.rs", "crates/mesh-talk-core/src/identity/device.rs"]],
+    ["linked-device-sync", "MT-SYNC-AI-003", ["crates/mesh-talk-core/src/identity/account.rs", "crates/mesh-talk-core/src/identity/device.rs", "crates/mesh-talk-core/src/storage/record_log.rs", "crates/mesh-talk-core/src/storage/encryption.rs"]],
+    ["linked-device-sync", "MT-SYNC-AI-004", ["crates/mesh-talk-core/src/node/account_suppression.rs", "crates/mesh-talk-core/src/storage/record_log.rs", "crates/mesh-talk-core/src/storage/encryption.rs"]],
+    ["person-presence", "MT-PRESENCE-002", ["crates/mesh-talk-core/src/discovery/roster.rs"]],
+  );
+  contracts.push(
+    ["linked-device-sync", "MT-SYNC-AI-001", ["crates/mesh-talk-core/src/identity/account.rs", "crates/mesh-talk-core/src/node/account_devices.rs", "crates/mesh-talk-core/src/node/dm_envelope.rs", "crates/mesh-talk-core/src/node/account_sync_policy.rs"]],
+    ["group-reception", "MT-GROUP-UX-002", ["src-tauri/src/chat_commands/state.rs", "src-tauri/src/desktop_session.rs"]],
+    ["linked-device-sync", "MT-SYNC-AI-005", ["crates/mesh-talk-core/src/node/profile.rs", "crates/mesh-talk-core/src/node/privacy_routing.rs", "crates/mesh-talk-core/src/node/peer_directory.rs"]],
+    ["linked-device-sync", "MT-SYNC-AI-006", ["frontend/src/lib/api/contacts.ts", "src-tauri/src/avatars.rs", "src-tauri/src/chat_commands/account.rs", "frontend/src/store/ownership.ts"]],
+    ["linked-device-sync", "MT-SYNC-AI-007", ["crates/mesh-talk-core/src/node/privacy_routing.rs", "crates/mesh-talk-core/src/discovery/roster.rs", "crates/mesh-talk-core/src/identity/account.rs", "crates/mesh-talk-core/src/channel/model.rs", "crates/mesh-talk-core/src/node/channel.rs"]],
+    ["linked-device-sync", "MT-SYNC-AI-008", ["crates/mesh-talk-core/src/node/received_log.rs", "crates/mesh-talk-core/src/storage/record_log.rs"]],
+    ["linked-device-sync", "MT-SYNC-AI-009", ["crates/mesh-talk-core/src/storage/record_log.rs", "crates/mesh-talk-core/src/storage/encryption.rs"]],
+    ["linked-device-sync", "MT-SYNC-AI-010", ["crates/mesh-talk-core/src/node/media_store.rs", "crates/mesh-talk-core/src/storage/encryption.rs"]],
+    ["linked-device-sync", "MT-SYNC-AI-011", ["frontend/src/lib/linkedPreferencePublisher.ts", "frontend/src/features/chat/LinkDeviceDialog.tsx", "frontend/src/features/chat/ChatApp.tsx"]],
+    ["linked-device-sync", "MT-SYNC-AI-012", ["crates/mesh-talk-core/src/node/delivery_runtime.rs", "crates/mesh-talk-core/src/node/peer_directory.rs", "crates/mesh-talk-core/src/storage/record_log.rs"]],
+    ["person-presence", "MT-PRESENCE-003", ["frontend/src/store/ownership.ts", "frontend/src/store/auth.ts", "frontend/src/features/chat/ChatApp.tsx"]],
+    ["person-presence", "MT-PRESENCE-004", ["crates/mesh-talk-core/src/node/bridge_client.rs", "crates/mesh-talk-core/src/discovery/roster.rs", "crates/mesh-talk-core/src/discovery/announce.rs", "crates/mesh-talk-core/src/node/postbox.rs"]],
+    ["tray-menu", "MT-TRAY-001", ["docs/platform-validation.md", "src-tauri/src/window_visibility.rs", "frontend/src/features/chat/sidebar/SidebarUtilities.tsx", "frontend/src/features/auth/LoginScreen.tsx", "src-tauri/src/lib.rs"]],
+    ["validation-velocity", "MT-VALIDATION-001", ["scripts/validation/contracts.mjs", "crates/mesh-talk-core/validation.json", "scripts/validation/validation.json", "scripts/validation/stage.mjs", "scripts/validation/stage-inputs.mjs", "scripts/validation/feedback.mjs"]],
+    ["validation-velocity", "MT-VALIDATION-003", ["scripts/ci/collect-ui-coverage.mjs", ".github/workflows/gitleaks.yml"]],
+    ["validation-velocity", "MT-VALIDATION-004", ["scripts/validation/changed.mjs", "scripts/validation/selectors.mjs"]],
+    ["validation-velocity", "MT-VALIDATION-005", ["scripts/validation/frontend-graph.mjs"]],
+  );
+  for (const [name, id, owners] of contracts) {
+    const suite = JSON.parse(readFileSync(new URL(`../docs/evals/${name === "base" ? "ai-eval-suite" : `${name}-ai-eval-suite`}.json`, import.meta.url), "utf8"));
+    const entry = suite.cases.find(entry => entry.id === id);
+    for (const owner of owners) assert.ok(entry?.context_files?.includes(owner), `${id} cannot verify delegated guarantees without ${owner}`);
+  }
+});

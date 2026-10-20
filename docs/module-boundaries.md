@@ -125,7 +125,9 @@ operating-system preference changes. None of these modules owns global chat stat
 `core/node/account_profile.rs` owns signed Account profile state: startup
 reconstruction, local revision allocation, authenticated incoming updates and
 coordinated avatar persistence. Its internal state owns the journal and current
-publication together. Node profile paths retain authenticated Event processing,
+publication together. Local avatar edits must advance the durable revision;
+revision exhaustion fails before changing publication or emitting an update.
+Node profile paths retain authenticated Event processing,
 authorization and delivery. Recovery uses explicit snapshot/import operations;
 retired language metadata is never republished or restored as filtering state.
 The existing signed payload and encrypted record formats remain the same.

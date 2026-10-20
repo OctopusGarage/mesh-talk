@@ -109,7 +109,7 @@
         "scripts/diagnostics/standards-wiring.test.mjs"
       ],
       "escalation": [
-        "Before publication run full preparation; focused diagnostic success alone does not certify native or platform execution."
+        "Fast PR creation checks source integrity; use --full-preflight for comprehensive local preparation. Required CI must pass before merge; focused diagnostics alone do not certify native or platform execution."
       ]
     },
     {
@@ -130,7 +130,7 @@
         "mcp-adapter"
       ],
       "escalation": [
-        "Shared compiler, dependency or feature inputs invalidate every workspace consumer. Inspect production/test feature differences, platform checks and native requirements before publication."
+        "Shared compiler, dependency or feature inputs invalidate every workspace consumer. Inspect production/test feature differences, platform checks and native requirements before merge or full local preparation."
       ]
     },
     {
@@ -173,6 +173,52 @@
       ],
       "escalation": [
         "Public help content is bundled into the frontend and published independently; review the public help build/publication and settings-navigation consumers."
+      ]
+    },
+    {
+      "id": "evaluation-context-integrity",
+      "paths": [
+        "docs/evals/README.md",
+        "docs/evals/ai-eval-suite.json",
+        "docs/evals/group-reception-ai-eval-suite.json",
+        "docs/evals/linked-device-sync-ai-eval-suite.json",
+        "docs/evals/person-presence-ai-eval-suite.json",
+        "docs/evals/tray-menu-ai-eval-suite.json",
+        "docs/evals/validation-velocity-ai-eval-suite.json",
+        "docs/evals/prompts/agent-contract-evaluator.md",
+        "scripts/test-ai-eval.mjs"
+      ],
+      "node": ["scripts/test-ai-eval.mjs"],
+      "escalation": [
+        "Context selection integrity checks validate rubric inputs; they do not execute the evaluated capabilities or establish native evidence."
+      ]
+    },
+    {
+      "id": "native-acceptance-harness",
+      "paths": [
+        "scripts/diagnostics/hidden-contacts.mjs",
+        "scripts/diagnostics/hidden-contacts-report.mjs",
+        "scripts/diagnostics/hidden-contacts-report.test.mjs",
+        "scripts/diagnostics/native-multicast-probe.mjs",
+        "scripts/diagnostics/native-capture.mjs",
+        "scripts/diagnostics/native-capture.test.mjs",
+        "scripts/diagnostics/native-core-scenarios.mjs",
+        "scripts/diagnostics/native-core-scenarios.test.mjs",
+        "scripts/diagnostics/native-ipc-boundary.test.mjs",
+        "scripts/evals/png-evidence.mjs",
+        "scripts/diagnostics/png-evidence.test.mjs",
+        "scripts/diagnostics/test-fixtures/png.mjs"
+      ],
+      "node": [
+        "scripts/diagnostics/hidden-contacts-report.test.mjs",
+        "scripts/diagnostics/native-capture.test.mjs",
+        "scripts/diagnostics/native-core-scenarios.test.mjs",
+        "scripts/diagnostics/native-ipc-boundary.test.mjs",
+        "scripts/diagnostics/native-build.test.mjs",
+        "scripts/diagnostics/png-evidence.test.mjs"
+      ],
+      "escalation": [
+        "Native harness and evidence-validation changes require fresh real desktop acceptance on the affected platforms with clean source and verified build provenance; diagnostic unit checks cannot certify native behavior."
       ]
     }
   ]

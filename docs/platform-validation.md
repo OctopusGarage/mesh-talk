@@ -66,6 +66,20 @@ tray icon to exist and Tauri's unhandled default `main` tray icon to be absent.
 This checks actual Tauri registration on each runner; it does not simulate an OS
 tray click or inspect stale icons retained by a Windows shell after a crash.
 
+The native menu's lifetime follows the registered tray resource. In the locked
+Tauri 2.12.4 implementation, `TrayIconBuilder::menu` obtains an owned clone through
+`Menu::inner_context_owned`; building the tray registers a clone in the app's
+resource table and tray registry. The locked tray-icon 0.25.1 platform
+implementations retain that owned menu, and muda 0.20.0 menu clones share their
+native menu and child items. Dropping the local `tray_menu` variable therefore
+does not release the registered menu. `TrayMenuState` retains the shared unread
+item for updates; explicit tray removal or application exit ends registration.
+These are dependency ownership guarantees, rather than native click evidence.
+Recheck them when changing the locked versions: the owning sources are
+[Tauri's tray builder and registration](https://docs.rs/tauri/2.12.4/src/tauri/tray/mod.rs.html),
+[Tauri's owned menu clone](https://docs.rs/tauri/2.12.4/src/tauri/menu/menu.rs.html),
+and the platform implementations in `tray-icon`'s `src/platform_impl`.
+
 Each passing scenario supplies JSON observations, a screenshot and a redacted
 process log. Schema 2 requires the tested source revision and SHA256 digests for
 all three files. Validation requires typed scenario observations and fully decodes
@@ -83,11 +97,26 @@ for a current build. See [the feedback loop](testing-feedback-loop.md#native-req
 for commands. An uncommitted or unverified local run is development evidence; its
 HEAD SHA identifies the base revision, not certification of that commit.
 
-Native attachment evidence intentionally proves incoming manifest persistence and
-generic-file rendering **only**. The OS save picker is outside the embedded DOM
-driver and its default destination may be outside the isolated fixture. The
-report explicitly marks download as unverified; actual transferred file bytes
-are asserted separately by the real CLI integration scenario.
+Keep the native build and its acceptance run inside one
+[managed build lease](build-retention.md#commands). Cargo's compiler lock ends
+before the example is launched; scheduled cache cleanup can otherwise remove
+the example executable between those steps. For macOS or Linux, a single lease
+can cover both commands:
+
+```sh
+python3 scripts/build-retention.py run -- bash -c \
+  'node scripts/validation/native-build.mjs && node scripts/diagnostics/hidden-contacts.mjs'
+```
+
+On Windows, place both commands in the same managed PowerShell runner, retaining
+the interactive desktop session and the configured D-drive state directory.
+
+Native attachment evidence requires incoming manifest persistence, exact received
+bytes and a rendered ready file card without a pending progress indicator. The
+runner creates an isolated download directory and configures it through the
+real owner-scoped settings API before reception. The OS save picker remains
+outside the embedded DOM driver; the report marks picker-driven downloads as
+unverified. Real CLI integration scenarios separately assert transferred bytes.
 
 On macOS, avatar clearance is compared with actual AppKit standard-button bounds
 converted to the content view. Other platforms report this macOS-specific chrome

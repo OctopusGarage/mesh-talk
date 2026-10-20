@@ -33,7 +33,7 @@ export function createFeedback(plan, { checks = false, fingerprint, started } = 
       ...(plan.requirements?.browser ?? []).map(spec => ({ kind: "browser", selection: spec, status: "not-run" })),
       ...(plan.requirements?.native ?? []).map(platform => ({ kind: "native", selection: platform, status: "not-run" })),
       ...plan.escalation.map(instruction => ({ kind: "review", status: "needs-review", instruction })),
-      { kind: "candidate", status: "not-run", instruction: "Commit the candidate and run ./scripts/prepare-pr.sh with affected Rust selectors, required browser specs and native evidence. Full health and protected CI remain required." },
+      { kind: "candidate", status: "not-run", instruction: "Commit the candidate and create its PR with ./scripts/create-pr.sh -- <gh options>. Required CI must pass before merge. For optional full local validation, run ./scripts/prepare-pr.sh with affected Rust selectors, browser specs and native evidence." },
     ],
     limitations: "Observed development scope only. Browser/native requirements are pending, not executed by this runner. Command success alone does not prove test selection or assertions; the phase must also pass its inventory, nonempty-test and unchanged-input checks. This report is not publication evidence.",
   };

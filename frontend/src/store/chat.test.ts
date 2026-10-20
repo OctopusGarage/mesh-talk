@@ -3046,3 +3046,273 @@ it("does not reload or resurrect a cleared conversation from terminal-only recep
   expect(useChat.getState().ledger).toEqual({});
   expect(useChat.getState().reception).toEqual({});
 });
+
+for (const kind of ["channel", "file"] as const)
+  for (const persisted of [false, true]) {
+    it(`preserves ${kind} identities ${persisted ? "with a disk baseline" : "on first initialization"} received during deferred boot through baseline, focus and reopen`, async () => {
+      const storage = new Map<string, string>();
+      vi.stubGlobal("localStorage", {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+      });
+      vi.stubGlobal("document", {
+        visibilityState: "visible",
+        hasFocus: () => true,
+      });
+      const { saveReceptionLedger, loadReceptionLedger, saveUnread } =
+        await import("@/lib/unreadStorage");
+      const key = "channel:team";
+      if (persisted) {
+        saveReceptionLedger("host", "myacct", {
+          [key]: {
+            "disk-read": { seen: true, late: false },
+            "disk-unread": { seen: false, late: true },
+          },
+        });
+        saveUnread("host", "myacct", { [key]: 3 });
+      }
+      let finish!: (value: unknown) => void;
+      let identityCalls = 0;
+      const identity = {
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        history_revision: 1,
+      };
+      const ids = [
+        ...(persisted ? ["disk-read", "disk-unread"] : []),
+        "during-boot",
+        "own-device",
+        "own-history",
+      ];
+      const expected = persisted
+        ? ["disk-unread", "during-boot"]
+        : ["during-boot"];
+      invoke.mockImplementation((command: string) => {
+        if (command === "owner_node_identity")
+          return ++identityCalls === 1
+            ? new Promise((resolve) => {
+                finish = resolve;
+              })
+            : Promise.resolve(identity);
+        if (command === "list_channels")
+          return Promise.resolve([
+            {
+              channel_id: "team",
+              name: "Team",
+              owner: "peer",
+              member_count: 2,
+            },
+          ]);
+        if (command === "channel_history")
+          return Promise.resolve(
+            ids.map((id) => ({
+              id,
+              from_me: id.startsWith("own-"),
+              who: "peer",
+              text: id,
+              wall_clock: 1,
+            })),
+          );
+        if (command === "channel_members")
+          return Promise.resolve({ owner: "peer", members: [] });
+        return Promise.resolve([]);
+      });
+      let stop = useChat.getState().start();
+      try {
+        expect(useChat.getState().ready).toBe(false);
+        for (const id of ids) {
+          const event = {
+            from: id === "own-history" ? "me" : "peer",
+            event_id: id,
+            own_device: id === "own-device",
+            arrival_kind: "catch_up",
+            channel_id: "team",
+            channel_name: "Team",
+            is_channel: true,
+            conv: "team",
+            file_conv: `file-${id}`,
+            name: id,
+            size: 1,
+            mime: "text/plain",
+            media: false,
+            text: id,
+          };
+          captured.current![kind === "channel" ? "onChannelMessage" : "onFile"](
+            event,
+          );
+        }
+        finish(identity);
+        await vi.waitFor(() =>
+          expect(useChat.getState().historyFullBaselines).toContain(key),
+        );
+        expect(new Set(useChat.getState().unreadIds[key])).toEqual(
+          new Set(expected),
+        );
+        expect(useChat.getState().unread[key]).toBe(persisted ? 4 : 1);
+        await useChat
+          .getState()
+          .open({ kind: "channel", id: "team", name: "Team" });
+        useChat.getState().markLegacyActiveRead();
+        useChat.getState().markMessagesViewed(key, ["disk-read"]);
+        expect(useChat.getState().unread[key]).toBe(expected.length);
+        expect(
+          loadReceptionLedger("host", "myacct")[key]["during-boot"].seen,
+        ).toBe(false);
+        expect(loadReceptionLedger("other", "myacct")).toEqual({});
+        stop();
+        useChat.getState().resetForLock();
+        stop = useChat.getState().start();
+        await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+        expect(new Set(useChat.getState().unreadIds[key])).toEqual(
+          new Set(expected),
+        );
+      } finally {
+        stop();
+        vi.unstubAllGlobals();
+      }
+    });
+  }
+
+for (const replacementOwner of ["other", "host"]) {
+  it(`does not hydrate deferred boot events across ${replacementOwner === "host" ? "a new generation" : "an owner change"}`, async () => {
+    let finish!: (value: unknown) => void;
+    let calls = 0;
+    invoke.mockImplementation((command: string, args?: { owner?: string }) =>
+      command === "owner_node_identity"
+        ? ++calls === 1
+          ? new Promise((resolve) => {
+              finish = resolve;
+            })
+          : Promise.resolve({
+              owner: args?.owner,
+              device_id: "new-device",
+              account_id: "new-account",
+            })
+        : Promise.resolve([]),
+    );
+    const stopOld = useChat.getState().start();
+    const oldHandler = captured.current!.onChannelMessage;
+    oldHandler({
+      channel_id: "team",
+      event_id: "old-boot",
+      from: "peer",
+      text: "old",
+    });
+    stopOld();
+    useAuth.setState({
+      user: { id: replacementOwner, username: "new", display_name: "New" },
+      generation: 1,
+    });
+    const stopNew = useChat.getState().start();
+    try {
+      finish({ owner: "host", device_id: "me", account_id: "myacct" });
+      oldHandler({
+        channel_id: "team",
+        event_id: "late-old-boot",
+        from: "peer",
+        text: "old",
+      });
+      await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+      expect(useChat.getState().unreadOwner).toBe(replacementOwner);
+      expect(useChat.getState().myAccountId).toBe("new-account");
+      expect(useChat.getState().ledger).toEqual({});
+      expect(useChat.getState().unread).toEqual({});
+    } finally {
+      stopNew();
+    }
+  });
+}
+
+for (const kind of ["channel", "file"] as const) {
+  it(`preserves ${kind} identities received during the replacement account's second identity lookup`, async () => {
+    let replacement = false;
+    let replacementCalls = 0;
+    let finish!: (value: unknown) => void;
+    const oldIdentity = {
+      owner: "host",
+      device_id: "me",
+      account_id: "myacct",
+    };
+    const newIdentity = {
+      ...oldIdentity,
+      device_id: "new-device",
+      account_id: "new-account",
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "owner_node_identity") {
+        if (!replacement) return Promise.resolve(oldIdentity);
+        return ++replacementCalls === 2
+          ? new Promise((resolve) => {
+              finish = resolve;
+            })
+          : Promise.resolve(newIdentity);
+      }
+      if (command === "list_channels")
+        return Promise.resolve([
+          { channel_id: "team", name: "Team", owner: "peer", member_count: 2 },
+        ]);
+      if (command === "channel_history")
+        return Promise.resolve(
+          replacement
+            ? [
+                {
+                  id: "new-arrival",
+                  from_me: false,
+                  who: "peer",
+                  text: "new",
+                  wall_clock: 1,
+                },
+              ]
+            : [],
+        );
+      if (command === "channel_members")
+        return Promise.resolve({ owner: "peer", members: [] });
+      return Promise.resolve([]);
+    });
+    const stop = useChat.getState().start();
+    try {
+      await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+      captured.current!.onChannelMessage({
+        channel_id: "team",
+        event_id: "old-account-arrival",
+        from: "peer",
+        text: "old",
+      });
+      replacement = true;
+      await useChat.getState().refreshRoster();
+      expect(replacementCalls).toBe(2);
+      expect(useChat.getState().ready).toBe(false);
+      captured.current![kind === "channel" ? "onChannelMessage" : "onFile"]({
+        channel_id: "team",
+        event_id: "new-arrival",
+        from: "peer",
+        text: "new",
+        is_channel: true,
+        conv: "team",
+        file_conv: "new-file",
+        name: "new.txt",
+        size: 1,
+        mime: "text/plain",
+        media: false,
+      });
+      finish(newIdentity);
+      await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+      await useChat
+        .getState()
+        .open({ kind: "channel", id: "team", name: "Team" });
+      useChat.getState().markLegacyActiveRead();
+      expect(useChat.getState().unreadIds["channel:team"]).toEqual([
+        "new-arrival",
+      ]);
+      expect(useChat.getState().unread["channel:team"]).toBe(1);
+      expect(
+        useChat.getState().ledger["channel:team"]?.["old-account-arrival"],
+      ).toBeUndefined();
+      expect(useChat.getState().myAccountId).toBe("new-account");
+      expect(useChat.getState().identityEpoch).toBe(1);
+    } finally {
+      stop();
+    }
+  });
+}

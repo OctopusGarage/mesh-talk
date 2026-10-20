@@ -187,3 +187,23 @@ test("publication rejects development native runs and unverified prebuilt binari
     );
   }
 });
+
+test("changed pack and composer browser scenarios require their own acceptance specs", async () => {
+  const { loadRequirements } = await import("../validation/pr-scenarios.mjs");
+  const { fileURLToPath } = await import("node:url");
+  for (const name of ["packs", "ui-audit-composer"]) {
+    const spec = `e2e/${name}.spec.ts`;
+    const requirements = await loadRequirements([`frontend/${spec}`], fileURLToPath(new URL("../../", import.meta.url)));
+    assert.deepEqual(requirements.browser, [spec]);
+  }
+});
+
+test("production native harness changes require all desktop platforms while test-only edits stay focused", async () => {
+  const { loadRequirements } = await import("../validation/pr-scenarios.mjs");
+  const { fileURLToPath } = await import("node:url");
+  const root = fileURLToPath(new URL("../../", import.meta.url));
+  for (const name of ["hidden-contacts", "hidden-contacts-report", "native-core-scenarios", "native-capture"]) {
+    assert.deepEqual((await loadRequirements([`scripts/diagnostics/${name}.mjs`], root)).native, ["darwin", "linux", "win32"], name);
+    assert.deepEqual((await loadRequirements([`scripts/diagnostics/${name}.test.mjs`], root)).native, [], name);
+  }
+});

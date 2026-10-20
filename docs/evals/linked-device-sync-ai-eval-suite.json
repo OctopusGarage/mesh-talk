@@ -19,7 +19,21 @@
       "context_files": [
         "crates/mesh-talk-core/src/node/account_sync/page.rs",
         "crates/mesh-talk-core/src/node/linking.rs",
-        "crates/mesh-talk-core/src/node/account_sync_wire.rs"
+        "crates/mesh-talk-core/src/node/account_sync_wire.rs",
+        "crates/mesh-talk-core/src/identity/account.rs",
+        "crates/mesh-talk-core/src/node/account_devices.rs",
+        "crates/mesh-talk-core/src/node/dm_envelope.rs",
+        "crates/mesh-talk-core/src/node/account_sync_policy.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/storage/record_log.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "crates/mesh-talk-core/src/transport/auth.rs",
+        "crates/mesh-talk-core/src/transport/handshake.rs",
+        "crates/mesh-talk-core/src/transport/channel.rs",
+        "crates/mesh-talk-core/src/transport/session.rs",
+        "crates/mesh-talk-core/src/discovery/announce.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
       ]
     },
     {
@@ -34,6 +48,10 @@
         "Record headers require a canonical sender account and a positive length no greater than MAX_RECORD.",
         "Record chunks cannot be empty or larger than MAX_CHUNK.",
         "Device frames verify their account certificate and bind it to the transmitted device signing key."
+      ],
+      "context_files": [
+        "crates/mesh-talk-core/src/identity/account.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
       ]
     },
     {
@@ -48,6 +66,12 @@
         "Duplicate enrollment is idempotent, while conflicting records are rejected.",
         "The number of linked devices is bounded on insertion and reload.",
         "The directory is stored through the encrypted record log."
+      ],
+      "context_files": [
+        "crates/mesh-talk-core/src/identity/account.rs",
+        "crates/mesh-talk-core/src/storage/record_log.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
       ]
     },
     {
@@ -62,6 +86,11 @@
         "Bulk suppression is persisted before the matching plaintext entries are removed.",
         "Persistence failures propagate instead of silently proceeding with an erase.",
         "The erase remains local; it does not claim to delete copies on other devices."
+      ],
+      "context_files": [
+        "crates/mesh-talk-core/src/node/account_suppression.rs",
+        "crates/mesh-talk-core/src/storage/record_log.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs"
       ]
     },
     {
@@ -76,6 +105,18 @@
         "The durable profile store applies only newer updates and retains avatar clears.",
         "An applied own-account update refreshes the profile republished to newly discovered peers.",
         "Local avatar publication uses a timestamp newer than the durable own-account profile state."
+      ],
+      "context_files": [
+        "crates/mesh-talk-core/src/node/account_profile.rs",
+        "crates/mesh-talk-core/src/node/profile_store.rs",
+        "crates/mesh-talk-core/src/node/profile.rs",
+        "crates/mesh-talk-core/src/node/privacy_routing.rs",
+        "crates/mesh-talk-core/src/node/peer_directory.rs",
+        "crates/mesh-talk-core/src/discovery/roster.rs",
+        "crates/mesh-talk-core/src/discovery/announce.rs",
+        "crates/mesh-talk-core/src/identity/account.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
       ]
     },
     {
@@ -90,6 +131,26 @@
         "Startup republish does not turn a stale local avatar into a newer signed update after a sibling changed it.",
         "In-flight local edits and owner changes are guarded against stale asynchronous loads.",
         "A local override for another contact is not removed by that contact's propagated avatar."
+      ],
+      "context_files": [
+        "frontend/src/lib/api/contacts.ts",
+        "src-tauri/src/avatars.rs",
+        "src-tauri/src/chat_commands/account.rs",
+        "frontend/src/store/ownership.ts",
+        "frontend/src/store/auth.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/lib/events.ts",
+        "src-tauri/src/events.rs",
+        "crates/mesh-talk-core/src/node/profile.rs",
+        "crates/mesh-talk-core/src/node/profile_io.rs",
+        "crates/mesh-talk-core/src/node/profile_store.rs",
+        "crates/mesh-talk-core/src/node/account_profile.rs",
+        "src-tauri/src/config_store.rs",
+        "crates/mesh-talk-core/src/storage/record_log.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "frontend/src/store/chatRuntimeEffects.ts",
+        "crates/mesh-talk-core/src/node/runtime.rs",
+        "crates/mesh-talk-core/src/node/node.rs"
       ]
     },
     {
@@ -104,6 +165,18 @@
         "A pending invitation is accepted automatically only when another accepted channel member is a verified sibling of the local account.",
         "An ordinary invitation remains pending for explicit consent.",
         "The recovery loop processes at most one invitation and one acceptance per pass."
+      ],
+      "context_files": [
+        "crates/mesh-talk-core/src/node/privacy_routing.rs",
+        "crates/mesh-talk-core/src/node/peer_directory.rs",
+        "crates/mesh-talk-core/src/discovery/roster.rs",
+        "crates/mesh-talk-core/src/discovery/announce.rs",
+        "crates/mesh-talk-core/src/identity/account.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "crates/mesh-talk-core/src/channel/model.rs",
+        "crates/mesh-talk-core/src/node/channel.rs",
+        "crates/mesh-talk-core/src/eventlog/event.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
       ]
     },
     {
@@ -122,7 +195,10 @@
       ],
       "context_files": [
         "crates/mesh-talk-core/src/node/account_sync/page.rs",
-        "crates/mesh-talk-core/src/node/account_sync_wire.rs"
+        "crates/mesh-talk-core/src/node/account_sync_wire.rs",
+        "crates/mesh-talk-core/src/node/received_log.rs",
+        "crates/mesh-talk-core/src/storage/record_log.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs"
       ]
     },
     {
@@ -137,6 +213,10 @@
         "A deterministic revision and device-ID order resolves concurrent edits, while a stale edit cannot replace a newer one.",
         "Clears are retained as versioned tombstones and survive reopen.",
         "A failed durable append does not update the in-memory current value."
+      ],
+      "context_files": [
+        "crates/mesh-talk-core/src/storage/record_log.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs"
       ]
     },
     {
@@ -155,7 +235,22 @@
       ],
       "context_files": [
         "crates/mesh-talk-core/src/node/account_sync_wire.rs",
-        "crates/mesh-talk-core/src/node/files.rs"
+        "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/node/media_store.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "crates/mesh-talk-core/src/identity/account.rs",
+        "crates/mesh-talk-core/src/identity/device.rs",
+        "crates/mesh-talk-core/src/eventlog/event.rs",
+        "crates/mesh-talk-core/src/channel/model.rs",
+        "crates/mesh-talk-core/src/node/account_suppression.rs",
+        "crates/mesh-talk-core/src/node/delivery_store.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/transport/channel.rs",
+        "crates/mesh-talk-core/src/transport/presence_auth.rs",
+        "crates/mesh-talk-core/src/transport/auth.rs",
+        "crates/mesh-talk-core/src/transport/handshake.rs",
+        "crates/mesh-talk-core/src/transport/mod.rs",
+        "crates/mesh-talk-core/src/transport/session.rs"
       ]
     },
     {
@@ -163,7 +258,12 @@
       "name": "linked appearance does not overwrite a fresh device with defaults",
       "subject_file": "frontend/src/lib/linkedAppearance.ts",
       "context_files": [
-        "frontend/src/lib/theme.ts"
+        "frontend/src/lib/theme.ts",
+        "frontend/src/lib/linkedPreferencePublisher.ts",
+        "frontend/src/features/chat/LinkDeviceDialog.tsx",
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/src/lib/linkedAppearance.test.ts",
+        "frontend/src/lib/linkedPreferencePublisher.test.ts"
       ],
       "min_score": 0.85,
       "scenario": "Review browser integration for linked theme and wallpaper preferences. Check initial pairing migration, remote application, per-device policy, owner lifecycle, and write feedback. Trace the supplied theme projection when checking whether a local value was explicitly saved.",
@@ -182,7 +282,14 @@
       "context_files": [
         "crates/mesh-talk-core/src/node/privacy_runtime.rs",
         "crates/mesh-talk-core/src/node/privacy_routing.rs",
-        "crates/mesh-talk-core/src/node/delivery_store.rs"
+        "crates/mesh-talk-core/src/node/delivery_store.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-core/src/node/peer_directory.rs",
+        "crates/mesh-talk-core/src/storage/record_log.rs",
+        "crates/mesh-talk-core/src/storage/encryption.rs",
+        "crates/mesh-talk-core/src/discovery/announce.rs",
+        "crates/mesh-talk-core/src/identity/account.rs",
+        "crates/mesh-talk-core/src/identity/device.rs"
       ],
       "scenario": "A certified sibling announcement reaches the live roster before the next host peer-snapshot query has persisted its account proof. The user immediately sends a personal text or sticker. Trace the self-target path, certificate persistence, destination account binding and WAL validation. Also consider persistence errors and owner invalidation while awaiting snapshot persistence.",
       "rubric": [

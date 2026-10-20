@@ -101,6 +101,7 @@
     }
   },
   "login": {
+    "invalidCredentials": "Invalid username or password",
     "tagline": "Serverless · end-to-end encrypted",
     "signIn": "Sign in",
     "register": "Register",

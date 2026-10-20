@@ -1,7 +1,9 @@
 export const REQUIRED_SCENARIOS = ["hide-cancel", "hide", "restart", "settings-search", "offline-restore", "hidden-inbound", "history-retained", "raw-peer-retained", "local-user-isolation", "narrow-keyboard-layout", "privacy-mode", "privacy-reply", "privacy-restart", "auth-register-signin", "auth-logout-wrong-password", "signed-peer-discovery", "direct-messages", "message-content", "group-message", "incoming-attachment", "history-process-restart", "settings-theme-persistence", "native-profile-layout", "native-settings-layout"];
+import { isDeepStrictEqual } from "node:util";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { nativeInvalidCredentialTexts } from "./native-capture.mjs";
 import { inspectPng } from "../evals/png-evidence.mjs";
 REQUIRED_SCENARIOS.push("receipt-offline-awaiting", "receipt-peer-restart-delivered", "receipt-source-restart-durable");
 
@@ -12,7 +14,7 @@ const REQUIRED_TRUE = {
   "offline-restore": ["realPeerStopped", "rawRosterExpired", "persistedIdentityRestored", "durableHistoryRetained"],
   "hidden-inbound": ["inboundStored", "rowAbsent"], "history-retained": ["originalEntriesUnchanged", "inboundAdded"],
   "raw-peer-retained": ["rawPeerPresent", "accountPresent"], "local-user-isolation": ["secondUserContactVisible", "secondUserHasNoHiddenEntry"],
-  "narrow-keyboard-layout": ["keyboardFocusReachedRestore"], "privacy-mode": ["cancelledBeforeCommit", "passivePeerRetained"],
+  "narrow-keyboard-layout": ["keyboardFocusReachedRestore"], "privacy-mode": ["cancelledBeforeCommit", "passivePeerRetained", "confirmationDismissed", "dialogSettled"],
   "privacy-reply": ["manualGrantAfterRevocation", "realCliReplyStored"], "privacy-restart": ["realCliReplyAfterRestart", "historyRetained"],
   "auth-register-signin": ["registered", "signedIn"], "auth-logout-wrong-password": ["loggedOut", "wrongPasswordRejected", "signinRestored"],
   "signed-peer-discovery": ["cliSawGui"], "direct-messages": ["uiToCliRendered", "uiToCliPersisted", "cliToUiRendered", "cliToUiPersisted"],
@@ -21,6 +23,15 @@ const REQUIRED_TRUE = {
   "settings-theme-persistence": ["visibleSelection", "persistedAfterRestart"],
   "native-profile-layout": ["profileDialogVisible", "profileUsernameVisible"], "native-settings-layout": ["dialogContained", "themePickerVisible"],
 };
+const invalidCredentialTexts = await nativeInvalidCredentialTexts();
+const evidenceFiles = name => [`${name}.json`, ...(name.startsWith("receipt-") ? [`${name}-0.png`, `${name}-1.png`] : []), `${name}.png`, ...(name === "auth-logout-wrong-password" ? [`${name}-error.png`] : []), `${name}.log`];
+
+const finiteRect = rect => [rect?.x,rect?.y,rect?.width,rect?.height].every(Number.isFinite) && rect.x >= 0 && rect.y >= 0 && rect.width > 0 && rect.height > 0;
+function validPaintCapture(capture, rect) {
+  const paint=capture?.paint, viewport=capture?.viewport;
+  return finiteRect(rect) && viewport && Number.isFinite(viewport.width) && viewport.width > 0 && Number.isFinite(viewport.height) && viewport.height > 0 && rect.x+rect.width <= viewport.width && rect.y+rect.height <= viewport.height && paint?.coordinateBasis === "webview-client" && paint.painted === true && paint.matchingFrames === 2 && /^[a-f0-9]{64}$/.test(paint.pixelDigest ?? "") && Number.isSafeInteger(paint.horizontalEdges) && paint.horizontalEdges >= 3 && Number.isSafeInteger(paint.verticalEdges) && paint.verticalEdges >= 3 && finiteRect(paint.bounds) && [paint.screenshot?.width,paint.screenshot?.height].every(value=>Number.isSafeInteger(value)&&value>0);
+}
+
 export function validateObservations(name, observations, platform) {
   const errors = [];
   const require = (condition, message) => { if (!condition) errors.push(`${name}: ${message}`); };
@@ -33,6 +44,10 @@ export function validateObservations(name, observations, platform) {
     const expected = name === "receipt-offline-awaiting" ? "awaiting" : "delivered";
     require(Array.isArray(observations?.statuses) && observations.statuses.length === 3 && observations.statuses.every(status => status === expected), "incorrect receipt state");
     require(observations?.cardsVerified === true, "missing native card projection");
+    const captures = observations?.captures;
+    const pngs = evidenceFiles(name).filter(file => file.endsWith(".png"));
+    require(Array.isArray(captures) && captures.length === 3 && new Set(captures.map(capture => capture?.label)).size === 3 && captures.every((capture, index) => capture?.filename === pngs[index] && typeof capture.label === "string" && capture.label.length > 0 && capture.visible === true && capture.status === expected && [capture.rect?.x, capture.rect?.y, capture.rect?.width, capture.rect?.height].every(Number.isFinite) && capture.rect.width > 0 && capture.rect.height > 0), "missing painted native card captures");
+    require(Array.isArray(captures) && captures.every(capture=>validPaintCapture(capture,capture?.badgeRect)), "missing receipt pixel paint proof");
     require(observations?.actualPeerExit === true, "peer did not actually exit");
     if (name !== "receipt-offline-awaiting") require(observations?.sameKeystorePeerRestart === true, "missing same-keystore restart");
     if (name === "receipt-source-restart-durable") {
@@ -44,7 +59,16 @@ export function validateObservations(name, observations, platform) {
       require(observations?.uiVerifiedAfterPeerRestart === true, "native cards checked after receiver rediscovery");
     }
   }
-  if (name === "incoming-attachment") require(observations?.bytesVerified === true, "missing exact decrypted bytes");
+  if (name === "auth-logout-wrong-password") {
+    const capture = observations?.errorCapture;
+    require(validPaintCapture(capture,capture?.rect), "missing credential-error pixel paint proof");
+    require(observations?.sessionReady?.backendReady === true && observations?.sessionReady?.shellReady === true && /^[0-9a-f-]{36}$/.test(observations?.sessionReady?.owner ?? ""), "missing restored ready session capture");
+    require(observations?.invalidCredentialsKey === "login.invalidCredentials" && capture?.filename === `${name}-error.png` && invalidCredentialTexts.includes(capture?.text) && capture?.visible === true && capture?.chatAbsent === true && [capture.rect?.x, capture.rect?.y, capture.rect?.width, capture.rect?.height].every(Number.isFinite) && capture.rect.x >= 0 && capture.rect.y >= 0 && capture.rect.width > 0 && capture.rect.height > 0, "missing visible localized credential-error capture");
+  }
+  if (name === "incoming-attachment") {
+    require(observations?.bytesVerified === true, "missing exact decrypted bytes");
+    require(observations?.completion?.backendReady === true && observations?.completion?.renderedComplete === true, "missing completed native attachment rendering");
+  }
   for (const key of REQUIRED_TRUE[name] ?? []) require(observations?.[key] === true, `missing successful observation ${key}`);
   const nonempty = value => typeof value === "string" && value.trim().length > 0;
   if (name === "auth-register-signin") require(nonempty(observations?.owner), "missing registered account");
@@ -88,11 +112,14 @@ export async function validateEvidence(report, root, expected = {}) {
       const observationErrors = validateObservations(name, evidence.observations, report.platform);
       if (observationErrors.length) throw new Error(observationErrors.join("; "));
       if (name.startsWith("receipt-")) receipts.set(name, evidence.observations);
-      const png = await readFile(join(root, `${name}.png`));
-      inspectPng(png);
-      for (const extension of ["json", "png", "log"]) {
-        const file = `${name}.${extension}`;
-        const digest = createHash("sha256").update(await readFile(join(root, file))).digest("hex");
+      for (const file of evidenceFiles(name)) {
+        const bytes = await readFile(join(root, file));
+        if (file.endsWith(".png")) {
+          const capture = name.startsWith("receipt-") ? evidence.observations.captures.find(capture=>capture.filename===file) : evidence.observations.errorCapture?.filename===file ? evidence.observations.errorCapture : undefined;
+          const decoded=inspectPng(bytes,capture ? {rect: name.startsWith("receipt-") ? capture.badgeRect : capture.rect,viewport:capture.viewport} : undefined);
+          if (capture && (!decoded.region.painted || !isDeepStrictEqual({...decoded.region,matchingFrames:2},capture.paint))) throw new Error(`PNG pixel paint proof mismatch: ${file}`);
+        }
+        const digest = createHash("sha256").update(bytes).digest("hex");
         if (digest !== report.scenarios?.[name]?.evidenceDigests?.[file]) throw new Error(`Evidence digest mismatch: ${file}`);
       }
     } catch (error) {
@@ -110,7 +137,7 @@ export function validateReport(report, expected = {}) {
   if (expected.platform !== undefined && expected.platform !== report?.platform) errors.push("Mismatched native platform");
   for (const name of REQUIRED_SCENARIOS) {
     const result = report?.scenarios?.[name];
-    const files = ["json", "png", "log"].map(extension => `${name}.${extension}`);
+    const files = evidenceFiles(name);
     if (result?.passed !== true || !Number.isFinite(result.elapsedMs) || result.elapsedMs < 0 || !Array.isArray(result.evidence) || result.evidence.length !== files.length || files.some((file, index) => result.evidence[index] !== file || !/^[a-f0-9]{64}$/.test(result.evidenceDigests?.[file] ?? ""))) errors.push(`Missing successful evidence: ${name}`);
   }
   return errors;

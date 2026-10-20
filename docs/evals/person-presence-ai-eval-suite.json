@@ -29,7 +29,8 @@
         "Rechecks current device/account association; gives unbound identities an explicit device-scoped key.",
         "Group summaries exclude pending members, deduplicate accounts, include accepted current self, and keep unresolved device membership separate.",
         "Reuses a shared roster snapshot, performs no per-member dial, propagates snapshot errors, and rejects replacement runtime publication."
-      ]
+      ],
+      "context_files": ["crates/mesh-talk-core/src/discovery/roster.rs"]
     },
     {
       "id": "MT-PRESENCE-003",
@@ -43,6 +44,13 @@
         "Prevents older successful or failed responses and obsolete owner/runtime polling sessions from overwriting newer accepted state.",
         "Bounds outstanding refreshes and retained history, clears state on stop/replacement, and preserves unchanged record references.",
         "Uses account member keys to recompute group online counts after expiry, not a group-level online boolean; offline labels retain available observation history."
+      ],
+      "context_files": [
+        "frontend/src/store/ownership.ts",
+        "frontend/src/store/auth.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/src/App.tsx"
       ]
     },
     {
@@ -57,6 +65,15 @@
         "v4 response is explicitly versioned and preserves origin expiry with bounded pagination and valid identity proofs.",
         "Legacy directory response layouts remain compatible but omit eligible freshness metadata; response assembly rejects mixing legacy and freshness pages.",
         "Valid expiry becomes a monotonic client deadline and unusable freshness cannot establish online status; gateway provenance remains separate from ordinary device presence."
+      ],
+      "context_files": [
+        "crates/mesh-talk-core/src/node/bridge_client.rs",
+        "crates/mesh-talk-core/src/discovery/roster.rs",
+        "crates/mesh-talk-core/src/discovery/announce.rs",
+        "crates/mesh-talk-core/src/identity/account.rs",
+        "crates/mesh-talk-core/src/node/postbox.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs"
       ]
     }
   ]

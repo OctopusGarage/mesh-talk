@@ -107,6 +107,30 @@ class RetentionTests(unittest.TestCase):
                 self.skipTest(f"Windows symlink privilege unavailable: {error}")
             raise
 
+    def test_utf8_project_metadata_under_windows_gbk_locale(self):
+        # Python on Chinese Windows defaults text files to GBK, while Cargo
+        # manifests/configuration are UTF-8 even when comments contain smart quotes.
+        for name in ("Cargo.toml", "src-tauri/Cargo.toml"):
+            path = self.root / name
+            content = path.read_text(encoding="utf-8")
+            path.write_text(content + "# “本地构建”\n", encoding="utf-8")
+        config = self.root / ".cargo/config.toml"
+        config.parent.mkdir()
+        config.write_text("# “默认构建目录”\n", encoding="utf-8")
+        original_open = Path.open
+
+        def windows_gbk_open(
+            path, mode="r", buffering=-1, encoding=None, errors=None, newline=None
+        ):
+            if "b" not in mode and (encoding is None or encoding == "locale"):
+                encoding = "gbk"
+            return original_open(path, mode, buffering, encoding, errors, newline)
+
+        with patch.object(Path, "open", windows_gbk_open):
+            self.assertTrue(RETENTION.project(self.root))
+            with patch.dict(os.environ, self.env, clear=True):
+                self.assertFalse(RETENTION.custom_cargo_output(self.root, []))
+
     def test_budget_discovers_worktrees_and_preserves_binaries(self):
         other = self.base / "other"
         self.git("worktree", "add", "-qb", "other", str(other))

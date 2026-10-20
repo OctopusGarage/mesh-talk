@@ -1,7 +1,7 @@
 // Runtime assertions against the owned native webview, real CLI, and read-only
 // production observations. This module does not replace any application IPC.
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export function writeChildCommand(child, text) {
@@ -19,6 +19,17 @@ export function writeChildCommand(child, text) {
       });
     } catch (error) { reject(error); }
   });
+}
+
+/** Keep attachment output inside the disposable profile, independent of OS home folders. */
+export async function prepareNativeDownloadFixture({ fixture, owner, invoke }) {
+  assert.ok(owner, "native download setup requires the signed-in fixture owner");
+  const directory = join(fixture, "downloads");
+  await mkdir(directory, { recursive: true });
+  const settings = await invoke("get_app_settings", { owner });
+  await invoke("set_app_settings", { owner, settings: { ...settings, download_dir: directory } });
+  assert.equal((await invoke("get_app_settings", { owner })).download_dir, directory, "production settings retain the owned download directory");
+  return directory;
 }
 
 export function nativeMessageContents(nonce) {
@@ -51,9 +62,26 @@ public static class NativeKeyboard {
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window, System.Text.StringBuilder name, int length);
   [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr window, int command);
-  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
+  [DllImport("user32.dll", SetLastError=true)] static extern bool SetForegroundWindow(IntPtr window);
+  [DllImport("kernel32.dll")] static extern void SetLastError(uint error);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll", SetLastError=true)] static extern bool GetWindowRect(IntPtr window, out RECT rect);
   [DllImport("user32.dll", SetLastError=true)] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
   [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+  static string DescribeWindow(IntPtr window) {
+    uint process;
+    GetWindowThreadProcessId(window, out process);
+    var name = new System.Text.StringBuilder(64);
+    GetClassName(window, name, name.Capacity);
+    RECT rect;
+    bool hasRect = GetWindowRect(window, out rect);
+    int? rectError = hasRect ? (int?)null : Marshal.GetLastWin32Error();
+    string session;
+    try { session = System.Diagnostics.Process.GetProcessById((int)process).SessionId.ToString(); }
+    catch (Exception) { session = "unavailable"; }
+    return "pid=" + process + ",class=" + name + ",session=" + session + ",rect=" +
+      (hasRect ? rect.Left + "," + rect.Top + "," + rect.Right + "," + rect.Bottom : "unavailable(error=" + rectError + ")");
+  }
   public static void FocusOwned(uint ownedPid) {
     uint actualPid;
     if (GetWindowThreadProcessId(GetForegroundWindow(), out actualPid) != 0 && actualPid == ownedPid) return;
@@ -66,14 +94,18 @@ public static class NativeKeyboard {
       if (process == ownedPid && IsWindowVisible(window) && name.ToString() == "Tauri Window") { target = window; return false; }
       return true;
     }, IntPtr.Zero);
-    if (target == IntPtr.Zero) throw new InvalidOperationException("Owned application window not found");
+    if (target == IntPtr.Zero) throw new InvalidOperationException("Owned application window not found; ownedPid=" + ownedPid + "; foreground={" + DescribeWindow(GetForegroundWindow()) + "}");
     ShowWindowAsync(target, 9);
-    SetForegroundWindow(target);
+    SetLastError(0);
+    bool activated = SetForegroundWindow(target);
+    int? activationError = activated ? (int?)null : Marshal.GetLastWin32Error();
     for (int attempt = 0; attempt < 20; attempt++) {
       if (GetWindowThreadProcessId(GetForegroundWindow(), out actualPid) != 0 && actualPid == ownedPid) return;
       Thread.Sleep(50);
     }
-    throw new InvalidOperationException("Owned application did not become foreground");
+    throw new InvalidOperationException("Owned application did not become foreground; ownedPid=" + ownedPid +
+      "; foreground={" + DescribeWindow(GetForegroundWindow()) + "}; ownedTarget={" + DescribeWindow(target) +
+      "}; SetForegroundWindow=" + activated + (activationError.HasValue ? "; SetForegroundWindowError=" + activationError.Value : ""));
   }
   public static void SendOwned(uint ownedPid, ushort vk) {
     if (vk != 9 && vk != 13 && vk != 27 && vk != 33) throw new InvalidOperationException("Unsupported control key");
@@ -121,7 +153,7 @@ export async function receiptColdRestartCheckpoint(c, state) {
   return { owner: c.owner, account: c.account, ids: [...state.ids], statuses, offlineBackendDurabilityVerified: true, peerOfflineDuringSourceRestart: true };
 }
 
-async function receiptPhase(c, state, name, expected, historical = false, cold = undefined) {
+export async function receiptPhase(c, state, name, expected, historical = false, cold = undefined) {
   assert.equal(c.owner, state.owner, "receipt owner unchanged");
   if (historical) {
     assert.equal(cold?.offlineBackendDurabilityVerified, true, "cold checkpoint precedes receiver restart/UI navigation");
@@ -137,12 +169,14 @@ async function receiptPhase(c, state, name, expected, historical = false, cold =
     const values = orderedReceiptStatuses(state.ids, await c.observe("owner_delivery_statuses", { owner: c.owner, account: c.account, ids: state.ids }));
     return values.every(value => value === expected) && values;
   });
+  const captures = [];
   for (const [index, label] of [...state.labels].reverse().entries()) {
     if (historical && index > 0) await revealHistoricalNativeMessage(c, label);
     else await revealLatestNativeMessage(c, label);
     await c.until(`native ${label} card is ${expected}`, () => c.execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e&&e.querySelectorAll('[data-delivery]').length===1&&e.querySelector('[data-delivery]')?.getAttribute('data-delivery')===arguments[1];", [label, expected]));
+    captures.push(await c.captureReceiptCard(index === 2 ? name : `${name}-${index}`, { label, status: expected }));
   }
-  await c.passed(name, { owner: c.owner, account: c.account, ids: state.ids, originalIds: state.ids, statuses, cardsVerified: true, actualPeerExit: true, sameKeystorePeerRestart: expected === "delivered", actualProcessRestart: historical, peerOfflineDuringSourceRestart: historical && cold.peerOfflineDuringSourceRestart, offlineBackendDurabilityVerified: historical && cold.offlineBackendDurabilityVerified, coldIds: cold?.ids, coldStatuses: cold?.statuses, uiVerifiedAfterPeerRestart: historical, acceptancePath: "text: native composer; sticker/file: real owner IPC plus native history rendering", fileReceiptMeaning: "target durable custody, not user download/read" });
+  await c.passed(name, { captures, owner: c.owner, account: c.account, ids: state.ids, originalIds: state.ids, statuses, cardsVerified: true, actualPeerExit: true, sameKeystorePeerRestart: expected === "delivered", actualProcessRestart: historical, peerOfflineDuringSourceRestart: historical && cold.peerOfflineDuringSourceRestart, offlineBackendDurabilityVerified: historical && cold.offlineBackendDurabilityVerified, coldIds: cold?.ids, coldStatuses: cold?.statuses, uiVerifiedAfterPeerRestart: historical, acceptancePath: "text: native composer; sticker/file: real owner IPC plus native history rendering", fileReceiptMeaning: "target durable custody, not user download/read" }, captures);
 }
 
 export async function receiptScenarios(c) {
@@ -259,9 +293,41 @@ export function nativeSettingsTargets(defaultRect, defaultViewport, minimumViewp
   ];
 }
 
+export async function settledSignedInSession(c, owner) {
+  return c.until("signed-in backend and rendered shell ready", async () => {
+    const identity = await c.observe("owner_node_identity", { owner });
+    if (identity.owner !== owner) return false;
+    const shellReady = await c.execute("return !!document.querySelector('[data-testid=chat-shell] main.conversation-canvas')&&!document.querySelector('[data-testid=chat-shell] main .animate-spin');");
+    return shellReady && { owner, backendReady: true, shellReady: true };
+  });
+}
+
+export async function settledIncomingAttachment(c, fileConv, fileName, backendReady = false) {
+  return c.until("incoming attachment complete in backend and rendered card", async () => {
+    const status = (await c.observe("file_statuses", { fileConvs: [fileConv] })).find(row => row.file_conv === fileConv);
+    backendReady ||= status?.ready === true;
+    if (!backendReady) return false;
+    const rendered = await c.execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),action=e?.querySelector('button[title][aria-label]');return !!e&&!e.querySelector('[data-testid=receive-file],[role=progressbar]')&&!!action&&!action.disabled&&!action.hasAttribute('data-download-error')&&action.getBoundingClientRect().width>0;", [fileName]);
+    return rendered && { backendReady: true, renderedComplete: true };
+  });
+}
+
+export async function settledPrivacyMode(c) {
+  await c.until("invisible confirmation fully dismissed", () => c.execute("return !document.querySelector('[data-testid=invisible-confirm]');"));
+  await c.settledDialog("settings-dialog");
+  return { confirmationDismissed: true, dialogSettled: true };
+}
+
+export async function wrongPasswordCheckpoint(c) {
+  const name = "auth-logout-wrong-password";
+  const errorCapture = await c.captureAuthError(`${name}-error`, { kind: "auth-error", texts: c.invalidCredentialTexts });
+  const sessionReady = await c.login(c.userName);
+  await c.passed(name, { sessionReady, loggedOut: true, wrongPasswordRejected: true, signinRestored: true, invalidCredentialsKey: "login.invalidCredentials", errorCapture }, [errorCapture]);
+}
+
 export async function coreScenarios(c) {
   const { execute, observe, until, passed, fill, click, peer, account, userId,
-    fixture, history, row, privacySettings, key, signOut, login, userName } = c;
+    fixture, history, row, privacySettings, key, signOut, userName } = c;
   const rendered = text => until("message rendered in real native webview", () => execute(
     "return Array.from(document.querySelectorAll('[data-testid=message-bubble]')).some(e=>e.textContent.includes(arguments[0]));", [text]));
   await passed("auth-register-signin", { registered: true, signedIn: true, owner: c.owner });
@@ -269,9 +335,7 @@ export async function coreScenarios(c) {
   await fill("login-username", userName);
   await fill("login-password", "incorrect-eval-password");
   await click("login-submit");
-  await until("wrong password rejected visibly", () => execute("return !!document.querySelector('[data-testid=login-form] .text-destructive')?.textContent && !document.querySelector('[data-testid=chat-shell]');"));
-  await login(userName);
-  await passed("auth-logout-wrong-password", { loggedOut: true, wrongPasswordRejected: true, signinRestored: true });
+  await wrongPasswordCheckpoint(c);
   const defaultWindow = await c.command("GET", "/window/rect");
   const defaultLayout = await profileLayout(c);
   await c.command("POST", "/window/rect", nativeMinimumWindowRequest(defaultWindow, defaultLayout.viewport));
@@ -328,6 +392,7 @@ export async function coreScenarios(c) {
   await rendered(groupText);
   await passed("group-message", { channelId: group.channel_id, rendered: true, persisted: true });
   await click(row());
+  await prepareNativeDownloadFixture(c);
   const fileName = `native-attachment-${c.nonce}.txt`;
   const bytes = Buffer.from(`fixture attachment 你好 ${c.nonce}\n`);
   const filePath = join(fixture, fileName);
@@ -343,11 +408,14 @@ export async function coreScenarios(c) {
   const receiveButton = await c.command("POST", "/element", { using: "css selector", value: '[data-testid="message-bubble"] [data-testid="receive-file"]' });
   await c.command("POST", `/element/${receiveButton["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
   await until("incoming attachment decrypted bytes available", async () => {
+    const status = (await observe("file_statuses", { fileConvs: [attachment.file.file_conv] })).find(row => row.file_conv === attachment.file.file_conv);
+    if (!status?.ready) return false;
     const received = await c.readFileBytes(attachment.file.file_conv);
     assert.deepEqual(received, Array.from(bytes));
     return true;
   });
-  await passed("incoming-attachment", { fileName, manifestPersisted: true, genericFileRendered: true, recipientApproved: true, bytesVerified: true, downloadVerified: false, limitation: "Real read_file bytes verified after recipient approval; OS save picker is outside embedded W3C DOM automation and was not invoked." });
+  const completion = await settledIncomingAttachment(c, attachment.file.file_conv, fileName, true);
+  await passed("incoming-attachment", { completion, fileName, manifestPersisted: true, genericFileRendered: true, recipientApproved: true, bytesVerified: true, downloadVerified: false, limitation: "Real read_file bytes verified after recipient approval; OS save picker is outside embedded W3C DOM automation and was not invoked." });
   await privacySettings();
   await click("settings-nav-appearance");
   await c.element("theme-picker");

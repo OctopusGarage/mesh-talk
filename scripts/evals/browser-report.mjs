@@ -10,6 +10,7 @@ import { inspectTrace } from "./trace-evidence.mjs";
 const EVIDENCE = ["portable-browser-evidence", "portable-browser-screenshot", "trace"];
 export function requiredBrowserPaths(tier) {
   const paths = [
+    ["portable-core.spec.ts", "presence waits for node readiness without showing a startup failure"],
     ["portable-core.spec.ts", "chat startup does not import each preset image as a module"],
     ["portable-core.spec.ts", "portable authentication rejects the wrong password"],
     ["portable-core.spec.ts", "portable registration sign in and sign out"],

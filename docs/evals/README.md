@@ -41,6 +41,10 @@ runner includes each supporting source in the model prompt and records its path
 in the report. This lets the model assess delegated production validation without
 requiring duplicated guards in an orchestration module. Unprovided dependencies
 remain unverified; minimum passing scores and security requirements still apply.
+When ownership moves behind a helper, update the affected case contexts with the
+implementation that proves its rubric guarantees. A facade or re-export alone
+does not establish the delegated behavior; report missing context separately
+from a confirmed product defect.
 The linked-device suite version 2 includes the page assembler/importer and wire
 helpers, requires accepted requester membership, and distinguishes MTAHS2 file
 metadata selection from attachment bytes while preserving MTAHS1 behavior.

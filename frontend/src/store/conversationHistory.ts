@@ -159,41 +159,45 @@ export async function reloadConversation(
         convKey(get().active!) !== key)
     )
       return false;
-    set((s) => ({
-      ...snapshotPatch(s, key, items, {
+    set((s) => {
+      const snapshot = snapshotPatch(s, key, items, {
         kind: "presentation",
         discoverChanges,
         limit: s.historyLimits[key] ?? HISTORY_LIMIT,
-      }),
-      messages: {
-        ...s.messages,
-        [key]: reconcileMessages(
-          items.map((h) => ({
-            ...fromHistoryItem(h),
-            receivedAt: s.ledger[key]?.[h.id ?? ""]?.receivedAt,
-            arrivalKind: s.ledger[key]?.[h.id ?? ""]?.arrivalKind,
-          })),
-          s.messages[key] ?? [],
-          Object.values(s.intents).filter(
-            (i) => convKey(i.conversation) === key,
+      });
+      const ledger = snapshot.ledger ?? s.ledger;
+      return {
+        ...snapshot,
+        messages: {
+          ...s.messages,
+          [key]: reconcileMessages(
+            items.map((h) => ({
+              ...fromHistoryItem(h),
+              receivedAt: ledger[key]?.[h.id ?? ""]?.receivedAt,
+              arrivalKind: ledger[key]?.[h.id ?? ""]?.arrivalKind,
+            })),
+            s.messages[key] ?? [],
+            Object.values(s.intents).filter(
+              (i) => convKey(i.conversation) === key,
+            ),
+            s.deleted[key] ?? [],
           ),
-          s.deleted[key] ?? [],
+        },
+        intents: Object.fromEntries(
+          Object.entries(s.intents).filter(
+            ([, intent]) =>
+              convKey(intent.conversation) !== key ||
+              !intent.message.id ||
+              (!intent.acceptanceHistoryOnly &&
+                !items.some((h) => h.id === intent.message.id)),
+          ),
         ),
-      },
-      intents: Object.fromEntries(
-        Object.entries(s.intents).filter(
-          ([, intent]) =>
-            convKey(intent.conversation) !== key ||
-            !intent.message.id ||
-            (!intent.acceptanceHistoryOnly &&
-              !items.some((h) => h.id === intent.message.id)),
-        ),
-      ),
-      reactions: { ...s.reactions, [key]: reacts },
-      ...(s.loadingRequest === loadingRequest
-        ? { loading: false, historyError: null }
-        : {}),
-    }));
+        reactions: { ...s.reactions, [key]: reacts },
+        ...(s.loadingRequest === loadingRequest
+          ? { loading: false, historyError: null }
+          : {}),
+      };
+    });
     if (current() && get().active && convKey(get().active!) === key)
       await get().refreshStatuses();
     return current();

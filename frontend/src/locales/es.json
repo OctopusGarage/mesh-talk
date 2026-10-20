@@ -101,6 +101,7 @@
     "tabCities": "Ciudades pintadas"
   },
   "login": {
+    "invalidCredentials": "Nombre de usuario o contraseña incorrectos",
     "tagline": "Sin servidor · cifrado de extremo a extremo",
     "signIn": "Iniciar sesión",
     "register": "Registrarse",

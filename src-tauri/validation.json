@@ -297,6 +297,17 @@
         "src-tauri/tauri.conf.json"
       ],
       "native": ["host"]
+    },
+    {
+      "id": "native-acceptance-harness",
+      "paths": [
+        "scripts/diagnostics/hidden-contacts.mjs",
+        "scripts/diagnostics/hidden-contacts-report.mjs",
+        "scripts/diagnostics/native-core-scenarios.mjs",
+        "scripts/diagnostics/native-capture.mjs",
+        "scripts/evals/png-evidence.mjs"
+      ],
+      "native": ["darwin", "linux", "win32"]
     }
   ]
 }

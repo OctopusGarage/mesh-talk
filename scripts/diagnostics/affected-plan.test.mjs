@@ -275,3 +275,35 @@ test("capability contracts reject misspellings, missing obligations and nonlocal
     { ...valid, invariants: [{ name: "Session", reference: "docs/rules.md", typo: true }] },
   ]) assert.throws(() => buildAffectedPlan([], { contracts: [{ ...contracts[0], consumers: [], capability }] }), /capability/i);
 });
+
+test("acceptance harness changes select their focused integrity checks without claiming future files", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const roots = ["scripts/validation", "frontend", "crates/mesh-talk-core", "src-tauri", "crates/mesh-talk-integrations", "crates/mesh-talk-mcp"];
+  const registered = (await Promise.all(roots.map(async root => JSON.parse(await readFile(new URL(`../../${root}/validation.json`, import.meta.url), "utf8")).contracts))).flat();
+  const cases = [
+    ["frontend/e2e/packs.spec.ts", "frontend", "src/lib/pack.test.ts"],
+    ["frontend/e2e/ui-audit-composer.spec.ts", "frontend", "src/features/chat/ComposerScreenshot.test.ts"],
+    ["docs/evals/group-reception-ai-eval-suite.json", "node", "scripts/test-ai-eval.mjs"],
+    ["docs/evals/linked-device-sync-ai-eval-suite.json", "node", "scripts/test-ai-eval.mjs"],
+    ["docs/evals/validation-velocity-ai-eval-suite.json", "node", "scripts/test-ai-eval.mjs"],
+    ["docs/evals/README.md", "node", "scripts/test-ai-eval.mjs"],
+    ["docs/evals/prompts/agent-contract-evaluator.md", "node", "scripts/test-ai-eval.mjs"],
+    ["scripts/test-ai-eval.mjs", "node", "scripts/test-ai-eval.mjs"],
+    ["scripts/diagnostics/hidden-contacts.mjs", "node", "scripts/diagnostics/native-ipc-boundary.test.mjs"],
+    ["scripts/diagnostics/hidden-contacts-report.mjs", "node", "scripts/diagnostics/hidden-contacts-report.test.mjs"],
+    ["scripts/diagnostics/hidden-contacts-report.test.mjs", "node", "scripts/diagnostics/hidden-contacts-report.test.mjs"],
+    ["scripts/diagnostics/native-multicast-probe.mjs", "node", "scripts/diagnostics/native-core-scenarios.test.mjs"],
+    ["scripts/diagnostics/native-capture.mjs", "node", "scripts/diagnostics/native-capture.test.mjs"],
+    ["scripts/diagnostics/native-capture.test.mjs", "node", "scripts/diagnostics/native-capture.test.mjs"],
+    ["scripts/diagnostics/native-core-scenarios.mjs", "node", "scripts/diagnostics/native-core-scenarios.test.mjs"],
+    ["scripts/diagnostics/native-core-scenarios.test.mjs", "node", "scripts/diagnostics/native-core-scenarios.test.mjs"],
+  ];
+  for (const [file, kind, selected] of cases) {
+    const plan = buildAffectedPlan([file], { contracts: registered });
+    assert.deepEqual(plan.blockers, [], file);
+    assert.ok(plan[kind].includes(selected), `${file} must select ${selected}`);
+  }
+  for (const file of ["frontend/e2e/future.spec.ts", "scripts/diagnostics/future-native.mjs", "docs/evals/future-suite.json"]) {
+    assert.match(buildAffectedPlan([file], { contracts: registered }).blockers.join(" "), /unmapped/i, file);
+  }
+});

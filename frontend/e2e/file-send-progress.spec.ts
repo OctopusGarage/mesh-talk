@@ -76,7 +76,8 @@ for (const attachment of [
     });
     await expect(
       bubble.getByRole("progressbar", { name: /Confirming receipt/ }),
-    ).toHaveAttribute("aria-valuenow", "99");
+    ).toHaveAttribute("aria-valuenow", "100");
+    await expect(bubble.getByText("100%", { exact: true })).toBeVisible();
     await page.evaluate(() => {
       const state = (window as unknown as { __upload: { delivered: boolean } })
         .__upload;
@@ -154,6 +155,15 @@ test("concurrent sends keep progress with their own file bubbles", async ({
     ).__sendProgress.requests.map((r) => r.key),
   );
   expect(keys[0]).not.toBe(keys[1]);
+  for (const name of ["alpha.bin", "beta.bin"]) {
+    const bubble = page.getByTestId("message-bubble").filter({ hasText: name });
+    await expect(bubble.getByRole("progressbar")).toBeVisible();
+    await expect(bubble.getByRole("progressbar")).not.toHaveAttribute(
+      "aria-valuenow",
+      /.+/,
+    );
+    await expect(bubble.getByText(/\d+%/)).toHaveCount(0);
+  }
   await page.evaluate(([first, second]) => {
     const state = (
       window as unknown as {

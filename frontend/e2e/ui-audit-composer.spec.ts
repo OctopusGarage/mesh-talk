@@ -11,10 +11,9 @@ import {
 
 test.use({ viewport: { width: 820, height: 620 } });
 
-test("composer controls and popovers stay usable at narrow width", async ({
+test("composer toolbar targets have visible keyboard focus at narrow width", async ({
   page,
 }) => {
-  await seedMarketPacks(page, ["google-noto"]);
   await enterChat(page);
   await openBobDm(page);
   await page.getByTestId("composer-input").fill("composer audit");
@@ -30,7 +29,16 @@ test("composer controls and popovers stay usable at narrow width", async ({
     await expectMinTargetSize(page.getByTestId(id), 36, id);
     await expectVisibleFocus(page, page.getByTestId(id));
   }
+});
 
+test("expression popovers fit and support keyboard navigation at narrow width", async ({
+  page,
+}) => {
+  await seedMarketPacks(page, ["google-noto"]);
+  await enterChat(page);
+  await openBobDm(page);
+  await page.getByTestId("composer-input").fill("composer audit");
+  await page.getByTestId("composer-more-tools").click();
   await page.getByTestId("composer-emoji").click();
   await expect(page.getByTestId("composer-emoji")).toHaveAttribute(
     "aria-expanded",
@@ -65,7 +73,15 @@ test("composer controls and popovers stay usable at narrow width", async ({
     page.getByTestId("sticker-option-pack:google-noto:1f602"),
   );
   await page.keyboard.press("Escape");
+});
 
+test("screenshot menu fits and has visible keyboard focus at narrow width", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await page.getByTestId("composer-input").fill("composer audit");
+  await page.getByTestId("composer-more-tools").click();
   await page.getByTestId("composer-screenshot").click();
   await expect(page.getByTestId("screenshot-menu")).toBeVisible();
   await expectElementsWithin(page, '[data-testid="screenshot-menu"]', "body");

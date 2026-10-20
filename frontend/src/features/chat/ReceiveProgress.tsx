@@ -26,23 +26,25 @@ export function ReceiveProgress({
     );
   const total = status?.total ?? 0;
   const done = status?.done ?? 0;
-  const percent =
-    total > 0 ? Math.min(100, Math.floor((done / total) * 100)) : 0;
+  const hasProgress =
+    Number.isFinite(done) && Number.isFinite(total) && done >= 0 && total > 0;
+  const ratio = hasProgress ? Math.min(1, done / total) : 0;
+  const percent = hasProgress ? Math.floor(ratio * 100) : undefined;
   return (
     <div
       className="mt-2"
       role="status"
       aria-label={
-        total > 0
+        hasProgress
           ? t("transfer.receivingProgress", { percent })
           : t("transfer.waiting")
       }
     >
       <div className="mb-1 flex items-center justify-between gap-3 text-[11px] opacity-75">
         <span>
-          {total > 0 ? t("transfer.receiving") : t("transfer.waiting")}
+          {hasProgress ? t("transfer.receiving") : t("transfer.waiting")}
         </span>
-        {total > 0 && (
+        {hasProgress && (
           <span className="font-mono tabular-nums">{percent}%</span>
         )}
       </div>
@@ -51,12 +53,12 @@ export function ReceiveProgress({
         aria-label={t("transfer.receiving")}
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={total > 0 ? percent : undefined}
+        aria-valuenow={percent}
         className="h-1 w-full overflow-hidden rounded-full bg-current/15"
       >
         <div
           className="h-full origin-left bg-current transition-transform duration-300"
-          style={{ transform: `scaleX(${total > 0 ? done / total : 0})` }}
+          style={{ transform: `scaleX(${ratio})` }}
         />
       </div>
     </div>

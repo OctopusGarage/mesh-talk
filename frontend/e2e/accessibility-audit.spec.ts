@@ -14,6 +14,30 @@ import {
 test.use({ reducedMotion: "reduce" });
 
 async function expectNoWcagViolations(page: Page) {
+  // Reduced motion retains brief color feedback. Measure the settled surface,
+  // including inherited-color transitions started as the login form mounts.
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const transitioning = () =>
+          document.getAnimations().some((animation) => {
+            if (!(animation instanceof CSSTransition)) return false;
+            return (
+              /^(color|background-color|border-(top|right|bottom|left)-color|opacity)$/.test(
+                animation.transitionProperty,
+              ) &&
+              Number.isFinite(animation.effect?.getComputedTiming().endTime) &&
+              (animation.playState === "running" || animation.pending)
+            );
+          });
+        if (transitioning()) return false;
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        );
+        return !transitioning();
+      }),
+    )
+    .toBe(true);
   const results = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();

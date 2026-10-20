@@ -9,6 +9,12 @@ test("Windows native helper only emits bounded owned-PID control keys with ABI-s
     assert.ok(script.includes(`[NativeKeyboard]::SendOwned(12345, ${vk})`));
     for (const text of ["GetForegroundWindow", "GetWindowThreadProcessId", "actualPid != ownedPid", "Marshal.SizeOf(typeof(INPUT))", "SendInput(2", "inserted != 2", "GetLastWin32Error", "LayoutKind.Explicit", "MOUSEINPUT", "KEYEVENTF_KEYUP", "EnumWindows", "IsWindowVisible", "SetForegroundWindow", "FocusOwned", "Mark 'start'", "Mark 'activate'", "Mark 'compiled'", "keyboard:owned", "Mark 'sent'", "Out.Flush"]) assert.ok(script.includes(text), text);
     assert.ok(!script.includes("SendWait") && !script.includes("dispatchEvent") && !script.includes("WScript.Shell"));
+    assert.match(script, /static string DescribeWindow\(IntPtr window\)/);
+    assert.match(script, /GetWindowRect\(window, out rect\)/);
+    assert.match(script, /GetProcessById\(\(int\)process\).SessionId/);
+    assert.match(script, /SetLastError\(0\);\s*bool activated = SetForegroundWindow\(target\);\s*int\? activationError = activated \? \(int\?\)null : Marshal.GetLastWin32Error\(\);/);
+    assert.match(script, /Owned application did not become foreground[\s\S]*DescribeWindow\(GetForegroundWindow\(\)\)[\s\S]*DescribeWindow\(target\)[\s\S]*activationError.HasValue/);
+    assert.ok(!script.includes("GetWindowText"), "foreground diagnostics never collect window titles");
   }
   for (const pid of [0, -1, NaN, 1.5, "123;evil"]) assert.throws(() => nativeWindowsKeyboardScript(pid, "\uE00C"));
   for (const key of ["a", "{ESC}", "\uE008"]) assert.throws(() => nativeWindowsKeyboardScript(12345, key));
@@ -178,4 +184,93 @@ test("destroyed stdin fails immediately", async () => {
   const child = { stdin: new Writable({ write(_bytes, _encoding, done) { done(); } }) };
   child.stdin.destroy();
   await assert.rejects(writeChildCommand(child, "/quit\n"), /not writable/);
+});
+
+test("each native receipt card is captured while its own expected state is visible", async () => {
+  const { receiptPhase } = await import("./native-core-scenarios.mjs");
+  const ids = ["a", "b", "c"], labels = ["text", "sticker", "file"];
+  let visible, recorded;
+  const c = {
+    owner: "owner", account: "account",
+    observe: async command => command === "owner_account_history" ? ids.map(id => ({ id, from_me: true })) : ids.map(id => ({ id, status: "awaiting" })),
+    until: async (_description, poll) => { const result = await poll(); assert.ok(result); return result; },
+    execute: async (_script, args) => { visible = args[0]; return args.length === 1 ? { visible: true } : true; },
+    command: async () => { throw new Error("already visible"); },
+    captureReceiptCard: async (name, expected) => { assert.equal(expected.label, visible); assert.equal(expected.status, "awaiting"); return { filename: `${name}.png`, label: visible, status: expected.status, visible: true }; },
+    passed: async (_name, observations, captures) => { recorded = { observations, captures }; },
+  };
+  await receiptPhase(c, { owner: "owner", ids, labels }, "receipt-offline-awaiting", "awaiting");
+  assert.deepEqual(recorded.captures.map(capture => capture.label), [...labels].reverse());
+  assert.deepEqual(recorded.observations.captures, recorded.captures);
+});
+
+test("localized wrong-password error is captured before successful sign-in recovery", async () => {
+  const { wrongPasswordCheckpoint } = await import("./native-core-scenarios.mjs");
+  const steps = [], errorCapture = { filename: "auth-logout-wrong-password-error.png", text: "用户名或密码错误", visible: true };
+  let observed;
+  await wrongPasswordCheckpoint({
+    userName: "user", invalidCredentialTexts: ["用户名或密码错误"],
+    captureAuthError: async (name, expected) => { steps.push("error capture"); assert.equal(name, "auth-logout-wrong-password-error"); assert.deepEqual(expected.texts, ["用户名或密码错误"]); return errorCapture; },
+    login: async name => { steps.push("recovery"); assert.equal(name, "user"); return {owner:"a".repeat(36),backendReady:true,shellReady:true}; },
+    passed: async (name, observations, captures) => { steps.push("passed"); assert.equal(name, "auth-logout-wrong-password"); observed = observations; assert.deepEqual(captures, [errorCapture]); },
+  });
+  assert.deepEqual(steps, ["error capture", "recovery", "passed"]);
+  assert.equal(observed.invalidCredentialsKey, "login.invalidCredentials");
+  assert.equal(observed.errorCapture.text, "用户名或密码错误");
+});
+
+test("attachment completion waits for backend readiness and completed rendered action", async () => {
+  const { settledIncomingAttachment } = await import("./native-core-scenarios.mjs");
+  assert.equal(typeof settledIncomingAttachment,"function");
+  let ready=false,rendered=false,polls=0;
+  const c={observe:async()=>[{file_conv:"conv",ready}],execute:async()=>rendered,until:async(_label,poll)=>{for(let i=0;i<3;i++){polls++; if(i===1)ready=true;if(i===2)rendered=true;const value=await poll();if(value)return value;}throw Error("not ready");}};
+  const observed=await settledIncomingAttachment(c,"conv","file.txt");
+  assert.equal(observed.backendReady,true);assert.equal(observed.renderedComplete,true);assert.equal(polls,3);
+});
+
+test("session readiness waits for matching backend owner and rendered ready shell", async () => {
+  const { settledSignedInSession } = await import("./native-core-scenarios.mjs");
+  let polls=0;
+  const c={observe:async()=>({owner:polls<2?'stale':'owner'}),execute:async()=>polls>2,until:async(_label,poll)=>{for(let i=0;i<3;i++){polls++;const result=await poll();if(result)return result;}throw Error('not ready');}};
+  assert.deepEqual(await settledSignedInSession(c,'owner'),{owner:'owner',backendReady:true,shellReady:true});
+  assert.equal(polls,3);
+  await assert.rejects(settledSignedInSession({...c,observe:async()=>({owner:'stale'})},'owner'),/not ready/);
+});
+test("privacy evidence waits for confirmation removal before settled settings", async()=>{
+  const { settledPrivacyMode } = await import("./native-core-scenarios.mjs");
+  let present=true;
+  const c={execute:async()=>!present,until:async(_label,poll)=>{assert.equal(await poll(),false);present=false;assert.equal(await poll(),true);},settledDialog:async id=>{assert.equal(present,false);assert.equal(id,'settings-dialog');}};
+  assert.deepEqual(await settledPrivacyMode(c),{confirmationDismissed:true,dialogSettled:true});
+});
+test("attachment completion retains the verified backend checkpoint after automatic-save pruning",async()=>{
+  const { settledIncomingAttachment } = await import("./native-core-scenarios.mjs");
+  const c={observe:async()=>[{file_conv:'conv',ready:false}],execute:async()=>true,until:async(_label,poll)=>{const result=await poll();if(!result)throw Error('not ready');return result;}};
+  await assert.rejects(settledIncomingAttachment(c,'conv','file'),/not ready/);
+  assert.deepEqual(await settledIncomingAttachment(c,'conv','file',true),{backendReady:true,renderedComplete:true});
+});
+
+test("native attachment fixture creates an owned download directory before configuring real settings", async () => {
+  const { mkdtemp, stat, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { prepareNativeDownloadFixture } = await import("./native-core-scenarios.mjs");
+  const fixture = await mkdtemp(join(tmpdir(), "native-download-fixture-"));
+  const owner = "fixture-user";
+  let settings = { download_dir: "", stay_signed_in: false, retention_days: 30 };
+  const calls = [];
+  try {
+    await assert.rejects(stat(join(fixture, "downloads")), { code: "ENOENT" });
+    const invoke = async (command, args) => {
+      assert.equal(args.owner, owner, "fixture settings remain scoped to the signed-in owner");
+      calls.push(command);
+      if (command === "get_app_settings") return settings;
+      assert.equal(command, "set_app_settings");
+      assert.equal((await stat(args.settings.download_dir)).isDirectory(), true, "save destination exists before it is configured");
+      settings = args.settings;
+    };
+    const directory = await prepareNativeDownloadFixture({ fixture, owner, invoke });
+    assert.equal(directory, join(fixture, "downloads"));
+    assert.deepEqual(settings, { download_dir: directory, stay_signed_in: false, retention_days: 30 });
+    assert.deepEqual(calls, ["get_app_settings", "set_app_settings", "get_app_settings"]);
+  } finally { await rm(fixture, { recursive: true, force: true }); }
 });

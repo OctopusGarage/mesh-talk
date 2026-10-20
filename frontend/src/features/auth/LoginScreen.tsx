@@ -266,7 +266,9 @@ export function LoginScreen() {
                     role="alert"
                     className="text-sm font-medium text-destructive"
                   >
-                    {error}
+                    {error === "Invalid username or password"
+                      ? t("login.invalidCredentials")
+                      : error}
                   </p>
                 )}
                 {notice && (

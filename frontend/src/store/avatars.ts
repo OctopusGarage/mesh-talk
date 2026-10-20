@@ -60,6 +60,13 @@ const pendingEdits = new Map<
   { revision: number; dataUrl: string | null; current: () => boolean }
 >();
 
+/** Finishing a write also invalidates snapshots captured while it was pending. */
+function finishEdit(id: string, revision: number) {
+  if (pendingEdits.get(id)?.revision !== revision) return;
+  pendingEdits.delete(id);
+  localRevision++;
+}
+
 export const useAvatars = create<AvatarsState>((set, get) => ({
   owner: null,
   setOwner: (owner) => {
@@ -167,8 +174,7 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
       try {
         await avatarsApi.set(lease.owner!, id, null);
       } finally {
-        if (pendingEdits.get(id)?.revision === revision)
-          pendingEdits.delete(id);
+        finishEdit(id, revision);
       }
     });
     pendingWrite = task.catch(() => {});
@@ -208,12 +214,11 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
       } catch {
         // A superseded failure must not replace a newer optimistic edit.
         if (currentEdit()) {
-          pendingEdits.delete(id);
+          finishEdit(id, revision);
           await get().load(lease.current);
         }
       } finally {
-        if (pendingEdits.get(id)?.revision === revision)
-          pendingEdits.delete(id);
+        finishEdit(id, revision);
       }
     });
     pendingWrite = task.catch(() => {});

@@ -109,6 +109,95 @@ export function emptyReception(
     reception: {},
   };
 }
+
+type CountedReception = ReceptionState & { unread: Record<string, number> };
+const trackedUnread = (state: ReceptionState, key: string) =>
+  (state.unreadIds[key]?.length ?? 0) + (state.overflowUnread[key] ?? 0);
+
+/** Install disk state without losing same-owner identities received during boot. */
+export function mergeReception(
+  persisted: CountedReception,
+  pending: CountedReception,
+): CountedReception {
+  const keys = new Set([
+    ...Object.keys(persisted.ledger),
+    ...Object.keys(pending.ledger),
+  ]);
+  const ledger = Object.fromEntries(
+    [...keys].map((key) => {
+      const saved = persisted.ledger[key] ?? {};
+      const live = pending.ledger[key] ?? {};
+      return [
+        key,
+        Object.fromEntries(
+          [...new Set([...Object.keys(saved), ...Object.keys(live)])].map(
+            (id) => {
+              const old = saved[id],
+                incoming = live[id];
+              return [
+                id,
+                old && incoming
+                  ? {
+                      ...incoming,
+                      ...old,
+                      seen: old.seen || incoming.seen,
+                      late: old.late || incoming.late,
+                      receivedAt: old.receivedAt ?? incoming.receivedAt,
+                      arrivalKind: old.arrivalKind ?? incoming.arrivalKind,
+                    }
+                  : (old ?? incoming),
+              ];
+            },
+          ),
+        ),
+      ];
+    }),
+  );
+  const overflow = Object.fromEntries(
+    [
+      ...new Set([
+        ...Object.keys(persisted.overflowUnread),
+        ...Object.keys(pending.overflowUnread),
+      ]),
+    ].map((key) => [
+      key,
+      Math.min(
+        1_000_000,
+        (persisted.overflowUnread[key] ?? 0) +
+          (pending.overflowUnread[key] ?? 0),
+      ),
+    ]),
+  );
+  const merged = emptyReception(ledger, overflow);
+  const unread = Object.fromEntries(
+    [
+      ...new Set([
+        ...Object.keys(persisted.unread),
+        ...Object.keys(pending.unread),
+        ...Object.keys(merged.unreadIds),
+        ...Object.keys(merged.overflowUnread),
+      ]),
+    ].map((key) => [
+      key,
+      Math.max(
+        0,
+        (persisted.unread[key] ?? 0) - trackedUnread(persisted, key),
+      ) +
+        Math.max(0, (pending.unread[key] ?? 0) - trackedUnread(pending, key)) +
+        trackedUnread(merged, key),
+    ]),
+  );
+  return {
+    ...merged,
+    unread,
+    reception: Object.fromEntries(
+      Object.entries({ ...persisted.reception, ...pending.reception }).filter(
+        ([key]) => Object.prototype.hasOwnProperty.call(merged.ledger, key),
+      ),
+    ),
+  };
+}
+
 export function receiveIdentity(
   state: ReceptionState,
   key: string,
@@ -241,12 +330,14 @@ export function reconcileHistory(
 ): ReceptionState {
   const entries = { ...(state.ledger[key] ?? {}) };
   for (const row of rows) {
-    if (
-      !row.id ||
-      row.id.length > 200 ||
-      Object.prototype.hasOwnProperty.call(entries, row.id)
-    )
+    if (!row.id || row.id.length > 200) continue;
+    if (Object.prototype.hasOwnProperty.call(entries, row.id)) {
+      // The resolved history owner can classify an own send that arrived before
+      // device/account identity was available to the live callback.
+      if (row.fromMe && !entries[row.id].seen)
+        entries[row.id] = { ...entries[row.id], seen: true };
       continue;
+    }
     Object.defineProperty(entries, row.id, {
       value: {
         seen: row.fromMe || !discover,
@@ -282,11 +373,7 @@ export function receptionPatch(
   ])) {
     unread[key] = Math.max(
       0,
-      (unread[key] ?? 0) +
-        (next.unreadIds[key]?.length ?? 0) +
-        (next.overflowUnread[key] ?? 0) -
-        (state.unreadIds[key]?.length ?? 0) -
-        (state.overflowUnread[key] ?? 0),
+      (unread[key] ?? 0) + trackedUnread(next, key) - trackedUnread(state, key),
     );
   }
   return { ...next, unread };

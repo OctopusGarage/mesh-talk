@@ -202,6 +202,10 @@ export function useConversationViewport(
       frame = requestAnimationFrame(() => {
         pinLiveEdge();
         measureRows(pendingUserAnchor.current && !pendingScrollIntent.current);
+        // A deferred virtualizer correction can leave the measured viewport
+        // above the live edge without a scroll event. Keep navigation available
+        // while retaining the existing live-edge intent and reader anchor.
+        setShowJump(!isAtBottom(scroller));
       });
     };
     const resize =
@@ -386,8 +390,12 @@ export function useConversationViewport(
         atBottom.current.get(key) !== false &&
         !anchors.current.has(key) &&
         performance.now() >= userInteractionUntil.current
-      )
+      ) {
+        // Measurement drift is not a reader scroll, but the actual gap still
+        // needs a usable jump control until live-edge correction completes.
+        setShowJump(true);
         return;
+      }
       atBottom.current.set(key, observedBottom);
       if (observedBottom) {
         anchors.current.delete(key);
