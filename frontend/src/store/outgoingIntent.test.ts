@@ -11,7 +11,10 @@ import {
   type SendIntent,
   type OutgoingIntentContext,
 } from "./outgoingIntent";
-import { emptyConversationCache } from "./conversationState";
+import {
+  completeSendIntentState,
+  emptyConversationCache,
+} from "./conversationState";
 import { useAuth } from "./auth";
 import { useTransfers } from "./transfers";
 import type { ChatMessage, Conversation } from "./conversationModel";
@@ -246,4 +249,32 @@ it("uses the session expiry clock when reconciling history after a wall-clock ro
   const now = Date.now();
   const expired = { ...row("expired"), expiresAtMs: now + 1000 };
   expect(reconcileMessages([expired], [], [], [], now + 1001)).toEqual([]);
+});
+
+it("retires an expired completion after its conversation cache was evicted", () => {
+  const conversation: Conversation = {
+    kind: "account",
+    id: "friend",
+    name: "Friend",
+  };
+  const message = { ...row(null, "pending"), expiresAtMs: 1000 };
+  const state = {
+    ...emptyConversationCache(),
+    intents: {
+      pending: {
+        conversation,
+        message,
+        payload: { kind: "text" as const, text: "same text", replyTo: null },
+      },
+    },
+  };
+  const result = completeSendIntentState(
+    state,
+    conversation,
+    "pending",
+    { ...message, id: "accepted" },
+    1001,
+  );
+  expect(result.intents).toEqual({});
+  expect(result.messages).toEqual({});
 });

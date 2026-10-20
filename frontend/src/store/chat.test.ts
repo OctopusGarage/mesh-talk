@@ -2104,6 +2104,25 @@ describe("incoming events", () => {
     expect(useChat.getState().incomingFiles[0].fromName).toBe("Alice");
     stop();
   });
+
+  it("discards a file callback arriving after its deadline", async () => {
+    const stop = await boot();
+    try {
+      captured.current!.onFile({
+        conv: "x",
+        is_channel: false,
+        from: "dev1",
+        name: "late.pdf",
+        size: 10,
+        mime: "application/pdf",
+        file_conv: "late-file",
+        expires_at_ms: Date.now() - 1,
+      });
+      expect(useChat.getState().incomingFiles).toEqual([]);
+    } finally {
+      stop();
+    }
+  });
 });
 
 describe("send/action failures", () => {
@@ -3335,6 +3354,23 @@ it("removes expired sender and recipient bubbles from cached conversations while
       incomingFiles: [
         {
           fromName: "Friend",
+          name: "permanent.txt",
+          size: 1,
+          mime: "text/plain",
+          fileConv: "permanent",
+          media: false,
+        },
+        {
+          fromName: "Friend",
+          name: "future.txt",
+          size: 1,
+          mime: "text/plain",
+          fileConv: "future",
+          media: false,
+          expiresAtMs: now + 60_000,
+        },
+        {
+          fromName: "Friend",
           name: "temporary.txt",
           size: 1,
           mime: "text/plain",
@@ -3350,13 +3386,26 @@ it("removes expired sender and recipient bubbles from cached conversations while
         ],
         "channel:group": [{ ...message, id: "incoming", fromMe: false }],
       },
+      reactions: {
+        "account:friend": [
+          { target: "expiring", emoji: "👍", who: ["friend"] },
+          { target: "retained", emoji: "👍", who: ["friend"] },
+        ],
+      },
     });
     await vi.advanceTimersByTimeAsync(1001);
     expect(
       useChat.getState().messages["account:friend"].map((m) => m.id),
     ).toEqual(["retained"]);
     expect(useChat.getState().messages["channel:group"]).toEqual([]);
-    expect(useChat.getState().incomingFiles).toEqual([]);
+    expect(
+      useChat.getState().incomingFiles.map((file) => file.fileConv),
+    ).toEqual(["permanent", "future"]);
+    expect(
+      useChat
+        .getState()
+        .reactions["account:friend"].map((reaction) => reaction.target),
+    ).toEqual(["retained"]);
   } finally {
     stop();
     vi.useRealTimers();
@@ -3396,5 +3445,43 @@ it("expires idle cached content after elapsed time even if the wall clock rolls 
     stop();
     monotonic.mockRestore();
     vi.useRealTimers();
+  }
+});
+
+it("expires cached plaintext on focus and removes lifecycle listeners on stop", () => {
+  const browser = new EventTarget();
+  const page = new EventTarget();
+  const removeFocus = vi.spyOn(browser, "removeEventListener");
+  const removeVisibility = vi.spyOn(page, "removeEventListener");
+  vi.stubGlobal("window", browser);
+  vi.stubGlobal("document", page);
+  const stop = useChat.getState().start();
+  try {
+    useChat.setState({
+      messages: {
+        "account:friend": [
+          {
+            id: "suspended",
+            fromMe: false,
+            who: "Friend",
+            text: "temporary",
+            wallClock: 1,
+            replyTo: null,
+            expiresAtMs: Date.now() - 1,
+          },
+        ],
+      },
+    });
+    browser.dispatchEvent(new Event("focus"));
+    expect(useChat.getState().messages["account:friend"]).toEqual([]);
+    page.dispatchEvent(new Event("visibilitychange"));
+  } finally {
+    stop();
+    expect(removeFocus).toHaveBeenCalledWith("focus", expect.any(Function));
+    expect(removeVisibility).toHaveBeenCalledWith(
+      "visibilitychange",
+      expect.any(Function),
+    );
+    vi.unstubAllGlobals();
   }
 });
