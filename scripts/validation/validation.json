@@ -2,6 +2,32 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "release-publication",
+      "paths": [
+        ".github/workflows/release.yml",
+        "scripts/release/",
+        "scripts/diagnostics/release-assets.test.mjs",
+        "scripts/diagnostics/release-gates.test.mjs",
+        "scripts/diagnostics/release-preflight.test.mjs",
+        "scripts/diagnostics/release-reuse.test.mjs",
+        "scripts/diagnostics/release-state.test.mjs",
+        "scripts/diagnostics/release-verifier.test.mjs",
+        "scripts/diagnostics/release-workflow.test.mjs"
+      ],
+      "node": [
+        "scripts/diagnostics/release-assets.test.mjs",
+        "scripts/diagnostics/release-gates.test.mjs",
+        "scripts/diagnostics/release-preflight.test.mjs",
+        "scripts/diagnostics/release-reuse.test.mjs",
+        "scripts/diagnostics/release-state.test.mjs",
+        "scripts/diagnostics/release-verifier.test.mjs",
+        "scripts/diagnostics/release-workflow.test.mjs"
+      ],
+      "escalation": [
+        "Release changes require exact-source hosted CI; signed native builds and publication remain tag-only workflow gates."
+      ]
+    },
+    {
       "id": "validation-tooling",
       "paths": [
         "scripts/validation/affected.mjs",
