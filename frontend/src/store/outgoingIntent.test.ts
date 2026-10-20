@@ -204,3 +204,46 @@ it("polls an accepted fallback without recursively polling through reload", asyn
   );
   expect(store.getState().statusBusy).toBe(false);
 });
+
+it("keeps the original deadline on an optimistic expiring send", async () => {
+  const store = session();
+  invoke.mockReturnValue(new Promise(() => {}));
+  const deadline = Date.now() + 300_000;
+  void beginSendIntent(store.setState, store.getState, conversation, {
+    kind: "text",
+    text: "expires",
+    replyTo: null,
+    expiresAtMs: deadline,
+  });
+  expect(store.getState().messages[key][0]).toMatchObject({
+    expiresAtMs: deadline,
+  });
+});
+
+it("does not resurrect expired history or an expired outgoing overlay", () => {
+  const expired = { ...row("expired"), expiresAtMs: Date.now() - 1 };
+  const live = row("retained");
+  expect(reconcileMessages([expired, live], [], [], [])).toEqual([
+    expect.objectContaining({ id: "retained" }),
+  ]);
+  expect(
+    reconcileMessages(
+      [],
+      [expired],
+      [
+        {
+          conversation,
+          payload: { kind: "text", text: "same text", replyTo: null },
+          message: expired,
+        },
+      ],
+      [],
+    ),
+  ).toEqual([]);
+});
+
+it("uses the session expiry clock when reconciling history after a wall-clock rollback", () => {
+  const now = Date.now();
+  const expired = { ...row("expired"), expiresAtMs: now + 1000 };
+  expect(reconcileMessages([expired], [], [], [], now + 1001)).toEqual([]);
+});

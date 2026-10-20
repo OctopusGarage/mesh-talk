@@ -54,6 +54,7 @@ import {
 } from "./conversationHistory";
 import {
   convKey,
+  expireConversationMessages,
   openConversationState,
   deleteConversationMessage,
   clearConversationMessages,
@@ -86,6 +87,7 @@ export type {
 const INCOMING_FILES_CAP = 300;
 
 export interface IncomingFile {
+  expiresAtMs?: number | null;
   fromName: string;
   name: string;
   size: number;
@@ -218,6 +220,7 @@ export interface ChatState
   favoritesRequest: number;
   ready: boolean;
   myAccountId: string;
+  expiryNow: number;
   peers: PeerInfo[];
   accounts: AccountInfo[];
   channels: ChannelInfo[];
@@ -305,6 +308,7 @@ function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
 function emptySessionData() {
   return {
     ...emptyConversationHistory(),
+    expiryNow: Date.now(),
     identityEpoch: 0,
     bootBusy: false,
     bootRequest: 0,
@@ -530,6 +534,33 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         set({ bootFailed: true });
     })();
 
+    const expiryWallStart = Date.now();
+    const expiryMonotonicStart = performance.now();
+    const expire = () => {
+      if (!lease.current()) return;
+      const now = Math.max(
+        get().expiryNow,
+        Date.now(),
+        expiryWallStart + Math.floor(performance.now() - expiryMonotonicStart),
+      );
+      const expiredFiles = get().incomingFiles.filter(
+        (file) => file.expiresAtMs != null && file.expiresAtMs <= now,
+      );
+      set((state) => ({
+        ...expireConversationMessages(state, now),
+        incomingFiles: state.incomingFiles.filter(
+          (file) => file.expiresAtMs == null || file.expiresAtMs > now,
+        ),
+        expiryNow: now,
+      }));
+      for (const file of expiredFiles)
+        notifyIncomingFileDismissed(file.fileConv);
+    };
+    const expiry = setInterval(expire, 1000);
+    if (typeof window !== "undefined") window.addEventListener("focus", expire);
+    if (typeof document !== "undefined")
+      document.addEventListener?.("visibilitychange", expire);
+
     const roster = setInterval(() => {
       if (lease.current() && get().ready) {
         void get().refreshRoster();
@@ -579,6 +610,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     return () => {
       cancelled = true;
       clearInterval(roster);
+      clearInterval(expiry);
+      if (typeof window !== "undefined")
+        window.removeEventListener("focus", expire);
+      if (typeof document !== "undefined")
+        document.removeEventListener?.("visibilitychange", expire);
       unlisten();
       if (get().runEpoch === lease.run) {
         stopChatCalls();
@@ -1225,11 +1261,13 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
       ),
     );
   if (!e.event_id && knownTray) return;
+  if (e.expires_at_ms != null && e.expires_at_ms <= Date.now()) return;
   if (!own && !knownTray && !knownIdentity)
     set((state) => ({
       incomingFiles: [
         {
           fromName: peer?.name || e.from,
+          expiresAtMs: e.expires_at_ms,
           name: e.name,
           size: e.size,
           mime: e.mime,

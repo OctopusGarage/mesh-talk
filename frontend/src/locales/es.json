@@ -273,6 +273,7 @@
     "source_unscoped": "Descubrimiento firmado (ámbito de red no determinado)"
   },
   "message": {
+    "expiresIn": "Caduca en {{time}} tras el envío; se elimina en ambos lados",
     "delivery": {
       "awaiting": "Esperando recibo",
       "delivered": "Entregado",

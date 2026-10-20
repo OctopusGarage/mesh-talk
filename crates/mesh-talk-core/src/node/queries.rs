@@ -52,10 +52,7 @@ impl Node {
             .into_iter()
             .filter(|entry| !delivery.file_erased(entry.conversation, entry.event_id))
             .filter(|entry| {
-                entry.from == me
-                    || linked_me.contains(&entry.from)
-                    || recovered_me.contains(&entry.from)
-                    || !self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock)
+                !self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock)
             })
             .filter_map(|entry| {
                 let manifest = crate::file::decode_manifest(&entry.plaintext)?;
@@ -72,6 +69,7 @@ impl Node {
                     },
                     text: Vec::new(),
                     wall_clock: entry.wall_clock,
+                    expires_at_ms: crate::expiry::deadline(&entry.plaintext),
                     reply_to: None,
                     file: Some(FileHistoryInfo {
                         file_conv: manifest.file_conv(),
@@ -124,6 +122,11 @@ impl Node {
         // Account messages are stored as full `DmEnvelope`s; the logical `msg_id` is
         // the stable, cross-device id reactions/replies target.
         for sent in self.sent_entries_for_history(conv) {
+            if super::expiry_policy::plaintext_deadline(&sent.plaintext)
+                .is_some_and(|deadline| deadline <= self.expiry_now())
+            {
+                continue;
+            }
             let (id, body) = decode_account_entry(&sent.plaintext);
             entries.push(HistoryEntry {
                 id,
@@ -131,6 +134,7 @@ impl Node {
                 who: "you".to_string(),
                 text: body.text,
                 wall_clock: sent.wall_clock,
+                expires_at_ms: super::expiry_policy::plaintext_deadline(&sent.plaintext),
                 reply_to: body.reply_to,
                 file: None,
                 recalled: false,
@@ -149,8 +153,7 @@ impl Node {
             let inner = envelope
                 .as_ref()
                 .map_or(rcv.plaintext.as_slice(), |e| e.body.as_slice());
-            if rcv.from != my_account && self.recipient_expired(inner, rcv.event_id, rcv.wall_clock)
-            {
+            if self.recipient_expired(inner, rcv.event_id, rcv.wall_clock) {
                 continue;
             }
             let (id, body) = decode_account_entry(&rcv.plaintext);
@@ -161,6 +164,7 @@ impl Node {
                 who: if from_me { "you".to_string() } else { rcv.from },
                 text: body.text,
                 wall_clock: rcv.wall_clock,
+                expires_at_ms: super::expiry_policy::plaintext_deadline(&rcv.plaintext),
                 reply_to: body.reply_to,
                 file: None,
                 recalled: false,
@@ -210,6 +214,11 @@ impl Node {
             .map(|device| device.public.user_id())
             .collect();
         for (id, sent) in self.raw_sent_history(conversation) {
+            if super::expiry_policy::plaintext_deadline(&sent.plaintext)
+                .is_some_and(|deadline| deadline <= self.expiry_now())
+            {
+                continue;
+            }
             let body = MessageBody::decode(&sent.plaintext);
             entries.push(HistoryEntry {
                 id,
@@ -217,6 +226,7 @@ impl Node {
                 who: "you".to_string(),
                 text: body.text,
                 wall_clock: sent.wall_clock,
+                expires_at_ms: super::expiry_policy::plaintext_deadline(&sent.plaintext),
                 reply_to: body.reply_to,
                 file: None,
                 recalled: false,
@@ -230,9 +240,7 @@ impl Node {
             .expect("received mutex not poisoned")
             .entries(&conversation)
         {
-            if !own_devices.contains(&rcv.from)
-                && self.recipient_expired(&rcv.plaintext, rcv.event_id, rcv.wall_clock)
-            {
+            if self.recipient_expired(&rcv.plaintext, rcv.event_id, rcv.wall_clock) {
                 continue;
             }
             let body = MessageBody::decode(&rcv.plaintext);
@@ -243,6 +251,7 @@ impl Node {
                 who: if from_me { "you".to_string() } else { rcv.from },
                 text: body.text,
                 wall_clock: rcv.wall_clock,
+                expires_at_ms: super::expiry_policy::plaintext_deadline(&rcv.plaintext),
                 reply_to: body.reply_to,
                 file: None,
                 recalled: false,

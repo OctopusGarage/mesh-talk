@@ -24,13 +24,17 @@ const { historyApi, dialog } = vi.hoisted(() => ({
       throw new Error("offline");
     }),
   },
-  dialog: { onOpenChange: null as null | ((open: boolean) => void) },
+  dialog: {
+    now: Date.now(),
+    onOpenChange: null as null | ((open: boolean) => void),
+  },
 }));
 
 vi.mock("@/lib/api", () => ({ chat: historyApi }));
 vi.mock("@/store/chat", () => ({
-  useChat: (selector: (state: { ready: boolean }) => unknown) =>
-    selector({ ready: true }),
+  useChat: (
+    selector: (state: { ready: boolean; expiryNow: number }) => unknown,
+  ) => selector({ ready: true, expiryNow: dialog.now }),
   convKey: (conversation: { kind: string; id: string }) =>
     `${conversation.kind}:${conversation.id}`,
   captureChatOwnership: () => ({ owner: "me", current: () => true }),
@@ -107,6 +111,40 @@ it("does not show another conversation's rows after its history load fails", asy
       ),
     );
     expect(container.textContent).not.toContain("private history from Alice");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("removes an expired row from an already open history dialog", async () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  dialog.now = Date.now();
+  const expiring = {
+    id: "expiring",
+    fromMe: false,
+    who: "Alice",
+    text: "temporary history",
+    wallClock: 1,
+    replyTo: null,
+    file: null,
+    recalled: false,
+    recalledText: null,
+    sticker: null,
+    expiresAtMs: dialog.now + 60_000,
+  };
+  historyApi.ownerHistory.mockResolvedValueOnce([expiring]);
+  const view = () =>
+    createElement(ConversationHistoryDialog, {
+      conversation: { kind: "account", id: "alice", name: "Alice" },
+    });
+  try {
+    await act(async () => root.render(view()));
+    await act(async () => dialog.onOpenChange?.(true));
+    expect(container.textContent).toContain("temporary history");
+    dialog.now += 60_001;
+    await act(async () => root.render(view()));
+    expect(container.textContent).not.toContain("temporary history");
   } finally {
     await act(async () => root.unmount());
   }

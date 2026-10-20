@@ -250,17 +250,42 @@
     },
     {
       "id": "core-expiry",
-      "paths": ["crates/mesh-talk-core/src/expiry.rs"],
+      "paths": [
+        "crates/mesh-talk-core/src/expiry.rs",
+        "crates/mesh-talk-core/src/node/expiry_policy.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["expiry::"]
+          "filters": [
+            "expiry::",
+            "node::node::tests::expired_incoming_account_message_is_hidden_from_history",
+            "node::node::tests::expired_outgoing_account_message_is_hidden_and_erased",
+            "node::node::tests::restart_erases_unexpired_recipient_copy_without_erasing_sender_copy",
+            "node::node::tests::monotonic_observation_bounds_expiry_even_with_a_future_deadline",
+            "node::delivery_runtime_tests::expiring_account_message_arrives_over_loopback_and_expires_on_both_sides",
+            "node::delivery_runtime_tests::accepted_account_file_card_carries_fixed_deadline"
+          ]
         }
       ],
       "consumers": ["core-node", "core-file"],
       "escalation": [
         "Deadline framing is a wire/storage boundary; verify legacy compatibility and affected message delivery consumers."
-      ]
+      ],
+      "capability": {
+        "summary": "Enforce authenticated send-time deadlines on both sender and recipient copies.",
+        "guide": "docs/ARCHITECTURE.md#fixed-deadline-messages",
+        "invariants": [
+          {
+            "name": "Both directions hide expired plaintext and erase local copies without replay resurrection",
+            "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
+          },
+          {
+            "name": "Wire compatibility and recipient clock and restart protections remain intact",
+            "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
+          }
+        ]
+      }
     },
     {
       "id": "core-package",

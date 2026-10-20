@@ -3316,3 +3316,85 @@ for (const kind of ["channel", "file"] as const) {
     }
   });
 }
+
+it("removes expired sender and recipient bubbles from cached conversations while idle", async () => {
+  vi.useFakeTimers();
+  const stop = useChat.getState().start();
+  try {
+    const now = Date.now();
+    const message = {
+      id: "expiring",
+      fromMe: true,
+      who: "me",
+      text: "secret",
+      wallClock: now,
+      replyTo: null,
+      expiresAtMs: now + 1000,
+    };
+    useChat.setState({
+      incomingFiles: [
+        {
+          fromName: "Friend",
+          name: "temporary.txt",
+          size: 1,
+          mime: "text/plain",
+          fileConv: "file",
+          media: false,
+          expiresAtMs: now + 1000,
+        },
+      ],
+      messages: {
+        "account:friend": [
+          message,
+          { ...message, id: "retained", expiresAtMs: null },
+        ],
+        "channel:group": [{ ...message, id: "incoming", fromMe: false }],
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(
+      useChat.getState().messages["account:friend"].map((m) => m.id),
+    ).toEqual(["retained"]);
+    expect(useChat.getState().messages["channel:group"]).toEqual([]);
+    expect(useChat.getState().incomingFiles).toEqual([]);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("expires idle cached content after elapsed time even if the wall clock rolls backward", async () => {
+  vi.useFakeTimers();
+  const wall = Date.now();
+  let elapsed = 0;
+  const monotonic = vi
+    .spyOn(performance, "now")
+    .mockImplementation(() => elapsed);
+  const stop = useChat.getState().start();
+  try {
+    useChat.setState({
+      messages: {
+        "account:friend": [
+          {
+            id: "rollback",
+            fromMe: false,
+            who: "peer",
+            text: "temporary",
+            wallClock: wall,
+            replyTo: null,
+            expiresAtMs: wall + 1000,
+          },
+        ],
+      },
+    });
+    vi.setSystemTime(wall - 60_000);
+    elapsed = 1001;
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(useChat.getState().messages["account:friend"]).toEqual([]);
+    expect(useChat.getState().expiryNow).toBeGreaterThanOrEqual(wall + 1000);
+  } finally {
+    stop();
+    monotonic.mockRestore();
+    vi.useRealTimers();
+  }
+});

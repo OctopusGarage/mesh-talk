@@ -156,3 +156,14 @@ it("keeps authored time distinct from local receipt detail for recovered content
     render({ ...base, fromMe: false, receivedAt: 500000 }, true),
   ).not.toContain("Received later");
 });
+
+it("shows a countdown for each expiring message, including grouped incoming messages", async () => {
+  await i18n.changeLanguage("en");
+  const html = render({
+    ...base,
+    fromMe: false,
+    expiresAtMs: Date.now() + 299_000,
+  });
+  expect(html).toContain('data-testid="message-expiry"');
+  expect(html).toMatch(/4:5[89]/);
+});

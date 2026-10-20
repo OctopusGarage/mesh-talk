@@ -2828,7 +2828,7 @@ async fn accepted_account_file_card_carries_fixed_deadline() {
     let dir = tempfile::tempdir().unwrap();
     let remote = Account::generate();
     let proof = Announce::new_with_account(&DeviceIdentity::generate(), &remote, "Bob", 1);
-    let (node, _) = node(
+    let (mut node, _) = node(
         dir.path(),
         DeviceIdentity::generate(),
         Account::generate(),
@@ -2857,6 +2857,70 @@ async fn accepted_account_file_card_carries_fixed_deadline() {
         .clone();
     assert_eq!(crate::expiry::deadline(&row.plaintext), Some(deadline));
     assert!(crate::file::decode_manifest(&row.plaintext).is_some());
+    assert_eq!(
+        node.account_history(&remote.account_id(), 10)[0].expires_at_ms,
+        Some(deadline)
+    );
+    Arc::get_mut(&mut node).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
+    assert!(node.account_history(&remote.account_id(), 10).is_empty());
+    assert!(node.prune_expired_received().unwrap() > 0);
+    assert!(node.received_files.lock().unwrap().entry(id).is_none());
+}
+
+#[tokio::test]
+async fn expiring_account_message_arrives_over_loopback_and_expires_on_both_sides() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (mut a, _) = node(ad.path(), alice, aa, &bp);
+    let (mut b, mut incoming) = node(bd.path(), bob, ba, &ap);
+    let deadline = super::node::now_millis() + 300_000;
+    let id = a
+        .enqueue_to_account_expiring_if(
+            &b.account_id(),
+            b"expires on both sides",
+            None,
+            Some(deadline),
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let received = tokio::time::timeout(std::time::Duration::from_secs(8), incoming.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.text, b"expires on both sides");
+    assert_eq!(
+        a.account_history(&b.account_id(), 10)[0].expires_at_ms,
+        Some(deadline)
+    );
+    assert_eq!(
+        b.account_history(&a.account_id(), 10)[0].expires_at_ms,
+        Some(deadline)
+    );
+    at.abort();
+    bt.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    Arc::get_mut(&mut a).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
+    Arc::get_mut(&mut b).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
+    assert!(a.account_history(&b.account_id(), 10).is_empty());
+    assert!(b.account_history(&a.account_id(), 10).is_empty());
+    assert!(a.prune_expired_received().unwrap() > 0);
+    assert!(b.prune_expired_received().unwrap() > 0);
+    let conv = super::conversation::account_conversation_id(&a.account_id(), &b.account_id());
+    assert!(a.sent_entries_for_history(conv).is_empty());
+    assert!(b.received.lock().unwrap().entries(&conv).is_empty());
+    assert!(a.account_suppression.lock().unwrap().contains(conv, id));
 }
 
 #[tokio::test]

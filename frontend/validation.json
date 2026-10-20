@@ -147,6 +147,39 @@
       "escalation": [
         "Composer browser scenario changes require keyboard, focus, popover containment and existing visual baseline assertions in the complete browser spec."
       ]
+    },
+    {
+      "id": "frontend-message-expiry",
+      "paths": [
+        "frontend/src/features/chat/DeliveryFooter.tsx",
+        "frontend/src/features/chat/deliveryFooter.test.ts",
+        "frontend/src/features/chat/ConversationHistoryDialog.tsx",
+        "frontend/e2e/message-expiry.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/deliveryFooter.test.ts",
+        "src/features/chat/ConversationHistoryDialog.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/outgoingIntent.test.ts"
+      ],
+      "capability": {
+        "summary": "Display send-time countdowns and remove expired messages from current and cached views.",
+        "guide": "docs/ARCHITECTURE.md#fixed-deadline-messages",
+        "invariants": [
+          {
+            "name": "Shared countdown updates remove both directions without per-message IPC or history resurrection",
+            "reference": "docs/ARCHITECTURE.md#fixed-deadline-messages"
+          }
+        ]
+      }
+    },
+    {
+      "id": "frontend-browser-fixture",
+      "paths": ["frontend/e2e/tauri-mock.ts"],
+      "frontend": ["src/lib/events.test.ts", "src/store/chat.test.ts"],
+      "escalation": [
+        "Shared mocked IPC changes require affected browser scenarios; mocks do not prove native transport or persistent cleanup."
+      ]
     }
   ],
   "prScenarios": [
@@ -210,6 +243,20 @@
       "id": "frontend-composer-acceptance",
       "paths": ["frontend/e2e/ui-audit-composer.spec.ts"],
       "browser": ["e2e/ui-audit-composer.spec.ts"]
+    },
+    {
+      "id": "frontend-message-expiry-acceptance",
+      "paths": [
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/features/chat/DeliveryFooter.tsx",
+        "frontend/src/features/chat/ConversationHistoryDialog.tsx",
+        "frontend/e2e/message-expiry.spec.ts",
+        "frontend/e2e/tauri-mock.ts"
+      ],
+      "browser": ["e2e/message-expiry.spec.ts"]
     }
   ]
 }

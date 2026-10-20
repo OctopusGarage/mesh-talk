@@ -156,7 +156,11 @@ impl Node {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let node = Arc::clone(&self);
-            let _ = tokio::task::spawn_blocking(move || node.prune_expired_received()).await;
+            match tokio::task::spawn_blocking(move || node.prune_expired_received()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => log::warn!("message expiry cleanup failed: {error}"),
+                Err(error) => log::warn!("message expiry task failed: {error}"),
+            }
         }
     }
 
@@ -469,7 +473,7 @@ impl Node {
                 .linked_devices()
                 .iter()
                 .any(|device| device.public.user_id() == event.author.user_id());
-            if !own_device && self.recipient_expired(&plaintext, event.id, event.wall_clock) {
+            if self.recipient_expired(&plaintext, event.id, event.wall_clock) {
                 self.files
                     .lock()
                     .expect("files mutex not poisoned")
@@ -488,6 +492,7 @@ impl Node {
                 continue;
             }
             let received = ReceivedFile {
+                expires_at_ms: crate::expiry::deadline(&plaintext),
                 conv,
                 is_channel,
                 from: event.author.user_id(),
@@ -771,9 +776,7 @@ impl Node {
                     continue;
                 }
                 msg.own_device = own_devices.contains(&msg.from);
-                if !msg.own_device
-                    && self.recipient_expired(&msg.wrapped, msg.event_id, msg.wall_clock)
-                {
+                if self.recipient_expired(&msg.wrapped, msg.event_id, msg.wall_clock) {
                     continue;
                 }
                 if msg.received_at == 0 {

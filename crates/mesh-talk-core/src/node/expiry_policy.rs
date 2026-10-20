@@ -1,7 +1,15 @@
-//! Sender deadline admission and recipient clock policy.
+//! Fixed send-time deadlines, clock policy and local erasure on both sides.
 
 use super::{DmEnvelope, Node, NodeError};
 use crate::eventlog::event::EventId;
+
+/// Deadline authenticated inside either an account envelope or direct plaintext.
+pub(in crate::node) fn plaintext_deadline(wire: &[u8]) -> Option<u64> {
+    DmEnvelope::decode(wire).map_or_else(
+        || crate::expiry::deadline(wire),
+        |envelope| crate::expiry::deadline(&envelope.body),
+    )
+}
 
 /// Sender-selected UTC deadline must still be in the future at acceptance.
 pub(crate) fn validate_outgoing(deadline: Option<u64>) -> Result<(), NodeError> {
@@ -49,21 +57,13 @@ impl Node {
         &self,
         file_conv: crate::eventlog::event::ConversationId,
     ) -> bool {
-        let own = self.account_id();
-        let own_devices: std::collections::HashSet<_> = self
-            .linked_devices()
-            .into_iter()
-            .map(|device| device.public.user_id())
-            .collect();
         let files = self
             .received_files
             .lock()
             .expect("files mutex not poisoned");
         files.conversations().into_iter().any(|conv| {
             files.entries_ref(&conv).iter().any(|row| {
-                row.from != own
-                    && !own_devices.contains(&row.from)
-                    && self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
+                self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
                     && super::files::validated_manifest(&row.plaintext)
                         .is_some_and(|manifest| manifest.file_conv() == file_conv)
             })
@@ -101,11 +101,10 @@ impl Node {
                     let inner = envelope
                         .as_ref()
                         .map_or(row.plaintext.as_slice(), |env| env.body.as_slice());
-                    if row.from == own_account || own_devices.contains(&row.from) {
-                        continue;
-                    }
+                    let recipient = row.from != own_account && !own_devices.contains(&row.from);
                     if crate::expiry::deadline(inner).is_some()
-                        && (restart || self.recipient_expired(inner, row.event_id, row.wall_clock))
+                        && ((restart && recipient)
+                            || self.recipient_expired(inner, row.event_id, row.wall_clock))
                     {
                         let account = envelope.is_some();
                         let target = envelope.map_or(row.event_id, |env| EventId::new(env.msg_id));
@@ -121,11 +120,9 @@ impl Node {
                 .expect("files mutex not poisoned");
             for conv in files.conversations() {
                 for row in files.entries_ref(&conv) {
-                    if row.from == own_account || own_devices.contains(&row.from) {
-                        continue;
-                    }
+                    let recipient = row.from != own_account && !own_devices.contains(&row.from);
                     if crate::expiry::deadline(&row.plaintext).is_some()
-                        && (restart
+                        && ((restart && recipient)
                             || self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock))
                     {
                         targets.push((conv, row.event_id, true, row.event_id));
@@ -133,6 +130,68 @@ impl Node {
                 }
             }
         }
+        // Snapshot only conversations with due sender rows. Resolve legacy sequence
+        // identities after releasing the sidecar lock (delivery uses the reverse order).
+        let due_conversations = {
+            let sent = self.sentlog.lock().expect("sent mutex not poisoned");
+            sent.conversations()
+                .into_iter()
+                .filter(|conv| {
+                    sent.entries_ref(conv).iter().any(|row| {
+                        plaintext_deadline(&row.plaintext)
+                            .is_some_and(|deadline| deadline <= self.expiry_now())
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        for conv in due_conversations {
+            for (event_id, row) in self.raw_sent_history(conv) {
+                if plaintext_deadline(&row.plaintext)
+                    .is_some_and(|deadline| deadline <= self.expiry_now())
+                {
+                    let envelope = DmEnvelope::decode(&row.plaintext);
+                    let account = envelope.is_some();
+                    let target = envelope.map_or(event_id, |env| EventId::new(env.msg_id));
+                    targets.push((conv, target, account, event_id));
+                }
+            }
+        }
+        {
+            let delivery = self.delivery.lock().expect("delivery lock not poisoned");
+            for transaction in delivery.pending_transactions() {
+                match transaction.body() {
+                    super::delivery_store::DeliveryTransaction::Outgoing {
+                        message, sent, ..
+                    } if plaintext_deadline(&sent.plaintext)
+                        .is_some_and(|deadline| deadline <= self.expiry_now()) =>
+                    {
+                        targets.push((
+                            message.conversation,
+                            message.logical_id,
+                            DmEnvelope::decode(&sent.plaintext).is_some(),
+                            message.logical_id,
+                        ));
+                    }
+                    super::delivery_store::DeliveryTransaction::OutgoingManifest {
+                        message,
+                        received,
+                        ..
+                    } if plaintext_deadline(&received.plaintext)
+                        .is_some_and(|deadline| deadline <= self.expiry_now()) =>
+                    {
+                        targets.push((
+                            message.conversation,
+                            message.logical_id,
+                            true,
+                            message.logical_id,
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        targets.retain(|target| seen.insert(*target));
         let mut removed = 0;
         for (conv, id, account, event_id) in targets {
             removed += self.delete_message(conv, id, account)?;
@@ -140,6 +199,9 @@ impl Node {
                 .lock()
                 .expect("expiry mutex not poisoned")
                 .remove(&event_id);
+        }
+        if removed > 0 {
+            self.note_account_history_change();
         }
         Ok(removed)
     }

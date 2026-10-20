@@ -38,6 +38,7 @@ import {
 import { errorMessage } from "@/lib/error";
 import { formatDay, formatTime, humanSize } from "@/lib/format";
 import { renderWithMentions } from "@/lib/mentions";
+import { messageExpired } from "@/store/conversationState";
 import { categorize, matchesQuery } from "@/lib/conversationHistory";
 import {
   convKey,
@@ -96,6 +97,7 @@ export function ConversationHistoryDialog({
   const { t } = useTranslation();
   const ready = useChat((s) => s.ready);
   const [open, setOpen] = useState(false);
+  const expiryNow = useChat((s) => (open ? s.expiryNow : 0));
   const [query, setQuery] = useState("");
   const [history, setHistory] = useState<{
     key: string;
@@ -106,7 +108,23 @@ export function ConversationHistoryDialog({
 
   const key = convKey(conversation);
   const view = history?.key === key ? history : null;
-  const items = view?.items ?? NO_HISTORY;
+  const items = useMemo(
+    () =>
+      (view?.items ?? NO_HISTORY).filter(
+        (m) => !messageExpired(m, Math.max(expiryNow, Date.now())),
+      ),
+    [view?.items, expiryNow],
+  );
+  useEffect(() => {
+    setHistory((previous) =>
+      previous?.items.some((m) => messageExpired(m, expiryNow))
+        ? {
+            ...previous,
+            items: previous.items.filter((m) => !messageExpired(m, expiryNow)),
+          }
+        : previous,
+    );
+  }, [expiryNow]);
   const loading = view?.loading ?? false;
   const error = view?.error ?? null;
 

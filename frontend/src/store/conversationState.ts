@@ -59,6 +59,7 @@ export function fromHistoryItem(h: HistoryItem): ChatMessage {
     who: h.who,
     text: h.text,
     wallClock: h.wall_clock,
+    expiresAtMs: h.expires_at_ms,
     replyTo: h.reply_to,
     recalled: h.recalled,
     recalledText: h.recalled_text,
@@ -97,6 +98,7 @@ export function completeSendIntentState(
   conversation: Conversation,
   clientId: string,
   next: ChatMessage | null,
+  now = Date.now(),
 ) {
   const key = convKey(conversation);
   const intent = state.intents[clientId];
@@ -113,9 +115,11 @@ export function completeSendIntentState(
   }
   const intents = { ...state.intents };
   if (
-    next?.id &&
-    (state.deleted[key]?.includes(next.id) ||
-      intent.deletedIds?.includes(next.id))
+    next &&
+    (messageExpired(next, now) ||
+      (next.id &&
+        (state.deleted[key]?.includes(next.id) ||
+          intent.deletedIds?.includes(next.id))))
   ) {
     delete intents[clientId];
     return {
@@ -169,6 +173,7 @@ export function reconcileMessages(
   previous: ChatMessage[],
   intents: SendIntent[],
   deleted: string[],
+  now = Date.now(),
 ): ChatMessage[] {
   const tombstones = new Set(deleted);
   const overlays = intents
@@ -176,7 +181,7 @@ export function reconcileMessages(
     .map((i) => i.message);
   const known = [...previous, ...intents.map((i) => i.message)];
   const result: ChatMessage[] = history
-    .filter((m) => !m.id || !tombstones.has(m.id))
+    .filter((m) => !messageExpired(m, now) && (!m.id || !tombstones.has(m.id)))
     .map((m) => {
       const old = m.id ? known.find((p) => p.id === m.id) : undefined;
       return {
@@ -190,7 +195,7 @@ export function reconcileMessages(
       };
     });
   for (const m of overlays) {
-    if (m.id && tombstones.has(m.id)) continue;
+    if (messageExpired(m, now) || (m.id && tombstones.has(m.id))) continue;
     if (!m.id || !result.some((h) => h.id === m.id)) result.push(m);
   }
   return result;
@@ -337,5 +342,36 @@ export function clearConversationMessages(
     messages: state.messages[key]
       ? { ...state.messages, [key]: [] }
       : state.messages,
+  };
+}
+
+/** Presentation expiry is synchronous; the core independently erases durable data. */
+export function messageExpired(message: ChatMessage, now: number): boolean {
+  return message.expiresAtMs != null && message.expiresAtMs <= now;
+}
+
+export function expireConversationMessages(
+  state: ConversationCacheState,
+  now: number,
+): Partial<ConversationCacheState> {
+  const messages = { ...state.messages };
+  const reactions = { ...state.reactions };
+  for (const [key, rows] of Object.entries(messages)) {
+    const expired = new Set(
+      rows.filter((m) => messageExpired(m, now)).map((m) => m.id),
+    );
+    if (!rows.some((m) => messageExpired(m, now))) continue;
+    messages[key] = rows.filter((m) => !messageExpired(m, now));
+    if (reactions[key])
+      reactions[key] = reactions[key].filter((r) => !expired.has(r.target));
+  }
+  return {
+    messages,
+    reactions,
+    intents: Object.fromEntries(
+      Object.entries(state.intents).filter(
+        ([, intent]) => !messageExpired(intent.message, now),
+      ),
+    ),
   };
 }

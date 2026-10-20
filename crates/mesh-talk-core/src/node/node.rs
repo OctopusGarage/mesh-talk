@@ -120,6 +120,8 @@ pub struct SearchHit {
 /// A merged conversation-history entry (sent or received), for display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
+    /// Authenticated absolute UTC deadline shared by sender and recipient.
+    pub expires_at_ms: Option<u64>,
     pub id: EventId,
     pub from_me: bool,
     pub who: String,
