@@ -239,6 +239,8 @@
     {
       "id": "desktop-package",
       "paths": [
+        "package.json",
+        "package-lock.json",
         "src-tauri/src/lib.rs",
         "src-tauri/src/main.rs",
         "src-tauri/src/linux_renderer.rs",
