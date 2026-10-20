@@ -104,7 +104,23 @@ if [[ ! -f $data_dir/password ]]; then
     openssl rand -base64 48 > "$data_dir/password"
 fi
 chmod 600 "$data_dir/password"
+# Local-network rules identify the executable separately from its mesh identity.
+# Linker-generated identifiers can change between builds; retain the installed
+# identifier for locally signed updates, and use a stable one on first install.
+signing_id=com.octopusgarage.mesh-talk.node
+if [[ -f $binary ]]; then
+    existing_signature=$(codesign --display --verbose=2 "$binary" 2>&1) || existing_signature=
+    existing_id=$(printf '%s\n' "$existing_signature" | sed -n 's/^Identifier=//p')
+    [[ -z $existing_id ]] || signing_id=$existing_id
+fi
 install -m 755 "$source_binary" "$binary.next"
+staged_signature=$(codesign --display --verbose=2 "$binary.next" 2>&1) || staged_signature=
+if ! grep -q '^Authority=' <<< "$staged_signature"; then
+    codesign --force --sign - --identifier "$signing_id" "$binary.next"
+fi
+# Preserve publisher-issued signatures, and never replace a working executable
+# if either signing or signature verification fails.
+codesign --verify --strict "$binary.next"
 "$binary.next" --help >/dev/null
 mv -f "$binary.next" "$binary"
 if [[ -n $federation_config ]]; then
