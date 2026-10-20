@@ -19,7 +19,7 @@ function webview({ hidden = false, status = "awaiting", moved = false } = {}) {
   const bounds = { x: 0, y: 10, width: 100, height: 50, top: 10, bottom: 60, left: 0, right: 100 };
   const badge = { getAttribute: () => status, getBoundingClientRect: () => ({ ...bounds, top: hidden ? 900 : 40, bottom: hidden ? 920 : 60 }) };
   const bubble = { textContent: "receipt text", getBoundingClientRect: () => ({ ...bounds, x: moved && ++samples > 1 ? 30 : 0 }), querySelectorAll: () => [badge] };
-  const document = { querySelectorAll: () => [bubble], querySelector: () => ({ getBoundingClientRect: () => ({ top: 0, bottom: 500, left: 0, right: 500 }) }) };
+  const document = { getAnimations: () => [], querySelectorAll: selector => selector.includes("message-bubble") ? [bubble] : [], querySelector: selector => selector.includes("role=log") ? ({ getBoundingClientRect: () => ({ top: 0, bottom: 500, left: 0, right: 500 }) }) : null };
   return {
     command: async (_method, path, body) => {
       if (path === "/execute/async") return new Promise(resolve => {
@@ -30,7 +30,7 @@ function webview({ hidden = false, status = "awaiting", moved = false } = {}) {
       assert.ok(frames >= 2, "native screenshot follows two actual frame callbacks");
       return Buffer.from("png bytes").toString("base64");
     },
-    execute: async (script, args) => runInNewContext(`(function(){${script}}).apply(null, args)`, { args, document, innerWidth: 500, innerHeight: 500 }),
+    execute: async (script, args) => runInNewContext(`(function(){${script}}).apply(null, args)`, { args, document, innerWidth: 500, innerHeight: 500, getComputedStyle: () => ({visibility:"visible",opacity:"1",display:"block"}) }),
     until: async (_description, poll) => { for (let i = 0; i < 3; i++) { const result = await poll(); if (result) return result; } throw new Error("capture never settled"); },
     shots: () => shots,
   };
@@ -68,10 +68,33 @@ test("auth error capture requires a fully visible localized alert on the login f
     const rect = { x: 10, y: config.top, top: config.top, bottom: config.top + 20, left: 10, right: 150, width: 140, height: 20 };
     const alert = { textContent: config.text, getBoundingClientRect: () => rect };
     const form = { getBoundingClientRect: () => ({ x: 0, y: 0, top: 0, left: 0, right: 300, bottom: 500, width: 300, height: 500 }) };
-    const document = { querySelector: selector => selector.includes("[role=alert]") ? alert : selector.includes("chat-shell") ? config.chat : form };
+    const document = { getAnimations: () => [], querySelectorAll: () => [], querySelector: selector => selector.includes("[role=alert]") ? alert : selector.includes("chat-shell") ? config.chat : selector.includes("login-form") ? form : null };
     c.execute = async (script,args) => runInNewContext(`(function(){${script}}).apply(null,args)`, { document, args, innerWidth: 500, innerHeight: 500, getComputedStyle: () => ({ visibility: "visible", opacity: config.opacity ?? "1", display: "block" }) });
     const capture = captureNativeEvidence(c,{ kind: "auth-error", texts: ["用户名或密码错误"] });
     if (config.accepted) { assert.equal((await capture).observation.text, config.text); assert.equal(c.shots(), 1); }
     else { await assert.rejects(capture,/never settled/); assert.equal(c.shots(),0); }
+  }
+});
+
+test("general native capture rejects foreground loading and running finite animations", async () => {
+  const { captureNativeEvidence } = await load();
+  for (const kind of ["loader", "finite-animation"]) {
+    const c = webview();
+    const original = c.execute;
+    c.execute = async (script,args) => script.includes("getAnimations") ? { settled: false, foregroundLoader: kind === "loader", finiteAnimations: kind === "finite-animation" ? 1 : 0 } : original(script,args);
+    await assert.rejects(captureNativeEvidence(c), /never settled/);
+    assert.equal(c.shots(),0);
+  }
+});
+
+test("settled capture permits an infinite sidebar search spinner but rejects a real main loader", async () => {
+  const { captureNativeEvidence } = await load();
+  for (const foreground of [false,true]) {
+    const c=webview();
+    const spinner={getBoundingClientRect:()=>({width:20,height:20,top:1,bottom:21,left:1,right:21})};
+    const document={querySelector:()=>null,querySelectorAll:selector=>selector==='main .animate-spin'&&foreground?[spinner]:[],getAnimations:()=>[{playState:'running',effect:{getComputedTiming:()=>({endTime:Infinity})}}]};
+    c.execute=async script=>runInNewContext(`(function(){${script}})()`,{document,innerWidth:500,innerHeight:500,getComputedStyle:()=>({display:'block',visibility:'visible',opacity:'1'})});
+    if(foreground) {await assert.rejects(captureNativeEvidence(c),/never settled/);assert.equal(c.shots(),0);}
+    else {const capture=await captureNativeEvidence(c);assert.equal(capture.surface.settled,true);assert.equal(c.shots(),1);}
   }
 });

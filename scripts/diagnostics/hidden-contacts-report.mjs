@@ -13,7 +13,7 @@ const REQUIRED_TRUE = {
   "offline-restore": ["realPeerStopped", "rawRosterExpired", "persistedIdentityRestored", "durableHistoryRetained"],
   "hidden-inbound": ["inboundStored", "rowAbsent"], "history-retained": ["originalEntriesUnchanged", "inboundAdded"],
   "raw-peer-retained": ["rawPeerPresent", "accountPresent"], "local-user-isolation": ["secondUserContactVisible", "secondUserHasNoHiddenEntry"],
-  "narrow-keyboard-layout": ["keyboardFocusReachedRestore"], "privacy-mode": ["cancelledBeforeCommit", "passivePeerRetained"],
+  "narrow-keyboard-layout": ["keyboardFocusReachedRestore"], "privacy-mode": ["cancelledBeforeCommit", "passivePeerRetained", "confirmationDismissed", "dialogSettled"],
   "privacy-reply": ["manualGrantAfterRevocation", "realCliReplyStored"], "privacy-restart": ["realCliReplyAfterRestart", "historyRetained"],
   "auth-register-signin": ["registered", "signedIn"], "auth-logout-wrong-password": ["loggedOut", "wrongPasswordRejected", "signinRestored"],
   "signed-peer-discovery": ["cliSawGui"], "direct-messages": ["uiToCliRendered", "uiToCliPersisted", "cliToUiRendered", "cliToUiPersisted"],
@@ -53,9 +53,13 @@ export function validateObservations(name, observations, platform) {
   }
   if (name === "auth-logout-wrong-password") {
     const capture = observations?.errorCapture;
+    require(observations?.sessionReady?.backendReady === true && observations?.sessionReady?.shellReady === true && /^[0-9a-f-]{36}$/.test(observations?.sessionReady?.owner ?? ""), "missing restored ready session capture");
     require(observations?.invalidCredentialsKey === "login.invalidCredentials" && capture?.filename === `${name}-error.png` && invalidCredentialTexts.includes(capture?.text) && capture?.visible === true && capture?.chatAbsent === true && [capture.rect?.x, capture.rect?.y, capture.rect?.width, capture.rect?.height].every(Number.isFinite) && capture.rect.x >= 0 && capture.rect.y >= 0 && capture.rect.width > 0 && capture.rect.height > 0, "missing visible localized credential-error capture");
   }
-  if (name === "incoming-attachment") require(observations?.bytesVerified === true, "missing exact decrypted bytes");
+  if (name === "incoming-attachment") {
+    require(observations?.bytesVerified === true, "missing exact decrypted bytes");
+    require(observations?.completion?.backendReady === true && observations?.completion?.renderedComplete === true, "missing completed native attachment rendering");
+  }
   for (const key of REQUIRED_TRUE[name] ?? []) require(observations?.[key] === true, `missing successful observation ${key}`);
   const nonempty = value => typeof value === "string" && value.trim().length > 0;
   if (name === "auth-register-signin") require(nonempty(observations?.owner), "missing registered account");

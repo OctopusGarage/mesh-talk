@@ -30,17 +30,28 @@ const e=document.querySelector('[data-testid=login-form] [role=alert]'),r=e?.get
 const visible=!!r&&!!f&&r.width>0&&r.height>0&&f.width>0&&f.height>0&&r.top>=0&&r.left>=0&&r.bottom<=innerHeight&&r.right<=innerWidth&&style.visibility==='visible'&&style.display!=='none'&&Number(style.opacity)>0;
 return {text:e?.textContent?.trim(),visible,chatAbsent:!document.querySelector('[data-testid=chat-shell]'),rect:r?{x:r.x,y:r.y,width:r.width,height:r.height}:null};`;
 
+const captureSurface = `
+const rect=e=>{const r=e?.getBoundingClientRect();return r?{x:r.x,y:r.y,width:r.width,height:r.height}:null;};
+const visible=e=>{const r=e?.getBoundingClientRect(),s=e&&getComputedStyle(e);return !!r&&r.width>0&&r.height>0&&r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth&&s.display!=='none'&&s.visibility==='visible'&&Number(s.opacity)>0;};
+const foregroundLoader=Array.from(document.querySelectorAll('main .animate-spin')).some(visible);
+const finiteAnimations=document.getAnimations().filter(a=>a.playState==='running'&&Number.isFinite(a.effect?.getComputedTiming().endTime??Infinity)).length;
+const dialogs=Array.from(document.querySelectorAll('[role=dialog],[role=alertdialog]')).filter(visible).map(e=>({testId:e.getAttribute('data-testid'),state:e.getAttribute('data-state'),opacity:getComputedStyle(e).opacity,rect:rect(e)}));
+return {settled:!foregroundLoader&&finiteAnimations===0,foregroundLoader,finiteAnimations,dialogs,main:rect(document.querySelector('main'))};`;
+
 export async function captureNativeEvidence({ command, execute, until }, expected) {
   return until("native evidence visibly painted and stable", async () => {
     await command("POST", "/execute/async", { script: "const done=arguments[arguments.length-1]; requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)));", args: [] });
     const auth = expected?.kind === "auth-error";
     const sample = async () => expected ? execute(auth ? authErrorObservation : receiptObservation, auth ? [] : [expected.label]) : undefined;
+    const surfaceBefore = await execute(captureSurface);
+    if (!surfaceBefore.settled) return false;
     const before = await sample();
     const valid = value => !expected || (value?.visible === true && (auth ? value.chatAbsent === true && expected.texts.includes(value.text) : value.status === expected.status));
     if (!valid(before)) return false;
     const png = Buffer.from(await command("GET", "/screenshot"), "base64");
     const after = await sample();
-    if (!valid(after) || JSON.stringify(before) !== JSON.stringify(after)) return false;
-    return { png, observation: after };
+    const surfaceAfter = await execute(captureSurface);
+    if (!surfaceAfter.settled || JSON.stringify(surfaceBefore) !== JSON.stringify(surfaceAfter) || !valid(after) || JSON.stringify(before) !== JSON.stringify(after)) return false;
+    return { png, observation: after, surface: surfaceAfter };
   });
 }

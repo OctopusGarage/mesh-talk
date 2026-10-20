@@ -261,11 +261,36 @@ export function nativeSettingsTargets(defaultRect, defaultViewport, minimumViewp
   ];
 }
 
+export async function settledSignedInSession(c, owner) {
+  return c.until("signed-in backend and rendered shell ready", async () => {
+    const identity = await c.observe("owner_node_identity", { owner });
+    if (identity.owner !== owner) return false;
+    const shellReady = await c.execute("return !!document.querySelector('[data-testid=chat-shell] main.conversation-canvas')&&!document.querySelector('[data-testid=chat-shell] main .animate-spin');");
+    return shellReady && { owner, backendReady: true, shellReady: true };
+  });
+}
+
+export async function settledIncomingAttachment(c, fileConv, fileName, backendReady = false) {
+  return c.until("incoming attachment complete in backend and rendered card", async () => {
+    const status = (await c.observe("file_statuses", { fileConvs: [fileConv] })).find(row => row.file_conv === fileConv);
+    backendReady ||= status?.ready === true;
+    if (!backendReady) return false;
+    const rendered = await c.execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),action=e?.querySelector('button[title][aria-label]');return !!e&&!e.querySelector('[data-testid=receive-file],[role=progressbar]')&&!!action&&!action.disabled&&!action.hasAttribute('data-download-error')&&action.getBoundingClientRect().width>0;", [fileName]);
+    return rendered && { backendReady: true, renderedComplete: true };
+  });
+}
+
+export async function settledPrivacyMode(c) {
+  await c.until("invisible confirmation fully dismissed", () => c.execute("return !document.querySelector('[data-testid=invisible-confirm]');"));
+  await c.settledDialog("settings-dialog");
+  return { confirmationDismissed: true, dialogSettled: true };
+}
+
 export async function wrongPasswordCheckpoint(c) {
   const name = "auth-logout-wrong-password";
   const errorCapture = await c.captureAuthError(`${name}-error`, { kind: "auth-error", texts: c.invalidCredentialTexts });
-  await c.login(c.userName);
-  await c.passed(name, { loggedOut: true, wrongPasswordRejected: true, signinRestored: true, invalidCredentialsKey: "login.invalidCredentials", errorCapture }, [errorCapture]);
+  const sessionReady = await c.login(c.userName);
+  await c.passed(name, { sessionReady, loggedOut: true, wrongPasswordRejected: true, signinRestored: true, invalidCredentialsKey: "login.invalidCredentials", errorCapture }, [errorCapture]);
 }
 
 export async function coreScenarios(c) {
@@ -350,11 +375,14 @@ export async function coreScenarios(c) {
   const receiveButton = await c.command("POST", "/element", { using: "css selector", value: '[data-testid="message-bubble"] [data-testid="receive-file"]' });
   await c.command("POST", `/element/${receiveButton["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
   await until("incoming attachment decrypted bytes available", async () => {
+    const status = (await observe("file_statuses", { fileConvs: [attachment.file.file_conv] })).find(row => row.file_conv === attachment.file.file_conv);
+    if (!status?.ready) return false;
     const received = await c.readFileBytes(attachment.file.file_conv);
     assert.deepEqual(received, Array.from(bytes));
     return true;
   });
-  await passed("incoming-attachment", { fileName, manifestPersisted: true, genericFileRendered: true, recipientApproved: true, bytesVerified: true, downloadVerified: false, limitation: "Real read_file bytes verified after recipient approval; OS save picker is outside embedded W3C DOM automation and was not invoked." });
+  const completion = await settledIncomingAttachment(c, attachment.file.file_conv, fileName, true);
+  await passed("incoming-attachment", { completion, fileName, manifestPersisted: true, genericFileRendered: true, recipientApproved: true, bytesVerified: true, downloadVerified: false, limitation: "Real read_file bytes verified after recipient approval; OS save picker is outside embedded W3C DOM automation and was not invoked." });
   await privacySettings();
   await click("settings-nav-appearance");
   await c.element("theme-picker");

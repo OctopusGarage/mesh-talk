@@ -69,7 +69,7 @@ test("typed observations reject missing checks and preserve explicit download li
   const { validateObservations } = await import("./hidden-contacts-report.mjs");
   assert.deepEqual(validateObservations("direct-messages", { uiToCliRendered: true, uiToCliPersisted: true, cliToUiRendered: true, cliToUiPersisted: true }), []);
   for (const observations of [{}, { uiToCliRendered: "true" }, { uiToCliRendered: false }]) assert.ok(validateObservations("direct-messages", observations).length);
-  assert.deepEqual(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, bytesVerified: true, downloadVerified: false, limitation: "OS save picker is not automated" }), []);
+  assert.deepEqual(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, bytesVerified: true, completion: {backendReady:true,renderedComplete:true}, downloadVerified: false, limitation: "OS save picker is not automated" }), []);
   assert.ok(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, downloadVerified: false, limitation: "OS save picker is not automated" }).length);
   assert.ok(validateObservations("incoming-attachment", { manifestPersisted: true, genericFileRendered: true, downloadVerified: false }).length);
 });
@@ -104,10 +104,20 @@ test("wrong-password proof requires its localized visible error and supplemental
   const name = "auth-logout-wrong-password";
   const observations = { loggedOut: true, wrongPasswordRejected: true, signinRestored: true };
   assert.ok(validateObservations(name, observations).length, "a recovered chat screenshot alone does not prove the error UI");
-  const valid = { ...observations, invalidCredentialsKey: "login.invalidCredentials", errorCapture: { filename: `${name}-error.png`, text: "用户名或密码错误", visible: true, chatAbsent: true, rect: { x: 10, y: 10, width: 100, height: 20 } } };
+  const valid = { ...observations, sessionReady: {owner:"a".repeat(36),backendReady:true,shellReady:true}, invalidCredentialsKey: "login.invalidCredentials", errorCapture: { filename: `${name}-error.png`, text: "用户名或密码错误", visible: true, chatAbsent: true, rect: { x: 10, y: 10, width: 100, height: 20 } } };
   assert.deepEqual(validateObservations(name, valid), []);
   for (const patch of [{ visible: false }, { text: "decrypt failed" }, { filename: "wrong.png" }, { chatAbsent: false }, { rect: { x: 0, y: 0, width: 0, height: 0 } }]) assert.ok(validateObservations(name, { ...valid, errorCapture: { ...valid.errorCapture, ...patch } }).length);
   const report = complete();
   report.scenarios[name].evidence = report.scenarios[name].evidence.filter(file => !file.endsWith("-error.png"));
   assert.ok(validateReport(report).some(error => error.includes(name)), "error capture must be a hashed report artifact");
+});
+
+test("semantic capture checkpoints cannot pass from backend-only observations", async()=>{
+  const {validateObservations}=await import('./hidden-contacts-report.mjs');
+  const attachment={fileName:'file',manifestPersisted:true,genericFileRendered:true,bytesVerified:true,recipientApproved:true,downloadVerified:false,limitation:'OS save picker not invoked'};
+  assert.ok(validateObservations('incoming-attachment',attachment).length);
+  assert.deepEqual(validateObservations('incoming-attachment',{...attachment,completion:{backendReady:true,renderedComplete:true}}),[]);
+  const privacy={cancelledBeforeCommit:true,durable:{invisible:true},passivePeerRetained:true};
+  assert.ok(validateObservations('privacy-mode',privacy).length);
+  assert.deepEqual(validateObservations('privacy-mode',{...privacy,confirmationDismissed:true,dialogSettled:true}),[]);
 });

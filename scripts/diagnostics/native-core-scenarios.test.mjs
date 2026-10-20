@@ -205,10 +205,40 @@ test("localized wrong-password error is captured before successful sign-in recov
   await wrongPasswordCheckpoint({
     userName: "user", invalidCredentialTexts: ["用户名或密码错误"],
     captureAuthError: async (name, expected) => { steps.push("error capture"); assert.equal(name, "auth-logout-wrong-password-error"); assert.deepEqual(expected.texts, ["用户名或密码错误"]); return errorCapture; },
-    login: async name => { steps.push("recovery"); assert.equal(name, "user"); },
+    login: async name => { steps.push("recovery"); assert.equal(name, "user"); return {owner:"a".repeat(36),backendReady:true,shellReady:true}; },
     passed: async (name, observations, captures) => { steps.push("passed"); assert.equal(name, "auth-logout-wrong-password"); observed = observations; assert.deepEqual(captures, [errorCapture]); },
   });
   assert.deepEqual(steps, ["error capture", "recovery", "passed"]);
   assert.equal(observed.invalidCredentialsKey, "login.invalidCredentials");
   assert.equal(observed.errorCapture.text, "用户名或密码错误");
+});
+
+test("attachment completion waits for backend readiness and completed rendered action", async () => {
+  const { settledIncomingAttachment } = await import("./native-core-scenarios.mjs");
+  assert.equal(typeof settledIncomingAttachment,"function");
+  let ready=false,rendered=false,polls=0;
+  const c={observe:async()=>[{file_conv:"conv",ready}],execute:async()=>rendered,until:async(_label,poll)=>{for(let i=0;i<3;i++){polls++; if(i===1)ready=true;if(i===2)rendered=true;const value=await poll();if(value)return value;}throw Error("not ready");}};
+  const observed=await settledIncomingAttachment(c,"conv","file.txt");
+  assert.equal(observed.backendReady,true);assert.equal(observed.renderedComplete,true);assert.equal(polls,3);
+});
+
+test("session readiness waits for matching backend owner and rendered ready shell", async () => {
+  const { settledSignedInSession } = await import("./native-core-scenarios.mjs");
+  let polls=0;
+  const c={observe:async()=>({owner:polls<2?'stale':'owner'}),execute:async()=>polls>2,until:async(_label,poll)=>{for(let i=0;i<3;i++){polls++;const result=await poll();if(result)return result;}throw Error('not ready');}};
+  assert.deepEqual(await settledSignedInSession(c,'owner'),{owner:'owner',backendReady:true,shellReady:true});
+  assert.equal(polls,3);
+  await assert.rejects(settledSignedInSession({...c,observe:async()=>({owner:'stale'})},'owner'),/not ready/);
+});
+test("privacy evidence waits for confirmation removal before settled settings", async()=>{
+  const { settledPrivacyMode } = await import("./native-core-scenarios.mjs");
+  let present=true;
+  const c={execute:async()=>!present,until:async(_label,poll)=>{assert.equal(await poll(),false);present=false;assert.equal(await poll(),true);},settledDialog:async id=>{assert.equal(present,false);assert.equal(id,'settings-dialog');}};
+  assert.deepEqual(await settledPrivacyMode(c),{confirmationDismissed:true,dialogSettled:true});
+});
+test("attachment completion retains the verified backend checkpoint after automatic-save pruning",async()=>{
+  const { settledIncomingAttachment } = await import("./native-core-scenarios.mjs");
+  const c={observe:async()=>[{file_conv:'conv',ready:false}],execute:async()=>true,until:async(_label,poll)=>{const result=await poll();if(!result)throw Error('not ready');return result;}};
+  await assert.rejects(settledIncomingAttachment(c,'conv','file'),/not ready/);
+  assert.deepEqual(await settledIncomingAttachment(c,'conv','file',true),{backendReady:true,renderedComplete:true});
 });

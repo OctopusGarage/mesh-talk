@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { verifyNativeBuild } from "../validation/native-build.mjs";
 import { captureNativeEvidence, nativeDriverEvidence, nativeInvalidCredentialTexts } from "./native-capture.mjs";
 import { validateEvidence } from "./hidden-contacts-report.mjs";
-import { coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, signedPeerObservation, nativeWindowsKeyboardScript } from "./native-core-scenarios.mjs";
+import { coreScenarios, restartedCoreScenarios, writeChildCommand, receiptScenarios, receiptRestartScenario, receiptColdRestartCheckpoint, signedPeerObservation, nativeWindowsKeyboardScript, settledSignedInSession, settledPrivacyMode } from "./native-core-scenarios.mjs";
 
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -266,6 +266,7 @@ async function login(username, register = false) {
     registeredOwners.set(username, owner);
   }
   signedInUser = registeredOwners.get(username);
+  return settledSignedInSession({ observe, execute, until }, signedInUser);
 }
 const hiddenContacts = async () => (await observe("get_hidden_contacts", { owner: signedInUser })).contacts;
 async function ensureOverflowOpen() {
@@ -347,7 +348,8 @@ try {
   await click("invisible-confirm");
   await until("durable invisible mode", async () => (await privacyPolicy()).invisible);
   assert.ok((await observe("list_accounts")).some(a => a.account_id === account), "passive roster remains available");
-  await passed("privacy-mode", { cancelledBeforeCommit: true, durable: await privacyPolicy(), passivePeerRetained: true });
+  const privacyPresentation = await settledPrivacyMode(coreContext);
+  await passed("privacy-mode", { ...privacyPresentation, cancelledBeforeCommit: true, durable: await privacyPolicy(), passivePeerRetained: true });
   await openDialog("manage-privacy");
   await settledDialog("privacy-dialog");
   await fill("privacy-search", peerName);
