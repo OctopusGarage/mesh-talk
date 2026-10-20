@@ -2,9 +2,17 @@
 
 <!-- One sentence describing what this changes and why. -->
 
+## Requirement and validation ownership
+
+<!-- Identify the requirement/issue, existing decision owner and authoritative rule.
+State observable acceptance criteria, affected consumers and browser/native risks.
+List validation.json updates, or explain why its existing selections remain sufficient.
+For a CI miss or flaky fixture, identify the owning correction and focused regression. -->
+
 ## Checklist
 
-- [ ] `make test` passes (or `cargo test -- --test-threads=2`)
+- [ ] `make standards-check` passes (structural ownership/references only)
+- [ ] `make test` passes
 - [ ] `./scripts/check-health.sh` passes before requesting review
 - [ ] Strict workspace Clippy passes (`cargo clippy --workspace --all-targets -- -D warnings`)
 - [ ] `cargo fmt` applied (no formatting diff)

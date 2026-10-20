@@ -52,6 +52,7 @@ test(
       );
     writeFileSync(join(root, "scripts/pr-platform/run.mjs"), "");
     writeFileSync(join(root, "scripts/validation/pr-scenarios.mjs"), "");
+    writeFileSync(join(root, "scripts/validation/standards.mjs"), "process.exit(Number(process.env.STANDARDS_STATUS || 0));\n");
     const trace = join(root, "trace");
     writeFileSync(
       join(root, "scripts/check-health.sh"),
@@ -74,6 +75,9 @@ test(
           ...env,
         },
       });
+    writeFileSync(trace, "");
+    assert.equal(run({ STANDARDS_STATUS: "19" }).status, 19);
+    assert.equal(readFileSync(trace, "utf8"), "", "standards failure must stop before expensive preflight or health");
     assert.equal(run({ HEALTH_STATUS: "9" }).status, 9);
     assert.equal(readFileSync(trace, "utf8"), "preflight:0\nhealth:0\n");
     writeFileSync(trace, "");

@@ -25,3 +25,15 @@ body:
     attributes:
       label: Alternatives considered
       description: Any other approaches you've thought about?
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Observable acceptance criteria
+      description: Describe what users should observe, including relevant failure or permission cases.
+    validations:
+      required: true
+  - type: textarea
+    id: ownership
+    attributes:
+      label: Implementation and validation ownership
+      description: Identify an existing capability or owning guide if known. The implementer must review consumers, validation contracts and browser/native obligations; unknown ownership can be resolved during triage.

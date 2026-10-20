@@ -8,6 +8,7 @@ import { readFile, mkdir, mkdtemp, rm, lstat, readlink, realpath } from "node:fs
 import { createHash, randomUUID } from "node:crypto";
 import { buildAffectedPlan, isFrontendGlobal } from "./affected.mjs";
 import { buildFrontendGraph } from "./frontend-graph.mjs";
+import { loadContracts } from "./contracts.mjs";
 import { runStage } from "./stage.mjs";
 import { runCommand, rustTestCount } from "../pr-platform/guest.mjs";
 import { buildStaticChecks, phasePlan } from "./checks.mjs";
@@ -15,14 +16,6 @@ import { frontendEnvironmentIdentity } from "./stage-inputs.mjs";
 import { loadRequirements, selectRequirements } from "./pr-scenarios.mjs";
 import { createFeedback, completePhase, finishFeedback, observeCommands, writeFeedback } from "./feedback.mjs";
 
-const contractFiles = [
-  "scripts/validation/validation.json",
-  "frontend/validation.json",
-  "crates/mesh-talk-core/validation.json",
-  "src-tauri/validation.json",
-  "crates/mesh-talk-integrations/validation.json",
-  "crates/mesh-talk-mcp/validation.json",
-];
 function git(root, args) {
   const result = spawnSync("git", args, {
     cwd: root,
@@ -94,13 +87,7 @@ export function parseOptions(args) {
 
 export async function createPlan(root, options) {
   const changes = discoverChanges(root, options.base);
-  const contracts = [];
-  for (const file of contractFiles) {
-    const parsed = JSON.parse(await readFile(path.join(root, file), "utf8"));
-    if (parsed.schema !== 1 || !Array.isArray(parsed.contracts))
-      throw Error(`Invalid validation contract: ${file}`);
-    contracts.push(...parsed.contracts);
-  }
+  const contracts = await loadContracts(root);
   let frontend;
   if (
     changes.files.some((file) => file.startsWith("frontend/src/") || isFrontendGlobal(file)) ||

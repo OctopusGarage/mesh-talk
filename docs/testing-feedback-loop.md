@@ -50,6 +50,76 @@ recipient delivery and read state, and between frontend ownership and host
 session authority. Summarize observed results and remaining obligations before
 moving to candidate acceptance.
 
+## Maintaining standards across requirements
+
+For every new requirement, the implementation owner follows this sequence:
+
+1. Locate the existing decision owner and authoritative business rule. Describe
+   observable acceptance criteria, including applicable failure, permission,
+   persistence and lifetime behavior. Clarify the rule in its owning guide when
+   its meaning changes; preserve the canonical glossary.
+2. Preview `make verify-plan` against the actual diff. Review consumers and
+   browser/native escalation, including runtime relationships that imports cannot
+   reveal. Extend the owning implementation before creating another rule owner.
+3. Maintain the owning `validation.json` in the same change when paths, shared
+   fixtures, consumers, selectors or escalation requirements change. New business
+   capabilities should declare their guide and invariant references. Existing
+   contracts do not need invented metadata or a duplicate specification. Explain
+   why the current contract remains sufficient when no change is needed.
+4. Add independent assertions derived from the requirement or a historical
+   failure. For a reproducible bug, show the regression failing before the fix.
+   Run affected checks while editing and replan when scope changes.
+5. Run `make standards-check` and `make verify-changed`. Report the tested source,
+   observed outcomes and outstanding obligations in the PR. Complete the existing
+   candidate preparation and protected checks before claiming readiness.
+
+`make standards-check` is a cheap structural audit of all registered validation
+contracts and source ownership, rather than another build or test suite. It uses
+one shared contract loader and the established planner/import graph. It checks
+schema and consumers, explicit test-file references, capability guides and
+supported heading anchors, and executable development selections for Rust and
+frontend source. A selection means tests are declared, not that they executed or
+contain useful assertions. Runtime wiring, complete requirement coverage and
+independent review still require human judgment.
+
+Capability anchors support ATX (`# Heading`) and setext headings outside fenced
+code, basic inline markup/link stripping, and numbered duplicate-heading suffixes.
+Custom HTML anchors and complete GitHub Markdown rendering are outside this
+checker's supported reference syntax; use ordinary headings for contract links.
+
+Exact-path frontend bootstrap, auth-screen, chat-shell and window-control owners
+use conservative existing state/helper unit selections where their composition
+has no importing unit test. Their `prScenarios` rules also require the owning
+browser suites. These fallback selections do not establish root rendering or
+native correctness, and new source outside those explicit paths still needs
+ownership or import reachability. The avatar primitive has a direct rendering
+regression.
+
+The checker runs in pre-commit, before expensive PR preparation and health work,
+and in the existing CI platform checks after frontend dependencies are installed.
+Install dependencies with `npm ci --prefix frontend` on a fresh checkout; missing
+parser dependencies fail rather than silently skipping frontend analysis. Hooks
+inspect the working tree, including untracked source. They do not construct the
+partially staged candidate, so staged-only correctness is established by CI on
+that committed candidate. No local hook or structural audit replaces full gates.
+
+When a failure reveals a weakness, classify it using the cause-to-correction
+mapping under [structured feedback](#structured-development-feedback). Correct
+its owning contract, task, fixture or business rule and add a known-change or
+real-execution regression that would catch the same omission. Update reusable
+AI evaluation scenarios when the reviewed mechanism changes; model availability
+is not a prerequisite for deterministic enforcement. Keep generated evidence in
+ignored output or CI artifacts, and record durable decisions in this guide or
+the relevant owning guide.
+
+During maintenance and before proposing gate reductions, compare like-for-like
+latency reports and same-source selection audits: first actionable feedback,
+required-gate p50/p95, observed runner minutes, first-attempt failures and observed
+selection omissions. Missing data stays unknown. Investigate newly slow or flaky
+checks before adding retries or global obligations. A policy change needs an
+explicit rationale and review; this process does not automatically rewrite rules,
+relax thresholds or infer a speedup or zero omissions from a small sample.
+
 ## Change-aware development plans
 
 Use the affected-test planner during development:

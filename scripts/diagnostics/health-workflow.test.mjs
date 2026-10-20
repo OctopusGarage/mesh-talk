@@ -74,6 +74,7 @@ test("full health holds a managed checkout lease and never reuses its aggregate 
   writeFileSync(join(root, "frontend/node_modules/.package-lock.json"), "{}");
   writeFileSync(join(root, "Makefile"), "");
   copyFileSync(resolve("scripts/check-health.sh"), join(root, "scripts/check-health.sh"));
+  writeFileSync(join(root, "scripts/validation/standards.mjs"), "");
   const trace = join(root, "trace.json");
   writeFileSync(join(root, "scripts/validation/stage.mjs"), "import fs from 'node:fs'; fs.writeFileSync(process.env.TRACE,JSON.stringify({args:process.argv.slice(2),fresh:process.env.MESH_VALIDATION_FRESH}));process.exit(17);\n");
   for (const fresh of ["0", "1"]) {
@@ -100,6 +101,7 @@ test("health primes fresh frontend dependencies before capturing supervised inpu
   for (const name of ["scripts/validation", "frontend", "src-tauri", "bin"]) mkdirSync(join(root, name), { recursive: true });
   writeFileSync(join(root, "Makefile"), "");
   copyFileSync(resolve("scripts/check-health.sh"), join(root, "scripts/check-health.sh"));
+  writeFileSync(join(root, "scripts/validation/standards.mjs"), "");
   writeFileSync(join(root, "bin/npm"), "#!/bin/sh\nmkdir -p node_modules\nprintf '{}' > node_modules/.package-lock.json\n", { mode: 0o755 });
   const trace = join(root, "trace.json");
   writeFileSync(join(root, "scripts/validation/stage.mjs"), "import fs from 'node:fs';fs.writeFileSync(process.env.TRACE,JSON.stringify({primed:fs.existsSync('frontend/node_modules/.package-lock.json')}));process.exit(17);\n");

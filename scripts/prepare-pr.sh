@@ -12,6 +12,7 @@ if [ -n "$(git status --porcelain)" ]; then
     echo "Commit or stash changes before preparing a PR candidate." >&2
     exit 1
 fi
+node scripts/validation/standards.mjs
 candidate="$(git rev-parse HEAD)"
 base_ref="$(node --input-type=module - "$@" <<'JS'
 import { parseFlags } from './scripts/pr-platform/plan.mjs';
