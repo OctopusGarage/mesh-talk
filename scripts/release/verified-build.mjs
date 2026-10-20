@@ -41,13 +41,15 @@ export async function resolveVerifiedBuild({ repo, sha, tag, currentRunId, read 
     assert.equal(run.repository?.full_name, repo, "build repository changed");
     assert.equal(run.head_repository?.full_name, repo, "build source repository changed");
     assert.equal(run.head_sha, sha, "build source changed");
-    assert.equal(run.head_branch, tag, "build tag changed");
+    assert.ok(typeof run.head_branch === "string" && run.head_branch.length > 0, "missing build ref");
     assert.equal(run.path, ".github/workflows/release.yml", "build workflow changed");
     assert.ok(typeof run.run_started_at === "string" && Number.isFinite(Date.parse(run.run_started_at)), "missing build attempt time");
   }
-  // A rerun of an older workflow may be the newest build execution.
-  runs.sort((a, b) => Date.parse(b.run_started_at) - Date.parse(a.run_started_at) || b.id - a.id);
-  for (const run of runs) {
+  // Branch dry runs use the same source but never verify a tagged draft.
+  // A rerun of an older tagged workflow may be the newest build execution.
+  const candidates = runs.filter((run) => run.head_branch === tag);
+  candidates.sort((a, b) => Date.parse(b.run_started_at) - Date.parse(a.run_started_at) || b.id - a.id);
+  for (const run of candidates) {
     const jobs = collection(await read(`${prefix}/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`), "jobs");
     const builds = jobs.filter((job) => /^build-release(?:$| \()/.test(job.name));
     if (builds.length && builds.every((job) => job.status === "completed" && job.conclusion === "skipped")) continue;

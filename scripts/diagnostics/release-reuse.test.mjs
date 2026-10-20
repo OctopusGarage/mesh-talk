@@ -51,11 +51,18 @@ test("ranks reruns by attempt start instead of original run ID", async () => {
   assert.equal((await resolve([run(11), run(10, { run_attempt: 2, run_started_at: "2026-10-12T00:00:00Z" })])).id, 10);
 });
 
+test("unrelated branch dry runs on the same source cannot block the requested tag", async () => {
+  const result = await resolve([run(11, { head_branch: "main", conclusion: "failure" }), run(10)]);
+  assert.equal(result.id, 10);
+  assert.ok(result.calls.every((path) => !path.includes("runs/11/")));
+  await assert.rejects(resolve([run(11, { head_branch: "main" })]), /No eligible/);
+});
+
 for (const [name, overrides] of Object.entries({
   repository: { repository: { full_name: "other/repo" } },
   fork: { head_repository: { full_name: "fork/repo" } },
   source: { head_sha: "b".repeat(40) },
-  tag: { head_branch: "main" },
+  "missing ref": { head_branch: undefined },
   workflow: { path: ".github/workflows/other.yml" },
   "workflow failure": { conclusion: "failure" },
   "incomplete workflow": { status: "in_progress", conclusion: null },
