@@ -170,7 +170,7 @@ def run():
         with tempfile.TemporaryDirectory(prefix="mesh-talk-four-e2e-") as local_dir:
             base = int(os.environ.get("MESH_TALK_E2E_BASE_PORT", random.randint(49000, 55000)))
             if installed:
-                e_udp, f_udp = 47479, 47480
+                e_udp, f_udp = 47478, 47478
                 e_id = os.environ.get("MESH_TALK_E2E_MAC2015_RELAY_ID",
                                       "edbbf0daac94d930e687ba86c20d3f06")
                 f_id = os.environ.get("MESH_TALK_E2E_MACMINI_RELAY_ID",

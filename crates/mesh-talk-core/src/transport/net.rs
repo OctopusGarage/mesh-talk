@@ -10,6 +10,10 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 /// from the legacy plaintext discovery port so the two protocols never collide.
 pub const DEFAULT_DISCOVERY_PORT: u16 = 47474;
 
+/// Dedicated routed discovery for managed post offices on every platform.
+/// Relays also participate on DEFAULT_DISCOVERY_PORT for shared LAN discovery.
+pub const POST_OFFICE_DISCOVERY_PORT: u16 = 47478;
+
 /// The IPv4 multicast group the node's discovery announces are sent to and
 /// listened on. Mirrors LocalSend's `224.0.0.167`: a link-local (224.0.0.0/24)
 /// group that stays on the LAN and survives where limited broadcast

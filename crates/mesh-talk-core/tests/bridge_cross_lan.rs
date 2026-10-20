@@ -46,6 +46,9 @@ impl Node {
                 dir.join("identity.keystore").to_str().unwrap(),
             ])
             .args(["--password", "pw", "--name", name])
+            // Multiple disposable relays share this host; managed services use
+            // the role default, while this isolated fixture requests OS ports.
+            .args(["--port", "0"])
             .args(["--discovery-port", &port.to_string()]);
         if relay {
             command.args(["--post-office", "--bridge"]);

@@ -10,5 +10,5 @@ RUN groupadd --gid 10001 mesh-talk && \
 
 USER 10001:10001
 WORKDIR /var/lib/mesh-talk
-EXPOSE 47475/tcp 47474/udp
+EXPOSE 47479/tcp 47474/udp 47478/udp
 ENTRYPOINT ["/usr/local/bin/mesh-talk-node", "--post-office"]

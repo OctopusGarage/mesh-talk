@@ -22,6 +22,7 @@ use mesh_talk_core::node::{
 };
 use mesh_talk_core::postoffice::PostOffice;
 use mesh_talk_core::postoffice::federation::FederationDirectory;
+use mesh_talk_core::transport::net::POST_OFFICE_DISCOVERY_PORT;
 use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -60,11 +61,15 @@ struct Args {
     /// Display name advertised to peers.
     #[arg(long)]
     name: String,
-    /// TCP port to listen on for peer connections (0 = OS-assigned).
-    #[arg(long, default_value_t = 0)]
+    /// TCP listener: OS-assigned for clients, 47479 for post offices; 0 explicitly selects a test port.
+    #[arg(
+        long,
+        default_value_t = 0,
+        default_value_if("post_office", "true", "47479")
+    )]
     port: u16,
-    /// UDP port for signed-announce discovery (must match across peers).
-    #[arg(long, default_value_t = DEFAULT_DISCOVERY_PORT)]
+    /// UDP discovery port: desktop 47474, post office 47478. Custom ports need explicit probes.
+    #[arg(long, default_value_t = DEFAULT_DISCOVERY_PORT, default_value_if("post_office", "true", "47478"))]
     discovery_port: u16,
     /// Also discover and announce on the LAN's shared port when the relay's
     /// routed discovery port differs (for example, when a desktop app shares the host).
@@ -300,12 +305,26 @@ impl Drop for DataDirLock {
     }
 }
 
+impl Args {
+    fn apply_discovery_defaults(&mut self) {
+        // Managed-role defaults retain LAN visibility. An explicitly isolated
+        // custom discovery port must not silently publish onto the real LAN.
+        if self.post_office
+            && self.discovery_port == POST_OFFICE_DISCOVERY_PORT
+            && self.lan_announce_port.is_none()
+        {
+            self.lan_announce_port = Some(DEFAULT_DISCOVERY_PORT);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("federation")) {
         return federation_config::run_cli();
     }
     let mut args = Args::parse();
+    args.apply_discovery_defaults();
     if let Some(path) = args.federation_config.as_deref() {
         args.federation_peers = federation_config::load(path)?;
     }
@@ -1167,6 +1186,48 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn cli_discovery_defaults_follow_service_role_and_allow_explicit_fixture_ports() {
+        let base = [
+            "mesh-talk-node",
+            "--keystore",
+            "node.keystore",
+            "--password",
+            "pw",
+            "--name",
+            "node",
+        ];
+        let desktop = Args::try_parse_from(base).unwrap();
+        assert_eq!(desktop.discovery_port, 47474);
+        assert_eq!(desktop.lan_announce_port, None);
+        let mut relay = Args::try_parse_from(base.into_iter().chain(["--post-office"])).unwrap();
+        relay.apply_discovery_defaults();
+        assert_eq!(relay.port, 47479);
+        assert_eq!(relay.discovery_port, 47478);
+        assert_eq!(relay.lan_announce_port, Some(47474));
+        let isolated = Args::try_parse_from(base.into_iter().chain([
+            "--post-office",
+            "--port",
+            "0",
+            "--discovery-port",
+            "51000",
+            "--lan-announce-port",
+            "51001",
+        ]))
+        .unwrap();
+        assert_eq!(isolated.port, 0);
+        assert_eq!(isolated.discovery_port, 51000);
+        assert_eq!(isolated.lan_announce_port, Some(51001));
+        let mut isolated = Args::try_parse_from(base.into_iter().chain([
+            "--post-office",
+            "--discovery-port",
+            "51000",
+        ]))
+        .unwrap();
+        isolated.apply_discovery_defaults();
+        assert_eq!(isolated.lan_announce_port, None);
     }
 
     #[test]

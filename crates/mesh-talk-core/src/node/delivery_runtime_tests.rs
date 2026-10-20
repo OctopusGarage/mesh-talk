@@ -6805,3 +6805,207 @@ fn expired_received_attachment_loses_readiness_after_cleanup() {
     assert!(!output.exists());
     assert!(!dir.path().join("expired.mov.part").exists());
 }
+
+#[tokio::test]
+async fn delayed_routed_dm_retries_reach_recipient_and_confirm_without_manual_flush() {
+    use std::time::Duration;
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, mut received) = node(bd.path(), bob, ba, &ap);
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"delayed routed message", None)
+        .await
+        .unwrap();
+    let mut workers = tokio::task::JoinSet::new();
+    workers.spawn(a.clone().run_delivery_loop());
+    workers.spawn(b.clone().run_delivery_loop());
+    // Delay both directions: the recipient's authenticated receipt must also
+    // survive a fresh routed handshake, without a manual flush or pull bypass.
+    for (receiver, listener) in [(a.clone(), al), (b.clone(), bl)] {
+        workers.spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let receiver = receiver.clone();
+                connections.spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(450)).await;
+                    if let Ok(channel) = receiver.privacy_accept(stream).await {
+                        receiver.serve_connection(channel).await;
+                    }
+                });
+            }
+        });
+    }
+    let result = tokio::time::timeout(Duration::from_secs(8), async {
+        let message = received.recv().await.unwrap();
+        assert_eq!(message.text, b"delayed routed message");
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    workers.abort_all();
+    while workers.join_next().await.is_some() {}
+    for node in [&a, &b] {
+        node.runtime_work.close();
+        tokio::time::timeout(Duration::from_secs(1), node.runtime_work.drain())
+            .await
+            .expect("cancelled controls must release retirement admission");
+    }
+    assert!(
+        result.is_ok(),
+        "a reachable high-latency recipient must receive the queued message and return its authenticated receipt"
+    );
+}
+
+#[tokio::test]
+async fn busy_delivery_slots_preserve_the_next_queued_destination_turn() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let account = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let remote = Account::generate();
+    let listeners = [
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+    ];
+    let proof = Announce::new_with_account(
+        &bob,
+        &remote,
+        "Bob",
+        listeners[0].local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(dir.path(), alice, account, &proof);
+    for listener in &listeners[1..] {
+        let sibling = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(
+            &sibling,
+            &sender.account,
+            "Sibling",
+            listener.local_addr().unwrap().port(),
+        );
+        sender.roster.lock().unwrap().update(
+            &proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &sender.user_id(),
+        );
+    }
+    let id = sender
+        .enqueue_to_account(&remote.account_id(), b"keep every destination's turn", None)
+        .await
+        .unwrap();
+    let mut destinations: Vec<_> = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations
+        .iter()
+        .map(|d| d.event.id)
+        .collect();
+    destinations.sort();
+    assert_eq!(destinations.len(), 3);
+    let worker = tokio::spawn(sender.clone().run_delivery_loop());
+    // Two identity-pinned dials remain pending while the third destination waits.
+    // Hold the accepted streams without completing their Noise handshakes.
+    let mut streams = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for _ in 0..2 {
+            let (stream, _) = tokio::select! {
+                result = listeners[0].accept() => result.unwrap(),
+                result = listeners[1].accept() => result.unwrap(),
+                result = listeners[2].accept() => result.unwrap(),
+            };
+            streams.push(stream);
+        }
+        // Force four additional snapshot passes before either dial times out.
+        for _ in 0..4 {
+            let (observed, snapshot) = tokio::sync::oneshot::channel();
+            *sender.delivery_snapshot_hook.lock().unwrap() = Some(Box::new(move || {
+                let _ = observed.send(());
+            }));
+            sender.delivery_notify.notify_one();
+            snapshot.await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    worker.abort();
+    let _ = worker.await;
+    sender.runtime_work.close();
+    tokio::time::timeout(Duration::from_secs(1), sender.runtime_work.drain())
+        .await
+        .unwrap();
+    let next = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .next_destination(None)
+        .unwrap()
+        .1
+        .event_id;
+    assert_eq!(
+        next, destinations[2],
+        "a full lane must not consume an unattempted destination's turn"
+    );
+}
+
+#[tokio::test]
+async fn relocated_recipient_cancels_stalled_old_route_before_exchange_deadline() {
+    use std::time::Duration;
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let old = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", old.local_addr().unwrap().port());
+    let relocated = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, mut incoming) = node(bd.path(), bob, ba, &ap);
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"handoff queued", None)
+        .await
+        .unwrap();
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(a.clone().run_accept_loop(al));
+    tasks.spawn(b.clone().run_accept_loop(bl));
+    let (stalled, _) = tokio::time::timeout(Duration::from_secs(2), old.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&relocated, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        assert_eq!(incoming.recv().await.unwrap().text, b"handoff queued");
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    drop(stalled);
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    assert!(
+        result.is_ok(),
+        "fresh recipient route must preempt a stalled old exchange without reducing the routed exchange budget"
+    );
+}

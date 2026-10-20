@@ -21,7 +21,7 @@ The desktop automatically reads both optional local-client inventories:
 
 Both feed the same core `CandidateSource` interface. Collection runs concurrently
 with independent 2.5-second deadlines, below the core's three-second snapshot
-budget. Results are interleaved, deduplicated, and capped at 256 total addresses
+budget. Results are interleaved, deduplicated, and capped at 256 total UDP endpoints
 so neither provider takes the entire candidate budget. Missing clients, denied
 RPC access, timeouts or incompatible JSON make that provider unavailable without
 discarding the other's results. Discovery starts automatically and refreshes
@@ -53,7 +53,10 @@ VPN presence and TCP connectivity are different observations.
 The routed query (`MTDQ`, version 1) is a fixed 64-byte identity-free UDP packet
 with a random 16-byte nonce. A public responder signs the `MTDR` response, binding
 that nonce to its signed announcement. The requester admits one response from an
-outstanding candidate IP within five seconds after validating both signatures.
+outstanding candidate IP and nonce within five seconds after validating both
+signatures. Separate nonces for services on the same IP remain independently
+pending, with at most 256 pending requests; consuming one does not invalidate
+another service's reply.
 Invisible mode and physical-LAN-only disclosure suppress routed probing/replies.
 
 Roster routes retain origin, freshness and authentication observations separately
@@ -61,6 +64,45 @@ from device identity. A known direct route may be LAN, routed-query or
 authenticated; a gateway/mailbox hint alone is not direct reachability. Transport
 tries bounded candidate routes and keeps current signed ports ahead of stale
 cached ports. IPv4/IPv6 support follows available sockets and interface scope.
+
+## Network changes and recovery
+
+All desktop, CLI and post-office discovery sockets observe non-loopback interface
+names, addresses and interface indexes every two seconds. A changed inventory
+rejoins LAN multicast and wakes the existing announce/scan producers; a desktop's
+shared trigger also refreshes routed candidates. Inventory ordering and duplicates
+do not create changes, and an enumeration failure retains the last observation.
+The 30-second periodic multicast join remains a retry fallback. Every advertisement
+and routed probe still passes the current visibility/scope gates.
+
+Fresh signed announcements supply current TCP endpoints. Changed local interfaces
+cancel stale delivery control batches and mailbox pulls; changed endpoints for an
+active recipient or eligible relay cancel the old control batch before retrying
+its immutable queue. Unrelated peers and refresh timestamps do not cause resets.
+Transport errors retire failed pooled sessions. The 15-second complete-exchange
+budget remains available on stable high-latency routes. The two-second observation period and per-exchange
+timeouts are scheduling bounds, not an end-to-end delivery SLA. Recovery still
+requires an allowed IP path, fresh discoverable/pinned endpoints and retained
+message state. A configured federation seed whose IP actually changes may need
+its explicit endpoint updated if neither LAN discovery nor another retained route
+can find that identity.
+
+`scripts/e2e-network-handoff.py` moves disposable Linux container interfaces between
+two real Docker bridge networks without restarting the node processes or manually
+probing/rescanning. It checks queued/new messages, duplicate-free history and
+recipient-authenticated receipt convergence in both directions of the handoff,
+plus recovery from a relocated post office while the sender is disconnected.
+The relay phase explicitly verifies the disposable contacts before enabling
+proactive mailbox recovery; discovery never substitutes for verification.
+Its 15-second fixture acceptance budget starts after the new route is attached.
+This is network-namespace acceptance, not a physical Wi-Fi/hotspot or native
+WebView latency measurement. Build Linux `mesh-talk-node` and the
+`network-acceptance` example with `fast-test-kdf` into a Docker volume, then run:
+
+```bash
+python3 scripts/e2e-network-handoff.py --image <linux-runtime-image> \
+  --binaries-volume <docker-volume> --binaries-subdir <directory-containing-binaries>
+```
 
 ## Connect two apps directly
 
@@ -75,9 +117,20 @@ cached ports. IPv4/IPv6 support follows available sockets and interface scope.
 4. Validate the discovered identity; normal private-contact/group permissions
    still apply. A blocked TCP listener can prevent delivery after discovery.
 
-The default discovery port is 47474. A custom relay/app discovery port must be
-queried explicitly or otherwise supplied as a candidate; VPN inventories do not
-advertise Mesh Talk service ports. A device-to-device VPN edge exposes those
+The managed discovery contract is platform-independent: desktops use UDP 47474;
+every post office uses dedicated UDP 47478 and also participates on shared LAN
+UDP 47474. The macOS and Windows service installers enforce these ports.
+Desktop inventories probe both role ports on each candidate host. Both share
+the same interleaved 256-endpoint budget; duplicate endpoints are queried once
+per snapshot. The port numbers identify entry points; only signed responses
+establish service identity and advertise its TCP port: managed post offices use
+TCP 47479; desktop clients automatically choose and attempt to reuse their port.
+VPN inventories advertise hosts, not Mesh Talk service ports. The raw headless
+CLI retains custom discovery ports for isolated deployments/tests, which must
+supply explicit discovery endpoints; they are not automatically discovered by
+the desktop inventory. The current desktop manual-address form supplies the
+default port only, while CLI `/probe <ip:discovery-port>` supports custom ports.
+Production services must retain the managed role ports. A device-to-device VPN edge exposes those
 endpoints, not all machines on their neighboring LANs. Tailscale-only and
 EasyTier-only devices still need a shared permitted route or a separately
 configured Mesh Talk relay topology.

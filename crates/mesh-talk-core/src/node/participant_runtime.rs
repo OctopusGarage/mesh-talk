@@ -3,7 +3,7 @@
 //! hosts can perform their final session authorization around it.
 use super::{Node, runtime_work::RuntimeWork};
 use crate::discovery::service::{
-    RoutedDiscovery, SharedAnnounce, shared_announce, spawn_discovery_with_routed,
+    RoutedDiscovery, SharedAnnounce, shared_announce, spawn_discovery_with_network_changes,
     spawn_routed_listener, swap_announce,
 };
 use crate::discovery::{DiscoveryVisibility, candidates::CandidateSource};
@@ -83,7 +83,7 @@ impl PreparedParticipant {
         let announce = shared_announce(&current_announce);
         let discovery_trigger = Arc::new(Notify::new());
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-        tasks.extend(spawn_discovery_with_routed(
+        tasks.extend(spawn_discovery_with_network_changes(
             Arc::clone(&socket),
             Arc::clone(&roster),
             Arc::clone(&announce),
@@ -92,6 +92,7 @@ impl PreparedParticipant {
             Some(Arc::clone(&discovery_trigger)),
             Arc::clone(&visibility),
             Some(Arc::clone(&routed)),
+            Some(node.network_changes.clone()),
         ));
         if let Some(socket_v6) = socket_v6.as_ref() {
             tasks.push(spawn_routed_listener(
@@ -157,9 +158,16 @@ impl PreparedParticipant {
         {
             let node = Arc::clone(&node);
             tasks.push(tokio::spawn(async move {
+                let mut network = node.network_changes.subscribe();
                 loop {
-                    node.drain_from_post_office().await;
-                    tokio::time::sleep(Duration::from_secs(DRAIN_INTERVAL_SECS)).await;
+                    tokio::select! {
+                        _ = node.drain_from_post_office() => {},
+                        _ = network.changed() => continue,
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(DRAIN_INTERVAL_SECS)) => {},
+                        _ = network.changed() => {},
+                    }
                 }
             }));
         }
