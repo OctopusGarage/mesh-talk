@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# The repository PR entry point: verify the candidate before publishing it.
+# Publish promptly after cheap checks; comprehensive validation runs in PR CI.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 preflight_args=()
+full_preflight=0
 separator=0
 while [ "$#" -gt 0 ]; do
     if [ "$1" = "--" ]; then
@@ -13,11 +14,16 @@ while [ "$#" -gt 0 ]; do
         shift
         break
     fi
+    if [ "$1" = "--full-preflight" ]; then
+        full_preflight=1
+        shift
+        continue
+    fi
     preflight_args+=("$1")
     shift
 done
 if [ "$separator" -ne 1 ]; then
-    echo "Usage: scripts/create-pr.sh [preflight selectors and UI specs] -- [gh pr create options]" >&2
+    echo "Usage: scripts/create-pr.sh [--full-preflight] [preflight selectors and UI specs] -- [gh pr create options]" >&2
     exit 2
 fi
 if [ -n "${GH_REPO:-}" ]; then
@@ -36,7 +42,9 @@ done
 # Bash 3.2 treats an empty array as unset under nounset.
 base_ref="$(node --input-type=module - ${preflight_args[@]+"${preflight_args[@]}"} <<'JS'
 import { parseFlags } from './scripts/pr-platform/plan.mjs';
-console.log(parseFlags(['--base', process.env.PATCH_COVERAGE_BASE ?? 'origin/main', ...process.argv.slice(2)]).base);
+const flags = parseFlags(['--base', process.env.PATCH_COVERAGE_BASE ?? 'origin/main', ...process.argv.slice(2)]);
+if (flags.planOnly) throw Error('Preview with scripts/pr-platform/run.mjs --plan; creation publishes a PR.');
+console.log(flags.base);
 JS
 )"
 case "$base_ref" in
@@ -50,9 +58,20 @@ git check-ref-format --branch "$pr_base" >/dev/null
 
 base_sha="$(git rev-parse --verify "$base_ref")"
 candidate="$(git rev-parse HEAD)"
-"$repo_root/scripts/prepare-pr.sh" ${preflight_args[@]+"${preflight_args[@]}"}
+if [ -n "$(git status --porcelain)" ]; then
+    echo "Commit or stash changes before creating a PR." >&2
+    exit 1
+fi
+git diff --check "$base_ref"...HEAD
+if [ "$full_preflight" -eq 1 ]; then
+    "$repo_root/scripts/prepare-pr.sh" ${preflight_args[@]+"${preflight_args[@]}"}
+else
+    node scripts/check-repository-hygiene.mjs
+    node scripts/validation/standards.mjs
+    echo "Fast PR creation: full platform, browser and native checks run in CI. Merge only after CI passes."
+fi
 if [ "$(git rev-parse HEAD)" != "$candidate" ] || [ -n "$(git status --porcelain)" ] || [ "$(git rev-parse --verify "$base_ref")" != "$base_sha" ]; then
-    echo "The candidate changed during preflight. Verify the new revision before creating its PR." >&2
+    echo "The candidate or comparison base changed during PR checks. Retry with the committed revision." >&2
     exit 1
 fi
 exec gh pr create --base "$pr_base" "$@"

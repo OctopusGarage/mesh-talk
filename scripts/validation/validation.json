@@ -109,7 +109,7 @@
         "scripts/diagnostics/standards-wiring.test.mjs"
       ],
       "escalation": [
-        "Before publication run full preparation; focused diagnostic success alone does not certify native or platform execution."
+        "Fast PR creation checks source integrity; use --full-preflight for comprehensive local preparation. Required CI must pass before merge; focused diagnostics alone do not certify native or platform execution."
       ]
     },
     {
@@ -130,7 +130,7 @@
         "mcp-adapter"
       ],
       "escalation": [
-        "Shared compiler, dependency or feature inputs invalidate every workspace consumer. Inspect production/test feature differences, platform checks and native requirements before publication."
+        "Shared compiler, dependency or feature inputs invalidate every workspace consumer. Inspect production/test feature differences, platform checks and native requirements before merge or full local preparation."
       ]
     },
     {

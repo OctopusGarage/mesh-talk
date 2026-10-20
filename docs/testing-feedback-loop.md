@@ -3,17 +3,20 @@
 During feature development, run the smallest tests that cross the changed
 boundary. The pre-commit hook checks staged whitespace and source formatting;
 it does not launch test suites. Record the focused commands and results in the
-PR. Before opening or updating a PR, commit the candidate and run
-`./scripts/prepare-pr.sh` with affected Rust selectors and Playwright specs.
-It runs affected platform preflight, followed by full health (including
-`make test`'s workspace test stage); `create-pr.sh` invokes it automatically before publication. CI also runs the comprehensive suites. Run backend or full UI E2E sooner
-when explicitly requested or when the changed behavior needs process/browser
-evidence.
+PR. Commit the candidate and use `./scripts/create-pr.sh -- <gh pr create options>`
+for fast publication after cheap source, whitespace, structural and hygiene checks.
+CI runs the comprehensive suites after publication; all required checks must pass
+on the current PR head before merge. Creating a PR does not certify acceptance.
+For comprehensive local validation, pass `--full-preflight` before the `--`
+separator with affected selectors/specs, or run `./scripts/prepare-pr.sh`
+directly. Preparation runs affected platform preflight followed by full health,
+including `make test`'s workspace test stage. Run backend or full UI E2E sooner
+when explicitly requested or when the changed behavior needs process/browser evidence.
 
 | Changed boundary            | Fast local command                                                                                          | Broader trigger                                             |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Core unit module            | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync`                              | `make test` before PR                                       |
-| Host settings/session       | `make test-focused TEST_PACKAGE=mesh-talk TEST_FILTER=owner_scoped_node_handle`                             | `make test` before PR                                       |
+| Core unit module            | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync`                              | `make test` locally or matching CI before merge              |
+| Host settings/session       | `make test-focused TEST_PACKAGE=mesh-talk TEST_FILTER=owner_scoped_node_handle`                             | `make test` locally or matching CI before merge              |
 | One Rust integration target | `make test-focused TEST_PACKAGE=mesh-talk-core TEST_TARGET=decoder_smoke`                                   | `make e2e` when requested or for release validation         |
 | Frontend state/controller   | `cd frontend && npm test -- src/features/chat/settingsDialogSession.test.ts`                                | `npm run test:coverage` in PR preflight                     |
 | Frontend rendering          | Run the affected component test, for example `cd frontend && npm test -- src/features/chat/Sidebar.test.ts` | Pass relevant Playwright specs to `scripts/pr-preflight.sh` |
@@ -38,7 +41,7 @@ described by [Fowler](https://martinfowler.com/bliki/DeploymentPipeline.html) an
 | Understand and plan  | Start work or change its scope; identify business owner, consumers and obligations           | Owning guides, `make verify-plan`                                                    |
 | Change feedback      | Validate a small change with affected static checks and executable tests                     | `make verify-changed`, development feedback JSON                                     |
 | Boundary validation  | Change cross-module interfaces, runtime IPC, visible behavior, persistence or lifecycle      | Plan requirements and escalation review; focused integration/browser/native evidence |
-| Candidate acceptance | Prepare the committed candidate for publication and review                                   | `prepare-pr.sh`, full health and protected CI                                        |
+| Candidate acceptance | Accept the current committed PR head before merge                                            | Required protected CI; optional local `prepare-pr.sh` and full health                |
 | Extended validation  | Scheduled, release or explicitly triggered compatibility, stress and long-running properties | Owning backend/UI/native workflows and evaluation guides                             |
 
 Read the selected capability's authoritative guide before changing behavior.
@@ -614,7 +617,7 @@ or scenario review required. No result removes current full gates. Investigate
 misses and strengthen the owning contract; a green sample is not proof that
 future selection is sound.
 
-## Merge queues and unchanged publication guarantees
+## Merge queues and required merge checks
 
 Required Actions workflows accept `merge_group: checks_requested`, including
 actual base/head dependency review. This prepares them for a queue without
@@ -623,25 +626,40 @@ required external CodeQL/Codecov statuses, candidate SHA/evidence semantics and
 actual hosted completion before activation. Workflows cancel superseded candidate
 work where safe; publication/release operations retain their own policies.
 
-Full local PR preparation, protected platform/browser/native checks and review
-health remain required. A future fast-publication or selective-merge policy needs
-measured selector reliability and coordinated updates to this guide, AGENTS,
-entry points and protected checks. Queueing protects combined changes against
-the latest base; it can add verification work and does not itself make tests
-faster. Keep agent tasks small, identify owner/acceptance commands before edits,
-and validate the combined diff after integration.
+Protected platform/browser/native and health checks remain required before merge.
+Fast PR publication does not change workflow triggers, required checks or branch
+protection. Queueing protects combined changes against the latest base; it can
+add verification work and does not itself make tests faster. Keep agent tasks
+small, identify owner/acceptance commands before edits, and validate the combined
+diff after integration.
 
-## Automatic platform checks before PR creation
+## Fast PR creation and optional full local preparation
 
 Commit the candidate and use the repository's PR entry point:
 
 ```bash
-./scripts/create-pr.sh \
+./scripts/create-pr.sh -- --draft --fill
+```
+
+The default checks a clean committed candidate, the comparison base, safe PR
+arguments, whitespace, structural standards and repository hygiene. It does not
+start Docker, SSH, browser suites or full health. Required hosted checks run
+after publication and must all pass before merge. Local results do not replace
+those checks.
+
+To finish comprehensive local validation before creating a PR, opt in:
+
+```bash
+./scripts/create-pr.sh --full-preflight \
   --core-filter node::delivery_runtime_tests \
   --host-filter owner_scoped_node_handle \
   e2e/ui-visual-regression.spec.ts \
   -- --draft --fill
 ```
+
+`--full-preflight` belongs before `--` and invokes `prepare-pr.sh`; its full
+health and platform checks remain unchanged. The following selector and
+platform requirements apply when running full local preparation.
 
 Arguments before `--` select tests; arguments after it go to `gh pr create`.
 Use filters and browser specs relevant to your change. Core, host, integration and MCP filters can be repeated. Use
@@ -657,7 +675,7 @@ does not automatically launch the full workspace, ignored process rigs, or
 the full browser suite.
 
 Changes to the platform runner, PR entry point or source-evidence helpers also
-select four fixed Node workflow regression files on both guests. This catches
+select the fixed Node workflow regression set on both guests. This catches
 Git, shell and path compatibility independently of application tests; a
 workflow-only diagnostic plan does not install frontend dependencies.
 Verification archives suppress export substitutions and text/filter conversions
@@ -693,9 +711,10 @@ preserves that directory's registry and network configuration without logging
 its contents. Otherwise, Cargo uses the isolated D: cache. Source, build
 output, browser downloads and temporary directories remain isolated.
 
-For an existing PR, run `scripts/prepare-pr.sh` before pushing the candidate.
-Use `scripts/pr-preflight.sh` alone for focused platform investigation; it does
-not certify the complete publication gate. After a broader run has produced evidence, a focused follow-up can
+For an existing PR, `scripts/prepare-pr.sh` provides optional comprehensive local
+validation before pushing a candidate. Use `scripts/pr-preflight.sh` alone for
+focused platform investigation; it does not certify full candidate acceptance.
+After a broader run has produced evidence, a focused follow-up can
 use `--base <previous-candidate>` with the tests affected by the delta. Retain
 the earlier reports and record both revisions, the comparison base, remaining
 failures and exact test scope in the PR. Shared fixture changes require all
@@ -728,7 +747,7 @@ To run native Linux amd64 containers on the Intel Mac while preparing a PR:
 
 ```bash
 MESH_PR_LINUX_HOST=mac2015 MESH_PR_LINUX_PLATFORM=linux/amd64 \
-  ./scripts/create-pr.sh --core-filter discovery:: --host-filter discovery \
+  ./scripts/create-pr.sh --full-preflight --core-filter discovery:: --host-filter discovery \
   e2e/settings-recovery.spec.ts -- --title "Your PR title" --body-file /tmp/pr-body.md
 ```
 
