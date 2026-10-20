@@ -137,7 +137,7 @@ console.log(JSON.stringify(result));
       copyFileSync(process.execPath, `${gh}.exe`);
       const preload = `${directory}/reply.cjs`;
       writeFileSync(preload, `if (process.execPath.toLowerCase().endsWith('gh.exe')) { ${reply}\nprocess.exit(0); }`);
-      fixtureEnv.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ""} --require "${preload}"`;
+      fixtureEnv.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ""} --require "${preload.replaceAll("\\", "/")}"`;
     } else {
       writeFileSync(gh, `#!/usr/bin/env node\n${reply}`);
       chmodSync(gh, 0o755);
