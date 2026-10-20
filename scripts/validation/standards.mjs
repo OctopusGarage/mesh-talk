@@ -17,7 +17,8 @@ const requiresOwnership = (file) =>
     /\.rs$|\/Cargo\.toml$|\/tests\/fixtures\//u.test(file));
 
 // Deliberately limited Markdown support: ATX/setext headings outside fenced
-// code, basic inline markup/link stripping, and duplicate-heading suffixes.
+// code, basic Markdown markup/link stripping, and duplicate-heading suffixes.
+// HTML-bearing headings are unsupported; never partially strip HTML as text.
 // This is not a complete GitHub Markdown renderer.
 function headingAnchors(markdown) {
   const anchors = new Set();
@@ -52,9 +53,13 @@ function headingAnchors(markdown) {
       index++;
     }
     if (!heading) continue;
+    // Skipping unsupported headings would corrupt later duplicate-slug counts.
+    if (/[<>]/u.test(heading))
+      throw Error(
+        "HTML-bearing headings are unsupported for anchored references",
+      );
     const slug = heading
       .replace(/!?\[([^\]]+)\]\([^)]*\)/gu, "$1")
-      .replace(/<[^>]*>/gu, "")
       .toLowerCase()
       .replace(/[^\p{L}\p{N}\p{M}_\-\s]/gu, "")
       .replace(/\s/gu, "-");

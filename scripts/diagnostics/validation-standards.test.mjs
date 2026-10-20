@@ -282,3 +282,50 @@ test("backticks in an opening info string do not start a code fence", async (t) 
   await f.put("docs/feature.md", "```invalid`info\n# Real\n");
   assert.deepEqual((await checkStandards(f.root)).issues, []);
 });
+
+for (const heading of ["<em>Feature</em>", "<scrip<script>t>"]) {
+  test(`HTML-bearing headings cannot supply capability anchors: ${heading}`, async (t) => {
+    const anchor = heading.includes("Feature") ? "feature" : "t";
+    const f = await fixture(t, [
+      owner({
+        capability: {
+          summary: "Feature",
+          guide: "docs/feature.md",
+          invariants: [
+            { name: "Invariant", reference: `docs/feature.md#${anchor}` },
+          ],
+        },
+      }),
+    ]);
+    await f.put("scripts/example.test.mjs");
+    await f.put("docs/feature.md", `# Real\n# ${heading}\n`);
+    const report = await checkStandards(f.root);
+    assert.equal(report.ok, false);
+    assert.equal(report.issues.length, 1);
+    assert.equal(report.issues[0].path, `docs/feature.md#${anchor}`);
+    await f.put("docs/feature.md", `# Real\n# **[${anchor}](guide.md)**\n`);
+    assert.deepEqual((await checkStandards(f.root)).issues, []);
+  });
+}
+
+test("unsupported HTML headings cannot lend their duplicate anchor to a plain heading", async (t) => {
+  const f = await fixture(t, [
+    owner({
+      capability: {
+        summary: "Feature",
+        guide: "docs/feature.md",
+        invariants: [
+          { name: "Invariant", reference: "docs/feature.md#feature" },
+        ],
+      },
+    }),
+  ]);
+  await f.put("scripts/example.test.mjs");
+  await f.put("docs/feature.md", "# <em>Feature</em>\n# Feature\n");
+  const report = await checkStandards(f.root);
+  assert.equal(report.ok, false);
+  assert.equal(report.issues.length, 1);
+  assert.match(report.issues[0].message, /HTML-bearing headings/u);
+  await f.put("docs/feature.md", "# Other\n# Feature\n");
+  assert.deepEqual((await checkStandards(f.root)).issues, []);
+});

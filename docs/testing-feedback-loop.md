@@ -83,9 +83,13 @@ contain useful assertions. Runtime wiring, complete requirement coverage and
 independent review still require human judgment.
 
 Capability anchors support ATX (`# Heading`) and setext headings outside fenced
-code, basic inline markup/link stripping, and numbered duplicate-heading suffixes.
-Custom HTML anchors and complete GitHub Markdown rendering are outside this
-checker's supported reference syntax; use ordinary headings for contract links.
+code, basic Markdown markup/link stripping, and numbered duplicate-heading suffixes.
+Headings containing `<` or `>` (including inline HTML and autolinks), custom HTML
+anchors and complete GitHub Markdown rendering are outside this checker's supported
+reference syntax; use ordinary headings for contract links. Anchored references to
+documents containing HTML-bearing headings fail, including references to later plain
+headings: skipping unsupported headings would invalidate duplicate-anchor numbering.
+Unanchored file references still work. The checker does not sanitize or render HTML.
 
 Exact-path frontend bootstrap, auth-screen, chat-shell and window-control owners
 use conservative existing state/helper unit selections where their composition
