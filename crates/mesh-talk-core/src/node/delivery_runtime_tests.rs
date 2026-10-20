@@ -6814,13 +6814,13 @@ async fn delayed_routed_dm_retries_reach_recipient_and_confirm_without_manual_fl
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut received) = node(bd.path(), bob, ba, &ap);
+    let (b, mut received) = node(bd.path(), bob, bob_account, &ap);
     let id = a
         .enqueue_to_account(&b.account_id(), b"delayed routed message", None)
         .await
@@ -6970,15 +6970,17 @@ async fn relocated_recipient_cancels_stalled_old_route_before_exchange_deadline(
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let old = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", old.local_addr().unwrap().port());
-    let relocated = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp =
+        Announce::new_with_account(&bob, &bob_account, "Bob", old.local_addr().unwrap().port());
+    let relocated =
+        Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut incoming) = node(bd.path(), bob, ba, &ap);
+    let (b, mut incoming) = node(bd.path(), bob, bob_account, &ap);
     let id = a
         .enqueue_to_account(&b.account_id(), b"handoff queued", None)
         .await
