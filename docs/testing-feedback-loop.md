@@ -74,7 +74,8 @@ For every new requirement, the implementation owner follows this sequence:
    Run affected checks while editing and replan when scope changes.
 5. Run `make standards-check` and `make verify-changed`. Report the tested source,
    observed outcomes and outstanding obligations in the PR. Complete the existing
-   candidate preparation and protected checks before claiming readiness.
+   protected CI checks before claiming merge readiness; comprehensive local
+   candidate preparation remains optional.
 
 `make standards-check` is a cheap structural audit of all registered validation
 contracts and source ownership, rather than another build or test suite. It uses
@@ -341,9 +342,11 @@ failed/interrupted stages, dirty sources, and changed inputs require execution.
 scans continue to run directly rather than reusing time-sensitive scan verdicts.
 
 `make test` and full health share the same workspace-test stage. Preflight and
-health share frontend static/unit stages. The PR wrapper still invokes preflight;
-its local work can reuse intact evidence, while both required remote platforms
-always execute. An unavailable environment therefore still blocks publication.
+health share frontend static/unit stages. With `--full-preflight`, the PR wrapper
+invokes local preparation; its local work can reuse intact evidence, while both
+required remote platforms always execute. An unavailable environment blocks that
+optional full preparation. Fast publication runs cheap checks instead; required
+hosted CI must pass before merge.
 Deterministic frontend formatting/lint/type/build/unit stages may opt into
 `--inputs frontend`. Their explicit closure includes tracked frontend sources,
 configuration/tests, public help code/content, marketplace assets, workspace

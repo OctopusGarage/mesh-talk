@@ -33,7 +33,7 @@
         "Unmapped changes block unless explicitly assigned with a reason; shared inputs reach consumers and deleted-source dependencies are considered.",
         "Cheap static checks precede heavy work, and changed inputs invalidate the queued handoff and final verdict.",
         "Test selectors must execute nonignored tests and each selected frontend or diagnostic file must execute at least one passing declared test case; skipped-only runs and file wrappers cannot qualify. Test-case counts are not proof of assertion-call counts or test quality.",
-        "Browser/native escalation and full publication gates remain explicit obligations; selected development success cannot authorize a merge."
+        "Browser/native escalation and full pre-merge CI gates remain explicit obligations; selected development success cannot authorize a merge."
       ]
     },
     {
