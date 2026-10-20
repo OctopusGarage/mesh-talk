@@ -23,12 +23,27 @@ test("release verification waits for every platform and checks exact-source sign
 test("publication is opt-in, tag-only and requires verified release evidence", () => {
   const publish = workflow.split("  publish-release:\n")[1];
   assert.ok(publish);
-  assert.match(publish, /needs: \[preflight, verify-release\]/);
+  assert.match(publish, /needs: \[preflight, resolve-publication\]/);
   assert.match(publish, /inputs\.publish_release/);
   assert.match(publish, /startsWith\(github\.ref, 'refs\/tags\/'\)/);
   assert.match(publish, /scripts\/release\/check-source-checks\.mjs/);
   assert.match(publish, /scripts\/release\/release-state\.mjs publish/);
   assert.match(publish, /name: verified-release-evidence/);
+  assert.match(publish, /run-id: \$\{\{ needs\.resolve-publication\.outputs\.run_id \}\}/);
+  assert.match(publish, /github-token: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
+  assert.match(publish, /release-state\.mjs verify/);
+  assert.match(publish, /verify-release\.sh draft-assets/);
+});
+
+test("publication resolves a verified build and skips compilation", () => {
+  for (const job of ["build-release", "verify-release"]) {
+    const body = workflow.split(`  ${job}:\n`)[1]?.split(/^  [a-z-]+:/m)[0];
+    assert.match(body, /if: .*inputs\.publish_release != true/);
+  }
+  const resolve = workflow.split("  resolve-publication:\n")[1]?.split(/^  publish-release:/m)[0];
+  assert.ok(resolve);
+  assert.match(resolve, /scripts\/release\/verified-build\.mjs/);
+  assert.match(resolve, /actions: read/);
 });
 
 test("post-office images use verified Linux archives and publish before the release", () => {
