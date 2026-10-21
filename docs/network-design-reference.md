@@ -222,12 +222,16 @@ inspectable and use their device-scoped observations without inventing an accoun
 Public freshness remains distinct from presentation tolerance. Local and public
 authenticated observations last 15 seconds. Signed routed observations learn a
 freshness lease from verified nonce-bound RTT within 15–60 seconds, with healthy
-samples shrinking a prior long lease by at most five seconds. A learned lease of
-at least 45 seconds indicates slow connection unless fresh physical LAN evidence
-is available. Across member headers, profiles and status tooltips, use the same
+samples shrinking a prior long lease by at most five seconds. The adaptive lease
+is a tolerance budget, never evidence that a currently renewing connection is slow.
+Show a quality hint when public observations have stopped renewing within the
+normal fifteen-second freshness window while cross-network tolerance keeps the
+person Online. Across member headers, profiles and status tooltips, use the same
 concise **Online · slow connection** label; do not add a long explanatory paragraph.
-The quality hint clears only after thirty seconds of successful healthy renewed
-observations. Delivery and receipt retries progress independently.
+Routed quality recovery requires thirty seconds of healthy renewed observations;
+fresh physical LAN evidence clears inherited routed quality immediately, without
+waiting through that cross-network hysteresis. Delivery and receipt retries progress
+independently. Discovery latency is not a measured message-delivery SLA.
 
 The separate cross-network presentation expiry is 120 seconds from the original
 public observation, even when the learned freshness lease is shorter. LAN-only

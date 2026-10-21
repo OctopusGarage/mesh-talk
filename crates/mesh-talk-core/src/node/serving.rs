@@ -1244,11 +1244,12 @@ mod file_recovery_tests {
         let alice = DeviceIdentity::generate();
         let bob = DeviceIdentity::generate();
         let aa = Account::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+        let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
         let (a, _, _) = super::super::test_support::node_with_files(source.path(), alice, aa, &bp);
-        let (b, _, _) = super::super::test_support::node_with_files(target.path(), bob, ba, &ap);
+        let (b, _, _) =
+            super::super::test_support::node_with_files(target.path(), bob, bob_account, &ap);
         let unrelated = Announce::new_with_account(
             &DeviceIdentity::generate(),
             &Account::generate(),

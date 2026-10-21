@@ -3108,13 +3108,17 @@ mod diagnostic_tests {
         let alice = DeviceIdentity::generate();
         let bob = DeviceIdentity::generate();
         let aa = Account::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-        let bp =
-            Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+        let bp = Announce::new_with_account(
+            &bob,
+            &bob_account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
         let (a, _, _) = node_with_files(source.path(), alice, aa, &bp);
-        let (b, _, _) = node_with_files(target.path(), bob, ba, &ap);
+        let (b, _, _) = node_with_files(target.path(), bob, bob_account, &ap);
         b.set_attachment_global_auto(true).unwrap();
         let path = source.path().join("routed.bin");
         std::fs::write(&path, b"valid slow route").unwrap();
@@ -3171,13 +3175,17 @@ mod diagnostic_tests {
         let alice = DeviceIdentity::generate();
         let bob = DeviceIdentity::generate();
         let aa = Account::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-        let bp =
-            Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+        let bp = Announce::new_with_account(
+            &bob,
+            &bob_account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
         let (a, _, _) = node_with_files(source.path(), alice, aa, &bp);
-        let (b, _, _) = node_with_files(target.path(), bob, ba, &ap);
+        let (b, _, _) = node_with_files(target.path(), bob, bob_account, &ap);
         let path = source.path().join("waiting.bin");
         std::fs::write(&path, b"offer awaiting approval").unwrap();
         let (id, _) = a

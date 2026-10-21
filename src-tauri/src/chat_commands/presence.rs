@@ -77,10 +77,13 @@ fn add_peer(out: &mut HashMap<String, PresenceInfo>, peer: &PeerRecord, now: Ins
     }
     let fresh = !evidence.is_empty();
     if remaining > 0 || fresh {
+        // A generous adaptive lease is a loss-tolerance budget, not a latency
+        // measurement. Fresh observations on any path remain healthy; only
+        // delayed observations warrant the quality hint while retaining Online.
         let weak = !fresh
-            || (evidence.iter().any(|e| {
-                e.source == "routed" && e.last_seen_secs.saturating_add(e.expires_in_secs) >= 44
-            }) && !evidence.iter().any(|e| e.source == "local"));
+            || evidence.iter().all(|e| {
+                e.last_seen_secs >= mesh_talk_core::discovery::roster::PUBLIC_PRESENCE_TTL.as_secs()
+            });
         entry.connection_weak = weak && (!entry.online || entry.connection_weak);
         entry.online = true;
     }
@@ -257,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_online_lease_is_presented_as_online_with_a_weak_connection() {
+    fn adaptive_lease_is_healthy_while_public_observations_keep_renewing() {
         let account = Account::generate();
         let device = DeviceIdentity::generate();
         let proof = Announce::new_with_account(&device, &account, "Peer", 1);
@@ -269,7 +272,21 @@ mod tests {
         let mut initial = HashMap::new();
         add_peer(&mut initial, &peer, origin);
         assert!(initial[&account.account_id()].online);
-        assert!(initial[&account.account_id()].connection_weak);
+        assert!(
+            !initial[&account.account_id()].connection_weak,
+            "an adaptive timeout is not evidence of a currently slow connection"
+        );
+        for age in [14, 15] {
+            let mut out = HashMap::new();
+            add_peer(
+                &mut out,
+                &peer,
+                origin + std::time::Duration::from_secs(age),
+            );
+            let p = &out[&account.account_id()];
+            assert!(p.online);
+            assert_eq!(p.connection_weak, age >= 15);
+        }
         let mut out = HashMap::new();
         add_peer(&mut out, &peer, origin + std::time::Duration::from_secs(45));
         let p = &out[&account.account_id()];

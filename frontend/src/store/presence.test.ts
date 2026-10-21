@@ -737,3 +737,66 @@ it("clears diagnostic failures on replacement and ignores a retired owner's reje
     stopNew();
   }
 });
+
+it("fresh local observations clear a previous routed weak hint immediately", async () => {
+  getPresence.mockResolvedValue({
+    bob: {
+      online: true,
+      connection_weak: true,
+      last_seen_secs: 20,
+      online_expires_in_secs: 100,
+      reconnect_expires_in_secs: 100,
+      devices: [],
+    },
+  });
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(usePresence.getState().map.bob.connection_weak).toBe(true);
+    getPresence.mockResolvedValue({
+      bob: {
+        online: true,
+        connection_weak: false,
+        last_seen_secs: 0,
+        online_expires_in_secs: 120,
+        reconnect_expires_in_secs: 120,
+        devices: [
+          {
+            user_id: "bob-local",
+            evidence: [
+              { source: "local", last_seen_secs: 0, expires_in_secs: 15 },
+            ],
+          },
+        ],
+      },
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(usePresence.getState().map.bob.connection_weak).toBe(false);
+    expect(presenceStatus(usePresence.getState().map.bob)).toBe("online");
+  } finally {
+    stop();
+  }
+});
+
+it("a fresh local path outranks a weak routed hint but only while local evidence is fresh", () => {
+  const snapshot: PresenceMap = {
+    bob: {
+      online: true,
+      connection_weak: true,
+      last_seen_secs: 0,
+      online_expires_in_secs: 120,
+      reconnect_expires_in_secs: 120,
+      devices: [
+        {
+          user_id: "bob",
+          evidence: [
+            { source: "local", last_seen_secs: 0, expires_in_secs: 15 },
+            { source: "routed", last_seen_secs: 20, expires_in_secs: 40 },
+          ],
+        },
+      ],
+    },
+  };
+  expect(agePresence(snapshot, 14).bob.connection_weak).toBe(false);
+  expect(agePresence(snapshot, 15).bob.connection_weak).toBe(true);
+});

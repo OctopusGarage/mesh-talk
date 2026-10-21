@@ -378,3 +378,49 @@ test("pure LAN presence expires promptly without a long network-quality notice",
   );
   await expect(page.getByTestId("connection-quality")).toHaveCount(0);
 });
+
+test("a fresh LAN observation clears the routed slow hint without a thirty-second wait", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  const profile = page.getByTestId("conversation-member-profile");
+  await page.evaluate((account) => {
+    (
+      window as unknown as { __mockSetPresence: (map: PresenceMap) => void }
+    ).__mockSetPresence({
+      [account]: {
+        online: true,
+        connection_weak: true,
+        last_seen_secs: 20,
+        online_expires_in_secs: 100,
+        reconnect_expires_in_secs: 100,
+        devices: [],
+      },
+    });
+  }, BOB);
+  await expect(profile).toContainText("Online · slow connection");
+  await page.evaluate((account) => {
+    (
+      window as unknown as { __mockSetPresence: (map: PresenceMap) => void }
+    ).__mockSetPresence({
+      [account]: {
+        online: true,
+        connection_weak: false,
+        last_seen_secs: 0,
+        online_expires_in_secs: 120,
+        reconnect_expires_in_secs: 120,
+        devices: [
+          {
+            user_id: "device_bob_2222",
+            evidence: [
+              { source: "local", last_seen_secs: 0, expires_in_secs: 15 },
+            ],
+          },
+        ],
+      },
+    });
+  }, BOB);
+  await expect(profile).not.toContainText("slow connection", { timeout: 5000 });
+  await expect(profile).toContainText("Online");
+});

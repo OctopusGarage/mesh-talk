@@ -44,6 +44,13 @@ function reconcile(prev: PresenceMap, next: PresenceMap): PresenceMap {
   return changed ? merged : prev;
 }
 
+/** Direct local evidence outranks a quality hint inherited from another path. */
+function hasFreshLocalEvidence(devices: PresenceInfo["devices"]): boolean {
+  return !!devices?.some((device) =>
+    device.evidence.some((e) => e.source === "local" && e.expires_in_secs > 0),
+  );
+}
+
 /** Age each source independently, including during IPC failure or silence. */
 export function agePresence(
   snapshot: PresenceMap,
@@ -81,7 +88,9 @@ export function agePresence(
               value.online_expires_in_secs - elapsed,
             ),
             connection_weak:
-              value.connection_weak || (value.online && devices?.length === 0),
+              !hasFreshLocalEvidence(devices) &&
+              (value.connection_weak ||
+                (value.online && devices?.length === 0)),
           }),
       // The host owns topology tolerance; legacy snapshots retain their short lease.
       online:
@@ -285,7 +294,11 @@ export const usePresence = create<PresenceState>((set, get) => ({
           }
           for (const [key, value] of Object.entries(withHistory)) {
             if (value.member_keys) continue;
-            if (!value.online || value.connection_weak !== false) {
+            if (
+              !value.online ||
+              value.connection_weak !== false ||
+              hasFreshLocalEvidence(value.devices)
+            ) {
               qualityConfirmations.delete(key);
               continue;
             }

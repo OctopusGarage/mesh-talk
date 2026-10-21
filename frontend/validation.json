@@ -285,7 +285,7 @@
         "guide": "docs/network-design-reference.md#person-presence-contract",
         "invariants": [
           {
-            "name": "LAN-only presence expires at fifteen seconds; cross-network Online tolerance expires at 120 seconds from the original public observation without manufacturing fresh evidence; concise quality labels are shared; quality clears after thirty healthy seconds; authoritative withdrawal bypasses tolerance",
+            "name": "LAN-only presence expires at fifteen seconds; cross-network Online tolerance expires at 120 seconds from the original public observation without manufacturing fresh evidence; concise quality labels are shared; routed quality clears after thirty healthy seconds while fresh LAN clears inherited routed hints immediately; adaptive tolerance alone never establishes slow connection; authoritative withdrawal bypasses tolerance",
             "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]
