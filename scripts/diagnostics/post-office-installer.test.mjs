@@ -59,6 +59,11 @@ else:
   writeFileSync(
     binary,
     `#!/bin/sh
+if [ "$1" = network ]; then
+  [ "$2" = inspect ] && [ "$3" = --policy ] && [ "$5" = --membership ] || exit 12
+  [ "$(head -n 1 "$4")" = 'public network policy' ] || exit 13
+  [ "$(head -n 1 "$6")" = 'public relay membership' ] || exit 14
+fi
 if [ "$1" = federation ]; then
   [ "$2" = --file ] && [ "$4" = list ] || exit 10
   [ "$(head -n 1 "$3")" = mesh-talk-federation-v1 ] || exit 11
@@ -558,3 +563,47 @@ test(
     assert.ok(!existsSync(path.join(f.home, ".local")));
   },
 );
+
+test("macOS prepares automatic network membership with persistent public files", { skip: process.platform === "win32" }, (t) => {
+  const f = fixture(t);
+  const policy = path.join(f.dir, "network policy");
+  const membership = path.join(f.dir, "relay membership");
+  writeFileSync(policy, "public network policy");
+  writeFileSync(membership, "public relay membership");
+  const result = f.run("--relay-network", policy, "--relay-membership", membership,
+    "--relay-seed", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@127.0.0.1:47478");
+  assert.equal(result.status, 0, result.stderr);
+  const plist = path.join(f.home, ".local/state/mesh-talk-post-office/LaunchDaemon.plist");
+  const parsed = spawnSync("python3", ["-c", "import json,plistlib,sys; print(json.dumps(plistlib.load(open(sys.argv[1], 'rb'))['ProgramArguments']))", plist], { encoding: "utf8" });
+  assert.equal(parsed.status, 0, parsed.stderr);
+  const args = JSON.parse(parsed.stdout);
+  for (const [flag, source, filename] of [
+    ["--relay-network", policy, "network.policy"],
+    ["--relay-membership", membership, "relay.membership"],
+  ]) {
+    const persistent = args[args.indexOf(flag) + 1];
+    assert.equal(persistent, realpathSync(path.join(f.home, ".local/share/mesh-talk-post-office", filename)));
+    assert.equal(readFileSync(persistent, "utf8"), readFileSync(source, "utf8"));
+    rmSync(source);
+    assert.ok(existsSync(persistent));
+  }
+  assert.ok(args.includes("--relay-seed"));
+  assert.ok(!args.includes("--federation-config"));
+  assert.ok(!args.includes("--authority-key"));
+});
+
+test("macOS rejects incomplete or conflicting network membership before changing service state", { skip: process.platform === "win32" }, (t) => {
+  for (const kind of ["missing-membership", "missing-policy", "conflicting-pins", "invalid-membership"]) {
+    const f = fixture(t);
+    const policy = path.join(f.dir, "network.policy");
+    const membership = path.join(f.dir, "relay.membership");
+    writeFileSync(policy, "public network policy");
+    writeFileSync(membership, kind === "invalid-membership" ? "invalid" : "public relay membership");
+    const options = kind === "missing-policy" ? [] : ["--relay-network", policy];
+    if (kind !== "missing-membership") options.push("--relay-membership", membership);
+    if (kind === "conflicting-pins") options.push("--federation-config", f.manifest);
+    const result = f.run(...options);
+    assert.notEqual(result.status, 0, kind);
+    assert.ok(!existsSync(path.join(f.home, ".local")), kind);
+  }
+});

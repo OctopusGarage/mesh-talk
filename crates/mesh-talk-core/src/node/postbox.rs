@@ -154,18 +154,38 @@ pub(super) async fn serve_relay_or_bridge_connection<IO>(
     serve_relay_or_bridge_connection_with_trust(channel, store, directory, None).await;
 }
 
+#[derive(Clone)]
+enum RelayTrust {
+    Pinned(Arc<HashSet<String>>),
+    Network(crate::postoffice::network::RelayNetwork),
+}
+
 async fn serve_relay_or_bridge_connection_with_trust<IO>(
     mut channel: SecureChannel<IO>,
     store: Arc<Mutex<PostOffice>>,
     directory: Option<Arc<Mutex<BridgeDirectory>>>,
-    federation_trust: Option<Arc<HashSet<String>>>,
+    federation_trust: Option<RelayTrust>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    let first = match tokio::time::timeout(RELAY_IDLE_TIMEOUT, channel.recv()).await {
+    let mut first = match tokio::time::timeout(RELAY_IDLE_TIMEOUT, channel.recv()).await {
         Ok(Ok(bytes)) => bytes,
         _ => return,
     };
+    let mut network_authorized = false;
+    if crate::postoffice::network::RelayNetwork::is_membership_request(&first) {
+        let Some(RelayTrust::Network(network)) = federation_trust.as_ref() else {
+            return;
+        };
+        if network.accept(&mut channel, &first).await.is_err() {
+            return;
+        }
+        first = match tokio::time::timeout(RELAY_IDLE_TIMEOUT, channel.recv()).await {
+            Ok(Ok(bytes)) if federation::is_inventory_request(&bytes) => bytes,
+            _ => return,
+        };
+        network_authorized = true;
+    }
     if bridge_directory::is_request(&first) {
         if let Some(directory) = directory {
             let response = {
@@ -194,9 +214,9 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
         return;
     }
     if federation::is_inventory_request(&first) {
-        if !federation_trust
-            .as_ref()
-            .is_some_and(|trusted| trusted.contains(&channel.peer_identity().user_id()))
+        if !network_authorized
+            && !matches!(federation_trust.as_ref(),
+            Some(RelayTrust::Pinned(trusted)) if trusted.contains(&channel.peer_identity().user_id()))
         {
             return;
         }
@@ -336,7 +356,26 @@ pub async fn run_federated_relay_accept_loop_with_directory(
         listener,
         store,
         Some(directory.shared()),
-        Some(trusted_relays),
+        Some(RelayTrust::Pinned(trusted_relays)),
+    )
+    .await;
+}
+
+/// Reconcile with automatically discovered members of an operator-approved network.
+/// Normal mailbox clients retain their existing opaque-only protocol.
+pub async fn run_network_relay_accept_loop_with_directory(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+    network: crate::postoffice::network::RelayNetwork,
+    directory: federation::FederationDirectory,
+) {
+    run_relay_accept_loop_inner_with_trust(
+        identity,
+        listener,
+        store,
+        Some(directory.shared()),
+        Some(RelayTrust::Network(network)),
     )
     .await;
 }
@@ -355,7 +394,7 @@ async fn run_relay_accept_loop_inner_with_trust(
     listener: TcpListener,
     store: Arc<Mutex<PostOffice>>,
     directory: Option<Arc<Mutex<BridgeDirectory>>>,
-    federation_trust: Option<Arc<HashSet<String>>>,
+    federation_trust: Option<RelayTrust>,
 ) {
     store
         .lock()
@@ -1142,5 +1181,46 @@ mod tests {
         assert!(super::super::session::event_fits_frame(
             &mailbox.wrap(&chunk).unwrap()
         ));
+    }
+    #[tokio::test]
+    async fn network_relay_keeps_ordinary_client_mailbox_sync_available() {
+        use crate::postoffice::network::{
+            NetworkMembership, NetworkPolicy, RelayNetwork, unix_now,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let authority = DeviceIdentity::generate();
+        let relay = DeviceIdentity::generate();
+        let expected = relay.public();
+        let now = unix_now();
+        let network = RelayNetwork::new(
+            NetworkPolicy::new(authority.public().ed25519_pub),
+            NetworkMembership::issue(&authority, &relay.user_id(), now, Duration::from_secs(3600))
+                .unwrap(),
+            &expected,
+            now,
+        )
+        .unwrap();
+        let store = Arc::new(Mutex::new(
+            PostOffice::open(&temp.path().join("relay"), "pw", DeviceIdentity::generate()).unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(run_network_relay_accept_loop_with_directory(
+            relay,
+            listener,
+            store,
+            network,
+            federation::FederationDirectory::new(),
+        ));
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let client = DeviceIdentity::generate();
+        let mut channel = SecureChannel::connect(stream, &client, Some(&expected))
+            .await
+            .unwrap();
+        let local = Mutex::new(EventLog::default());
+        let result = request_round(&mut channel, &local, ConversationId::new([99; 32])).await;
+        server.abort();
+        let _ = server.await;
+        result.unwrap();
     }
 }

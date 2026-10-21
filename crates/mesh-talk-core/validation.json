@@ -115,9 +115,23 @@
         }
       ],
       "escalation": [
-        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance. Network trust changes also require cargo test -p mesh-talk-core --test relay_network --test relay_network_cli --test federation_config_cli and the mesh-talk-node federation_runtime:: binary tests. Membership exchanges must reject forged, copied, expired, revoked and foreign-network credentials before bulk metadata disclosure."
       ],
-      "consumers": ["core-node"]
+      "consumers": ["core-node"],
+      "capability": {
+        "summary": "Authorize equal relay reconciliation through explicit pins or mutually verified operator-approved network memberships.",
+        "guide": "docs/post-office-federation.md",
+        "invariants": [
+          {
+            "name": "Network membership binds the authenticated device and checks authority, expiry and revocation before inventory or presence disclosure",
+            "reference": "docs/post-office-federation.md#automatic-membership-in-an-approved-network"
+          },
+          {
+            "name": "Failed membership cannot downgrade to pin-only federation and ordinary mailbox clients retain opaque-only admission",
+            "reference": "docs/post-office-federation.md#automatic-membership-in-an-approved-network"
+          }
+        ]
+      }
     },
     {
       "id": "core-ratchet",

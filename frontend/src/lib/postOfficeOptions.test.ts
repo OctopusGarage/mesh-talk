@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import type { PeerInfo } from "./types";
 import {
+  postOfficeAvailability,
   selectablePostOffices,
   savedIndirectPostOffice,
 } from "./postOfficeOptions";
@@ -79,5 +80,19 @@ it("preserves a preference through loss and recovery of its direct route", () =>
   expect(savedIndirectPostOffice([direct], "relay")).toBeNull();
   expect(selectablePostOffices([{ ...direct, post_office: false }])).toEqual(
     [],
+  );
+});
+
+it("reports availability without claiming a discovered relay is connected or trusted", () => {
+  expect(postOfficeAvailability(false, [])).toBe("disabled");
+  expect(postOfficeAvailability(true, [])).toBe("unavailable");
+  expect(postOfficeAvailability(true, [peer("indirect", true, false)])).toBe(
+    "unavailable",
+  );
+  expect(postOfficeAvailability(true, [peer("direct", true, true)])).toBe(
+    "available",
+  );
+  expect(postOfficeAvailability(false, [peer("direct", true, true)])).toBe(
+    "disabled",
   );
 });

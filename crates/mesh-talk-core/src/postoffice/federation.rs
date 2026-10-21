@@ -125,6 +125,28 @@ impl FederationDirectory {
         Arc::clone(&self.0)
     }
 
+    /// Network mode requires mutual membership before any inventory/presence.
+    /// It never retries the legacy pin-only protocol on authorization failure.
+    pub async fn sync_with_network_relay(
+        &self,
+        addr: SocketAddr,
+        identity: &DeviceIdentity,
+        expected: &PublicIdentity,
+        store: &Arc<Mutex<PostOffice>>,
+        network: &super::network::RelayNetwork,
+    ) -> Result<usize, String> {
+        sync_version(
+            addr,
+            identity,
+            expected,
+            store,
+            Some(&self.0),
+            REQUEST_V2,
+            Some(network),
+        )
+        .await
+    }
+
     pub async fn sync_with_relay(
         &self,
         addr: SocketAddr,
@@ -383,9 +405,9 @@ async fn sync_with_directory(
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
 ) -> Result<usize, String> {
-    match sync_version(addr, identity, expected, store, directory, REQUEST_V2).await {
+    match sync_version(addr, identity, expected, store, directory, REQUEST_V2, None).await {
         Ok(count) => Ok(count),
-        Err(_) => sync_version(addr, identity, expected, store, directory, REQUEST).await,
+        Err(_) => sync_version(addr, identity, expected, store, directory, REQUEST, None).await,
     }
 }
 
@@ -396,6 +418,7 @@ async fn sync_version(
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
     request: &[u8],
+    network: Option<&super::network::RelayNetwork>,
 ) -> Result<usize, String> {
     let limit = presence_limit(request);
     let stream = tokio::time::timeout(ROUND_TIMEOUT, TcpStream::connect(addr))
@@ -410,6 +433,9 @@ async fn sync_version(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
+    if let Some(network) = network {
+        network.connect(&mut channel).await?;
+    }
     channel.send(request).await.map_err(|e| e.to_string())?;
     send_presence_pages(&mut channel, directory, limit).await?;
     let mut local = {

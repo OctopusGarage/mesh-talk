@@ -28,8 +28,14 @@ test("post-office preference is on by default and persists across settings reope
   await selectSettingsCategory(page, "connection");
   const relay = page.getByRole("switch", { name: "Use post-office relays" });
   await expect(relay).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByTestId("post-office-status")).toHaveText(
+    "No post office available",
+  );
   await relay.click();
   await expect(relay).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByTestId("post-office-status")).toHaveText(
+    "Post offices are turned off",
+  );
   await page.getByRole("button", { name: "Close" }).click();
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "connection");
@@ -64,6 +70,9 @@ test("selecting a directly routed post office persists across settings reopen", 
   await enterChat(page, "tester", "/?data=post-office");
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "connection");
+  await expect(page.getByTestId("post-office-status")).toHaveText(
+    "Post office available",
+  );
   const preferred = page.locator("#setting-bridge-hub");
   await expect(preferred).toBeEnabled();
   await expect(preferred.locator("option")).toHaveCount(3);

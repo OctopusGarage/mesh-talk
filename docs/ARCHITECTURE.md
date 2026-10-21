@@ -554,9 +554,16 @@ directory, its fresh, self-signed introductions can be polled from that post
 office's opaque mailboxes. This does not mark safety numbers verified, persists
 no bridge permission, and expires with the directory membership. Invisible mode
 does not participate. See [routed network discovery](routed-network-discovery.md).
-For multi-site federation, post offices have equal roles and a shared set of
-trusted identity-pinned seeds. They discover trusted LAN relays, probe routed
-seeds, exchange short-lived signed opt-in presence, and reconcile version-3
+For multi-site federation, post offices have equal roles. Operators can use a
+shared set of identity-pinned seeds or an approved network authority with
+per-device expiring memberships and a public revocation policy. Network mode
+checks both memberships against authenticated Noise identities before disclosing
+inventories/presence and never downgrades to pin-only federation on failure.
+It automatically discovers LAN members; optional pinned seeds locate routed
+members. The offline authority key stays off relays; policy changes require
+distribution and restart. Membership is operator approval, not software integrity.
+See [network administration](post-office-federation.md).
+Both modes exchange short-lived signed opt-in presence and reconcile version-3
 pairwise opaque mailboxes over Noise. The original mailbox arrival time follows
 each federated copy, preserving the 30-day maximum. Clients can prefer a local
 relay and fall back to another reachable relay. New clients also read and write

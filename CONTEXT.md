@@ -176,9 +176,17 @@ must not be mistaken for the participant's own transport listener.
 _Avoid_: direct endpoint, participant's physical machine address.
 
 **Federation**:
-Authenticated exchange among explicitly enrolled, equally eligible post offices.
-Network reachability and co-location do not constitute enrollment.
-_Avoid_: automatic trust, mandatory global hub.
+Authenticated exchange among operator-approved, equally eligible post offices.
+Approval uses explicit device pins or authority-signed network memberships;
+network reachability and co-location do not constitute enrollment.
+_Avoid_: trust of every discovered relay, mandatory global hub.
+
+**Relay network membership**:
+An expiring, nondelegating operator-signed approval of one device fingerprint
+for relay reconciliation. Each relay verifies it against a locally approved
+network authority and revocation snapshot, bound to the authenticated Noise peer.
+It does not grant conversation membership or attest software integrity.
+_Avoid_: official-client verification, malware-free device, account membership.
 
 **Anti-entropy**:
 Bounded reconciliation of missing authenticated events between authorized holders.

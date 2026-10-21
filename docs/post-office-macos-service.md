@@ -110,6 +110,23 @@ supported when no manifest is supplied.
 If the only physical route between two sites fails, the local relay retains
 encrypted outgoing mail within its retention and capacity limits until a route returns.
 
+## Approved network membership
+
+To use automatic member discovery instead of a shared pin list, issue this
+relay's membership on the offline enrollment workstation using the
+[network administration workflow](post-office-federation.md#automatic-membership-in-an-approved-network).
+Keep its existing device identity and password. Prepare with `--relay-network
+/path/network.policy --relay-membership /path/relay.membership`, optionally
+repeating `--relay-seed <fingerprint>@<ip>:47478` for routed sites. These replace
+`--federation-config`/`--federation-peer` and a legacy gateway; no explicit
+`--bridge` is needed. Preparation verifies public approval before changing
+installation state and persists both public files beside the relay keystore.
+The daemon uses their absolute paths after staging files are removed. Use the
+existing interactive `activate` step to restart the service after policy changes
+or certificate renewal. Never install `authority.key` on a relay. Preparation
+validates the certificate's public approval; startup additionally verifies it
+matches the loaded persistent device identity before opening network listeners.
+
 ## Migrate the legacy LaunchAgent
 
 The old job is `gui/<service-user-uid>/com.octopusgarage.mesh-talk.post-office`;
