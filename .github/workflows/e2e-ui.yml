@@ -295,12 +295,28 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npx playwright install --with-deps ${{ matrix.browser }}
+      # Portable workflows load the same Vite module graph as the full UI suite.
+      # Preserve its Windows client-port budget here as well; the server's
+      # default portable port (5174) stays outside the disposable client pool.
+      - name: Reserve Windows browser connection capacity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          netsh int ipv4 set dynamicport tcp start=10000 num=55535
+          if ($LASTEXITCODE -ne 0) { throw "Failed to expand the Windows TCP client port range" }
+          netsh int ipv4 show dynamicport tcp
       - name: Run real React portable workflows (mocked IPC boundary)
         run: npx playwright test --config playwright.portable.config.ts
         env:
           EVAL_BROWSER: ${{ matrix.browser }}
           EVAL_SOURCE_SHA: ${{ github.sha }}
           EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
+      - name: Diagnose Windows browser connection failures
+        if: (failure() || cancelled()) && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          netsh int ipv4 show dynamicport tcp
+          Get-NetTCPConnection | Group-Object State | Select-Object Count, Name | Format-Table
       - name: Validate scenario evidence and reject partial or skipped execution
         run: node ../scripts/evals/browser-report.mjs eval-results/portable/${{ matrix.browser }}/${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}/results.json
         env:
