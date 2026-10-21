@@ -35,7 +35,12 @@ The composer is a stable bottom dock. Attachment, media, expression and send con
 
 Empty conversation and no-selection states have a quiet concentric motif, a clear explanation and the existing next action. Loading, connection, offline and error states say what is happening and offer retry or diagnostics when available. Technical values remain selectable and easy to compare. Text and controls must wrap or truncate within their pane, including long names, identifiers, messages and filenames.
 
-People use Online, Online · weak connection, Weak connection and Offline.
+People keep Online as the primary conversation status while a valid learned
+lease remains. Slow paths add a quiet secondary message explaining that messages
+and delivery confirmations may be delayed. This quality hint requires thirty
+seconds of healthy renewed observations before clearing, independently of the
+online state. Member details retain Online · weak connection; expired recovery
+uses Weak connection, and the bounded loss state is Offline.
 Slow signed routed discovery adapts its online lease up to sixty seconds. A lost public observation has a
 sixty-second total recovery window; returning presence must stay fresh for five
 seconds before the desktop returns to Online. Message transport progresses

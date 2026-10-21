@@ -248,6 +248,7 @@
     "moreUnread": "他にも未読メッセージがあります"
   },
   "presence": {
+    "slowMessages": "接続が遅いため、メッセージや配信確認に時間がかかる場合があります。",
     "onlineWeak": "オンライン · 接続が不安定",
     "reconnecting": "接続が不安定",
     "online": "オンライン",

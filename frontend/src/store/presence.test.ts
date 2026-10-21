@@ -493,3 +493,33 @@ it("keeps a latency-tolerant peer online with a weak label instead of re-enterin
     stop();
   }
 });
+
+it("keeps weak quality steady until thirty seconds of healthy renewed observations", async () => {
+  getPresence.mockResolvedValue({
+    bob: {
+      online: true,
+      connection_weak: true,
+      last_seen_secs: 35,
+      reconnect_expires_in_secs: 25,
+    },
+  });
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    getPresence.mockResolvedValue({
+      bob: {
+        online: true,
+        connection_weak: false,
+        last_seen_secs: 0,
+        reconnect_expires_in_secs: 60,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(28000);
+    expect(usePresence.getState().map.bob.online).toBe(true);
+    expect(usePresence.getState().map.bob.connection_weak).toBe(true);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(usePresence.getState().map.bob.connection_weak).toBe(false);
+  } finally {
+    stop();
+  }
+});

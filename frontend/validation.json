@@ -253,7 +253,7 @@
         "guide": "docs/network-design-reference.md#person-presence-contract",
         "invariants": [
           {
-            "name": "Routed online leases learn verified RTT within fifteen to sixty seconds; weak presentation and recovery do not slide past sixty seconds; stable recovery needs five seconds and a renewed origin; authoritative withdrawal bypasses grace",
+            "name": "Routed online leases learn verified RTT within fifteen to sixty seconds; weak presentation and recovery do not slide past sixty seconds; stable recovery needs five seconds and a renewed origin, weak quality clears after thirty healthy seconds; authoritative withdrawal bypasses grace",
             "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]

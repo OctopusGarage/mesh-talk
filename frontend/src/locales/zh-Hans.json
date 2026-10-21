@@ -248,6 +248,7 @@
     "moreUnread": "还有更多未读消息"
   },
   "presence": {
+    "slowMessages": "网络较慢，消息和送达确认可能延迟。",
     "onlineWeak": "在线 · 连接较弱",
     "reconnecting": "连接较弱",
     "online": "在线",

@@ -248,6 +248,7 @@
     "moreUnread": "More unread messages"
   },
   "presence": {
+    "slowMessages": "Slow connection. Messages and delivery confirmations may take longer.",
     "onlineWeak": "Online · weak connection",
     "reconnecting": "Weak connection",
     "online": "Online",

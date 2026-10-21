@@ -77,11 +77,9 @@ fn add_peer(out: &mut HashMap<String, PresenceInfo>, peer: &PeerRecord, now: Ins
     }
     if let Some(age) = evidence.iter().map(|e| e.last_seen_secs).min() {
         entry.last_seen_secs = Some(entry.last_seen_secs.map_or(age, |old| old.min(age)));
-        let weak = evidence.iter().all(|e| {
-            e.source == "routed"
-                && e.last_seen_secs.saturating_add(e.expires_in_secs)
-                    > mesh_talk_core::discovery::roster::PUBLIC_PRESENCE_TTL.as_secs()
-        });
+        let weak = evidence.iter().any(|e| {
+            e.source == "routed" && e.last_seen_secs.saturating_add(e.expires_in_secs) >= 44
+        }) && !evidence.iter().any(|e| e.source == "local");
         entry.connection_weak = weak && (!entry.online || entry.connection_weak);
         entry.online = true;
         entry.devices.push(PresenceDevice {
@@ -229,6 +227,10 @@ mod tests {
         let mut peer = roster.get(&proof.user_id).unwrap().clone();
         let origin = peer.routes[0].last_seen;
         peer.routes[0].presence_expires_at = Some(origin + std::time::Duration::from_secs(60));
+        let mut initial = HashMap::new();
+        add_peer(&mut initial, &peer, origin);
+        assert!(initial[&account.account_id()].online);
+        assert!(initial[&account.account_id()].connection_weak);
         let mut out = HashMap::new();
         add_peer(&mut out, &peer, origin + std::time::Duration::from_secs(45));
         let p = &out[&account.account_id()];

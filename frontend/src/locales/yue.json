@@ -248,6 +248,7 @@
     "moreUnread": "仲有更多未讀訊息"
   },
   "presence": {
+    "slowMessages": "網絡較慢，訊息同送達確認可能有延遲。",
     "onlineWeak": "在線 · 連線較弱",
     "reconnecting": "連線較弱",
     "online": "在線",

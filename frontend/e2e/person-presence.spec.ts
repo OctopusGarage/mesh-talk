@@ -208,7 +208,7 @@ test("poor-network recovery stays visible for sixty seconds without restarting n
   });
   await page.clock.runFor(31_000);
   await expect(page.getByTestId("conversation-member-profile")).toContainText(
-    "Online · weak connection",
+    "Online",
   );
   await expect(page.getByTestId("connection-status")).not.toContainText(
     "Searching",
@@ -216,9 +216,12 @@ test("poor-network recovery stays visible for sixty seconds without restarting n
   await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
   await page.clock.runFor(26_000);
   await expect(page.getByTestId("conversation-member-profile")).toContainText(
-    "Online · weak connection",
+    "Online",
   );
   await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
+  await expect(page.getByTestId("connection-quality")).toContainText(
+    "Messages and delivery confirmations may take longer",
+  );
   await page.screenshot({ path: "test-results/recovery-sixty-seconds.png" });
   await page.clock.runFor(4000);
   await expect(page.getByTestId("conversation-member-profile")).toContainText(

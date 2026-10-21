@@ -248,6 +248,7 @@
     "moreUnread": "Más mensajes sin leer"
   },
   "presence": {
+    "slowMessages": "Conexión lenta. Los mensajes y las confirmaciones de entrega pueden tardar más.",
     "onlineWeak": "En línea · conexión inestable",
     "reconnecting": "Conexión inestable",
     "online": "En línea",

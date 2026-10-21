@@ -221,7 +221,14 @@ Local and permitted public authenticated observations last 15 seconds. Routed
 query observations adapt from 15 to 60 seconds using the measured round trip of
 the exact nonce-bound, signature-verified response. RTT up to 100 ms keeps the
 15-second lease; additional RTT adds 150 times its duration, capped at 60 seconds
-(400 ms reaches the cap). A healthy sample reduces a previous longer lease by
+(400 ms reaches the cap). The primary conversation state stays Online during
+the learned lease. A routed lease of at least forty-five seconds indicates a
+slow-path hint unless a fresh physical LAN path is available; the header adds
+“Slow connection. Messages and delivery confirmations may take longer.” Once
+shown, that quality hint clears only after thirty seconds of successful healthy
+observations including renewed public evidence. It does not cancel or postpone
+message/receipt work. Individual alternating samples cannot toggle the hint.
+A healthy sample reduces a previous longer lease by
 at most five seconds per new observation. Tolerated routed observations display
 **Online · weak connection** and remain online for the learned lease; they do
 not enter the weak-only recovery presentation at a fixed fifteen-second mark.

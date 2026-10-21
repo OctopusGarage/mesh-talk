@@ -8,6 +8,7 @@ import { captureRuntimeOwner } from "./ownership";
 const POLL_MS = 2000;
 const MAX_HISTORY = 1024;
 const RECOVERY_STABLE_MS = 5000;
+const QUALITY_STABLE_MS = 30_000;
 let epoch = 0;
 interface PresenceState {
   map: PresenceMap;
@@ -102,6 +103,10 @@ export const usePresence = create<PresenceState>((set, get) => ({
       string,
       { since: number; deadlineAt: number }
     >();
+    const qualityConfirmations = new Map<
+      string,
+      { since: number; deadlineAt: number }
+    >();
     let baselineAt = performance.now();
     let expiryTimer: ReturnType<typeof setTimeout> | undefined;
     const current = () => !cancelled && epoch === session && lease.current();
@@ -150,6 +155,7 @@ export const usePresence = create<PresenceState>((set, get) => ({
         if (current() && pollId > lastApplied) {
           lastApplied = pollId;
           recoveryConfirmations.clear();
+          qualityConfirmations.clear();
           set({ unavailable: true });
           publishAge();
         }
@@ -233,6 +239,37 @@ export const usePresence = create<PresenceState>((set, get) => ({
               withHistory[key] = { ...value, online: false };
             } else {
               recoveryConfirmations.delete(key);
+            }
+          }
+          for (const key of qualityConfirmations.keys()) {
+            if (!(key in withHistory)) qualityConfirmations.delete(key);
+          }
+          for (const [key, value] of Object.entries(withHistory)) {
+            if (value.member_keys) continue;
+            if (!value.online || value.connection_weak !== false) {
+              qualityConfirmations.delete(key);
+              continue;
+            }
+            if (!old[key]?.connection_weak && !qualityConfirmations.has(key))
+              continue;
+            const deadlineAt =
+              confirmedAt + (value.reconnect_expires_in_secs ?? 0) * 1000;
+            const confirmation = qualityConfirmations.get(key) ?? {
+              since: confirmedAt,
+              deadlineAt,
+            };
+            if (
+              confirmedAt - confirmation.since < QUALITY_STABLE_MS ||
+              deadlineAt - confirmation.deadlineAt <= 1000
+            ) {
+              if (
+                qualityConfirmations.has(key) ||
+                qualityConfirmations.size < MAX_HISTORY
+              )
+                qualityConfirmations.set(key, confirmation);
+              withHistory[key] = { ...value, connection_weak: true };
+            } else {
+              qualityConfirmations.delete(key);
             }
           }
           lastApplied = pollId;
