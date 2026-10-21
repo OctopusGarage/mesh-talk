@@ -139,7 +139,10 @@
     },
     {
       "id": "frontend-composer-acceptance",
-      "paths": ["frontend/e2e/ui-audit-composer.spec.ts"],
+      "paths": [
+        "frontend/e2e/ui-audit-composer.spec.ts",
+        "frontend/e2e/composer-layout.spec.ts"
+      ],
       "frontend": [
         "src/features/chat/ComposerScreenshot.test.ts",
         "src/features/chat/ComposerAdmission.test.ts"
@@ -243,6 +246,15 @@
       "id": "frontend-composer-acceptance",
       "paths": ["frontend/e2e/ui-audit-composer.spec.ts"],
       "browser": ["e2e/ui-audit-composer.spec.ts"]
+    },
+    {
+      "id": "frontend-composer-input-acceptance",
+      "paths": [
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ComposerAdmission.test.ts",
+        "frontend/e2e/composer-layout.spec.ts"
+      ],
+      "browser": ["e2e/composer-layout.spec.ts"]
     },
     {
       "id": "frontend-message-expiry-acceptance",
