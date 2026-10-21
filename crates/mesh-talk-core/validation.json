@@ -248,6 +248,10 @@
           {
             "name": "Participant retirement drains admitted control tasks and only authenticated recipient evidence confirms delivery",
             "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Cached addresses share one probe per device and slow authentication does not append another refresh delay",
+            "reference": "docs/network-design-reference.md"
           }
         ]
       },

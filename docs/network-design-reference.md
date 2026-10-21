@@ -254,6 +254,12 @@ ages those leases locally, so a stopped desktop loses Online within 20 seconds
 without needing a logout packet. Route retention is independent: authenticated
 routes remain dial candidates for 300 seconds and routed candidates for 120 seconds.
 Transport-only authentication cannot renew the public observation deadline.
+Historical-route authentication probes run once per device, with its addresses
+sharing the existing bounded route race. Their five-second schedule starts at
+the beginning of each round, without overlapping rounds or appending another
+sleep after slow authentication. A cached address must not allocate a separate
+probe lane for the same device. Only permitted fresh public authentication can
+renew presence; the fifteen-second observation lease is unchanged.
 Routed probes and the local fallback scan run every five seconds; routed candidate
 pacing is 20 ms (at most 256 candidates per sweep). Bridge registration refreshes
 five seconds after each exchange. Existing admission and per-source response limits

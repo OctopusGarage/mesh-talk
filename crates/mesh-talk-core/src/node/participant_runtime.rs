@@ -148,12 +148,7 @@ impl PreparedParticipant {
         tasks.push(tokio::spawn(Arc::clone(&node).run_accept_loop(listener)));
         {
             let node = Arc::clone(&node);
-            tasks.push(tokio::spawn(async move {
-                loop {
-                    node.probe_private_routes().await;
-                    tokio::time::sleep(Duration::from_secs(10)).await;
-                }
-            }));
+            tasks.push(tokio::spawn(node.run_private_route_probes()));
         }
         {
             let node = Arc::clone(&node);

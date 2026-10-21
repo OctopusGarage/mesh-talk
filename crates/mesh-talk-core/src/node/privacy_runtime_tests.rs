@@ -9,6 +9,136 @@ use std::{
 use tokio::{net::TcpListener, sync::mpsc};
 const DEADLINE: Duration = Duration::from_secs(3);
 
+#[tokio::test]
+async fn private_probe_refreshes_public_presence_before_its_lease_expires() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", addr.port());
+    bob.configure_privacy(
+        &dir.path().join("bob"),
+        "pw",
+        &proof,
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    {
+        let mut state = alice.privacy.state.write().unwrap();
+        let state = state.as_mut().unwrap();
+        state.proofs.record(&proof).unwrap();
+        state.routes.record(&proof.public(), addr.ip()).unwrap();
+    }
+    let (accepted, mut arrivals) = mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        let mut sessions = tokio::task::JoinSet::new();
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            let bob = bob.clone();
+            let accepted = accepted.clone();
+            sessions.spawn(async move {
+                // Slow but reachable authentication uses part of the lease.
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                if bob.privacy_accept(socket).await.is_ok() {
+                    let _ = accepted.send(());
+                }
+            });
+        }
+    });
+    let probes = tokio::spawn(alice.run_private_route_probes());
+    let result = tokio::time::timeout(Duration::from_secs(13), async {
+        arrivals.recv().await.unwrap();
+        arrivals.recv().await.unwrap();
+    })
+    .await;
+    probes.abort();
+    server.abort();
+    assert!(
+        result.is_ok(),
+        "probe duration plus a fixed post-probe sleep delays the next fresh observation beyond the public lease"
+    );
+}
+
+#[tokio::test]
+async fn private_probe_does_not_multiply_handshakes_for_one_devices_cached_addresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let proof = crate::discovery::Announce::new_with_account(
+        &bob.identity,
+        &crate::identity::account::Account::generate(),
+        "Bob",
+        addr.port(),
+    );
+    {
+        let mut state = alice.privacy.state.write().unwrap();
+        let state = state.as_mut().unwrap();
+        state.proofs.record(&proof).unwrap();
+        for octet in 1..=8 {
+            state
+                .routes
+                .record(&proof.public(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, octet)))
+                .unwrap();
+        }
+    }
+    alice
+        .preferred_routes
+        .lock()
+        .unwrap()
+        .insert(bob.user_id(), addr);
+    assert_eq!(alice.cached_routing_peers().len(), 8);
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let accepted = count.clone();
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            held.push(socket);
+            accepted.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let probe = alice.probe_private_routes_with_budget(Duration::from_millis(500));
+    tokio::pin!(probe);
+    tokio::select! {
+        _ = &mut probe => panic!("the held handshake must still be pending"),
+        _ = tokio::time::sleep(Duration::from_millis(150)) => {},
+    }
+    let independent = alice.sessions.try_outbound();
+    assert!(
+        independent.is_some(),
+        "one device's cached addresses exhausted the outbound budget before other peers could connect"
+    );
+    drop(independent);
+    probe.await;
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "one device's address hints must share one bounded route race, not occupy all TCP slots"
+    );
+    server.abort();
+}
+
 #[test]
 fn failed_presence_cache_write_is_not_a_successful_empty_snapshot() {
     let dir = tempfile::tempdir().unwrap();

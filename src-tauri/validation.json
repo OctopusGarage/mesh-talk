@@ -85,7 +85,7 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["chat_commands::", "channel_reception::"]
+          "filters": ["chat_commands::", "channel_reception::", "events::"]
         }
       ],
       "escalation": [

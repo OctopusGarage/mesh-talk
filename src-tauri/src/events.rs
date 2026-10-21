@@ -486,6 +486,59 @@ pub fn emit_file_received<R: Runtime>(
 #[cfg(test)]
 mod notification_policy_tests {
     use super::*;
+    use tauri::Listener;
+
+    #[test]
+    fn dm_event_preserves_logical_identity_and_legacy_absence_for_unread_consumers() {
+        use mesh_talk_core::{eventlog::EventId, node::ReceivedDm};
+        let app = tauri::test::mock_app();
+        let settings = SettingsState::default();
+        settings.set(crate::settings::AppSettings {
+            notifications: false,
+            ..Default::default()
+        });
+        assert!(app.manage(settings));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = received.clone();
+        app.listen(EVENT_DM_RECEIVED, move |event| {
+            sink.lock()
+                .unwrap()
+                .push(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
+        });
+        let message_id = EventId::new([1; 32]);
+        let reply_to = EventId::new([2; 32]);
+        for (identity, account) in [
+            (Some(message_id), Some("sender-account".to_string())),
+            (None, None),
+        ] {
+            emit_dm_received(
+                app.handle(),
+                ReceivedDm {
+                    message_id: identity,
+                    from_account: account,
+                    from: "sender-device".into(),
+                    from_name: "Sender".into(),
+                    text: b"one received message".to_vec(),
+                    reply_to: Some(reply_to),
+                },
+            );
+        }
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2);
+        for (index, event) in received.iter().enumerate() {
+            assert_eq!(event["from"], "sender-device");
+            assert_eq!(event["from_name"], "Sender");
+            assert_eq!(event["text"], "one received message");
+            assert_eq!(event["reply_to"], reply_to.to_hex());
+            if index == 0 {
+                assert_eq!(event["message_id"], message_id.to_hex());
+                assert_eq!(event["from_account"], "sender-account");
+            } else {
+                assert!(event["message_id"].is_null());
+                assert!(event["from_account"].is_null());
+            }
+        }
+    }
 
     #[test]
     fn private_mode_never_places_sender_or_text_in_notification() {

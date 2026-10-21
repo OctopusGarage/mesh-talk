@@ -172,6 +172,18 @@ impl Node {
             .await;
     }
 
+    pub(in crate::node) async fn run_private_route_probes(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            // Schedule from the start of a round. Sleeping after a slow ten-
+            // second handshake used to leave a twenty-second refresh gap for
+            // fifteen-second public evidence, even on a reachable path.
+            tick.tick().await;
+            self.probe_private_routes().await;
+        }
+    }
+
     pub(in crate::node) async fn probe_private_routes_with_budget(
         self: &Arc<Self>,
         budget: Duration,
@@ -180,6 +192,11 @@ impl Node {
             log::warn!("verified discovery cache update failed");
         }
         let mut peers = self.cached_routing_peers();
+        // A dial already races this device's verified address candidates. Cache
+        // entries are route hints, not independent probe destinations: spawning
+        // once per address lets one moved device consume every outbound slot.
+        let mut devices = HashSet::new();
+        peers.retain(|peer| devices.insert(peer.public.user_id()));
         if peers.is_empty() {
             return;
         }
