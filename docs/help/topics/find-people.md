@@ -12,6 +12,16 @@ Check discovery, visibility and connectivity when someone is missing from the si
 
 Local discovery uses signed UDP multicast on port 47474; messaging uses an authenticated TCP connection on the app's advertised listening port. Firewalls must allow the relevant traffic. The diagnostics troubleshooting page gives platform-specific guidance; do not guess a fixed TCP port.
 
+## See how a member was discovered
+
+Open a member's profile and look at **Discovered via**. **Local LAN · UDP multicast**
+means this client observed local discovery. **Post office · name** identifies an
+introducing post office; its endpoint is shown underneath. Multiple sources can
+appear together, and each disappears when its observation expires. If an office's
+name cannot be resolved uniquely, the profile shows its endpoint without guessing
+the name. This identifies discovery, not a person's location or the route of each
+message.
+
 ## Discovery is not a delivery guarantee
 
 A known or recently observed device is not proof of a working message path. An offline contact can remain in your list. Invisible mode and reply permissions can affect public discovery and admission independently of IP reachability.

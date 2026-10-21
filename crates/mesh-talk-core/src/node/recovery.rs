@@ -23,6 +23,64 @@ const MEDIA_CHUNK_BYTES: usize = 64 * 1024;
 const RECOVERY_ORIGIN_MAGIC: &[u8; 6] = b"MTORIG";
 const RECOVERY_CONTACT_MAGIC: &[u8; 6] = b"MTRACC";
 
+/// Process-local first-DM metadata. Append-only revisions scan only unseen suffixes;
+/// rewrites discard positions and routes, including an erased first envelope.
+#[derive(Default)]
+pub(in crate::node) struct KnownAccountCache {
+    sent: FirstDmIndex,
+    received: FirstDmIndex,
+    #[cfg(test)]
+    pub(in crate::node) scanned_rows: usize,
+}
+
+#[derive(Default)]
+struct FirstDmIndex {
+    revision: Option<u64>,
+    rewrite_revision: u64,
+    conversations: HashMap<ConversationId, FirstDmConversation>,
+}
+
+#[derive(Default)]
+struct FirstDmConversation {
+    scanned: usize,
+    route: Option<super::DmRoute>,
+}
+
+impl FirstDmIndex {
+    fn refresh(&mut self, revision: u64, rewrite_revision: u64) -> bool {
+        if self.revision == Some(revision) {
+            return false;
+        }
+        if self.rewrite_revision != rewrite_revision {
+            self.conversations.clear();
+        }
+        self.revision = Some(revision);
+        self.rewrite_revision = rewrite_revision;
+        true
+    }
+
+    fn scan<'a>(
+        &mut self,
+        conversation: ConversationId,
+        rows: impl Iterator<Item = &'a [u8]>,
+    ) -> usize {
+        let state = self.conversations.entry(conversation).or_default();
+        if state.route.is_some() {
+            return 0;
+        }
+        let mut scanned = 0;
+        for plaintext in rows.skip(state.scanned) {
+            scanned += 1;
+            state.scanned += 1;
+            if let Some(envelope) = super::DmEnvelope::decode(plaintext) {
+                state.route = Some(envelope.route);
+                break;
+            }
+        }
+        scanned
+    }
+}
+
 struct MediaDigest(Sha256);
 
 impl Write for MediaDigest {
@@ -372,6 +430,14 @@ impl Node {
                     // Preserve old snapshot tags without restoring retired filtering state.
                     SnapshotRecordV1::DmLanguageProfile { .. }
                     | SnapshotRecordV1::DmLanguageDecision { .. } => {}
+                    SnapshotRecordV1::PeerTrustCard { card } => {
+                        if !node
+                            .receive_trust_card(&card)
+                            .map_err(|_| SnapshotError::Io)?
+                        {
+                            return Err(SnapshotError::InvalidEncoding);
+                        }
+                    }
                     SnapshotRecordV1::Profile {
                         account_id,
                         updated_at,
@@ -459,44 +525,64 @@ impl Node {
     pub fn known_account_ids(&self) -> Vec<String> {
         let own = self.account.account_id();
         let mut ids: BTreeSet<String> = self.recovery_contacts.iter().cloned().collect();
-        let mut observe = |plaintext: &[u8]| {
-            let Some(envelope) = super::DmEnvelope::decode(plaintext) else {
-                return;
-            };
-            let route = envelope.route;
-            let other = if route.sender_account == own {
-                route.recipient_account
-            } else if route.recipient_account == own {
-                route.sender_account
-            } else {
-                return;
-            };
-            if other != own && other.len() == 32 && other.bytes().all(|c| c.is_ascii_hexdigit()) {
-                ids.insert(other);
-            }
-        };
+        let mut cache = self
+            .known_account_cache
+            .lock()
+            .expect("known account cache mutex not poisoned");
+        let mut scanned = 0;
         let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
-        for conversation in sent.conversations() {
-            if let Some(entry) = sent
-                .entries_ref(&conversation)
-                .iter()
-                .find(|entry| super::DmEnvelope::decode(&entry.plaintext).is_some())
-            {
-                observe(&entry.plaintext);
+        if cache.sent.refresh(sent.revision(), sent.rewrite_revision()) {
+            for conversation in sent.conversations() {
+                scanned += cache.sent.scan(
+                    conversation,
+                    sent.entries_ref(&conversation)
+                        .iter()
+                        .map(|entry| entry.plaintext.as_slice()),
+                );
             }
         }
         drop(sent);
         let received = self.received.lock().expect("received mutex not poisoned");
-        for conversation in received.conversations() {
-            if let Some(entry) = received
-                .entries_ref(&conversation)
-                .iter()
-                .find(|entry| super::DmEnvelope::decode(&entry.plaintext).is_some())
-            {
-                observe(&entry.plaintext);
+        if cache
+            .received
+            .refresh(received.revision(), received.rewrite_revision())
+        {
+            for conversation in received.conversations() {
+                scanned += cache.received.scan(
+                    conversation,
+                    received
+                        .entries_ref(&conversation)
+                        .iter()
+                        .map(|entry| entry.plaintext.as_slice()),
+                );
             }
         }
         drop(received);
+        #[cfg(test)]
+        {
+            cache.scanned_rows += scanned;
+        }
+        #[cfg(not(test))]
+        let _ = scanned;
+        for route in cache
+            .sent
+            .conversations
+            .values()
+            .chain(cache.received.conversations.values())
+            .filter_map(|state| state.route.as_ref())
+        {
+            let other = if route.sender_account == own {
+                &route.recipient_account
+            } else if route.recipient_account == own {
+                &route.sender_account
+            } else {
+                continue;
+            };
+            if other != &own && other.len() == 32 && other.bytes().all(|c| c.is_ascii_hexdigit()) {
+                ids.insert(other.clone());
+            }
+        }
+        drop(cache);
         let peers = self.historical_dm_peers();
         let files = self
             .received_files
@@ -598,11 +684,17 @@ impl Node {
             .expect("recalls mutex not poisoned")
             .snapshot_marks();
         let profiles = self.account_profiles.snapshot();
+        let trust_cards = self
+            .trust_cards
+            .lock()
+            .expect("trust cards mutex not poisoned")
+            .all();
         let mut record_count = u64::try_from(
             sent_count
                 .checked_add(received_count)
                 .and_then(|count| count.checked_add(recalls.len()))
                 .and_then(|count| count.checked_add(profiles.len()))
+                .and_then(|count| count.checked_add(trust_cards.len()))
                 .and_then(|count| count.checked_add(event_count))
                 .and_then(|count| count.checked_add(file_count))
                 .and_then(|count| count.checked_add(file_contacts.len()))
@@ -748,6 +840,9 @@ impl Node {
                 updated_at,
                 avatar,
             })?;
+        }
+        for card in trust_cards {
+            writer.push(&SnapshotRecordV1::PeerTrustCard { card })?;
         }
         for (file_conv, size, digest) in media {
             writer.push(&SnapshotRecordV1::MediaDescriptor {

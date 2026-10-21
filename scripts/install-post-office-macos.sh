@@ -4,7 +4,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 prepare --binary PATH --name NAME [--port 47479] [--discovery-port PORT] [--lan-announce-port PORT] [--bridge] [--bridge-peer IP:PORT --bridge-peer-id ID --bridge-proxy-port PORT] [--federation-peer ID@IP:PORT ... | --federation-config PATH] | activate" >&2
+    echo "usage: $0 prepare --binary PATH --name NAME [--port 47479] [--discovery-port PORT] [--lan-announce-port PORT] [--bridge] [--bridge-peer IP:PORT --bridge-peer-id ID --bridge-proxy-port PORT] [--federation-peer ID@IP:PORT ... | --federation-config PATH | --relay-network PATH --relay-membership PATH [--relay-seed ID@IP:PORT ...]] | activate" >&2
     exit 2
 }
 
@@ -71,9 +71,12 @@ bridge_peer_id=
 bridge_proxy_port=
 federation_peers=()
 federation_config=
+relay_network=
+relay_membership=
+relay_seeds=()
 while (($#)); do
     case $1 in
-        --binary|--name|--port|--discovery-port|--lan-announce-port|--bridge-peer|--bridge-peer-id|--bridge-proxy-port|--federation-peer|--federation-config)
+        --binary|--name|--port|--discovery-port|--lan-announce-port|--bridge-peer|--bridge-peer-id|--bridge-proxy-port|--federation-peer|--federation-config|--relay-network|--relay-membership|--relay-seed)
             (($# >= 2)) || usage
             case $1 in
                 --binary) source_binary=$2 ;;
@@ -86,6 +89,9 @@ while (($#)); do
                 --bridge-proxy-port) bridge_proxy_port=$2 ;;
                 --federation-peer) federation_peers+=("$2") ;;
                 --federation-config) federation_config=$2 ;;
+                --relay-network) relay_network=$2 ;;
+                --relay-membership) relay_membership=$2 ;;
+                --relay-seed) relay_seeds+=("$2") ;;
             esac
             shift 2 ;;
         --bridge) bridge=true; shift ;;
@@ -129,6 +135,16 @@ if [[ -n $federation_config ]]; then
     bridge=true
 fi
 
+if [[ -n $relay_network || -n $relay_membership || -n ${relay_seeds[*]-} ]]; then
+    [[ -n $relay_network && -n $relay_membership && -z $federation_config && -z ${federation_peers[*]-} && -z $bridge_peer ]] || { echo "Network mode needs policy and membership and conflicts with federation pins or a bridge gateway" >&2; exit 2; }
+    for seed in ${relay_seeds[@]+"${relay_seeds[@]}"}; do
+        [[ $seed =~ ^[0-9a-fA-F]{32}@.+:[0-9]+$ ]] || usage
+    done
+    relay_network=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$relay_network")
+    relay_membership=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$relay_membership")
+    "$source_binary" network inspect --policy "$relay_network" --membership "$relay_membership" >/dev/null
+fi
+
 umask 077
 install -d -m 700 "$data_dir" "$state_dir" "$bin_dir"
 if [[ ! -f $data_dir/password ]]; then
@@ -167,11 +183,28 @@ if [[ -n $federation_config ]]; then
     federation_config=$persistent_config
 fi
 
-python3 - "$staged_plist" "$home_dir" "$(id -un)" "$name" "$port" "$discovery_port" "$lan_announce_port" "$bridge" "$bridge_peer" "$bridge_peer_id" "$bridge_proxy_port" "$federation_config" ${federation_peers[@]+"${federation_peers[@]}"} <<'PY'
+for network_file in network.policy relay.membership; do
+    if [[ -n $relay_network ]]; then
+        source_file=$relay_network
+        [[ $network_file != relay.membership ]] || source_file=$relay_membership
+        persistent_file=$data_dir/$network_file
+        if [[ $source_file != "$persistent_file" ]]; then
+            install -m 600 "$source_file" "$persistent_file.next"
+            mv -f "$persistent_file.next" "$persistent_file"
+        fi
+    fi
+done
+if [[ -n $relay_network ]]; then
+    relay_network=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$data_dir/network.policy")
+    relay_membership=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$data_dir/relay.membership")
+fi
+
+python3 - "$staged_plist" "$home_dir" "$(id -un)" "$name" "$port" "$discovery_port" "$lan_announce_port" "$bridge" "$bridge_peer" "$bridge_peer_id" "$bridge_proxy_port" "$federation_config" "$relay_network" "$relay_membership" "${#relay_seeds[@]}" ${relay_seeds[@]+"${relay_seeds[@]}"} ${federation_peers[@]+"${federation_peers[@]}"} <<'PY'
 import plistlib
 import sys
 
-plist, home, user, name, port, discovery_port, lan_announce_port, bridge, peer, peer_id, proxy_port, federation_config, *federation_peers = sys.argv[1:]
+plist, home, user, name, port, discovery_port, lan_announce_port, bridge, peer, peer_id, proxy_port, federation_config, relay_network, relay_membership, seed_count, *seeds = sys.argv[1:]
+relay_seeds, federation_peers = seeds[:int(seed_count)], seeds[int(seed_count):]
 args = [
     f"{home}/.local/bin/mesh-talk-node",
     "--keystore", f"{home}/.local/share/mesh-talk-post-office/identity.keystore",
@@ -187,6 +220,10 @@ if bridge == "true":
 if peer:
     args.extend(["--bridge-peer", peer, "--bridge-peer-id", peer_id.lower(),
                  "--bridge-proxy-port", proxy_port])
+if relay_network:
+    args.extend(["--relay-network", relay_network, "--relay-membership", relay_membership])
+for seed in relay_seeds:
+    args.extend(["--relay-seed", seed])
 if federation_config:
     args.extend(["--federation-config", federation_config])
 for seed in federation_peers:

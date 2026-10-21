@@ -80,7 +80,9 @@ export function IdentityCrest({
           <PresenceDot
             status={status}
             label={
-              status === "online" || status === "offline"
+              status === "online" ||
+              status === "offline" ||
+              status === "reconnecting"
                 ? t(`presence.${status}`)
                 : undefined
             }

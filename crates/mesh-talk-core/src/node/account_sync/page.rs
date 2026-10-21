@@ -4,6 +4,7 @@ use super::{
     AccountHistoryFrame, BackfillRecord, DmEnvelope, HistoryCursor, MAX_CHUNK, MAX_RECORD,
     NodeError, RECORDS_PER_PAGE, account_conversation_id,
 };
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
 #[derive(Clone)]
@@ -43,6 +44,7 @@ pub(super) enum HistoryRecord {
     FileCard(FileCardRecord),
 }
 
+#[cfg(test)]
 impl HistoryRecord {
     pub(super) fn id(&self) -> [u8; 32] {
         match self {
@@ -70,6 +72,7 @@ impl HistoryRecord {
 
 /// A full-history sweep keeps only one page and a look-ahead record in memory.
 /// The order-independent digest lets stores be scanned without sorting all rows.
+#[cfg(test)]
 pub(super) struct PageBuilder {
     after: Option<HistoryCursor>,
     pub(super) records: Vec<HistoryRecord>,
@@ -77,6 +80,7 @@ pub(super) struct PageBuilder {
     count: u64,
 }
 
+#[cfg(test)]
 impl PageBuilder {
     pub(super) fn new(after: Option<HistoryCursor>) -> Self {
         Self {

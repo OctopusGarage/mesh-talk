@@ -65,3 +65,47 @@ it("forwards content-free integration acceptance events and releases the listene
   stop();
   await vi.waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
 });
+
+it("forwards scoped group invalidations including lag recovery", async () => {
+  let forward!: (event: { payload: unknown }) => void;
+  const unlisten = vi.fn();
+  listen.mockImplementation((name, callback) => {
+    expect(name).toBe("channel-changed");
+    forward = callback;
+    return Promise.resolve(unlisten);
+  });
+  const onChannelChanged = vi.fn();
+  const stop = subscribeNodeEvents({ onChannelChanged });
+  const payload = {
+    owner: "host",
+    account_id: "account",
+    device_id: "device",
+    channel_id: null,
+  };
+  forward({ payload });
+  expect(onChannelChanged).toHaveBeenCalledWith(payload);
+  stop();
+  await vi.waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
+});
+
+it("forwards scoped state invalidations and releases the listener", async () => {
+  let forward!: (event: { payload: unknown }) => void;
+  const unlisten = vi.fn();
+  listen.mockImplementation((name, callback) => {
+    expect(name).toBe("node-state-changed");
+    forward = callback;
+    return Promise.resolve(unlisten);
+  });
+  const onStateChanged = vi.fn();
+  const stop = subscribeNodeEvents({ onStateChanged });
+  const payload = {
+    owner: "host",
+    account_id: "account",
+    device_id: "device",
+    kind: "files",
+  };
+  forward({ payload });
+  expect(onStateChanged).toHaveBeenCalledWith(payload);
+  stop();
+  await vi.waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
+});

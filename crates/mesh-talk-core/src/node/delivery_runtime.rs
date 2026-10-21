@@ -14,7 +14,13 @@ use crate::identity::device::PublicIdentity;
 const MAX_FILE_TRANSFERS: usize = 8;
 const MAX_FILE_SOCKETS: usize = super::session_pool::MAX_DIRECTION_CONNECTIONS - 1;
 const MAX_RELAY_CUSTODY_HINTS: usize = 256;
-const FILE_TRANSFER_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
+const FILE_TRANSFER_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+const FILE_CONSENT_RETRY: std::time::Duration = std::time::Duration::from_secs(3);
+pub(in crate::node) const FILE_EXCHANGE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
+pub(in crate::node) const RELAY_EXCHANGE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(5);
+const RELAY_FAILURE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
 const FILE_RELAY_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 
 // Whole authenticated control exchanges need several routed round trips. Keep
@@ -31,6 +37,31 @@ enum ControlWork {
 struct ControlRoutes {
     peer: PublicIdentity,
     endpoints: std::collections::BTreeSet<(String, std::net::SocketAddr)>,
+    publicly_observed: bool,
+}
+
+impl ControlWork {
+    fn retry_key(&self, peer: &PublicIdentity) -> (u8, String) {
+        (
+            match self {
+                Self::Destination(_) => 0,
+                Self::Receipt(_) => 1,
+                Self::Pull(_) => 2,
+            },
+            peer.user_id(),
+        )
+    }
+}
+
+impl ControlRoutes {
+    fn retry_routes(
+        &self,
+    ) -> (
+        std::collections::BTreeSet<(String, std::net::SocketAddr)>,
+        bool,
+    ) {
+        (self.endpoints.clone(), self.publicly_observed)
+    }
 }
 
 // Test-only timing: a dropped span records cancellation/early return, not success.
@@ -134,6 +165,7 @@ enum FilePhase {
     Manifest,
     ManifestCustody,
     Consent,
+    ConsentWait,
     InitialCustody,
     Chunks,
     FinalCustody,
@@ -183,6 +215,11 @@ impl FileTransfer {
 }
 
 type FileKey = (EventId, EventId);
+type FileStepResult = (
+    FileKey,
+    std::collections::HashMap<FileKey, FileTransfer>,
+    bool,
+);
 type FileWork = (
     super::delivery_store::FileCard,
     super::delivery_store::FileDestination,
@@ -196,9 +233,11 @@ struct FileDeliveryScheduler {
     pending_cursor: Option<FileKey>,
     active_cursor: Option<FileKey>,
     transfers: std::collections::HashMap<FileKey, FileTransfer>,
+    workers: tokio::task::JoinSet<FileStepResult>,
+    running_sockets: std::collections::HashSet<FileKey>,
     // Bounded scheduling hints, not custody/delivery truth. Eviction merely
     // permits an earlier retry after other destinations have had their turn.
-    relay_cooldowns: std::collections::VecDeque<(FileKey, std::time::Instant)>,
+    relay_cooldowns: std::collections::VecDeque<(FileKey, std::time::Instant, bool)>,
 }
 
 #[derive(Clone, Copy)]
@@ -231,12 +270,16 @@ impl FileScan {
 impl FileDeliveryScheduler {
     fn scan(&mut self, node: &Node) -> FileScan {
         node.prune_file_transfers(&mut self.transfers);
-        self.relay_cooldowns
-            .retain(|(_, until)| *until > std::time::Instant::now());
+        self.relay_cooldowns.retain(|(key, until, consent)| {
+            *until > std::time::Instant::now()
+                && (!*consent
+                    || node.outgoing_file_consent_status(key.0, key.1)
+                        != Some(crate::eventlog::sync::FileConsentStatus::Accepted))
+        });
         node.prune_outgoing_file_acks();
         FileScan {
             cursor: self.pending_cursor,
-            slots: MAX_FILE_TRANSFERS - self.transfers.len(),
+            slots: MAX_FILE_TRANSFERS - self.transfers.len() - self.workers.len(),
         }
     }
 
@@ -245,10 +288,11 @@ impl FileDeliveryScheduler {
         node.prune_file_transfers(&mut self.transfers);
         for (file, destination) in files {
             let key = (file.id, destination.binding.event_id);
-            if self.transfers.len() < MAX_FILE_TRANSFERS
-                && !self.relay_cooldowns.iter().any(|(held, _)| *held == key)
+            if self.transfers.len() + self.workers.len() < MAX_FILE_TRANSFERS
+                && !self.relay_cooldowns.iter().any(|(held, _, _)| *held == key)
                 && node.file_destination_current(&file, &destination)
                 && !self.transfers.contains_key(&key)
+                && !self.running_sockets.contains(&key)
             {
                 self.transfers
                     .insert(key, FileTransfer::new(file, destination));
@@ -256,67 +300,106 @@ impl FileDeliveryScheduler {
         }
     }
 
-    async fn advance(&mut self, node: &Node, diagnostic: &mut DeliveryDiagnosticThrottle) {
-        // Bound each pass to eight complete exchanges, round-robin across
-        // active slots. Failed exchanges discard sockets/protocol progress;
-        // ordered candidate metadata survives only until candidates are exhausted.
-        let mut progress = std::collections::HashSet::new();
-        for _ in 0..MAX_FILE_TRANSFERS {
-            let mut keys = self.transfers.keys().copied().collect::<Vec<_>>();
-            keys.sort_unstable();
-            let Some(key) = keys
-                .iter()
-                .copied()
-                .find(|key| self.active_cursor.is_none_or(|cursor| *key > cursor))
-                .or_else(|| keys.first().copied())
-            else {
-                break;
-            };
+    fn advance(&mut self, node: &std::sync::Arc<Node>) {
+        // Each exchange owns its socket until a clean protocol boundary. Slow
+        // peers consume one bounded worker, never the serial delivery loop.
+        let mut keys = self.transfers.keys().copied().collect::<Vec<_>>();
+        keys.sort_unstable();
+        if let Some(cursor) = self.active_cursor {
+            let offset = keys.partition_point(|key| *key <= cursor);
+            keys.rotate_left(offset);
+        }
+        let mut sockets = self.running_sockets.len()
+            + self
+                .transfers
+                .values()
+                .filter(|t| t.channel.is_some())
+                .count();
+        for key in keys {
+            let transfer = &self.transfers[&key];
+            let dial = matches!(transfer.phase, FilePhase::Dial);
+            if dial && sockets >= MAX_FILE_SOCKETS {
+                continue;
+            }
+            if dial {
+                sockets += 1;
+            }
             self.active_cursor = Some(key);
-            let transfer = self.transfers.get(&key).unwrap();
+            self.running_sockets.insert(key);
+            #[cfg(test)]
+            node.file_transfer_peak.fetch_max(
+                self.transfers.len() + self.workers.len(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            let transfer = self.transfers.remove(&key).unwrap();
             let file = transfer.file.clone();
             let destination = transfer.destination.clone();
+            let node = node.clone();
+            let Some(work) = node.runtime_work.admit() else {
+                return;
+            };
+            self.workers.spawn(work.track(async move {
+                let mut transfers = std::collections::HashMap::from([(key, transfer)]);
+                let complete = node
+                    .retry_file_step(&file, &destination, &mut transfers)
+                    .await;
+                (key, transfers, complete)
+            }));
+        }
+    }
+
+    fn finish(
+        &mut self,
+        node: &Node,
+        result: Result<FileStepResult, tokio::task::JoinError>,
+        diagnostic: &mut DeliveryDiagnosticThrottle,
+    ) {
+        let Ok((key, mut transfers, complete)) = result else {
+            // Never retain reservations after a panicked child; drop cancels the
+            // other workers and the owning accept loop retires on this failure.
+            self.running_sockets.clear();
+            self.workers.abort_all();
+            return;
+        };
+        self.running_sockets.remove(&key);
+        if complete {
+            node.delivery_notify.notify_one();
             if node
-                .retry_file_step(&file, &destination, &mut self.transfers)
-                .await
+                .delivery
+                .lock()
+                .expect("delivery lock not poisoned")
+                .retire_file_destination(key.0, key.1)
+                .is_err()
             {
-                if node
-                    .delivery
+                diagnostic.warn_if_due();
+            } else {
+                node.outgoing_file_acks
                     .lock()
-                    .expect("delivery lock not poisoned")
-                    .retire_file_destination(file.id, destination.binding.event_id)
-                    .is_err()
-                {
-                    diagnostic.warn_if_due();
-                } else {
-                    node.outgoing_file_acks
-                        .lock()
-                        .expect("outgoing file progress lock not poisoned")
-                        .remove(&key);
-                }
+                    .expect("outgoing file progress lock not poisoned")
+                    .remove(&key);
+                node.note_file_change();
             }
-            if self
-                .transfers
-                .get(&key)
-                .is_some_and(|transfer| matches!(transfer.phase, FilePhase::RelayHeld))
-            {
-                self.transfers.remove(&key);
+        }
+        if let Some(transfer) = transfers.remove(&key) {
+            let delay = match transfer.phase {
+                FilePhase::RelayHeld => Some(FILE_RELAY_RETRY),
+                FilePhase::ConsentWait => Some(FILE_CONSENT_RETRY),
+                _ => None,
+            };
+            if let Some(delay) = delay {
                 if self.relay_cooldowns.len() == MAX_RELAY_CUSTODY_HINTS {
                     self.relay_cooldowns.pop_front();
                 }
-                self.relay_cooldowns
-                    .push_back((key, std::time::Instant::now() + FILE_RELAY_RETRY));
-            } else if self.transfers.contains_key(&key) {
-                progress.insert(key);
+                self.relay_cooldowns.push_back((
+                    key,
+                    std::time::Instant::now() + delay,
+                    matches!(transfer.phase, FilePhase::ConsentWait),
+                ));
+                node.delivery_notify.notify_one();
+            } else {
+                self.transfers.insert(key, transfer);
+                node.delivery_notify.notify_one();
             }
-        }
-        if progress.iter().any(|key| self.transfers.contains_key(key)) {
-            #[cfg(test)]
-            if self.transfers.is_empty() {
-                node.empty_file_cache_self_wakes
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-            node.delivery_notify.notify_one();
         }
     }
 }
@@ -843,6 +926,20 @@ impl Node {
                     )),
                     _ => None,
                 });
+            let wake_local =
+                store
+                    .pending_transactions()
+                    .first()
+                    .is_some_and(|tx| match tx.body() {
+                        DeliveryTransaction::Outgoing { .. }
+                        | DeliveryTransaction::OutgoingManifest { .. }
+                        | DeliveryTransaction::ChannelOutgoing { .. } => true,
+                        DeliveryTransaction::Incoming { sender, .. }
+                        | DeliveryTransaction::IncomingManifest { sender, .. } => {
+                            !self.certified_sibling(sender)
+                        }
+                        DeliveryTransaction::Requested { .. } => false,
+                    });
             let transaction_id = store.pending_transactions().first().map(|tx| tx.id());
             if let Some(
                 DeliveryTransaction::Incoming {
@@ -911,6 +1008,9 @@ impl Node {
                     }
                 }
             }
+            if removed && wake_local {
+                self.note_account_local_change();
+            }
             if removed && let Some((sender, original_conv, entry, file, incoming)) = notification {
                 self.note_account_history_change();
                 if file {
@@ -976,20 +1076,23 @@ impl Node {
                     .expect("emitted lock not poisoned")
                     .insert(entry.event_id)
                 {
-                    let inner = DmEnvelope::decode(&entry.plaintext)
-                        .map_or_else(|| entry.plaintext.clone(), |env| env.body);
-                    if self.recipient_expired(&inner, entry.event_id, entry.wall_clock) {
+                    let envelope = DmEnvelope::decode(&entry.plaintext);
+                    let inner = envelope
+                        .as_ref()
+                        .map_or(entry.plaintext.as_slice(), |env| env.body.as_slice());
+                    if self.recipient_expired(inner, entry.event_id, entry.wall_clock) {
                         continue;
                     }
-                    let body = DmEnvelope::decode(&entry.plaintext).map_or_else(
-                        || MessageBody::decode(&entry.plaintext),
-                        |env| MessageBody::decode(&env.body),
-                    );
+                    let body = MessageBody::decode(inner);
                     let from_name = self
                         .historical_author(&sender.ed25519_pub)
                         .map_or_else(|| sender.user_id(), |proof| proof.name);
                     if !self.certified_sibling(&sender) {
                         let _ = self.incoming.send(ReceivedDm {
+                            message_id: envelope.as_ref().map(|env| EventId::new(env.msg_id)),
+                            from_account: envelope
+                                .as_ref()
+                                .map(|env| env.route.sender_account.clone()),
                             from: sender.user_id(),
                             from_name,
                             text: body.text,
@@ -1322,39 +1425,58 @@ impl Node {
         destination: &DeliveryDestination,
         conversation: ConversationId,
     ) -> bool {
-        let Ok(mut channel) = self.privacy_sync_dial(peer.addr, &destination.device).await else {
-            return false;
-        };
-        if !self.delivery_destination_allowed(destination)
-            || channel.peer_announcement().is_some_and(|p| {
-                destination.account.is_some() && p.account_id() != destination.account
-            })
-            || !self
-                .delivery
-                .lock()
-                .expect("delivery lock not poisoned")
-                .contains_work_event(destination.event.id)
-        {
-            return false;
-        }
-        let store = self.sync_store(channel.peer_identity());
-        if super::session::request_round(&mut channel, &store, conversation)
-            .await
-            .is_err()
-        {
-            return false;
-        }
-        if conversation != destination.event.conversation_id {
-            return false;
-        }
-        let held =
-            super::session::request_durable_have(&mut channel, conversation, destination.event.id)
+        for fresh in [false, true] {
+            let started = std::time::Instant::now();
+            let dial = if fresh {
+                self.privacy_dial(peer.addr, &destination.device)
+                    .await
+                    .map(|channel| (channel, false))
+            } else {
+                self.privacy_sync_dial_with_reuse(peer.addr, &destination.device)
+                    .await
+            };
+            let Ok((mut channel, reused)) = dial else {
+                return false;
+            };
+            if !self.delivery_destination_allowed(destination)
+                || channel.peer_announcement().is_some_and(|p| {
+                    destination.account.is_some() && p.account_id() != destination.account
+                })
+                || !self
+                    .delivery
+                    .lock()
+                    .expect("delivery lock not poisoned")
+                    .contains_work_event(destination.event.id)
+            {
+                return false;
+            }
+            let exchange = async {
+                let store = self.sync_store(channel.peer_identity());
+                super::session::request_round(&mut channel, &store, conversation).await?;
+                if conversation != destination.event.conversation_id {
+                    return Ok(false);
+                }
+                super::session::request_durable_have(
+                    &mut channel,
+                    conversation,
+                    destination.event.id,
+                )
                 .await
-                .unwrap_or(false);
-        if held {
-            self.recycle_sync_channel(channel);
+            }
+            .await;
+            match exchange {
+                Ok(held) => {
+                    self.observe_control_exchange(&channel, started);
+                    if held || conversation != destination.event.conversation_id {
+                        self.recycle_sync_channel(channel);
+                    }
+                    return held && self.delivery_destination_allowed(destination);
+                }
+                Err(error) if reused && super::session_pool::retryable_sync_error(&error) => {}
+                Err(_) => return false,
+            }
         }
-        held && self.delivery_destination_allowed(destination)
+        false
     }
 
     pub(in crate::node) async fn replicate_delivery_destination(
@@ -1377,72 +1499,174 @@ impl Node {
             let roster = self.roster.lock().expect("roster lock not poisoned");
             self.post_office_candidates_for(&roster, &destination.device)
         };
-        for po in candidates {
-            if po.public == self.identity.public() || !self.relay_send_allowed(&po.public) {
-                continue;
-            }
-            let Ok(mut channel) = self.privacy_sync_dial(po.addr, &po.public).await else {
-                continue;
-            };
-            if !self.delivery_destination_allowed(destination)
-                || !self.relay_send_allowed(&po.public)
-                || channel
-                    .peer_announcement()
-                    .is_some_and(|p| po.account_id.is_some() && p.account_id() != po.account_id)
-                || !self
-                    .delivery
-                    .lock()
-                    .expect("delivery lock not poisoned")
-                    .contains_work_event(destination.event.id)
-            {
-                continue;
-            }
-            let Ok(uploaded) = self
-                .opaque_relay_round(
-                    &mut channel,
-                    &destination.device,
-                    Some(destination.event.conversation_id),
-                )
-                .await
-            else {
-                continue;
-            };
-            let Some((_, outer_id)) = uploaded
-                .iter()
-                .find(|(inner_id, _)| *inner_id == destination.event.id)
-            else {
-                continue;
-            };
-            let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
-                &self.identity,
-                &destination.device,
-                &po.public,
-            ) else {
-                continue;
-            };
-            let held = super::session::request_durable_have(&mut channel, mailbox.id(), *outer_id)
-                .await
-                .unwrap_or(false);
+        use futures_util::StreamExt;
+        let scope = format!("upload:{}", destination.device.user_id());
+        let candidates = self.relay_candidate_batch(&scope, candidates);
+        let attempts = futures_util::stream::iter(candidates)
+            .map(|po| async move {
+                if po.public == self.identity.public()
+                    || !self.relay_send_allowed(&po.public)
+                    || !self.relay_retry_due(&po.public)
+                {
+                    return false;
+                }
+                let success = self
+                    .adaptive_control_timeout(&po.public, async {
+                        for fresh in [false, true] {
+                            let started = std::time::Instant::now();
+                            let dial = if fresh {
+                                self.privacy_dial(po.addr, &po.public)
+                                    .await
+                                    .map(|channel| (channel, false))
+                            } else {
+                                self.privacy_sync_dial_with_reuse(po.addr, &po.public).await
+                            };
+                            let Ok((mut channel, reused)) = dial else {
+                                return false;
+                            };
+                            if !self.delivery_destination_allowed(destination)
+                                || !self.relay_send_allowed(&po.public)
+                                || channel.peer_announcement().is_some_and(|p| {
+                                    po.account_id.is_some() && p.account_id() != po.account_id
+                                })
+                                || !self
+                                    .delivery
+                                    .lock()
+                                    .expect("delivery lock not poisoned")
+                                    .contains_work_event(destination.event.id)
+                            {
+                                return false;
+                            }
+                            let exchange = async {
+                                let uploaded = self
+                                    .opaque_relay_round(
+                                        &mut channel,
+                                        &destination.device,
+                                        Some(destination.event.conversation_id),
+                                    )
+                                    .await?;
+                                let Some((_, outer_id)) = uploaded
+                                    .iter()
+                                    .find(|(inner_id, _)| *inner_id == destination.event.id)
+                                else {
+                                    return Ok(false);
+                                };
+                                let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
+                                    &self.identity,
+                                    &destination.device,
+                                    &po.public,
+                                ) else {
+                                    return Ok(false);
+                                };
+                                super::session::request_durable_have(
+                                    &mut channel,
+                                    mailbox.id(),
+                                    *outer_id,
+                                )
+                                .await
+                            }
+                            .await;
+                            match exchange {
+                                Ok(held) => {
+                                    self.observe_control_exchange(&channel, started);
+                                    if held {
+                                        self.recycle_sync_channel(channel);
+                                    }
+                                    return held
+                                        && self.delivery_destination_allowed(destination)
+                                        && self.relay_send_allowed(&po.public);
+                                }
+                                Err(error)
+                                    if reused
+                                        && super::session_pool::retryable_sync_error(&error) => {}
+                                Err(_) => return false,
+                            }
+                        }
+                        false
+                    })
+                    .await
+                    .unwrap_or(false);
+                self.record_relay_attempt(&po.public, success);
+                success
+            })
+            .buffer_unordered(2);
+        tokio::pin!(attempts);
+        while let Some(held) = attempts.next().await {
             if held {
-                self.recycle_sync_channel(channel);
-            }
-            if held
-                && self.delivery_destination_allowed(destination)
-                && self.relay_send_allowed(&po.public)
-            {
                 return true;
             }
         }
         false
     }
 
+    /// A failed bounded batch continues at the next candidates on a later
+    /// wake. Prefix-scoped keys separate upload, pull and relay-drain turns.
+    pub(in crate::node) fn relay_candidate_batch(
+        &self,
+        scope: &str,
+        mut candidates: Vec<crate::discovery::roster::PeerRecord>,
+    ) -> Vec<crate::discovery::roster::PeerRecord> {
+        if candidates.is_empty() {
+            return candidates;
+        }
+        let mut cursors = self
+            .relay_drain_cursor
+            .lock()
+            .expect("relay cursor lock not poisoned");
+        let offset = cursors.get(scope).copied().unwrap_or(0) % candidates.len();
+        candidates.rotate_left(offset);
+        let next = offset.wrapping_add(candidates.len().min(4));
+        if cursors.len() >= MAX_RELAY_CUSTODY_HINTS
+            && !cursors.contains_key(scope)
+            && let Some(key) = cursors.keys().next().cloned()
+        {
+            cursors.remove(&key);
+        }
+        cursors.insert(scope.to_owned(), next);
+        candidates.truncate(4);
+        candidates
+    }
+
+    pub(in crate::node) fn relay_retry_due(&self, peer: &PublicIdentity) -> bool {
+        self.relay_retry_after
+            .lock()
+            .expect("relay retry lock not poisoned")
+            .get(&peer.user_id())
+            .is_none_or(|until| *until <= std::time::Instant::now())
+    }
+
+    pub(in crate::node) fn record_relay_attempt(&self, peer: &PublicIdentity, success: bool) {
+        let mut hints = self
+            .relay_retry_after
+            .lock()
+            .expect("relay retry lock not poisoned");
+        if success {
+            hints.remove(&peer.user_id());
+        } else {
+            hints.retain(|_, until| *until > std::time::Instant::now());
+            if hints.len() >= MAX_RELAY_CUSTODY_HINTS
+                && let Some(key) = hints.keys().next().cloned()
+            {
+                hints.remove(&key);
+            }
+            hints.insert(
+                peer.user_id(),
+                std::time::Instant::now() + RELAY_FAILURE_COOLDOWN,
+            );
+        }
+    }
+
     fn control_routes(&self, peer: &PublicIdentity) -> ControlRoutes {
         let roster = self.roster.lock().expect("roster mutex not poisoned");
         let mut endpoints = std::collections::BTreeSet::new();
+        let mut publicly_observed = false;
         if let Some(record) = roster
             .get(&peer.user_id())
             .filter(|record| record.public == *peer)
         {
+            publicly_observed = !record
+                .presence_evidence(std::time::Instant::now())
+                .is_empty();
             endpoints.extend(
                 record
                     .routes
@@ -1464,6 +1688,62 @@ impl Node {
         ControlRoutes {
             peer: peer.clone(),
             endpoints,
+            publicly_observed,
+        }
+    }
+
+    fn control_budget(&self, peer: &PublicIdentity) -> std::time::Duration {
+        self.routing_peer(&peer.user_id())
+            .filter(|p| p.public == *peer)
+            .map_or(CONTROL_EXCHANGE_TIMEOUT, |record| {
+                record
+                    .routes
+                    .iter()
+                    .filter(|route| {
+                        route.source != crate::discovery::roster::RouteSource::PostOffice
+                    })
+                    .map(|route| self.sessions.control_timeout(peer, route.addr))
+                    .chain(std::iter::once(
+                        self.sessions.control_timeout(peer, record.addr),
+                    ))
+                    .max()
+                    .unwrap_or(CONTROL_EXCHANGE_TIMEOUT)
+            })
+    }
+
+    pub(super) async fn adaptive_control_timeout<T>(
+        &self,
+        peer: &PublicIdentity,
+        operation: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        let started = tokio::time::Instant::now();
+        let mut budget = self.control_budget(peer);
+        tokio::pin!(operation);
+        loop {
+            tokio::select! {
+                result = &mut operation => return Some(result),
+                _ = tokio::time::sleep_until(started + budget) => {
+                    // Authentication completed during this exchange may have
+                    // taught us that its remaining round trips need more time.
+                    budget = budget.max(self.control_budget(peer));
+                    if tokio::time::Instant::now() < started + budget { continue; }
+                    let preferred = self.preferred_routes.lock().expect("routes lock not poisoned").get(&peer.user_id()).copied();
+                    let address = preferred.or_else(|| self.routing_peer(&peer.user_id()).filter(|p| p.public == *peer).map(|p| p.addr));
+                    if let Some(address) = address { self.sessions.control_timed_out(peer, address); }
+                    return None;
+                }
+            }
+        }
+    }
+
+    pub(super) fn observe_control_exchange(
+        &self,
+        channel: &crate::transport::SecureChannel<tokio::net::TcpStream>,
+        started: std::time::Instant,
+    ) {
+        if let Ok(address) = channel.tcp_peer_addr() {
+            self.sessions
+                .control_succeeded(channel.peer_identity(), address, started.elapsed());
         }
     }
 
@@ -1483,15 +1763,29 @@ impl Node {
         let mut controls = tokio::task::JoinSet::new();
         let mut active: std::collections::HashMap<ControlWork, ControlRoutes> =
             std::collections::HashMap::new();
+        let mut retries = super::delivery_retry::RetrySchedule::default();
         let mut network = self.network_changes.subscribe();
         loop {
             tokio::select! {
+                result = file_scheduler.workers.join_next(), if !file_scheduler.workers.is_empty() => {
+                    if let Some(result) = result {
+                        if let Err(error) = &result { log::error!("automatic file delivery task failed: {error}"); return; }
+                        file_scheduler.finish(&self, result, &mut diagnostic);
+                    }
+                    continue;
+                },
                 _ = interval.tick() => {},
                 _ = self.delivery_notify.notified() => {},
                 _ = network.changed() => {
-                    self.sessions.clear();
+                    self.sessions.network_changed();
+                    file_scheduler.workers.shutdown().await;
+                    file_scheduler.running_sockets.clear();
+                    file_scheduler.transfers.clear();
+                    file_scheduler.relay_cooldowns.clear();
+                    self.relay_retry_after.lock().expect("relay retry lock not poisoned").clear();
                     controls.shutdown().await;
                     active.clear();
+                    retries.clear();
                     self.channel_recovery_notify.notify_one();
                     self.account_sync_notify.notify_one();
                     self.bridge_notify.notify_one();
@@ -1499,8 +1793,10 @@ impl Node {
                 },
                 result = controls.join_next(), if !controls.is_empty() => {
                     match result {
-                        Some(Ok((key, persistence_failed))) => {
-                            active.remove(&key);
+                        Some(Ok((key, persistence_failed, progress))) => {
+                            if let Some(routes) = active.remove(&key) {
+                                retries.finished(key.retry_key(&routes.peer), routes.retry_routes(), progress, std::time::Instant::now());
+                            }
                             if persistence_failed {
                                 diagnostic.warn_if_due();
                             }
@@ -1592,25 +1888,36 @@ impl Node {
             if let Some((id, destination)) = destination {
                 destination_cursor = Some(id);
                 let key = ControlWork::Destination(destination.event.id);
+                let routes = self.control_routes(&destination.device);
                 if active
                     .keys()
                     .filter(|key| matches!(key, ControlWork::Destination(_)))
                     .count()
                     < 2
                     && !active.contains_key(&key)
+                    && !active.iter().any(|(key, routes)| {
+                        matches!(key, ControlWork::Destination(_))
+                            && routes.peer == destination.device
+                    })
+                    && retries.ready(
+                        &key.retry_key(&destination.device),
+                        &routes.retry_routes(),
+                        std::time::Instant::now(),
+                    )
                 {
                     let Some(work) = self.runtime_work.admit() else {
                         return;
                     };
                     let node = self.clone();
-                    active.insert(key.clone(), self.control_routes(&destination.device));
+                    active.insert(key.clone(), routes);
                     controls.spawn(work.track(async move {
                         let live = node
                             .delivery
                             .lock()
                             .expect("delivery lock not poisoned")
                             .contains_destination(id, destination.event.id);
-                        let failed = if live && node.retry_one_destination(&destination).await {
+                        let progress = live && node.retry_one_destination(&destination).await;
+                        let failed = if progress {
                             let mut store =
                                 node.delivery.lock().expect("delivery lock not poisoned");
                             store.completed_work(id).is_some()
@@ -1618,40 +1925,44 @@ impl Node {
                         } else {
                             false
                         };
-                        (key, failed)
+                        (key, failed, progress)
                     }));
                 }
             }
             if let Some(receipt) = receipt {
                 receipt_cursor = Some(receipt.destination.event.id);
                 let key = ControlWork::Receipt(receipt.destination.event.id);
+                let routes = self.control_routes(&receipt.destination.device);
                 if !active
                     .keys()
                     .any(|key| matches!(key, ControlWork::Receipt(_)))
                     && !active.contains_key(&key)
+                    && retries.ready(
+                        &key.retry_key(&receipt.destination.device),
+                        &routes.retry_routes(),
+                        std::time::Instant::now(),
+                    )
                 {
                     let Some(work) = self.runtime_work.admit() else {
                         return;
                     };
                     let node = self.clone();
-                    active.insert(
-                        key.clone(),
-                        self.control_routes(&receipt.destination.device),
-                    );
+                    active.insert(key.clone(), routes);
                     controls.spawn(work.track(async move {
-                        let failed = node.retry_one_destination(&receipt.destination).await
+                        let progress = node.retry_one_destination(&receipt.destination).await;
+                        let failed = progress
                             && node
                                 .delivery
                                 .lock()
                                 .expect("delivery lock not poisoned")
                                 .finish_receipt(receipt.conversation, receipt.original_event_id)
                                 .is_err();
-                        (key, failed)
+                        (key, failed, progress)
                     }));
                 }
             }
             file_scheduler.admit(&self, files, cursor);
-            file_scheduler.advance(&self, &mut diagnostic).await;
+            file_scheduler.advance(&self);
             // Historical identity authorizes a control pull even with its sender
             // offline. The cursor advances before any bounded network await.
             let peer = if active.keys().any(|key| matches!(key, ControlWork::Pull(_))) {
@@ -1681,56 +1992,55 @@ impl Node {
                     continue;
                 }
                 let key = ControlWork::Pull(peer.user_id.clone());
+                let routes = self.control_routes(&peer.public());
                 if !active.keys().any(|key| matches!(key, ControlWork::Pull(_)))
                     && !active.contains_key(&key)
+                    && retries.ready(
+                        &key.retry_key(&peer.public()),
+                        &routes.retry_routes(),
+                        std::time::Instant::now(),
+                    )
                 {
                     let Some(work) = self.runtime_work.admit() else {
                         return;
                     };
                     let node = self.clone();
-                    active.insert(key.clone(), self.control_routes(&peer.public()));
+                    active.insert(key.clone(), routes);
                     controls.spawn(work.track(async move {
-                        node.reconcile_delivery_peer(&peer).await;
-                        (key, false)
+                        let progress = node.reconcile_delivery_peer(&peer).await;
+                        (key, false, progress)
                     }));
                 }
             }
         }
     }
 
-    async fn reconcile_delivery_peer(&self, peer: &crate::discovery::Announce) {
-        // Scheduling captured a proof, not lasting recovery permission.
+    async fn reconcile_delivery_peer(&self, peer: &crate::discovery::Announce) -> bool {
         if !self.verified_dm_pull_peer(&peer.user_id) {
-            return;
+            return false;
         }
         let conv = super::delivery_receipt::delivery_conversation_id(
             &self.identity.public(),
             &peer.public(),
         );
         let dm = super::conversation::dm_conversation_id(&self.identity.public(), &peer.public());
-        let direct_dm = tokio::time::timeout(
-            CONTROL_EXCHANGE_TIMEOUT,
-            self.pull_delivery_scope(peer, dm, false),
-        )
+        tokio::time::timeout(super::route_timing::MAX_CONTROL_DEADLINE, async {
+            let (direct, relay) = tokio::join!(
+                async {
+                    let messages = Box::pin(self.pull_delivery_scope(peer, dm, false)).await;
+                    let receipts = Box::pin(self.pull_delivery_scope(peer, conv, false)).await;
+                    messages || receipts
+                },
+                async {
+                    let messages = Box::pin(self.pull_delivery_scope(peer, dm, true)).await;
+                    let receipts = Box::pin(self.pull_delivery_scope(peer, conv, true)).await;
+                    messages || receipts
+                }
+            );
+            direct || relay
+        })
         .await
-        .unwrap_or(false);
-        if !direct_dm {
-            let _ = tokio::time::timeout(
-                CONTROL_EXCHANGE_TIMEOUT,
-                self.pull_delivery_scope(peer, dm, true),
-            )
-            .await;
-        }
-        self.emit_new_messages(dm);
-        self.process_file_events(dm);
-        for relay in [true, false] {
-            let _ = tokio::time::timeout(
-                CONTROL_EXCHANGE_TIMEOUT,
-                self.pull_delivery_scope(peer, conv, relay),
-            )
-            .await;
-        }
-        self.emit_new_messages(conv);
+        .unwrap_or(false)
     }
 
     async fn pull_delivery_scope(
@@ -1759,37 +2069,59 @@ impl Node {
                 .into_iter()
                 .collect()
         };
+        let peers = if relay {
+            self.relay_candidate_batch(&format!("pull:{}", proof.user_id), peers)
+        } else {
+            peers
+        };
         let mut completed = false;
         for peer in peers {
+            let started = std::time::Instant::now();
             if relay && !self.relay_receive_allowed(&peer.public) {
                 continue;
             }
             if !relay && (peer.public != proof.public() || peer.account_id != proof.account_id()) {
                 continue;
             }
-            let Ok(mut channel) = self.privacy_sync_dial(peer.addr, &peer.public).await else {
-                continue;
-            };
-            if !current()
-                || (relay && !self.relay_receive_allowed(&peer.public))
-                || channel
-                    .peer_announcement()
-                    .is_some_and(|p| p.account_id() != peer.account_id)
-            {
+            if relay && !self.relay_retry_due(&peer.public) {
                 continue;
             }
-            let success = if relay {
-                self.opaque_relay_round(&mut channel, &proof.public(), None)
-                    .await
-                    .is_ok()
-            } else {
-                let store = self.pull_sync_store(channel.peer_identity());
-                super::session::request_round(&mut channel, &store, conv)
-                    .await
-                    .is_ok()
-            };
-            if success {
-                self.recycle_sync_channel(channel);
+            let success = self
+                .adaptive_control_timeout(&peer.public, async {
+                    let Ok(mut channel) = self.privacy_sync_dial(peer.addr, &peer.public).await
+                    else {
+                        return false;
+                    };
+                    if !current()
+                        || (relay && !self.relay_receive_allowed(&peer.public))
+                        || channel
+                            .peer_announcement()
+                            .is_some_and(|p| p.account_id() != peer.account_id)
+                    {
+                        return false;
+                    }
+                    let success = if relay {
+                        self.opaque_relay_round(&mut channel, &proof.public(), None)
+                            .await
+                            .is_ok()
+                    } else {
+                        let store = self.pull_sync_store(channel.peer_identity());
+                        super::session::request_round(&mut channel, &store, conv)
+                            .await
+                            .is_ok()
+                    };
+                    if success {
+                        self.observe_control_exchange(&channel, started);
+                        self.recycle_sync_channel(channel);
+                        self.emit_new_messages(conv);
+                        self.process_file_events(conv);
+                    }
+                    success
+                })
+                .await
+                .unwrap_or(false);
+            if relay {
+                self.record_relay_attempt(&peer.public, success);
             }
             completed |= success;
         }
@@ -1800,33 +2132,68 @@ impl Node {
         if !self.delivery_destination_allowed(destination) {
             return false;
         }
-        let mut held = false;
-        if let Some(peer) = self
-            .routing_peer(&destination.device.user_id())
-            .filter(|p| {
-                p.public == destination.device
-                    && p.account_id == destination.account
-                    && self.known_account_allowed(&p.public)
-            })
-        {
-            held = tokio::time::timeout(
-                CONTROL_EXCHANGE_TIMEOUT,
-                self.transfer_delivery_destination(
-                    &peer,
-                    destination,
-                    destination.event.conversation_id,
-                ),
-            )
-            .await
-            .unwrap_or(false);
-            self.emit_new_messages(destination.event.conversation_id);
+        let started = std::time::Instant::now();
+        let budget = super::route_timing::MAX_CONTROL_DEADLINE;
+        let direct = async {
+            let mut held = false;
+            if let Some(peer) = self
+                .routing_peer(&destination.device.user_id())
+                .filter(|p| {
+                    p.public == destination.device
+                        && p.account_id == destination.account
+                        && self.known_account_allowed(&p.public)
+                })
+            {
+                held = self
+                    .adaptive_control_timeout(&peer.public, async {
+                        let held = self
+                            .transfer_delivery_destination(
+                                &peer,
+                                destination,
+                                destination.event.conversation_id,
+                            )
+                            .await;
+                        self.emit_new_messages(destination.event.conversation_id);
+                        if held {
+                            let control = super::delivery_receipt::delivery_conversation_id(
+                                &self.identity.public(),
+                                &peer.public,
+                            );
+                            self.transfer_delivery_destination(&peer, destination, control)
+                                .await;
+                            self.emit_new_messages(control);
+                        }
+                        held
+                    })
+                    .await
+                    .unwrap_or(false);
+            }
+            (held, started.elapsed())
+        };
+        let relay = async {
+            let held =
+                tokio::time::timeout(budget, self.replicate_delivery_destination(destination))
+                    .await
+                    .unwrap_or(false);
+            (held, started.elapsed())
+        };
+        tokio::pin!(direct, relay);
+        // Both alternatives share the same bounded wall-clock window. Custody
+        // cannot cancel recipient progress; exact recipient confirmation can.
+        let ((held, direct_elapsed), (relay_held, relay_elapsed)) = tokio::select! {
+            result = &mut direct => {
+                let still_pending = self.delivery.lock().expect("delivery lock not poisoned")
+                    .contains_work_event(destination.event.id);
+                if still_pending { (result, relay.await) }
+                else { (result, (false, started.elapsed())) }
+            },
+            result = &mut relay => (direct.await, result),
+        };
+        if started.elapsed() >= std::time::Duration::from_secs(10) {
+            log::warn!(target: "mesh_talk::delivery",
+                "slow delivery attempt direct_ms={} relay_ms={} direct_held={} relay_held={} budget_ms={}",
+                direct_elapsed.as_millis(), relay_elapsed.as_millis(), held, relay_held, budget.as_millis());
         }
-        let relay_held = tokio::time::timeout(
-            CONTROL_EXCHANGE_TIMEOUT,
-            self.replicate_delivery_destination(destination),
-        )
-        .await
-        .unwrap_or(false);
         held || relay_held
     }
 
@@ -1962,6 +2329,11 @@ impl Node {
             return false;
         }
         let transfer = transfers.get_mut(&key).unwrap();
+        // Standalone callers may resume a clean consent boundary directly;
+        // the shared scheduler normally parks it outside active capacity.
+        if matches!(transfer.phase, FilePhase::ConsentWait) {
+            transfer.phase = FilePhase::Dial;
+        }
         transfer.last_used = std::time::Instant::now();
         #[cfg(test)]
         let mut timing = TestTiming::new(match transfer.phase {
@@ -1969,6 +2341,7 @@ impl Node {
             FilePhase::Manifest => "file-manifest-exchange",
             FilePhase::ManifestCustody => "file-manifest-custody",
             FilePhase::Consent => "file-consent",
+            FilePhase::ConsentWait => "file-consent-wait",
             FilePhase::InitialCustody => "file-initial-custody",
             FilePhase::Chunks => "file-chunk-exchange",
             FilePhase::FinalCustody => "file-final-custody",
@@ -1979,11 +2352,8 @@ impl Node {
             FilePhase::RelayCustody => "file-relay-custody",
             FilePhase::RelayHeld => "file-relay-held",
         });
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_millis(400),
-            self.advance_file_transfer(transfer),
-        )
-        .await;
+        let outcome =
+            tokio::time::timeout(FILE_EXCHANGE_TIMEOUT, self.advance_file_transfer(transfer)).await;
         #[cfg(test)]
         let phase = transfer.phase;
         #[cfg(test)]
@@ -1992,13 +2362,22 @@ impl Node {
                 Ok(Ok(true)) => "file-retirable",
                 Ok(Ok(false)) => "file-clean-boundary",
                 Ok(Err(_)) => "file-error",
-                Err(_) => "file-400ms-cancelled",
+                Err(_) => "file-exchange-cancelled",
             });
             timing.finish();
         }
         match outcome {
             Ok(Ok(true)) => {
-                transfers.remove(&key);
+                if let Some(mut transfer) = transfers.remove(&key)
+                    && matches!(
+                        transfer.phase,
+                        FilePhase::InitialCustody | FilePhase::FinalCustody
+                    )
+                    && transfer.route.as_ref().is_some_and(|(relay, _)| !relay)
+                    && let Some(channel) = transfer.channel.take()
+                {
+                    self.recycle_sync_channel(channel);
+                }
                 true
             }
             Ok(Ok(false)) => false,
@@ -2105,7 +2484,7 @@ impl Node {
                 return Err(SessionError::NoProgress);
             }
             let (relay, peer) = candidates.swap_remove(index);
-            let channel = self.privacy_dial(peer.addr, &peer.public).await?;
+            let channel = self.privacy_sync_dial(peer.addr, &peer.public).await?;
             if !self.file_destination_current(file, destination)
                 || channel.peer_identity() != &peer.public
                 || channel
@@ -2204,6 +2583,9 @@ impl Node {
                     Ok(status) => {
                         if status == crate::eventlog::sync::FileConsentStatus::Accepted {
                             transfer.phase = FilePhase::InitialCustody;
+                        } else {
+                            transfer.channel = None;
+                            transfer.phase = FilePhase::ConsentWait;
                         }
                     }
                     Err(_) => {
@@ -2239,13 +2621,15 @@ impl Node {
                     )
                     .await?;
                 if let Some(confirmed) = transfer.sync.remote_have_count() {
-                    self.outgoing_file_acks
+                    let confirmed = confirmed.min(file.chunk_count as usize) as u32;
+                    let previous = self
+                        .outgoing_file_acks
                         .lock()
                         .expect("outgoing file progress lock not poisoned")
-                        .insert(
-                            (file.id, binding.event_id),
-                            confirmed.min(file.chunk_count as usize) as u32,
-                        );
+                        .insert((file.id, binding.event_id), confirmed);
+                    if previous != Some(confirmed) {
+                        self.note_file_change();
+                    }
                 }
                 if complete {
                     transfer.phase = FilePhase::FinalCustody;
@@ -2264,6 +2648,7 @@ impl Node {
                 return Err(SessionError::NoProgress);
             }
             FilePhase::Dial
+            | FilePhase::ConsentWait
             | FilePhase::RelayManifestLegacy
             | FilePhase::RelayManifestFederated
             | FilePhase::RelayChunksLegacy
@@ -2321,7 +2706,11 @@ impl Node {
             {
                 return Err(SessionError::NoProgress);
             }
-            // Release this socket/slot without claiming recipient completion.
+            // Exact custody consumed the terminal reply. Reuse this clean
+            // sync channel without claiming recipient completion.
+            if let Some(channel) = transfer.channel.take() {
+                self.recycle_sync_channel(channel);
+            }
             transfer.phase = FilePhase::RelayHeld;
             return Ok(false);
         }
@@ -2439,7 +2828,7 @@ impl Node {
             }
             #[cfg(test)]
             let phase = std::sync::atomic::AtomicU8::new(0);
-            let outcome = tokio::time::timeout(std::time::Duration::from_millis(400), async {
+            let outcome = tokio::time::timeout(FILE_EXCHANGE_TIMEOUT, async {
                 let Ok(mut channel) = self.privacy_dial(peer.addr, &peer.public).await else {
                     return false;
                 };
@@ -2664,6 +3053,173 @@ impl Node {
 
 #[cfg(test)]
 mod diagnostic_tests {
+    #[tokio::test]
+    async fn bounded_relay_batches_eventually_visit_a_healthy_tail_after_four_failures() {
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let peer = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Peer",
+            9,
+        );
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        for _ in 0..10 {
+            let relay = Announce::new_post_office(&DeviceIdentity::generate(), "Relay", 9);
+            node.roster.lock().unwrap().update(
+                &relay,
+                "127.0.0.1".parse().unwrap(),
+                &node.user_id(),
+            );
+        }
+        let candidates = node.post_office_candidates(&node.roster.lock().unwrap());
+        assert_eq!(candidates.len(), 10);
+        let tail = candidates.last().unwrap().public.clone();
+        let first = node.relay_candidate_batch("pull:peer", candidates.clone());
+        assert_eq!(first.len(), 4);
+        assert!(!first.iter().any(|peer| peer.public == tail));
+        let second = node.relay_candidate_batch("pull:peer", candidates.clone());
+        assert_eq!(second.len(), 4);
+        let third = node.relay_candidate_batch("pull:peer", candidates);
+        assert!(
+            third.iter().any(|peer| peer.public == tail),
+            "failed head batches must not hide later healthy relays"
+        );
+        // Other peers and operation lanes start independently.
+        assert_eq!(
+            node.relay_candidate_batch("upload:peer", first.clone())[0].public,
+            first[0].public
+        );
+    }
+
+    #[tokio::test]
+    async fn file_exchange_accepts_a_valid_route_slower_than_four_hundred_milliseconds() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob_account = Account::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+        let bp = Announce::new_with_account(
+            &bob,
+            &bob_account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
+        let (a, _, _) = node_with_files(source.path(), alice, aa, &bp);
+        let (b, _, _) = node_with_files(target.path(), bob, bob_account, &ap);
+        b.set_attachment_global_auto(true).unwrap();
+        let path = source.path().join("routed.bin");
+        std::fs::write(&path, b"valid slow route").unwrap();
+        let (id, file) = a
+            .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let server_node = b.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            if let Ok(channel) = server_node.privacy_accept(stream).await {
+                server_node.serve_connection(channel).await;
+            }
+        });
+        let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        scheduler.admit(&a, vec![(card, destination)], None);
+        let mut diagnostics = super::DeliveryDiagnosticThrottle::default();
+        let complete = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                scheduler.advance(&a);
+                if let Some(result) = scheduler.workers.join_next().await {
+                    scheduler.finish(&a, result, &mut diagnostics);
+                }
+                if a.outgoing_file_progress(id)
+                    .is_some_and(|progress| progress.delivered)
+                {
+                    break;
+                }
+                if scheduler.workers.is_empty() && scheduler.transfers.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            }
+        })
+        .await;
+        server.abort();
+        let _ = server.await;
+        assert!(
+            complete.is_ok(),
+            "scheduler fairness must not reject a healthy 600ms handshake"
+        );
+        assert_eq!(b.read_file(file).unwrap(), b"valid slow route");
+    }
+
+    #[tokio::test]
+    async fn pending_consent_releases_file_scheduler_capacity_without_self_waking() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob_account = Account::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+        let bp = Announce::new_with_account(
+            &bob,
+            &bob_account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
+        let (a, _, _) = node_with_files(source.path(), alice, aa, &bp);
+        let (b, _, _) = node_with_files(target.path(), bob, bob_account, &ap);
+        let path = source.path().join("waiting.bin");
+        std::fs::write(&path, b"offer awaiting approval").unwrap();
+        let (id, _) = a
+            .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let server = tokio::spawn(b.run_accept_loop(listener));
+        let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let destination = card.destinations[0].clone();
+        let mut scheduler = super::FileDeliveryScheduler::default();
+        scheduler.admit(&a, vec![(card, destination)], None);
+        let mut diagnostics = super::DeliveryDiagnosticThrottle::default();
+        for _ in 0..12 {
+            scheduler.advance(&a);
+            if let Some(result) = scheduler.workers.join_next().await {
+                scheduler.finish(&a, result, &mut diagnostics);
+            }
+            if scheduler.transfers.is_empty() {
+                break;
+            }
+        }
+        server.abort();
+        let _ = server.await;
+        assert!(
+            scheduler.transfers.is_empty(),
+            "pending consent must release sockets and scheduling slots"
+        );
+        assert_eq!(
+            scheduler.relay_cooldowns.len(),
+            1,
+            "waiting offers need a bounded retry deadline"
+        );
+    }
+
     #[test]
     fn delivery_local_failure_diagnostic_throttle_has_fixed_non_sliding_deadline() {
         use std::time::{Duration, Instant};

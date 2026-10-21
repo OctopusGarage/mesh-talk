@@ -2,7 +2,6 @@
 //! message/contact/network/file-transfer events were retired with the legacy stack.)
 
 use crate::settings::SettingsState;
-use mesh_talk_core::eventlog::event::EventId;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
@@ -152,6 +151,8 @@ fn preview(text: &str) -> String {
 pub const EVENT_DM_RECEIVED: &str = "dm-received";
 /// A received channel message.
 pub const EVENT_CHANNEL_MESSAGE: &str = "channel-message";
+/// Group metadata changed; the UI should refresh its authorized projection.
+pub const EVENT_CHANNEL_CHANGED: &str = "channel-changed";
 /// A received file (DM or channel).
 pub const EVENT_FILE_RECEIVED: &str = "file-received";
 /// Progress of local file preparation or saving (throttled).
@@ -160,6 +161,29 @@ pub const EVENT_FILE_PROGRESS: &str = "file-progress";
 pub const EVENT_PROFILE_RECEIVED: &str = "profile-received";
 /// An inbound call signal (WebRTC SDP / "bye") from an authenticated peer. Ephemeral.
 pub const EVENT_CALL_SIGNAL: &str = "call-signal";
+
+#[derive(serde::Serialize, Clone)]
+pub(crate) struct ChannelChangedEvent {
+    /// Host login namespace; independent of the cryptographic account.
+    pub owner: String,
+    pub account_id: String,
+    /// Device user ID, including after adopting a linked account.
+    pub device_id: String,
+    /// None requests a full group refresh after the bounded receiver lagged.
+    pub channel_id: Option<String>,
+}
+
+pub(crate) fn emit_channel_changed<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    event: ChannelChangedEvent,
+) {
+    if crate::app_lock::app_locked(app_handle) {
+        return;
+    }
+    if let Err(error) = app_handle.emit(EVENT_CHANNEL_CHANGED, event) {
+        log::warn!("Failed to emit channel metadata change: {error}");
+    }
+}
 
 #[derive(serde::Serialize, Clone)]
 pub struct ProfileReceivedEvent {
@@ -218,6 +242,8 @@ pub fn emit_call_signal<R: Runtime>(
 
 #[derive(serde::Serialize, Clone)]
 pub struct DmReceivedEvent {
+    pub message_id: Option<String>,
+    pub from_account: Option<String>,
     pub from: String,
     pub from_name: String,
     pub text: String,
@@ -324,16 +350,15 @@ pub struct FileReceivedEvent {
 /// Emit a received DM to the frontend (text decoded lossily for display).
 pub fn emit_dm_received<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    from: String,
-    from_name: String,
-    text: Vec<u8>,
-    reply_to: Option<EventId>,
+    dm: mesh_talk_core::node::ReceivedDm,
 ) {
     let event = DmReceivedEvent {
-        from,
-        from_name,
-        text: String::from_utf8_lossy(&text).into_owned(),
-        reply_to: reply_to.map(|id| hex::encode(id.as_bytes())),
+        message_id: dm.message_id.map(|id| id.to_hex()),
+        from_account: dm.from_account,
+        from: dm.from,
+        from_name: dm.from_name,
+        text: String::from_utf8_lossy(&dm.text).into_owned(),
+        reply_to: dm.reply_to.map(|id| hex::encode(id.as_bytes())),
     };
     notify_if_unfocused(
         app_handle,
@@ -486,6 +511,59 @@ pub fn emit_file_received<R: Runtime>(
 #[cfg(test)]
 mod notification_policy_tests {
     use super::*;
+    use tauri::Listener;
+
+    #[test]
+    fn dm_event_preserves_logical_identity_and_legacy_absence_for_unread_consumers() {
+        use mesh_talk_core::{eventlog::EventId, node::ReceivedDm};
+        let app = tauri::test::mock_app();
+        let settings = SettingsState::default();
+        settings.set(crate::settings::AppSettings {
+            notifications: false,
+            ..Default::default()
+        });
+        assert!(app.manage(settings));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = received.clone();
+        app.listen(EVENT_DM_RECEIVED, move |event| {
+            sink.lock()
+                .unwrap()
+                .push(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
+        });
+        let message_id = EventId::new([1; 32]);
+        let reply_to = EventId::new([2; 32]);
+        for (identity, account) in [
+            (Some(message_id), Some("sender-account".to_string())),
+            (None, None),
+        ] {
+            emit_dm_received(
+                app.handle(),
+                ReceivedDm {
+                    message_id: identity,
+                    from_account: account,
+                    from: "sender-device".into(),
+                    from_name: "Sender".into(),
+                    text: b"one received message".to_vec(),
+                    reply_to: Some(reply_to),
+                },
+            );
+        }
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2);
+        for (index, event) in received.iter().enumerate() {
+            assert_eq!(event["from"], "sender-device");
+            assert_eq!(event["from_name"], "Sender");
+            assert_eq!(event["text"], "one received message");
+            assert_eq!(event["reply_to"], reply_to.to_hex());
+            if index == 0 {
+                assert_eq!(event["message_id"], message_id.to_hex());
+                assert_eq!(event["from_account"], "sender-account");
+            } else {
+                assert!(event["message_id"].is_null());
+                assert!(event["from_account"].is_null());
+            }
+        }
+    }
 
     #[test]
     fn private_mode_never_places_sender_or_text_in_notification() {
@@ -552,5 +630,25 @@ mod notification_policy_tests {
             )
             .is_none()
         );
+    }
+}
+
+#[derive(serde::Serialize, Clone)]
+pub(crate) struct NodeStateChangedEvent {
+    pub owner: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub kind: &'static str,
+}
+
+pub(crate) fn emit_node_state_changed<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    event: NodeStateChangedEvent,
+) {
+    if crate::app_lock::app_locked(app) {
+        return;
+    }
+    if let Err(error) = app.emit("node-state-changed", event) {
+        log::warn!("Failed to emit node state invalidation: {error}");
     }
 }

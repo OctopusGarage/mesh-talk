@@ -75,7 +75,7 @@ afterEach(() => {
 
 it("does not publish unsaved appearance defaults before pairing", async () => {
   mocks.getPreferences.mockResolvedValue([]);
-  await publishAppearanceBeforeLink();
+  await publishAppearanceBeforeLink("owner");
   expect(mocks.setPreference).not.toHaveBeenCalled();
 });
 
@@ -83,27 +83,29 @@ it("publishes only explicitly saved local appearance before pairing", async () =
   mocks.getPreferences.mockResolvedValue([]);
   mocks.values.theme = "oled";
   mocks.saved.add("theme");
-  await publishAppearanceBeforeLink();
+  await publishAppearanceBeforeLink("owner");
   expect(mocks.setPreference).toHaveBeenCalledExactlyOnceWith(
     "appearance",
     "theme",
     "oled",
+    "owner",
   );
 });
 
 it("preserves account values while publishing other saved appearance keys", async () => {
   mocks.saved.add("theme");
   mocks.saved.add("wallpaper_enabled");
-  await publishAppearanceBeforeLink();
+  await publishAppearanceBeforeLink("owner");
   expect(mocks.setPreference).toHaveBeenCalledExactlyOnceWith(
     "appearance",
     "wallpaper_enabled",
     "on",
+    "owner",
   );
 });
 
 it("adopts a linked theme without publishing a new device's default", async () => {
-  const stop = startLinkedAppearance();
+  const stop = startLinkedAppearance("owner");
   await vi.waitFor(() =>
     expect(mocks.apply).toHaveBeenCalledWith("theme", "light"),
   );
@@ -115,14 +117,14 @@ it("adopts a linked theme without publishing a new device's default", async () =
 
 it("keeps remote appearance local until this device enables its choice", async () => {
   mocks.getPolicy.mockResolvedValue({ appearance: false });
-  const stop = startLinkedAppearance();
+  const stop = startLinkedAppearance("owner");
   await vi.waitFor(() => expect(mocks.getPreferences).toHaveBeenCalled());
   expect(mocks.apply).not.toHaveBeenCalled();
   stop();
 });
 
 it("publishes a later local theme edit once", async () => {
-  const stop = startLinkedAppearance();
+  const stop = startLinkedAppearance("owner");
   await vi.waitFor(() =>
     expect(mocks.apply).toHaveBeenCalledWith("theme", "light"),
   );
@@ -133,6 +135,7 @@ it("publishes a later local theme edit once", async () => {
       "appearance",
       "theme",
       "oled",
+      "owner",
     ),
   );
   expect(mocks.setPreference).toHaveBeenCalledTimes(1);
@@ -140,7 +143,7 @@ it("publishes a later local theme edit once", async () => {
 });
 
 it("retries a failed local edit on the next poll", async () => {
-  const stop = startLinkedAppearance();
+  const stop = startLinkedAppearance("owner");
   await vi.waitFor(() =>
     expect(mocks.apply).toHaveBeenCalledWith("theme", "light"),
   );
@@ -150,5 +153,23 @@ it("retries a failed local edit on the next poll", async () => {
   await vi.waitFor(() => expect(mocks.setPreference).toHaveBeenCalledTimes(1));
   await vi.advanceTimersByTimeAsync(10_000);
   expect(mocks.setPreference).toHaveBeenCalledTimes(2);
+  stop();
+});
+
+it("keeps the originating owner on every appearance read and write", async () => {
+  const stop = startLinkedAppearance("owner-a");
+  await vi.waitFor(() => expect(mocks.apply).toHaveBeenCalled());
+  expect(mocks.getPolicy).toHaveBeenCalledWith("owner-a");
+  expect(mocks.getPreferences).toHaveBeenCalledWith("appearance", "owner-a");
+  mocks.values.theme = "oled";
+  for (const listener of mocks.listeners) listener();
+  await vi.waitFor(() =>
+    expect(mocks.setPreference).toHaveBeenCalledWith(
+      "appearance",
+      "theme",
+      "oled",
+      "owner-a",
+    ),
+  );
   stop();
 });

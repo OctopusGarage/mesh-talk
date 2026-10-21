@@ -4,12 +4,14 @@ import { test } from "node:test";
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 52], ["extended", 53]]) {
+  for (const [tier, count] of [["core", 57], ["extended", 58]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[0] === "portable-core.spec.ts" && path[1] === "presence waits for node readiness without showing a startup failure"));
     assert.ok(paths.some(path => path[1] === "city avatar thumbnails load after scrolling the gallery"));
-    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 2);
+    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 6);
+    assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "a scoped native delivery invalidation refreshes status without a polling response"));
+    for (const result of ["acceptance", "rejection"]) assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === `submitted text stays in its bubble after ${result} and navigation`));
     assert.equal(paths.filter(path => path[0] === "media-recovery.spec.ts").length, 1);
     assert.equal(paths.filter(path => path[0] === "media-lifecycle.spec.ts").length, 3);
     assert.equal(paths.filter(path => path[0] === "screenshot-portable.spec.ts").length, 7);
@@ -17,7 +19,8 @@ test("portable matrix requires existing receipt and media cases in both tiers", 
     assert.equal(paths.filter(path => path[0] === "directory-transfer.spec.ts").length, 3);
     assert.equal(paths.filter(path => path[0] === "attachment-approval.spec.ts").length, 4);
     assert.ok(paths.some(path => path[0] === "attachment-approval.spec.ts" && path[1] === "an expired previously ready attachment becomes unavailable"));
-    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 10);
+    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 11);
+    assert.ok(paths.some(path => path[0] === "unread-badge.spec.ts" && path[1] === "one logical DM remains one unread badge across duplicate live events and history scanning"));
     const report = complete();
     report.stats.expected = count;
     report.suites = paths.map(([file, ...titles], index) => ({ title: file, specs: [{ ...complete().suites[0].specs[0], id: `case-${index}`, title: titles.at(-1), tests: [{ ...complete().suites[0].specs[0].tests[0], results: [{ ...complete().suites[0].specs[0].tests[0].results[0], attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/case-${index}/${name}` })) }] }] }] }));
@@ -54,4 +57,29 @@ test("swapping evidence between viewports fails even when titles and revision ma
   const result = { scenarioTitle: "profile", scenarioPath: ["portable-core.spec.ts", "760x520 browser-only core", "profile"] };
   assert.doesNotThrow(() => validateScenarioIdentity({ scenario: "profile", scenarioPath: result.scenarioPath }, result));
   assert.throws(() => validateScenarioIdentity({ scenario: "profile", scenarioPath: ["portable-core.spec.ts", "1040x720 browser-only core", "profile"] }, result));
+});
+
+
+test("isolated portable shards preserve the complete strict inventory and every failure", async () => {
+  const { portableShards, mergePortableReports } = await import("../evals/portable-runner.mjs");
+  const { validateBrowserReport } = await import("../evals/browser-report.mjs");
+  assert.equal(portableShards("win32"), 2);
+  for (const os of ["darwin", "linux"]) assert.equal(portableShards(os), 1);
+  const first = complete(), second = structuredClone(first);
+  second.suites[0].specs[0].id = "second";
+  second.suites[0].specs[0].title = "second case";
+  for (const attachment of second.suites[0].specs[0].tests[0].results[0].attachments) attachment.path += "-second";
+  const options = { count: 2, browser: "chromium", expectedPaths: [
+    ["portable-core.spec.ts", "fixture case"], ["portable-core.spec.ts", "second case"],
+  ] };
+  assert.equal(validateBrowserReport(mergePortableReports([first, second]), options).length, 2);
+  assert.throws(() => validateBrowserReport(mergePortableReports([first]), options), /Missing or zero/);
+  assert.throws(() => validateBrowserReport(mergePortableReports([first, first]), options), /Duplicate/);
+  for (const statistic of ["unexpected", "skipped", "flaky"]) {
+    const bad = structuredClone(second); bad.stats[statistic] = 1;
+    assert.throws(() => validateBrowserReport(mergePortableReports([first, bad]), options), /Nonpassing/);
+  }
+  const bad = structuredClone(second); bad.errors.push({ message: "worker failed" });
+  assert.throws(() => validateBrowserReport(mergePortableReports([first, bad]), options), /harness errors/);
+  assert.throws(() => mergePortableReports([]), /Missing/);
 });

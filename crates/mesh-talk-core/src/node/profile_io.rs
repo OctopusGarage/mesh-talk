@@ -36,12 +36,37 @@ impl Node {
     ) -> Result<(), NodeError> {
         let mut delivery = Vec::new();
         authorize(&mut || {
-            let Some(payload) = self.account_profiles.set_avatar(avatar.clone())? else {
+            let mut store = self
+                .trust_cards
+                .lock()
+                .expect("trust cards mutex not poisoned");
+            if let Some(card) = store.get(&self.account_id())
+                && card.avatar != avatar
+            {
+                card.revision.checked_add(1).ok_or_else(|| {
+                    NodeError::InvalidInput("trust card revision exhausted".into())
+                })?;
+                self.account_profiles.validate_avatar_revision_headroom(1)?;
+            }
+            let payload = self.account_profiles.set_avatar(avatar.clone())?;
+            let needs_repair = store
+                .get(&self.account_id())
+                .is_some_and(|card| card.avatar != avatar);
+            if payload.is_none() && !needs_repair {
                 return Ok(());
-            };
-            let wire = payload.encode();
+            }
+            let card = self.update_trust_avatar(&mut store, avatar.clone())?;
+            let wire = payload
+                .or_else(|| self.account_profiles.current())
+                .expect("avatar publication exists")
+                .encode();
             for peer in self.profile_fanout_targets() {
-                let Some(conv) = self.prepare_profile_delivery(&peer, &wire) else {
+                let conv = if let Some(card) = &card {
+                    self.prepare_trust_card_delivery(&peer, card)
+                } else {
+                    self.prepare_profile_delivery(&peer, &wire)
+                };
+                let Some(conv) = conv else {
                     continue;
                 };
                 delivery.push((peer, conv));
@@ -56,21 +81,21 @@ impl Node {
     }
 
     /// Re-publish our current profile to a single freshly-discovered `peer`, so a new
-    /// contact gets our avatar without waiting for the next time we change it. A no-op if
-    /// we've never set an avatar this session (nothing to send).
+    /// contact gets our signed card or legacy avatar without waiting for an edit.
+    /// A no-op when neither public profile exists.
     pub(in crate::node) async fn republish_profile_to(&self, peer: &PeerRecord) {
-        let Some(payload) = self.account_profiles.current() else {
+        let Some(conv) = self.prepare_current_profile_delivery(peer) else {
             return;
         };
-        let wire = payload.encode();
-        self.deliver_profile(peer, &wire).await;
+        let _ = self.deliver_direct(peer, conv).await;
+        let _ = self.replicate_to_post_office(conv).await;
     }
 
     /// Every distinct peer DEVICE to publish a profile to: every known peer (any account)
     /// plus our own other devices, never ourselves, deduped by user-id. Unlike a DM
     /// fan-out we don't require a specific target account — a profile goes to everyone we
     /// know so any contact can render it.
-    fn profile_fanout_targets(&self) -> Vec<PeerRecord> {
+    pub(super) fn profile_fanout_targets(&self) -> Vec<PeerRecord> {
         let me = self.identity.public().user_id();
         let mut seen = std::collections::HashSet::new();
         self.routing_peers()
@@ -81,27 +106,31 @@ impl Node {
             .collect()
     }
 
-    /// Seal `wire` (an encoded `ProfilePayload`) to `peer`'s device via the DM sealed-box,
-    /// append it as a `Profile` event to the device-pair conversation, and deliver it
-    /// (direct, then post office). Best-effort: transport failures are swallowed (the
-    /// event is durably logged and syncs later).
-    async fn deliver_profile(&self, peer: &PeerRecord, wire: &[u8]) {
-        let Some(conv) = self.prepare_profile_delivery(peer, wire) else {
-            return;
-        };
-        let _ = self.deliver_direct(peer, conv).await;
-        let _ = self.replicate_to_post_office(conv).await;
+    /// Shared synchronous acceptance policy for user publication and background replay.
+    pub(super) fn prepare_profile_delivery(
+        &self,
+        peer: &PeerRecord,
+        wire: &[u8],
+    ) -> Option<ConversationId> {
+        self.prepare_profile_delivery_with_parent(peer, wire, None)
+            .map(|(conv, _)| conv)
     }
 
-    /// Shared synchronous acceptance policy for user publication and background replay.
-    fn prepare_profile_delivery(&self, peer: &PeerRecord, wire: &[u8]) -> Option<ConversationId> {
+    pub(super) fn prepare_profile_delivery_with_parent(
+        &self,
+        peer: &PeerRecord,
+        wire: &[u8],
+        required_parent: Option<crate::eventlog::event::EventId>,
+    ) -> Option<(ConversationId, crate::eventlog::event::EventId)> {
         if !self.known_account_allowed(&peer.public) {
             return None;
         }
         let conv = dm_conversation_id(&self.identity.public(), &peer.public);
         let sealed = crate::dm::seal(&self.identity, &peer.public.x25519_pub, wire).ok()?;
-        self.append_event(conv, EventKind::Profile, sealed).ok()?;
-        Some(conv)
+        let (_, id) = self
+            .append_event_with_profile_parent(conv, EventKind::Profile, sealed, required_parent)
+            .ok()?;
+        Some((conv, id))
     }
 
     /// Decode + verify + store any new `Profile` events in `conv` authored by others, then
@@ -149,6 +178,28 @@ impl Node {
                 .lock()
                 .expect("profiles_emitted mutex not poisoned")
                 .insert(event.id);
+            if plaintext.starts_with(b"MTC1") {
+                let Some(card) = TrustCard::decode(&plaintext) else {
+                    continue;
+                };
+                if peer_account.as_deref() != Some(card.account_id().as_str()) {
+                    continue;
+                }
+                if card.account_id() == self.account_id() && !self.device_sync_policy().profile {
+                    self.profiles_emitted
+                        .lock()
+                        .expect("profiles_emitted mutex not poisoned")
+                        .remove(&event.id);
+                    continue;
+                }
+                if self.receive_trust_card(&card).is_err() {
+                    self.profiles_emitted
+                        .lock()
+                        .expect("profiles_emitted mutex not poisoned")
+                        .remove(&event.id);
+                }
+                continue;
+            }
             let Some(payload) = ProfilePayload::decode(&plaintext) else {
                 continue;
             };
@@ -165,7 +216,7 @@ impl Node {
                     .remove(&event.id);
                 continue;
             }
-            let applied = match self.account_profiles.receive(&payload) {
+            let applied = match self.receive_legacy_profile(&payload) {
                 Ok(applied) => applied,
                 Err(_) => {
                     self.profiles_emitted
@@ -183,7 +234,7 @@ impl Node {
             }
         }
         // Bound on-disk growth: schedule dropping superseded, unreferenced profile events
-        // for this conversation (safe — they're never referenced as parents). The accept
+        // for this conversation, preserving parents of retained legacy/card pairs. The accept
         // loop performs the expensive rewrite outside this sync callback.
         self.log
             .lock()

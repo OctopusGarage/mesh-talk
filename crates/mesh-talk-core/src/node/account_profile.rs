@@ -38,6 +38,10 @@ impl AccountProfiles {
             .lock()
             .expect("account profile mutex not poisoned")
     }
+    #[cfg(test)]
+    pub(super) fn fail_appends_for_test(&self, enabled: bool) {
+        self.state().avatars.fail_appends_for_test(enabled);
+    }
     pub fn current(&self) -> Option<ProfilePayload> {
         self.state().current.clone()
     }
@@ -72,13 +76,7 @@ impl AccountProfiles {
             return Ok(None);
         }
         let account = self.account.account_id();
-        let next_revision = state
-            .avatars
-            .updated_at(&account)
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| NodeError::InvalidInput("account profile revision exhausted".into()))?;
-        let revision = super::node::now_millis().max(next_revision);
+        let revision = self.next_avatar_revision(&state)?;
         let payload = ProfilePayload::new(&self.account, avatar.clone(), revision);
         let applied = state
             .avatars
@@ -92,6 +90,22 @@ impl AccountProfiles {
         state.current = Some(payload.clone());
         Ok(Some(payload))
     }
+    fn next_avatar_revision(&self, state: &State) -> Result<u64, NodeError> {
+        let next = state
+            .avatars
+            .updated_at(&self.account.account_id())
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| NodeError::InvalidInput("account profile revision exhausted".into()))?;
+        Ok(super::node::now_millis().max(next))
+    }
+    /// Preflight additional revisions needed by a coordinated signed-card edit.
+    pub fn validate_avatar_revision_headroom(&self, extra_revisions: u64) -> Result<(), NodeError> {
+        self.next_avatar_revision(&self.state())?
+            .checked_add(extra_revisions)
+            .ok_or_else(|| NodeError::InvalidInput("account profile revision exhausted".into()))?;
+        Ok(())
+    }
     /// Recheck signatures after caller authentication. Retired metadata is ignored
     /// when reconstructing our own publication, including older MTPF2 profiles.
     pub fn receive(&self, payload: &ProfilePayload) -> Result<bool, LogError> {
@@ -103,6 +117,20 @@ impl AccountProfiles {
         let applied = state
             .avatars
             .record(&account, payload.updated_at, payload.avatar.clone())?;
+        if account == self.account.account_id() {
+            state.current = Self::reconstruct(&self.account, &state.avatars);
+        }
+        Ok(applied)
+    }
+    pub fn receive_trust_card(&self, card: &super::TrustCard) -> Result<bool, LogError> {
+        if !card.verify() {
+            return Ok(false);
+        }
+        let mut state = self.state();
+        let account = card.account_id();
+        let applied = state
+            .avatars
+            .record(&account, card.revision, card.avatar.clone())?;
         if account == self.account.account_id() {
             state.current = Self::reconstruct(&self.account, &state.avatars);
         }
@@ -200,6 +228,28 @@ mod tests {
         assert_eq!(current.avatar, None);
         assert!(current.verify());
     }
+    #[test]
+    fn equal_signed_revisions_converge_after_opposite_delivery_orders() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let avatar = ProfilePayload::new(&account, Some(b"photo".to_vec()), 100);
+        let clear = ProfilePayload::new(&account, None, 100);
+        let left = open(&dir.path().join("left"), &account);
+        let right = open(&dir.path().join("right"), &account);
+        left.receive(&avatar).unwrap();
+        left.receive(&clear).unwrap();
+        right.receive(&clear).unwrap();
+        right.receive(&avatar).unwrap();
+        assert_eq!(left.current(), right.current());
+        assert_eq!(left.current().unwrap().avatar, None);
+        drop(left);
+        drop(right);
+        assert_eq!(
+            open(&dir.path().join("left"), &account).current(),
+            open(&dir.path().join("right"), &account).current()
+        );
+    }
+
     #[test]
     fn exhausted_profile_revision_rejects_edits_without_changing_current_or_disk() {
         for avatar in [Some(b"sibling".to_vec()), None] {

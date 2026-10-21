@@ -72,7 +72,7 @@ test("presence waits for node readiness without showing a startup failure", asyn
     .poll(async () => (await probe()).bootRequests)
     .toBeGreaterThan(0);
   expect((await probe()).earlyCalls).toBe(0);
-  const warning = page.getByText(/Presence updates are unavailable/);
+  const warning = page.getByText(/Online status unavailable/);
   await expect(warning).toHaveCount(0);
   await page.evaluate(() => {
     (

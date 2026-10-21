@@ -386,8 +386,9 @@ export function Composer({
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     // Enter confirms an IME candidate in many writing systems. Let the input method
-    // finish composition before interpreting Enter as a send shortcut.
-    if (e.nativeEvent.isComposing) return;
+    // finish composition before interpreting Enter as a send shortcut. WebKit
+    // can emit compositionend first, so its confirming keydown needs the 229 fallback.
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     if (suggestions.length > 0 && e.key === "Enter") {
       e.preventDefault();
       applyMention(suggestions[0]);

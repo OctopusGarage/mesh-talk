@@ -1,3 +1,9 @@
+import {
+  subscribeSyncInvalidation,
+  supportsPushState,
+  type SyncInvalidation,
+} from "@/lib/syncInvalidation";
+import { readWithDeadline } from "@/lib/readDeadline";
 import { useEffect, useRef } from "react";
 
 /** Poll while visible, without overlapping requests or applying results after close. */
@@ -7,6 +13,7 @@ export function useSerialPoll<T>(
   request: () => Promise<T>,
   onResult: (result: T) => void,
   onError: (error: unknown) => void,
+  wakeOn?: SyncInvalidation["kind"],
 ) {
   const handlers = useRef({ request, onResult, onError });
   useEffect(() => {
@@ -17,11 +24,17 @@ export function useSerialPoll<T>(
     if (!enabled) return;
     let active = true;
     let busy = false;
-    const poll = () => {
-      if (busy) return;
+    let dirty = false;
+    let nextFallback = 0;
+    const poll = (invalidate = false) => {
+      if (busy) {
+        dirty ||= invalidate;
+        return;
+      }
       busy = true;
+      nextFallback = performance.now() + 30000;
       void Promise.resolve()
-        .then(() => handlers.current.request())
+        .then(() => readWithDeadline(() => handlers.current.request()))
         .then(
           (result) => {
             if (active) handlers.current.onResult(result);
@@ -32,13 +45,24 @@ export function useSerialPoll<T>(
         )
         .finally(() => {
           busy = false;
+          if (active && dirty) {
+            dirty = false;
+            poll();
+          }
         });
     };
     poll();
-    const timer = setInterval(poll, intervalMs);
+    const unlisten = subscribeSyncInvalidation((change) => {
+      if (change.kind === wakeOn) poll(true);
+    });
+    const timer = setInterval(() => {
+      if (!wakeOn || !supportsPushState() || performance.now() >= nextFallback)
+        poll();
+    }, intervalMs);
     return () => {
       active = false;
       clearInterval(timer);
+      unlisten();
     };
-  }, [enabled, intervalMs]);
+  }, [enabled, intervalMs, wakeOn]);
 }

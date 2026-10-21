@@ -30,3 +30,14 @@ export function savedIndirectPostOffice(
     ) ?? null
   );
 }
+
+/** Route availability is not connection, delivery, membership or attestation evidence. */
+export function postOfficeAvailability(
+  enabled: boolean,
+  peers: readonly PeerInfo[],
+): "disabled" | "available" | "unavailable" {
+  if (!enabled) return "disabled";
+  return peers.some((peer) => peer.post_office && hasDirectRoute(peer))
+    ? "available"
+    : "unavailable";
+}

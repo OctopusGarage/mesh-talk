@@ -83,7 +83,6 @@ export function ConversationView() {
   const channels = useChat((s) => s.channels);
   const favorites = useChat((s) => s.favorites);
   const admitText = useChat((s) => s.admitText);
-  const admitTextAndWait = useChat((s) => s.admitTextAndWait);
   const retry = useChat((s) => s.retry);
   const [expiryDurationMs, setExpiryDurationMs] = useState<number | null>(null);
   const expiresAtSend = () =>
@@ -124,7 +123,6 @@ export function ConversationView() {
     setPendingDelete(null);
   }, [key]);
   const drafts = useRef(new ConversationDrafts());
-  const [, refreshDraftAdmissions] = useState(0);
   const draftKey = `${owner}:${authGeneration}:${key}`;
   const messages = useChat((s) =>
     active ? (s.messages[key] ?? NO_MESSAGES) : NO_MESSAGES,
@@ -692,7 +690,6 @@ export function ConversationView() {
           screenshotAvailable={attachments.screenshotAvailable}
           stagedScreenshot={attachments.stagedScreenshot}
           key={`${owner}:${authGeneration}:${key}`}
-          admissionPending={drafts.current.isPending(draftKey)}
           initialDraft={drafts.current.get(draftKey)}
           onDraftChange={(text) => {
             drafts.current.set(draftKey, text);
@@ -725,40 +722,20 @@ export function ConversationView() {
                 convKey(conversation) === key
               );
             };
-            const finish = (
-              accepted: boolean,
-              cleared = true,
-              resetDraft = false,
-            ) => {
-              if (accepted && cleared && current()) {
-                setExpiryDurationMs(null);
-                setReply(null);
-                if (resetDraft)
-                  setPrefill((previous) => ({
-                    key: draftKey,
-                    text: "",
-                    n: (previous?.n ?? 0) + 1,
-                    applyIf: () =>
-                      current() && drafts.current.get(draftKey) === "",
-                  }));
-                else setPrefill(null);
-              }
-              return accepted;
-            };
             if (!current()) return false;
-            if (active.kind !== "account")
-              return finish(
-                admitText(text, replyTo?.id ?? null, expiresAtSend()),
-              );
-            const admission = drafts.current.admit(draftKey, text, () =>
-              admitTextAndWait(text, replyTo?.id ?? null, expiresAtSend()),
+            // Transfer the submitted text to the bounded outgoing intent once.
+            // Its bubble owns acceptance/retry feedback; it is no longer a draft.
+            const admitted = admitText(
+              text,
+              replyTo?.id ?? null,
+              expiresAtSend(),
             );
-            if (!admission) return false;
-            refreshDraftAdmissions((version) => version + 1);
-            return admission.then(({ accepted, cleared }) => {
-              refreshDraftAdmissions((version) => version + 1);
-              return finish(accepted, cleared, true);
-            });
+            if (admitted && current()) {
+              setExpiryDurationMs(null);
+              setReply(null);
+              setPrefill(null);
+            }
+            return admitted;
           }}
           onPasteFiles={attachments.pasteFiles}
           onScreenshot={attachments.captureScreenshot}

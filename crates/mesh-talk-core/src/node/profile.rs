@@ -34,7 +34,7 @@ const PROFILE_MAGIC: &[u8] = b"MTPF1";
 pub const MAX_AVATAR_BYTES: usize = 128 * 1024;
 
 /// serde helper for the 64-byte signature (serde derives arrays only up to len 32).
-mod sig_bytes {
+pub(super) mod sig_bytes {
     use serde::de::{Error, SeqAccess, Visitor};
     use serde::ser::SerializeTuple;
     use serde::{Deserializer, Serializer};

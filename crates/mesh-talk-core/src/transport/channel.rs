@@ -332,6 +332,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
 }
 
 impl SecureChannel<tokio::net::TcpStream> {
+    #[cfg(test)]
+    pub(crate) fn tcp_keepalive_enabled(&self) -> bool {
+        socket2::SockRef::from(&self.stream).keepalive().unwrap()
+    }
+
     pub(crate) fn tcp_peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
         self.stream.peer_addr()
     }
@@ -446,14 +451,40 @@ pub(crate) async fn write_frame<W: AsyncWrite + Unpin>(
 
 /// Read one length-prefixed frame, rejecting absurd lengths before allocating.
 pub(crate) async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, TransportError> {
+    fn incomplete_frame(error: std::io::Error) -> std::io::Error {
+        use std::io::ErrorKind;
+        match error.kind() {
+            ErrorKind::UnexpectedEof
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::NotConnected => std::io::Error::new(ErrorKind::InvalidData, error),
+            _ => error,
+        }
+    }
+
     let mut len_buf = [0u8; 4];
-    r.read_exact(&mut len_buf).await?;
+    // Only a close before any frame bytes is a compatibility/liveness signal.
+    // Partial framing is malformed data and must never authorize a downgrade.
+    let received = r.read(&mut len_buf).await?;
+    if received == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "transport closed at frame boundary",
+        )
+        .into());
+    }
+    if received < len_buf.len() {
+        r.read_exact(&mut len_buf[received..])
+            .await
+            .map_err(incomplete_frame)?;
+    }
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > MAX_FRAME {
         return Err(TransportError::FrameTooLarge(len));
     }
     let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf).await?;
+    r.read_exact(&mut buf).await.map_err(incomplete_frame)?;
     Ok(buf)
 }
 
@@ -469,6 +500,85 @@ mod presence_tests;
 mod tests {
     use super::*;
     use crate::identity::device::DeviceIdentity;
+
+    #[tokio::test]
+    async fn read_frame_distinguishes_boundary_eof_from_truncated_frames() {
+        let mut empty = &[][..];
+        assert!(matches!(read_frame(&mut empty).await,
+            Err(TransportError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof));
+        let frame = [0, 0, 0, 3, 10, 11, 12];
+        for length in 1..frame.len() {
+            let mut truncated = &frame[..length];
+            assert!(
+                matches!(read_frame(&mut truncated).await,
+                Err(TransportError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData),
+                "partial frame of {length} bytes must not be a clean boundary close"
+            );
+        }
+    }
+
+    struct FragmentedFrame<'a> {
+        bytes: &'a [u8],
+        ending: Option<std::io::ErrorKind>,
+    }
+
+    impl AsyncRead for FragmentedFrame<'_> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            output: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if output.remaining() == 0 {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            if let Some((first, rest)) = self.bytes.split_first() {
+                output.put_slice(&[*first]);
+                self.bytes = rest;
+                std::task::Poll::Ready(Ok(()))
+            } else if let Some(kind) = self.ending {
+                std::task::Poll::Ready(Err(std::io::Error::new(kind, "frame read failed")))
+            } else {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn read_frame_accepts_fragmented_frames_and_preserves_boundaries() {
+        let mut source = FragmentedFrame {
+            bytes: &[0, 0, 0, 3, 10, 11, 12, 0, 0, 0, 0],
+            ending: None,
+        };
+        assert_eq!(read_frame(&mut source).await.unwrap(), vec![10, 11, 12]);
+        assert!(read_frame(&mut source).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_frame_classifies_partial_reset_and_preserves_other_errors() {
+        use std::io::ErrorKind;
+        for prefix in [&[0][..], &[0, 0, 0, 3][..], &[0, 0, 0, 3, 10][..]] {
+            for ending in [ErrorKind::ConnectionReset, ErrorKind::ConnectionAborted] {
+                let mut source = FragmentedFrame {
+                    bytes: prefix,
+                    ending: Some(ending),
+                };
+                assert!(matches!(read_frame(&mut source).await,
+                    Err(TransportError::Io(error)) if error.kind() == ErrorKind::InvalidData));
+            }
+            let mut source = FragmentedFrame {
+                bytes: prefix,
+                ending: Some(ErrorKind::PermissionDenied),
+            };
+            assert!(matches!(read_frame(&mut source).await,
+                Err(TransportError::Io(error)) if error.kind() == ErrorKind::PermissionDenied));
+        }
+        let mut boundary_reset = FragmentedFrame {
+            bytes: &[],
+            ending: Some(ErrorKind::ConnectionReset),
+        };
+        assert!(matches!(read_frame(&mut boundary_reset).await,
+            Err(TransportError::Io(error)) if error.kind() == ErrorKind::ConnectionReset));
+    }
 
     #[tokio::test]
     async fn channel_handshakes_authenticates_and_exchanges_messages() {

@@ -1,7 +1,7 @@
 // Runtime assertions against the owned native webview, real CLI, and read-only
 // production observations. This module does not replace any application IPC.
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export function writeChildCommand(child, text) {
@@ -30,6 +30,17 @@ export async function prepareNativeDownloadFixture({ fixture, owner, invoke }) {
   await invoke("set_app_settings", { owner, settings: { ...settings, download_dir: directory } });
   assert.equal((await invoke("get_app_settings", { owner })).download_dir, directory, "production settings retain the owned download directory");
   return directory;
+}
+
+/** A successful automatic export is durable evidence even after transient chunks retire. */
+export async function verifyNativeAttachmentDownload(c, path, expected) {
+  return c.until("incoming attachment exact decrypted download bytes available", async () => {
+    let actual;
+    try { actual = await readFile(path); }
+    catch (error) { if (error.code === "ENOENT") return false; throw error; }
+    assert.deepEqual(actual, expected, "native download must contain the complete original bytes");
+    return true;
+  });
 }
 
 export function nativeMessageContents(nonce) {
@@ -392,7 +403,7 @@ export async function coreScenarios(c) {
   await rendered(groupText);
   await passed("group-message", { channelId: group.channel_id, rendered: true, persisted: true });
   await click(row());
-  await prepareNativeDownloadFixture(c);
+  const downloadDirectory = await prepareNativeDownloadFixture(c);
   const fileName = `native-attachment-${c.nonce}.txt`;
   const bytes = Buffer.from(`fixture attachment 你好 ${c.nonce}\n`);
   const filePath = join(fixture, fileName);
@@ -407,15 +418,11 @@ export async function coreScenarios(c) {
   await until("incoming attachment awaits recipient approval", () => execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0]));return !!e?.querySelector('[data-testid=receive-file]');", [fileName]));
   const receiveButton = await c.command("POST", "/element", { using: "css selector", value: '[data-testid="message-bubble"] [data-testid="receive-file"]' });
   await c.command("POST", `/element/${receiveButton["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
-  await until("incoming attachment decrypted bytes available", async () => {
-    const status = (await observe("file_statuses", { fileConvs: [attachment.file.file_conv] })).find(row => row.file_conv === attachment.file.file_conv);
-    if (!status?.ready) return false;
-    const received = await c.readFileBytes(attachment.file.file_conv);
-    assert.deepEqual(received, Array.from(bytes));
-    return true;
-  });
+  // Automatic export can consume/prune transient chunks before a status poll.
+  // Verify the final owned artifact rather than requiring a fleeting ready/read_file window.
+  await verifyNativeAttachmentDownload(c, join(downloadDirectory, fileName), bytes);
   const completion = await settledIncomingAttachment(c, attachment.file.file_conv, fileName, true);
-  await passed("incoming-attachment", { completion, fileName, manifestPersisted: true, genericFileRendered: true, recipientApproved: true, bytesVerified: true, downloadVerified: false, limitation: "Real read_file bytes verified after recipient approval; OS save picker is outside embedded W3C DOM automation and was not invoked." });
+  await passed("incoming-attachment", { completion, fileName, manifestPersisted: true, genericFileRendered: true, recipientApproved: true, bytesVerified: true, downloadVerified: true, limitation: "Exact decrypted bytes verified in the configured disposable download directory after recipient approval; OS save picker was not invoked." });
   await privacySettings();
   await click("settings-nav-appearance");
   await c.element("theme-picker");

@@ -1,16 +1,29 @@
+import {
+  subscribeSyncInvalidation,
+  supportsPushState,
+} from "@/lib/syncInvalidation";
+import { readWithDeadline } from "@/lib/readDeadline";
 import { create } from "zustand";
 import type { TFunction } from "i18next";
 import { presence as presenceApi } from "@/lib/api";
 import type { PresenceInfo, PresenceMap } from "@/lib/types";
 import type { PresenceStatus } from "@/lib/presence";
+import { errorMessage } from "@/lib/error";
 import { captureRuntimeOwner } from "./ownership";
 
 const POLL_MS = 2000;
 const MAX_HISTORY = 1024;
+const RECOVERY_STABLE_MS = 5000;
+const QUALITY_STABLE_MS = 30_000;
 let epoch = 0;
+type PresenceFailure =
+  | { kind: "request"; message: string }
+  | { kind: "timeout" }
+  | { kind: "invalid" };
 interface PresenceState {
   map: PresenceMap;
   unavailable: boolean;
+  failure: PresenceFailure | null;
   clear: () => void;
   start: () => () => void;
 }
@@ -31,6 +44,16 @@ function reconcile(prev: PresenceMap, next: PresenceMap): PresenceMap {
   return changed ? merged : prev;
 }
 
+/** Local/current-device evidence outranks a quality hint inherited from another path. */
+function hasFreshLocalEvidence(devices: PresenceInfo["devices"]): boolean {
+  return !!devices?.some((device) =>
+    device.evidence.some(
+      (e) =>
+        (e.source === "local" || e.source === "self") && e.expires_in_secs > 0,
+    ),
+  );
+}
+
 /** Age each source independently, including during IPC failure or silence. */
 export function agePresence(
   snapshot: PresenceMap,
@@ -44,7 +67,7 @@ export function agePresence(
         evidence: device.evidence
           .map((e) => ({
             ...e,
-            last_seen_secs: e.last_seen_secs + elapsed,
+            last_seen_secs: e.last_seen_secs + Math.floor(elapsed),
             expires_in_secs: Math.max(0, e.expires_in_secs - elapsed),
           }))
           .filter((e) => e.expires_in_secs > 0),
@@ -52,10 +75,38 @@ export function agePresence(
       .filter((device) => device.evidence.length > 0);
     next[key] = {
       ...value,
-      // Compatibility snapshots also have a bounded lease; no frozen green dots.
-      online: devices ? devices.length > 0 : value.online && elapsed < 15,
+      ...(value.reconnect_expires_in_secs == null
+        ? {}
+        : {
+            reconnect_expires_in_secs: Math.max(
+              0,
+              value.reconnect_expires_in_secs - elapsed,
+            ),
+          }),
+      ...(value.online_expires_in_secs == null
+        ? {}
+        : {
+            online_expires_in_secs: Math.max(
+              0,
+              value.online_expires_in_secs - elapsed,
+            ),
+            connection_weak:
+              !hasFreshLocalEvidence(devices) &&
+              (value.connection_weak ||
+                (value.online && devices?.length === 0)),
+          }),
+      // The host owns topology tolerance; legacy snapshots retain their short lease.
+      online:
+        value.online &&
+        (value.online_expires_in_secs != null
+          ? value.online_expires_in_secs > elapsed
+          : devices
+            ? devices.length > 0
+            : elapsed < 15),
       last_seen_secs:
-        value.last_seen_secs == null ? null : value.last_seen_secs + elapsed,
+        value.last_seen_secs == null
+          ? null
+          : value.last_seen_secs + Math.floor(elapsed),
       ...(devices ? { devices } : {}),
     };
   }
@@ -73,9 +124,10 @@ export function agePresence(
 export const usePresence = create<PresenceState>((set, get) => ({
   map: EMPTY,
   unavailable: false,
+  failure: null,
   clear: () => {
     epoch++;
-    set({ map: EMPTY, unavailable: false });
+    set({ map: EMPTY, unavailable: false, failure: null });
   },
   start: () => {
     const lease = captureRuntimeOwner();
@@ -85,34 +137,85 @@ export const usePresence = create<PresenceState>((set, get) => ({
     let nextPoll = 0;
     let lastApplied = 0;
     let inFlight = 0;
+    let dirty = false;
+    let nextFallback = 0;
     let baseline: PresenceMap = {};
+    // Presentation hysteresis only: delivery continues independently.
+    const recoveryConfirmations = new Map<
+      string,
+      { since: number; deadlineAt: number }
+    >();
+    const qualityConfirmations = new Map<
+      string,
+      { since: number; deadlineAt: number }
+    >();
     let baselineAt = performance.now();
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
     const current = () => !cancelled && epoch === session && lease.current();
     const age = () =>
       agePresence(
         baseline,
-        Math.max(0, Math.floor((performance.now() - baselineAt) / 1000)),
+        Math.max(0, (performance.now() - baselineAt) / 1000),
       );
     const publishAge = () => {
-      if (current()) set({ map: reconcile(get().map, age()) });
+      if (current()) {
+        set({ map: reconcile(get().map, age()) });
+        scheduleExpiry();
+      }
     };
-    const poll = async () => {
-      if (!current() || inFlight >= 2) return;
+    // Deadline ageing is independent of the two-second IPC poll. A grace ending
+    // between poll ticks must not remain visible beyond the approved bound.
+    const scheduleExpiry = () => {
+      clearTimeout(expiryTimer);
+      if (!current()) return;
+      const elapsed = Math.max(0, (performance.now() - baselineAt) / 1000);
+      let next = Infinity;
+      const consider = (deadline: number) => {
+        if (deadline > elapsed) next = Math.min(next, deadline - elapsed);
+      };
+      for (const value of Object.values(baseline)) {
+        if (value.online_expires_in_secs != null)
+          consider(value.online_expires_in_secs);
+        if (value.reconnect_expires_in_secs != null)
+          consider(value.reconnect_expires_in_secs);
+        if (value.devices) {
+          for (const device of value.devices)
+            for (const evidence of device.evidence)
+              consider(evidence.expires_in_secs);
+        } else if (value.online) consider(15);
+      }
+      if (Number.isFinite(next))
+        expiryTimer = setTimeout(
+          publishAge,
+          Math.max(1, Math.ceil(next * 1000)),
+        );
+    };
+    const poll = async (invalidate = false) => {
+      if (!current()) return;
+      if (inFlight >= 2) {
+        dirty ||= invalidate;
+        return;
+      }
       inFlight++;
+      nextFallback = performance.now() + 30000;
       const pollId = ++nextPoll;
       const requested = performance.now();
-      const fail = () => {
+      const fail = (failure: PresenceFailure) => {
         if (current() && pollId > lastApplied) {
           lastApplied = pollId;
-          set({ unavailable: true });
+          recoveryConfirmations.clear();
+          qualityConfirmations.clear();
+          set({ unavailable: true, failure });
           publishAge();
         }
       };
-      const timeout = setTimeout(fail, 10000);
+      const timeout = setTimeout(() => fail({ kind: "timeout" }), 10000);
       try {
-        const next = await presenceApi.get();
-        if (!next || typeof next !== "object" || Array.isArray(next))
-          throw new Error("invalid presence snapshot");
+        const next = await readWithDeadline(() => presenceApi.get());
+        if (!next || typeof next !== "object" || Array.isArray(next)) {
+          fail({ kind: "invalid" });
+          return;
+        }
         if (current() && pollId > lastApplied) {
           const old = age();
           // A successful empty snapshot withdraws presence immediately, while
@@ -136,7 +239,7 @@ export const usePresence = create<PresenceState>((set, get) => ({
           }
           const aged = agePresence(
             next,
-            Math.max(0, Math.floor((performance.now() - requested) / 1000)),
+            Math.max(0, (performance.now() - requested) / 1000),
           );
           const withHistory = Object.fromEntries(
             Object.entries(aged).map(([key, value]) => [
@@ -148,37 +251,145 @@ export const usePresence = create<PresenceState>((set, get) => ({
                 : value,
             ]),
           );
+          // A single successful refresh must not flash green between losses.
+          // Initial discovery and explicit withdrawal retain their immediate behavior.
+          const confirmedAt = performance.now();
+          for (const key of recoveryConfirmations.keys()) {
+            if (!(key in withHistory)) recoveryConfirmations.delete(key);
+          }
+          for (const [key, value] of Object.entries(withHistory)) {
+            if (value.member_keys) continue;
+            if (!value.online || (value.reconnect_expires_in_secs ?? 0) <= 0) {
+              recoveryConfirmations.delete(key);
+              continue;
+            }
+            const recovering =
+              old[key] &&
+              !old[key].online &&
+              presenceStatus(old[key]) === "reconnecting";
+            if (!recovering && !recoveryConfirmations.has(key)) continue;
+            if (
+              !recoveryConfirmations.has(key) &&
+              recoveryConfirmations.size >= MAX_HISTORY
+            )
+              continue;
+            const deadlineAt =
+              confirmedAt + (value.reconnect_expires_in_secs ?? 0) * 1000;
+            const confirmation = recoveryConfirmations.get(key) ?? {
+              since: confirmedAt,
+              deadlineAt,
+            };
+            // Allow one second for integer observation-age rounding. Re-querying
+            // one unchanged origin must not count as renewed public evidence.
+            const renewed = deadlineAt - confirmation.deadlineAt > 1000;
+            if (
+              confirmedAt - confirmation.since < RECOVERY_STABLE_MS ||
+              !renewed
+            ) {
+              recoveryConfirmations.set(key, confirmation);
+              withHistory[key] = { ...value, online: false };
+            } else {
+              recoveryConfirmations.delete(key);
+            }
+          }
+          for (const key of qualityConfirmations.keys()) {
+            if (!(key in withHistory)) qualityConfirmations.delete(key);
+          }
+          for (const [key, value] of Object.entries(withHistory)) {
+            if (value.member_keys) continue;
+            if (
+              !value.online ||
+              value.connection_weak !== false ||
+              hasFreshLocalEvidence(value.devices)
+            ) {
+              qualityConfirmations.delete(key);
+              continue;
+            }
+            if (!old[key]?.connection_weak && !qualityConfirmations.has(key))
+              continue;
+            const deadlineAt =
+              confirmedAt + (value.reconnect_expires_in_secs ?? 0) * 1000;
+            const confirmation = qualityConfirmations.get(key) ?? {
+              since: confirmedAt,
+              deadlineAt,
+            };
+            if (
+              confirmedAt - confirmation.since < QUALITY_STABLE_MS ||
+              deadlineAt - confirmation.deadlineAt <= 1000
+            ) {
+              if (
+                qualityConfirmations.has(key) ||
+                qualityConfirmations.size < MAX_HISTORY
+              )
+                qualityConfirmations.set(key, confirmation);
+              withHistory[key] = { ...value, connection_weak: true };
+            } else {
+              qualityConfirmations.delete(key);
+            }
+          }
           lastApplied = pollId;
-          baseline = { ...history, ...withHistory };
+          baseline = reconcile(
+            baseline,
+            agePresence({ ...history, ...withHistory }, 0),
+          );
           baselineAt = performance.now();
-          set({ map: reconcile(get().map, baseline), unavailable: false });
+          set({
+            map: reconcile(get().map, baseline),
+            unavailable: false,
+            failure: null,
+          });
+          scheduleExpiry();
         }
-      } catch {
-        fail();
+      } catch (error) {
+        fail({ kind: "request", message: errorMessage(error) });
       } finally {
         inFlight--;
         clearTimeout(timeout);
+        // Only a real invalidation requests follow-up work; failures and ticks
+        // cannot recursively retry a failing native read.
+        if (current() && dirty) {
+          dirty = false;
+          queueMicrotask(() => void poll(true));
+        }
       }
     };
     void poll();
+    const unlisten = subscribeSyncInvalidation((change) => {
+      if (
+        change.owner === lease.owner &&
+        (change.kind === "roster" || change.kind === "state")
+      )
+        void poll(true);
+    });
     const id = setInterval(() => {
-      void poll();
+      if (!supportsPushState(lease.owner) || performance.now() >= nextFallback)
+        void poll();
       queueMicrotask(publishAge);
     }, POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(id);
+      clearTimeout(expiryTimer);
+      unlisten();
       if (epoch === session) get().clear();
     };
   },
 }));
 
 export function presenceStatus(p: PresenceInfo): PresenceStatus {
-  return p.online ? "online" : "offline";
+  return p.online
+    ? p.connection_weak
+      ? "reconnecting"
+      : "online"
+    : (p.reconnect_expires_in_secs ?? 0) > 0
+      ? "reconnecting"
+      : "offline";
 }
 
 export function presenceLabel(p: PresenceInfo, t: TFunction): string {
-  if (p.online) return t("presence.online");
+  if (p.online)
+    return t(p.connection_weak ? "presence.onlineWeak" : "presence.online");
+  if (presenceStatus(p) === "reconnecting") return t("presence.reconnecting");
   const s = p.last_seen_secs;
   if (s == null) return t("presence.offline");
   const history =
@@ -205,4 +416,18 @@ export function groupPresenceLabel(p: PresenceInfo, t: TFunction): string {
 
 export function usePresenceFor(id: string | undefined): PresenceInfo {
   return usePresence((s) => (id ? (s.map[id] ?? OFFLINE) : OFFLINE));
+}
+
+/** Recovery is presentation only and excludes groups and the local account. */
+export function hasReconnectingPresence(
+  map: PresenceMap,
+  ownAccount?: string | null,
+): boolean {
+  return Object.entries(map).some(
+    ([key, p]) =>
+      key !== ownAccount &&
+      !p.member_keys &&
+      !p.online &&
+      presenceStatus(p) === "reconnecting",
+  );
 }

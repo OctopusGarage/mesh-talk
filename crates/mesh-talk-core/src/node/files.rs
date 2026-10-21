@@ -1098,6 +1098,8 @@ impl Node {
             Author::from_ed25519(self.identity.public().ed25519_pub),
             outgoing_manifest(manifest),
         );
+        drop(files);
+        self.note_account_local_change();
         Ok(())
     }
 

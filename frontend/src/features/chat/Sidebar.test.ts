@@ -76,7 +76,8 @@ vi.mock("@/store/settings", () => ({
   useSettings: (selector: (state: unknown) => unknown) =>
     selector({ callsEnabled: false }),
 }));
-vi.mock("@/store/presence", () => ({
+vi.mock("@/store/presence", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/store/presence")>()),
   usePresence: (selector: (state: unknown) => unknown) => selector({ map: {} }),
   usePresenceFor: () => ({ online: false, last_seen_secs: null }),
   presenceStatus: () => "offline",

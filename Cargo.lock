@@ -3165,7 +3165,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-talk"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "ashpd",
  "block2 0.6.2",
@@ -3210,7 +3210,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-talk-core"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "aes-gcm 0.11.1",
  "argon2",
@@ -3243,7 +3243,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-talk-integrations"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "clap",
  "hex",
@@ -3262,7 +3262,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-talk-mcp"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "clap",
  "mesh-talk-core",
@@ -4811,9 +4811,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -6834,9 +6834,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.2"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e4ffd8df1c57e87c325000a3d6ef93db75279dc3a231125aac571650f22b12a"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]

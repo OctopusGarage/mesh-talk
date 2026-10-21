@@ -15,7 +15,8 @@ const packages = new Map([
   ["mesh-talk-mcp", "crates/mesh-talk-mcp"],
 ]);
 const read = (path) => readFileSync(new URL(path, rootUrl), "utf8");
-const tracked = execFileSync("git", ["ls-files", "-z", ...packages.values()], {
+// Development ownership also applies to new source before it is staged.
+const sourceFiles = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z", ...packages.values()], {
   cwd: root,
   encoding: "utf8",
 })
@@ -27,8 +28,8 @@ const contracts = [...packages.values()].flatMap(
 const plan = (path) => buildAffectedPlan([path], { contracts });
 const owners = (path) => plan(path).owners.map(({ id }) => id);
 
-test("every tracked Rust source, crate manifest and test fixture has executable development ownership", () => {
-  const required = tracked.filter((path) =>
+test("every Rust source, crate manifest and test fixture has executable development ownership", () => {
+  const required = sourceFiles.filter((path) =>
     /\.rs$|\/Cargo\.toml$|\/tests\/fixtures\//u.test(path),
   );
   const missing = required.flatMap((path) => plan(path).blockers);
@@ -139,7 +140,7 @@ test("every Rust selector has nonignored library test evidence in its owning mod
         const exactName = filter.endsWith("::") ? null : segments.pop();
         if (segments.at(-1) === "tests") segments.pop();
         const modulePath = `${directory}/src/${segments.join("/")}`;
-        const sourcePaths = tracked.filter(
+        const sourcePaths = sourceFiles.filter(
           (path) =>
             path.startsWith(`${directory}/src/`) &&
             !path.startsWith(`${directory}/src/bin/`) &&
@@ -156,7 +157,7 @@ test("every Rust selector has nonignored library test evidence in its owning mod
             const referenced = posix.normalize(
               posix.join(posix.dirname(path), relative),
             );
-            if (tracked.includes(referenced)) sourcePaths.push(referenced);
+            if (sourceFiles.includes(referenced)) sourcePaths.push(referenced);
           }
         }
         const evidence = sourcePaths.some((path) => {

@@ -111,15 +111,16 @@ impl AccountPreferences {
         now_ms: u64,
     ) -> Result<AccountPreference, LogError> {
         let old = self.get(category, &key);
+        let next_revision = old
+            .as_ref()
+            .map_or(0, |entry| entry.revision)
+            .checked_add(1)
+            .ok_or_else(|| LogError::CorruptFile("account preference revision exhausted".into()))?;
         let record = AccountPreference {
             category,
             key,
             value,
-            revision: now_ms.max(
-                old.as_ref()
-                    .map_or(0, |entry| entry.revision)
-                    .saturating_add(1),
-            ),
+            revision: now_ms.max(next_revision),
             device_id,
         };
         self.merge(record.clone())?;
@@ -150,6 +151,32 @@ impl AccountPreferences {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exhausted_revision_rejects_local_edit_without_false_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = AccountPreferences::open(&dir.path().join("prefs.log"), "pw").unwrap();
+        let original = AccountPreference {
+            category: SyncCategory::Appearance,
+            key: "theme".into(),
+            value: Some("dark".into()),
+            revision: u64::MAX,
+            device_id: "ab".repeat(16),
+        };
+        assert!(store.merge(original.clone()).unwrap());
+        assert!(
+            store
+                .set_local(
+                    SyncCategory::Appearance,
+                    "theme".into(),
+                    Some("light".into()),
+                    original.device_id.clone(),
+                    1
+                )
+                .is_err()
+        );
+        assert_eq!(store.get(SyncCategory::Appearance, "theme"), Some(original));
+    }
 
     #[test]
     fn newer_preference_and_clear_survive_restart() {

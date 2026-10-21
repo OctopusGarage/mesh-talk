@@ -62,8 +62,8 @@ Paths below are relative to the repository root. `core/` abbreviates
 | Channels and authority                         | `core/node/channel.rs`, `channels.rs`, `channel_senders.rs`                                                                                                                     | Signed membership is authoritative. Do not derive membership or permissions from a filtered contact list.                                                                                                                              |
 | Group recovery/custody                         | `core/node/channel_custody.rs`, `channel_projection_cache.rs`, `session.rs`                                                                                                     | Reuse accepted membership and retained-event reconciliation; availability is not an unconditional delivery guarantee.                                                                                                                  |
 | Durable outgoing delivery                      | `core/node/delivery_store.rs`, `delivery_runtime.rs`, `delivery_receipt.rs`                                                                                                     | Storage owns persisted transitions; runtime owns bounded direct/relay progress and scheduling; receipts own exact completion evidence.                                                                                                 |
-| Post-office routing/federation                 | `core/postoffice/`, `core/node/postbox.rs`, `opaque_relay.rs`, `bridge_directory.rs`, `bridge_client.rs`, `relay_policy.rs`                                                     | Reuse relay eligibility, opaque projection and incremental mailbox admission; directory participation does not grant relay or conversation authority.                                                                                  |
-| Transport/session reuse                        | `core/transport/`, `core/node/transport.rs`, `session_pool.rs`, `session.rs`                                                                                                    | Reuse authenticated bounded sessions; feature modules do not open ad hoc sockets or create their own retry loops.                                                                                                                      |
+| Post-office routing/federation                 | `core/postoffice/` (including signed network membership in `network.rs`), `core/node/postbox.rs`, `opaque_relay.rs`, `bridge_directory.rs`, `bridge_client.rs`, `relay_policy.rs`                                                     | Reuse relay eligibility, opaque projection and incremental mailbox admission; directory participation does not grant relay or conversation authority.                                                                                  |
+| Transport/session reuse                        | `core/transport/`, `core/node/transport.rs`, `session_pool.rs`, `session.rs`, `account_session.rs`                                                                                                    | Reuse authenticated bounded sessions; feature modules do not open ad hoc sockets or create their own retry loops.                                                                                                                      |
 | Files/folders                                  | `core/file/`, `core/node/files.rs`, `filebook.rs`, `file_consent.rs`, `file_completion.rs`                                                                                      | Consent, chunk integrity and recipient completion remain distinct transitions. Presentation intake belongs to `ui/features/chat/attachments/useAttachmentIntake.ts`; the store retains intent acceptance/retry.                        |
 | History/search/recall/reactions                | `core/node/queries.rs`, `search.rs`, `recall.rs`, `reactions.rs`                                                                                                                | Query through core; frontend uses verified account bindings and centralized contact visibility.                                                                                                                                        |
 | Linking and sibling replay                     | `core/node/pairing.rs`, `linking.rs`, `account_sync*.rs`, `account_preferences.rs`                                                                                              | Pairing authority and replay policy stay separate from the dialog. Host adoption belongs to `src-tauri/src/linked_account.rs`.                                                                                                         |
@@ -104,6 +104,20 @@ and error-reporting capabilities. Their patches cannot mutate unrelated chat
 state. Chat supplies these capabilities; standalone send/status tests use the
 same cache defaults without initializing chat. Feature work should extend these
 owners instead of importing the aggregate chat getter/setter into them.
+
+The text composer transfers submitted content synchronously to the existing bounded,
+owner-scoped outgoing intent. A refused local submission retains the draft and
+creates no bubble. An admitted submission clears the input immediately; its bubble
+alone owns pending acceptance, failure and retry. Backend acceptance and recipient
+confirmation remain distinct states, and later completion cannot overwrite a new
+draft or put submitted text back into the composer.
+
+Account DM arrivals carry the authenticated sender account and the envelope's
+logical message ID from core through desktop IPC. The receipt ledger uses that
+same identity as account history, so live callbacks, repeat delivery and history
+coverage cannot count one logical message twice. Independent messages with equal
+text retain separate IDs and counts. Legacy providers without a logical identity
+retain their compatibility counter path.
 
 `ui/store/channelActions.ts` owns channel creation, member edits, ownership
 transfer, invitation acceptance, leaving, dissolution and renaming. Its narrow
@@ -363,3 +377,13 @@ reading-to-settings navigation. `tools/help/` owns shared search, restricted
 Markdown rendering, static publication and read-only documentation MCP. These
 modules consume no private messaging state and introduce no core protocol
 responsibility. See [help system maintenance](help-system.md).
+
+### Peer trust evidence
+
+`core/node/trust_card.rs` owns signed public card and proof validation; its node
+I/O owner owns authenticated publication and encrypted current-card persistence.
+`src-tauri/src/trust_cards.rs` adapts admitted commands and bounded versioned JSON.
+`src-tauri/src/trust.rs` owns private first-observed time, device-change history
+and manual verification. Profile renderers must not derive verification from a
+valid public signature. The [peer trust guide](peer-trust.md) owns claim meanings
+and evidence limits.

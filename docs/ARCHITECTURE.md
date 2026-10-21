@@ -445,12 +445,28 @@ the message delivery WAL; portable recovery snapshots currently omit reactions.
     departed peer's ICMP port-unreachable response as receive error 10054. Local
     socket failures remain fatal and are logged with their OS error.
     The roster and encrypted route cache retain multiple addresses per device and
-    a pinned dial tries alternatives. Shared discovery observes interface names,
+    a pinned dial staggers up to two candidate handshakes by 200 ms, with a
+    ten-second authentication deadline per candidate. Every attempt owns separate
+    TCP capacity permits; cancellation drops losing attempts. An obsolete LAN
+    endpoint accepting TCP through a proxy cannot block the first alternate route
+    for a full handshake deadline. Reusing an existing durable contact grant does
+    not acquire the disclosure gate's writer or repeat policy/proof persistence;
+    new grants and binding changes retain the serialized commit path and host
+    authorization. Slow local text acceptance, route authentication and delivery
+    attempts emit elapsed-time diagnostics with stage/outcome and route endpoint
+    metadata, excluding message bodies and identity identifiers. Shared discovery observes interface names,
     addresses and indexes every two seconds; changes rejoin multicast and wake
     privacy-gated LAN/routed producers without restarting the participant. A
     30-second multicast retry remains as a fallback. See [routed network discovery](routed-network-discovery.md)
     for the protocol, limitations, and cross-network release checks; see
     [network topologies](network-topologies.md) for the A–F deployment scenarios.
+- **Automatic account delivery** — after a direct durable-have response, the sender
+  also requests the intended device's authenticated receipt scope over the same
+  reachable path, within the existing control-attempt deadline. A recipient need
+  not establish a reverse connection before confirmation can return. Custody
+  alone never becomes a recipient-confirmation claim. Live account DM notifications
+  carry the authenticated sender account and logical envelope message ID through
+  desktop IPC; their unread projection shares that ID with account history.
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).
@@ -460,7 +476,8 @@ the message delivery WAL; portable recovery snapshots currently omit reactions.
   post office or the original author online. Each peer attempt is time-bounded;
   normal sync membership projection and event validation still apply.
   Discovery of a new or relocated peer wakes a bounded recovery batch immediately;
-  the three-second tick remains a fallback for missed announcements and old routes.
+  an adaptive jittered three-to-sixty-second recovery fallback repairs missed
+  announcements and old routes; custody checks retain their independent tick.
   Every TCP-serving node runs this bidirectional anti-entropy loop. For channels
   with more than five members, a text sender seeds at most two routed members;
   recipients' rounds then forward the signed log to other members. Smaller
@@ -477,8 +494,10 @@ the message delivery WAL; portable recovery snapshots currently omit reactions.
   eight-slot TCP budget covers both directions, handshakes and idle sessions;
   seven-slot direction limits preserve opposite-direction progress. Idle sessions
   expire after 15 seconds. Full identity, endpoint, account/role and policy checks
-  prevent cross-principal or stale-policy reuse. One-shot protocols dial fresh;
-  errors and cancellation discard sessions. One idle entry per identity/route
+  prevent cross-principal or stale-policy reuse. Negotiated V2 sibling history,
+  attachment and wake requests share a separate reusable protocol class;
+  older peers retain fresh exchanges. Call, pairing and directory protocols
+  dial fresh; errors and cancellation discard sessions. One idle entry per identity/route/protocol
   does not imply one busy connection per peer. OS backlog, discovery UDP, call
   media and separate relay processes are outside the Node budget.
   Each channel send emits a debug metric with member count, seeded peer count,
@@ -538,9 +557,16 @@ directory, its fresh, self-signed introductions can be polled from that post
 office's opaque mailboxes. This does not mark safety numbers verified, persists
 no bridge permission, and expires with the directory membership. Invisible mode
 does not participate. See [routed network discovery](routed-network-discovery.md).
-For multi-site federation, post offices have equal roles and a shared set of
-trusted identity-pinned seeds. They discover trusted LAN relays, probe routed
-seeds, exchange short-lived signed opt-in presence, and reconcile version-3
+For multi-site federation, post offices have equal roles. Operators can use a
+shared set of identity-pinned seeds or an approved network authority with
+per-device expiring memberships and a public revocation policy. Network mode
+checks both memberships against authenticated Noise identities before disclosing
+inventories/presence and never downgrades to pin-only federation on failure.
+It automatically discovers LAN members; optional pinned seeds locate routed
+members. The offline authority key stays off relays; policy changes require
+distribution and restart. Membership is operator approval, not software integrity.
+See [network administration](post-office-federation.md).
+Both modes exchange short-lived signed opt-in presence and reconcile version-3
 pairwise opaque mailboxes over Noise. The original mailbox arrival time follows
 each federated copy, preserving the 30-day maximum. Clients can prefer a local
 relay and fall back to another reachable relay. New clients also read and write
@@ -706,15 +732,17 @@ wakes, selects one destination and one receipt per iteration, and rotates logica
 messages and their independent destination cursors. It takes owned bounded
 snapshots after local recovery on the blocking pool, releases store locks before
 network awaits. Control exchanges run in a worker-owned task set with at most
-two destination retries, one receipt retry and one peer reconciliation in flight.
-Each complete direct or relay exchange has a 15-second deadline so routed
+two destination retries to distinct devices, one receipt retry and one peer
+reconciliation in flight. Multiple messages for the same stalled device share
+one destination lane, leaving the other lane available to a reachable device.
+Each complete direct or relay exchange adapts within a 15–60 second deadline so routed
 round trips can finish without blocking another lane or file scheduling. Active
 immutable event IDs prevent duplicate scheduling within a lane. Busy lanes leave
 their pending cursors unchanged so waiting destinations, receipts and peers retain
 their next scheduling turn. Dropping the
 accept loop cancels its worker and aborts the worker's control tasks, releasing
-channels and their admission permits. File phases retain their separate 400 ms
-budgets below.
+channels and their admission permits. File phases run in independently owned
+workers with separate network deadlines below.
 Historical DM and control pulls for manually verified contacts use a
 receive-only reconciliation projection; DM bodies prefer the direct sender
 route and fall back to the relay, while controls can be pulled directly or
@@ -723,13 +751,14 @@ through the relay when the original sender is offline.
 Immutable file retries use eight scheduling slots and retain at most six
 authenticated connections across complete protocol exchanges, with a ten-second
 idle limit. One outbound connection permit remains available for control work. A rotating admission
-cursor fills available slots; each worker pass runs at most eight round-robin
-file steps before continuing ordinary control work. Clean progress still retained
-at pass end schedules another pass. Fresh work tries the direct recipient first;
+cursor fills available slots; at most eight independent workers advance file
+steps while ordinary control work continues. Clean progress schedules the next
+step; waiting consent releases its socket and slot until a coalesced wake or
+bounded retry becomes due. Fresh work tries the direct recipient first;
 failed routes discard their wire state before advancing to another eligible
 candidate. Exhausted candidates free the slot rather than busy retrying.
 Dialing, fingerprinting, reconciliation and custody checking each have their
-own clean exchange boundary under the same 400 ms operation budget. Each step
+own clean exchange boundary under a 15-second network operation deadline. Each step
 rechecks the current private authorization and exact destination binding; a
 timeout discards the connection and any partial frame, resuming from durable
 remote state on a fresh connection. Only final, target-qualified chunk custody
@@ -874,13 +903,13 @@ recent history remains secondary to Offline. A global notice reports failed
 presence refresh or terminated discovery producers without asserting an Internet
 or LAN outage. Public device observations have a 15-second presence lease, separate
 from retained dial routes. Local and routed refreshes and directory registration
-run often enough for the shared two-second UI poll to show a stopped device
-Offline within 20 seconds. Private authenticated routing does not contribute.
+run often enough for pushed snapshots and shared two-second local evidence aging
+to show a stopped device Offline within 20 seconds. Older hosts retain polling. Private authenticated routing does not contribute.
 Directory v4 preserves the
 origin expiry across the final relay-to-client boundary; older directory replies
 remain route hints without eligible freshness. Routed inventories refresh every
-five seconds with 20 ms candidate pacing; local fallback scans and bridge
-registration also refresh every five seconds. Wire layouts and admission limits
+five seconds with 20 ms candidate pacing; local fallback scans use paced rotating
+slices with capped jittered backoff, while bridge registration retains lease refresh. Wire layouts and admission limits
 remain unchanged.
 
 Conversation headers show accepted distinct account counts and known-online
@@ -982,7 +1011,8 @@ otherwise a backup containing that plaintext is required. Offline DM peers are
 discovered from durable account history.
 
 Snapshots include visible plaintext history, signed event provenance, file cards,
-managed media referenced by visible cards, received peer avatars, and recall marks.
+managed media referenced by visible cards, received peer avatars, signed public
+trust cards and their attached proofs, and recall marks.
 Verified peer recall marks are persisted before export so a restored device does not
 redisplay recalled plaintext it cannot decrypt from the old device's events. A
 password-encrypted local index retains original IDs for restored outgoing messages;
@@ -1109,9 +1139,26 @@ Messages have no content-language restrictions. The core does not bundle languag
 models, classify message text, or persist language-based visibility decisions.
 Display-language localization remains a device preference.
 
-New account profiles use avatar-only `MTPF1`. Decoding still authenticates existing
+Avatar compatibility publications use `MTPF1`; accounts with a signed trust card
+publish the `MTC1` card first, then its `MTPF1` avatar under the same publication
+lock. The avatar event requires the card event as a causal parent.
+Decoding still authenticates existing
 `MTPF2` signatures so retained avatar events and linked devices remain readable;
 retired metadata is ignored and never re-emitted as a preference. Snapshot schema 2
 retains the positional tags of its two retired metadata records for old-backup
 compatibility. Imports validate those records without installing filtering state;
 new exports omit them. Existing `language.log` sidecars are not opened or applied.
+
+## Signed peer trust cards
+
+Account-signed trust cards add public presentation claims and optional creation
+evidence without changing account IDs, device certificates or manual verification
+authority. The core validates separately domain-separated card, introduction and
+creation-witness signatures, bounded fields and subject bindings. Revisioned cards
+are persisted encrypted and propagated only through authenticated profile paths.
+An imported signature never authorizes verified-contact DM pulls. Desktop IPC
+retains exact-session admission at local mutation, while private first-observed
+and device-change records remain in the owner-scoped trust store.
+
+The [peer trust guide](peer-trust.md) owns timestamp semantics and evidence limits;
+creation claims and witness clocks are explicitly distinct from trusted time.

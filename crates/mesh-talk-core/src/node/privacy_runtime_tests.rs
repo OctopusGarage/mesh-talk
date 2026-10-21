@@ -9,6 +9,136 @@ use std::{
 use tokio::{net::TcpListener, sync::mpsc};
 const DEADLINE: Duration = Duration::from_secs(3);
 
+#[tokio::test]
+async fn private_probe_refreshes_public_presence_before_its_lease_expires() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", addr.port());
+    bob.configure_privacy(
+        &dir.path().join("bob"),
+        "pw",
+        &proof,
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    {
+        let mut state = alice.privacy.state.write().unwrap();
+        let state = state.as_mut().unwrap();
+        state.proofs.record(&proof).unwrap();
+        state.routes.record(&proof.public(), addr.ip()).unwrap();
+    }
+    let (accepted, mut arrivals) = mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        let mut sessions = tokio::task::JoinSet::new();
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            let bob = bob.clone();
+            let accepted = accepted.clone();
+            sessions.spawn(async move {
+                // Slow but reachable authentication uses part of the lease.
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                if bob.privacy_accept(socket).await.is_ok() {
+                    let _ = accepted.send(());
+                }
+            });
+        }
+    });
+    let probes = tokio::spawn(alice.run_private_route_probes());
+    let result = tokio::time::timeout(Duration::from_secs(13), async {
+        arrivals.recv().await.unwrap();
+        arrivals.recv().await.unwrap();
+    })
+    .await;
+    probes.abort();
+    server.abort();
+    assert!(
+        result.is_ok(),
+        "probe duration plus a fixed post-probe sleep delays the next fresh observation beyond the public lease"
+    );
+}
+
+#[tokio::test]
+async fn private_probe_does_not_multiply_handshakes_for_one_devices_cached_addresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let proof = crate::discovery::Announce::new_with_account(
+        &bob.identity,
+        &crate::identity::account::Account::generate(),
+        "Bob",
+        addr.port(),
+    );
+    {
+        let mut state = alice.privacy.state.write().unwrap();
+        let state = state.as_mut().unwrap();
+        state.proofs.record(&proof).unwrap();
+        for octet in 1..=8 {
+            state
+                .routes
+                .record(&proof.public(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, octet)))
+                .unwrap();
+        }
+    }
+    alice
+        .preferred_routes
+        .lock()
+        .unwrap()
+        .insert(bob.user_id(), addr);
+    assert_eq!(alice.cached_routing_peers().len(), 8);
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let accepted = count.clone();
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            held.push(socket);
+            accepted.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let probe = alice.probe_private_routes_with_budget(Duration::from_millis(500));
+    tokio::pin!(probe);
+    tokio::select! {
+        _ = &mut probe => panic!("the held handshake must still be pending"),
+        _ = tokio::time::sleep(Duration::from_millis(150)) => {},
+    }
+    let independent = alice.sessions.try_outbound();
+    assert!(
+        independent.is_some(),
+        "one device's cached addresses exhausted the outbound budget before other peers could connect"
+    );
+    drop(independent);
+    probe.await;
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "one device's address hints must share one bounded route race, not occupy all TCP slots"
+    );
+    server.abort();
+}
+
 #[test]
 fn failed_presence_cache_write_is_not_a_successful_empty_snapshot() {
     let dir = tempfile::tempdir().unwrap();
@@ -2808,4 +2938,176 @@ async fn guarded_privacy_commits_enclose_all_writes_without_holding_state_lock()
         }
         .unwrap();
     }
+}
+
+#[tokio::test]
+async fn reachable_route_is_not_blocked_by_stalled_former_lan_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let old = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let good = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let old_addr = old.local_addr().unwrap();
+    let good_addr = good.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", good_addr.port());
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update_routed(&proof, good_addr.ip(), &alice.user_id());
+    let expected = bob.identity.public();
+    let server = tokio::spawn(async move {
+        let (stream, _) = good.accept().await.unwrap();
+        bob.privacy_accept(stream).await.unwrap()
+    });
+    let dial = alice.privacy_dial(old_addr, &expected);
+    let old_server = async {
+        let (_stalled, _) = old.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    };
+    let result = tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(1), dial) => result,
+        _ = old_server => unreachable!(),
+    };
+    server.abort();
+    assert!(
+        result.is_ok(),
+        "a stale TCP endpoint which accepts but never authenticates must not delay the reachable route"
+    );
+    let channel = result.unwrap().unwrap();
+    assert_eq!(channel.peer_identity(), &expected);
+    drop(channel);
+    let permits: Vec<_> = (0..crate::node::session_pool::MAX_DIRECTION_CONNECTIONS)
+        .map(|_| {
+            alice
+                .sessions
+                .try_outbound()
+                .expect("winner and canceled loser release socket capacity")
+        })
+        .collect();
+    assert!(
+        alice.sessions.try_outbound().is_none(),
+        "racing routes must retain the connection limit"
+    );
+    drop(permits);
+}
+
+#[tokio::test]
+async fn existing_contact_local_acceptance_does_not_wait_for_stalled_network_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&dir.path().join("bob"));
+    let old = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let old_addr = old.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", old_addr.port());
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, old_addr.ip(), &alice.user_id());
+    alice
+        .initiate_contact_locally(&bob.account_id())
+        .await
+        .unwrap();
+    let sender = alice.clone();
+    let expected = bob.identity.public();
+    let dial = tokio::spawn(async move { sender.privacy_dial(old_addr, &expected).await });
+    let (_stalled, _) = old.accept().await.unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_millis(500),
+        alice.enqueue_to_account(&bob.account_id(), b"send while old route stalls", None),
+    )
+    .await;
+    dial.abort();
+    assert!(
+        result.is_ok(),
+        "local durable acceptance must not wait behind an existing contact's stalled network handshake"
+    );
+    assert!(result.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn routed_handshake_can_finish_after_three_seconds_without_losing_identity_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let expected = bob.identity.public();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(3200)).await;
+        bob.privacy_accept(stream).await.unwrap()
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        alice.privacy_dial(address, &expected),
+    )
+    .await;
+    server.abort();
+    assert!(result.is_ok());
+    assert_eq!(
+        result
+            .unwrap()
+            .expect("a slow reachable routed peer must be allowed to finish authentication")
+            .peer_identity(),
+        &expected
+    );
+}
+
+#[tokio::test]
+async fn alternate_route_reclaims_idle_sessions_before_waiting_on_stale_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let good = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = good.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", address.port());
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update_routed(&proof, address.ip(), &alice.user_id());
+    let expected = bob.identity.public();
+    let mut inbound = Vec::new();
+    for _ in 0..(crate::node::session_pool::MAX_DIRECTION_CONNECTIONS - 1) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (outbound, accepted) = tokio::join!(
+            alice.privacy_dial(listener.local_addr().unwrap(), &expected),
+            async {
+                let (stream, _) = listener.accept().await.unwrap();
+                bob.privacy_accept(stream).await.unwrap()
+            },
+        );
+        alice.recycle_sync_channel(outbound.unwrap());
+        inbound.push(accepted);
+    }
+    let old = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dial = alice.privacy_dial(old.local_addr().unwrap(), &expected);
+    let server = async {
+        let (stream, _) = good.accept().await.unwrap();
+        bob.privacy_accept(stream).await.unwrap()
+    };
+    let stalled = async {
+        let (_stream, _) = old.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    };
+    let result = tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(dial, server).0 }) => result,
+        _ = stalled => unreachable!(),
+    };
+    assert!(
+        result.is_ok(),
+        "idle pooled connections must yield capacity to a reachable alternate route"
+    );
+    assert_eq!(result.unwrap().unwrap().peer_identity(), &expected);
 }

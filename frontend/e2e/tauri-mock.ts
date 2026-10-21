@@ -39,6 +39,7 @@ export const test = base.extend({
       // adding test controls to the product UI: ?data=worst|huge|peers-huge|members-huge|empty|offline.
       const dataMode = new URLSearchParams(window.location.search).get("data");
       // --- Identity ---------------------------------------------------------
+      const trustCardStore: Record<string, Record<string, unknown>> = {};
       const SELF = { device: "device_self_0001", account: "acc_self_aaaa1111" };
       (window as unknown as Record<string, unknown>).__mockReplaceIdentity = (
         accountId: string,
@@ -909,6 +910,68 @@ export const test = base.extend({
             return null;
           },
 
+          // Signed public cards are separate from private verifiedAccounts.
+          get_trust_card: (a) => trustCardStore[String(a.accountId)] ?? null,
+          publish_trust_card: (a) => {
+            trustCardStore[SELF.account] = {
+              account_id: SELF.account,
+              revision: 1,
+              display_name: String(a.displayName),
+              bio: String(a.bio),
+              created_at_ms: a.createdAtMs ?? null,
+              avatar: null,
+              introductions: [],
+              witnesses: [],
+              signed_json: JSON.stringify({
+                schema: 1,
+                kind: "card",
+                payload: {
+                  account_id: SELF.account,
+                  display_name: a.displayName,
+                  bio: a.bio,
+                  created_at_ms: a.createdAtMs ?? null,
+                },
+              }),
+            };
+            return null;
+          },
+          import_trust_artifact: (a) => {
+            const artifact = JSON.parse(String(a.json));
+            if (artifact.schema !== 1 || !artifact.payload)
+              throw new Error("Invalid signed artifact envelope");
+            if (artifact.payload.invalid_signature)
+              throw new Error("Invalid signature");
+            if (artifact.kind === "card") {
+              trustCardStore[artifact.payload.account_id] = {
+                ...artifact.payload,
+                revision: 1,
+                avatar: null,
+                introductions: [],
+                witnesses: [],
+                signed_json: String(a.json),
+              };
+            }
+            return null;
+          },
+          create_trust_introduction: (a) =>
+            JSON.stringify({
+              schema: 1,
+              kind: "introduction",
+              payload: {
+                account_id: a.accountId,
+                note: a.note,
+                issuer_account_id: SELF.account,
+              },
+            }),
+          witness_trust_creation: (a) =>
+            JSON.stringify({
+              schema: 1,
+              kind: "witness",
+              payload: {
+                account_id: a.accountId,
+                issuer_account_id: SELF.account,
+              },
+            }),
           // trust
           get_trust: (a) => ({
             account_id: String(a.accountId),
@@ -916,6 +979,8 @@ export const test = base.extend({
             verified: verifiedAccounts.has(String(a.accountId)),
             fingerprint_changed: dataMode === "changed",
             known: true,
+            first_seen_at_ms: 1700000000000,
+            device_changes: [],
           }),
           mark_verified: (a) => {
             verifiedAccounts.add(String(a.accountId));

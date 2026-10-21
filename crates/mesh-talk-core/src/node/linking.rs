@@ -105,9 +105,14 @@ impl Node {
             if self.device_sync_policy_snapshot().1 != wanted_revision {
                 break;
             }
-            let frame = match channel.recv().await {
-                Ok(f) => f,
-                Err(_) => break,
+            let frame = match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                channel.recv(),
+            )
+            .await
+            {
+                Ok(Ok(f)) => f,
+                _ => break,
             };
             if frame.is_empty() {
                 break; // terminator
@@ -142,6 +147,15 @@ impl Node {
             && self.device_sync_policy().history
         {
             authorize(&mut || {
+                let _commit = self
+                    .account_sync_commit
+                    .lock()
+                    .expect("account sync commit mutex not poisoned");
+                if self.device_sync_policy_snapshot().1 != wanted_revision {
+                    return Err(NodeError::Authorization(
+                        "account sync policy changed".into(),
+                    ));
+                }
                 self.import_account_backfill_for_account(&account.account_id(), &backfill)
             })?;
         }
@@ -221,7 +235,7 @@ impl Node {
     /// proves it and binds the authenticated channel peer. Clears the code on success.
     #[cfg(test)]
     pub(in crate::node) async fn serve_pairing(
-        &self,
+        self: &std::sync::Arc<Self>,
         channel: &mut SecureChannel<TcpStream>,
         req: PairingRequest,
     ) {
@@ -229,7 +243,7 @@ impl Node {
     }
 
     pub(in crate::node) async fn serve_pairing_selected(
-        &self,
+        self: &std::sync::Arc<Self>,
         channel: &mut SecureChannel<TcpStream>,
         req: PairingRequest,
         selected: Option<bool>,
@@ -354,11 +368,13 @@ impl Node {
         // joiner backfills nothing.
         if selected.unwrap_or(true) && offered.history {
             let mut total_bytes = 0usize;
-            for rec in self
-                .export_account_backfill()
-                .into_iter()
-                .take(MAX_PAIRING_BACKFILL_RECORDS)
-            {
+            let Ok(records) = self
+                .account_blocking(|node| Ok(node.export_account_backfill()))
+                .await
+            else {
+                return;
+            };
+            for rec in records {
                 if self.device_sync_policy_snapshot().1 != policy_revision {
                     return;
                 }
@@ -384,10 +400,24 @@ impl Node {
     pub(in crate::node) fn export_account_backfill(&self) -> Vec<BackfillRecord> {
         let my_account = self.account.account_id();
         let mut out = Vec::new();
+        let mut total_bytes = 0usize;
+        // Fixed-width bincode fields plus MTBF1; compute before cloning plaintext.
+        let mut selected = 0usize;
+        let mut remaining = |from_len: usize, plaintext_len: usize| {
+            let encoded_len = 5usize + 32 + 8 + from_len + 8 + 8 + plaintext_len + 32;
+            if selected >= MAX_PAIRING_BACKFILL_RECORDS
+                || total_bytes.saturating_add(encoded_len) > MAX_PAIRING_BACKFILL_BYTES
+            {
+                return false;
+            }
+            total_bytes += encoded_len;
+            selected += 1;
+            true
+        };
         {
             let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
             for conv in sentlog.conversations() {
-                for e in sentlog.entries(&conv) {
+                for e in sentlog.entries_ref(&conv) {
                     if let Some(env) = DmEnvelope::decode(&e.plaintext) {
                         if self.recipient_expired(&env.body, EventId::new(env.msg_id), e.wall_clock)
                         {
@@ -403,6 +433,9 @@ impl Node {
                         {
                             continue;
                         }
+                        if !remaining(my_account.len(), e.plaintext.len()) {
+                            return out;
+                        }
                         out.push(BackfillRecord {
                             conv: *conv.as_bytes(),
                             from: my_account.clone(),
@@ -417,7 +450,7 @@ impl Node {
         {
             let received = self.received.lock().expect("received mutex not poisoned");
             for conv in received.conversations() {
-                for e in received.entries(&conv) {
+                for e in received.entries_ref(&conv) {
                     if let Some(envelope) = DmEnvelope::decode(&e.plaintext) {
                         if self.recipient_expired(&envelope.body, e.event_id, e.wall_clock) {
                             continue;
@@ -435,6 +468,9 @@ impl Node {
                                 != *conv.as_bytes()
                         {
                             continue;
+                        }
+                        if !remaining(e.from.len(), e.plaintext.len()) {
+                            return out;
                         }
                         out.push(BackfillRecord {
                             conv: *conv.as_bytes(),

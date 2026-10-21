@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import type { PresenceStatus } from "@/lib/presence";
 
@@ -5,6 +6,7 @@ export type { PresenceStatus } from "@/lib/presence";
 
 const COLOR: Record<PresenceStatus, string> = {
   online: "hsl(var(--presence-online))",
+  reconnecting: "hsl(var(--presence-recent))",
   away: "hsl(var(--presence-recent))",
   recent: "hsl(var(--presence-recent))",
   offline: "hsl(var(--muted-foreground))",
@@ -30,12 +32,16 @@ export function PresenceDot({
   className,
   label,
 }: PresenceDotProps) {
+  const { t } = useTranslation();
   const px = SIZE[size];
   const color = COLOR[status];
   return (
     <span
       role="status"
-      aria-label={label ?? status}
+      aria-label={
+        label ??
+        (status === "reconnecting" ? t("presence.reconnecting") : status)
+      }
       className={cn("relative inline-flex shrink-0", className)}
       style={{ width: px, height: px }}
     >

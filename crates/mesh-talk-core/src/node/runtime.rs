@@ -317,16 +317,18 @@ impl NodeRuntime {
         // The two keystore unlocks run sequential 600k-PBKDF2/Argon2 KDFs (~seconds of CPU,
         // the bulk of cold start). Offload them to the blocking pool so they don't monopolize
         // a tokio worker; the result is identical (same files, same ordering).
-        let (identity, account) = {
+        let (identity, account, account_created_at_ms) = {
             let identity_path = dir.join("identity.keystore");
             let account_path = dir.join("account.keystore");
             let password = password.to_string();
             tokio::task::spawn_blocking(move || {
                 let identity = keystore::load_or_create(&identity_path, &password)
                     .map_err(|e| RuntimeError::Open(e.into()))?;
+                let new_account = !account_path.try_exists()?;
                 let account = account_keystore::load_or_create(&account_path, &password)
                     .map_err(|e| RuntimeError::Open(e.into()))?;
-                Ok::<_, RuntimeError>((identity, account))
+                let created_at_ms = new_account.then(super::node::now_millis);
+                Ok::<_, RuntimeError>((identity, account, created_at_ms))
             })
             .await
             .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??
@@ -370,8 +372,9 @@ impl NodeRuntime {
             let messages_log = dir.join("messages.log");
             let sent_log = dir.join("sent.log");
             let password = password.to_string();
+            let initial_display_name = display_name.to_owned();
             tokio::task::spawn_blocking(move || {
-                Node::open_with_account(
+                let node = Node::open_with_account(
                     identity,
                     account,
                     roster,
@@ -381,7 +384,14 @@ impl NodeRuntime {
                     &messages_log,
                     &sent_log,
                     &password,
-                )
+                )?;
+                // Only this branch knows it just generated a mesh account. Existing
+                // keystores, restored accounts and local login dates prove no age.
+                if let Some(created_at_ms) = account_created_at_ms {
+                    node.initialize_new_trust_card(initial_display_name, created_at_ms)
+                        .map_err(|e| LogError::Io(std::io::Error::other(e.to_string())))?;
+                }
+                Ok::<_, LogError>(node)
             })
             .await
         };
@@ -465,9 +475,9 @@ impl NodeRuntime {
                     }
                 }));
             }
-            // Re-publish our avatar to freshly-discovered peers: poll the roster, and for any
-            // peer user-id we hadn't seen before, send our current profile (a no-op if we've
-            // set no avatar). Bounded — `seen` only tracks ids, and re-publish skips known peers.
+            // Re-publish our signed card or legacy avatar to freshly-discovered peers.
+            // Poll the roster and send each newly present peer our current public profile.
+            // Bounded by the live roster; no-op when neither public profile exists.
             {
                 let node = Arc::clone(&node);
                 let roster = Arc::clone(&roster);
@@ -503,8 +513,8 @@ impl NodeRuntime {
                                 );
                             }
                         }
-                        // Re-publish our avatar to peers that just (re)appeared (a no-op if we've
-                        // set no avatar). Bounded by the live roster size.
+                        // Re-publish our public profile to peers that just (re)appeared.
+                        // Bounded by the live roster size.
                         for peer in profile_republish_targets(&mut present_prev, &peers) {
                             node.republish_profile_to(&peer).await;
                         }

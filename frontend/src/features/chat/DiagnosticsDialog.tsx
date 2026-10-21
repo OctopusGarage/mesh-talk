@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { hasReconnectingPresence, usePresence } from "@/store/presence";
 import {
   Activity,
   Copy,
@@ -146,12 +147,13 @@ export function DiagnosticsDialog({
       solo.push(p);
     }
   }
+  const presenceMap = usePresence((s) => s.map);
   const onlineAccounts = new Set(
     peers
       .filter(
         (p) =>
           isContactPeer(p) &&
-          p.last_seen_secs <= ONLINE_SECS &&
+          presenceMap[peerAccountKey(p)]?.online &&
           p.account_id !== info?.account_id,
       )
       .map(peerAccountKey),
@@ -161,6 +163,7 @@ export function DiagnosticsDialog({
     ready,
     noNetwork: info !== null && info.interfaces.length === 0,
     onlinePeople: onlineAccounts,
+    reconnecting: hasReconnectingPresence(presenceMap, info?.account_id),
   });
 
   return (
@@ -200,7 +203,7 @@ export function DiagnosticsDialog({
           ) : (
             <span
               aria-hidden="true"
-              className={`h-2 w-2 shrink-0 rounded-full ${connection === "failed" ? "bg-destructive" : connection === "ready" ? "bg-signal" : connection === "no-network" ? "bg-attention" : "bg-muted-foreground"}`}
+              className={`h-2 w-2 shrink-0 rounded-full ${connection === "failed" ? "bg-destructive" : connection === "ready" ? "bg-signal" : connection === "no-network" || connection === "reconnecting" ? "bg-attention" : "bg-muted-foreground"}`}
             />
           )}
           <span

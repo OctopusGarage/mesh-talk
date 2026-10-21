@@ -26,6 +26,10 @@ export function requiredBrowserPaths(tier) {
   paths.push(
     ["automatic-delivery.spec.ts", "text, sticker and file card stay Awaiting until explicit authoritative mock projection"],
     ["automatic-delivery.spec.ts", "a native picker completed after conversation navigation cannot send to the new conversation"],
+    ["automatic-delivery.spec.ts", "a pending local text acceptance moves the submitted text out of the composer"],
+    ["automatic-delivery.spec.ts", "a scoped native delivery invalidation refreshes status without a polling response"],
+    ["automatic-delivery.spec.ts", "submitted text stays in its bubble after acceptance and navigation"],
+    ["automatic-delivery.spec.ts", "submitted text stays in its bubble after rejection and navigation"],
     ["media-recovery.spec.ts", "received media recovers when bytes become available with stable fileConv"],
     ["media-lifecycle.spec.ts", "same-identity disable/re-enable never returns a revoked URL"],
     ["media-lifecycle.spec.ts", "cleanup during an admitted durable read prevents fallback and blob creation"],
@@ -58,6 +62,7 @@ export function requiredBrowserPaths(tier) {
     ["unread-badge.spec.ts", "an undiscovered sender remains unread across restart until discovery"],
     ["unread-badge.spec.ts", "history load failure leaves unread until the chat can be viewed"],
     ["unread-badge.spec.ts", "a replacement account does not inherit unread after identity lookup fails"],
+    ["unread-badge.spec.ts", "one logical DM remains one unread badge across duplicate live events and history scanning"],
   );
   return paths;
 }

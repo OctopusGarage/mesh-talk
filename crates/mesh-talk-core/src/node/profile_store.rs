@@ -32,6 +32,10 @@ pub struct ProfileStore {
 }
 
 impl ProfileStore {
+    #[cfg(test)]
+    pub(super) fn fail_appends_for_test(&mut self, enabled: bool) {
+        self.file.fail_appends_for_test(enabled).unwrap();
+    }
     /// Open (or create) the store at `path`, collapsing stored records to the newest
     /// per account.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
@@ -53,11 +57,18 @@ impl ProfileStore {
         Ok(store)
     }
 
-    /// Insert `entry` only if it is newer than what we hold (newest-wins, ties keep the
-    /// existing one).
+    /// Signed revisions order profiles; equal revisions use a deterministic
+    /// content order, with clear tombstones winning so replay cannot resurrect them.
+    fn order(revision: u64, avatar: &Option<Vec<u8>>) -> (u64, bool, Option<&[u8]>) {
+        (revision, avatar.is_none(), avatar.as_deref())
+    }
+
+    /// Use the same total order during journal replay and live admission.
     fn merge(by_account: &mut HashMap<String, ProfileEntry>, entry: ProfileEntry) {
         match by_account.get(&entry.account_id) {
-            Some(cur) if cur.updated_at >= entry.updated_at => {}
+            Some(cur)
+                if Self::order(cur.updated_at, &cur.avatar)
+                    >= Self::order(entry.updated_at, &entry.avatar) => {}
             _ => {
                 by_account.insert(entry.account_id.clone(), entry);
             }
@@ -65,7 +76,7 @@ impl ProfileStore {
     }
 
     /// Record a received avatar for `account_id`. Returns `true` if it was applied
-    /// (strictly newer than what we held), `false` if it was a stale/duplicate update
+    /// (greater in the revision/content order), `false` for a stale/duplicate update
     /// (in which case nothing is written). Oversized avatars are rejected (defensive;
     /// the payload signature check already bounds size).
     pub fn record(
@@ -80,7 +91,8 @@ impl ProfileStore {
             return Ok(false);
         }
         // Stale/duplicate? Don't write — keeps the log from growing on a replay.
-        if matches!(self.by_account.get(account_id), Some(cur) if cur.updated_at >= updated_at) {
+        if matches!(self.by_account.get(account_id), Some(cur) if Self::order(cur.updated_at, &cur.avatar) >= Self::order(updated_at, &avatar))
+        {
             return Ok(false);
         }
         let entry = ProfileEntry {
@@ -93,7 +105,7 @@ impl ProfileStore {
         if self.records >= self.by_account.len().saturating_mul(2).saturating_add(64) {
             self.compact()?;
         }
-        self.file.append(&entry)?;
+        self.file.append_durable(&entry)?;
         self.records += 1;
         self.by_account.insert(account_id.to_string(), entry);
         Ok(true)
@@ -210,6 +222,29 @@ mod tests {
         assert_eq!(store.updated_at("alice"), Some(66));
         std::fs::remove_dir(path.with_extension("compact-tmp")).unwrap();
         assert!(store.record("alice", 67, Some(b"new".to_vec())).unwrap());
+    }
+
+    #[test]
+    fn equal_revision_conflicts_converge_in_both_orders_and_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let variants = [None, Some(b"first".to_vec()), Some(b"second".to_vec())];
+        for (index, reverse) in [false, true].into_iter().enumerate() {
+            let path = dir.path().join(format!("profiles-{index}.log"));
+            let mut store = ProfileStore::open(&path, "pw").unwrap();
+            let mut updates = variants.clone();
+            if reverse {
+                updates.reverse();
+            }
+            for avatar in updates {
+                store.record("alice", 100, avatar).unwrap();
+            }
+            // Clear wins equal revisions; a replay cannot resurrect an avatar.
+            assert_eq!(store.avatar("alice"), None);
+            drop(store);
+            let reopened = ProfileStore::open(&path, "pw").unwrap();
+            assert_eq!(reopened.avatar("alice"), None);
+            assert_eq!(reopened.updated_at("alice"), Some(100));
+        }
     }
 
     #[test]

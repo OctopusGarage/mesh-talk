@@ -143,7 +143,7 @@ fn save(path: &Path, entries: &[FederationSeed], create: bool) -> io::Result<()>
 
 /// Hold a stable companion inode across load, replacement, and directory sync.
 /// Never unlink it: a second inode would let concurrent writers bypass the lock.
-fn lock_mutation(path: &Path) -> io::Result<(PathBuf, File)> {
+pub(super) fn lock_mutation(path: &Path) -> io::Result<(PathBuf, File)> {
     let filename = path
         .file_name()
         .ok_or_else(|| invalid("expected a manifest filename"))?;

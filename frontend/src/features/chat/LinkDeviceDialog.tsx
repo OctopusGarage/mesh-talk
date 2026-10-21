@@ -27,6 +27,7 @@ import { publishAppearanceBeforeLink } from "@/lib/linkedAppearance";
 import { useCopyFeedback } from "./useCopyFeedback";
 import { useSerialPoll } from "./useSerialPoll";
 import { useChat } from "@/store/chat";
+import { useAuth } from "@/store/auth";
 
 const SYNC_OPTIONS = [
   { category: "history", label: "historySync" },
@@ -37,7 +38,31 @@ const SYNC_OPTIONS = [
 ] as const satisfies readonly { category: SyncCategory; label: string }[];
 
 export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
+  const owner = useAuth((state) => state.user?.id);
+  const generation = useAuth((state) => state.generation);
+  if (!owner) return null;
+  return (
+    <OwnedLinkDeviceDialog
+      key={`${owner}:${generation}`}
+      owner={owner}
+      menuItem={menuItem}
+    />
+  );
+}
+
+function OwnedLinkDeviceDialog({
+  owner,
+  menuItem,
+}: {
+  owner: string;
+  menuItem: boolean;
+}) {
   const { t } = useTranslation();
+  const generation = useRef(useAuth.getState().generation).current;
+  const ownsSession = () => {
+    const current = useAuth.getState();
+    return current.user?.id === owner && current.generation === generation;
+  };
   const translate = useRef(t);
   useEffect(() => {
     translate.current = t;
@@ -72,7 +97,7 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
     setSyncError(null);
     setSyncStatus([]);
     setSyncStatusError(null);
-    void chat.getDeviceSyncPolicy().then(
+    void chat.getDeviceSyncPolicy(owner).then(
       (policy) => {
         if (active) setSyncPolicy(policy);
       },
@@ -88,12 +113,12 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
     return () => {
       active = false;
     };
-  }, [open]);
+  }, [open, owner]);
 
   useSerialPoll(
     open,
     5_000,
-    () => chat.getDeviceSyncStatus(),
+    () => chat.getDeviceSyncStatus(owner),
     (statuses) => {
       setSyncStatus(statuses);
       setSyncStatusError(null);
@@ -107,7 +132,7 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
     setSyncBusy(true);
     setSyncError(null);
     try {
-      const policy = await chat.setDeviceSyncCategory(category, enabled);
+      const policy = await chat.setDeviceSyncCategory(category, enabled, owner);
       if (openRef.current && session === dialogSession.current)
         setSyncPolicy(policy);
     } catch (error) {
@@ -121,8 +146,9 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
   };
 
   const stopLinking = () => {
+    if (!ownsSession()) return Promise.resolve();
     const pending = chat.stopLinking().catch((e) => {
-      setError(errorMessage(e));
+      if (ownsSession()) setError(errorMessage(e));
     });
     stopRef.current = pending;
     void pending.finally(() => {
@@ -162,14 +188,25 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
     setMsgIsError(false);
     try {
       if (stopRef.current) await stopRef.current;
-      if (!openRef.current || session !== dialogSession.current) return;
-      await publishAppearanceBeforeLink().catch((error) => {
+      if (
+        !ownsSession() ||
+        !openRef.current ||
+        session !== dialogSession.current
+      )
+        return;
+      await publishAppearanceBeforeLink(owner).catch((error) => {
         console.warn("Could not prepare linked appearance", error);
       });
+      if (
+        !ownsSession() ||
+        !openRef.current ||
+        session !== dialogSession.current
+      )
+        return;
       const nextCode = await chat.startLinking();
-      if (openRef.current && session === dialogSession.current)
+      if (ownsSession() && openRef.current && session === dialogSession.current)
         setCode(nextCode);
-      else await stopLinking();
+      else if (ownsSession()) await stopLinking();
     } catch (e) {
       if (openRef.current && session === dialogSession.current) {
         setMsgIsError(true);
@@ -194,6 +231,7 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
     setMsgIsError(false);
     try {
       await chat.linkDevice(joinPeer, joinCode.trim());
+      if (!ownsSession()) return;
       await auth.adoptLinkedAccount();
       if (openRef.current && session === dialogSession.current) {
         setMsg(t("linkDevice.linked"));

@@ -25,6 +25,7 @@ export function PersonalDevices() {
   return (
     <AccountDevices
       key={`${owner}:${generation}:${accountId}:${deviceId}:${runtime}`}
+      owner={owner}
       accountId={accountId}
       deviceId={deviceId}
     />
@@ -32,9 +33,11 @@ export function PersonalDevices() {
 }
 
 function AccountDevices({
+  owner,
   accountId,
   deviceId,
 }: {
+  owner: string;
   accountId: string;
   deviceId: string;
 }) {
@@ -46,12 +49,13 @@ function AccountDevices({
   useSerialPoll(
     true,
     5_000,
-    () => chat.getDeviceSyncStatus(),
+    () => chat.getDeviceSyncStatus(owner),
     (next) => {
       setStatuses(next);
       setFailed(false);
     },
     () => setFailed(true),
+    "state",
   );
   // Inventory comes from the persistent certified roster, never discovery alone.
   // Sync phase describes replication, not whether a device is currently online.

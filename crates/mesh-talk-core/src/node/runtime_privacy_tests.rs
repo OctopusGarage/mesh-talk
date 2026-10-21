@@ -623,7 +623,26 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
     // Force the prior account proof to durable storage before explicit pairing.
     alice.handle().cached_peer_snapshot_async().await.unwrap();
     let code = alice.start_linking();
-    assert_eq!(bob.link_device(&alice_id, &code).await.unwrap(), account);
+    let pairing_target = bob
+        .roster
+        .lock()
+        .unwrap()
+        .get(&alice_id)
+        .cloned()
+        .expect("discovery established the certified pairing target");
+    let linked = bob.link_device(&alice_id, &code).await;
+    assert!(
+        linked.is_ok(),
+        "known-peer pairing failed: result={linked:?}; linker_user_id={alice_id}; joiner_user_id={bob_id}; certified_account={:?}; roster_target={}; routes={:?}; linker_tcp={}; linker_udp={}; joiner_tcp={}; joiner_udp={}",
+        pairing_target.account_id,
+        pairing_target.addr,
+        pairing_target.routes,
+        alice.listen_tcp_port(),
+        alice.discovery_port(),
+        bob.listen_tcp_port(),
+        bob.discovery_port(),
+    );
+    assert_eq!(linked.unwrap(), account);
     bob.stop().await;
     alice.stop().await;
     let (alice, _) = start_reserved("pair-owner").await;

@@ -64,6 +64,14 @@ export interface ReactionInfo {
   who: string[];
 }
 
+/** Owner-scoped invalidation; null requests a full repair after event-buffer lag. */
+export interface ChannelChangedEvent {
+  owner: string;
+  account_id: string;
+  device_id: string;
+  channel_id: string | null;
+}
+
 export interface ChannelMemberInfo {
   user_id: string;
   name: string;
@@ -172,15 +180,27 @@ export interface PresenceEvidence {
     "local" | "routed" | "directory" | "authenticated" | "unscoped" | "self";
   last_seen_secs: number;
   expires_in_secs: number;
+  /** Immediate introducing office, not the member's location or a delivery path. */
+  post_office?: {
+    endpoint: string;
+    user_id?: string;
+    name?: string;
+  };
 }
 export interface PresenceDevice {
   user_id: string;
   evidence: PresenceEvidence[];
 }
 export interface PresenceInfo {
-  /** Person has fresh eligible device evidence; groups use member counts instead. */
+  /** Person has eligible public presence or bounded cross-network tolerance. */
   online: boolean;
   devices?: PresenceDevice[];
+  /** Latency-tolerant online observation; present as online with a weak connection. */
+  connection_weak?: boolean;
+  /** Remaining nonrenewing grace, never fresh Online evidence. */
+  reconnect_expires_in_secs?: number;
+  /** Host-owned presentation expiry; fresh device evidence remains separate. */
+  online_expires_in_secs?: number;
   member_count?: number;
   online_count?: number;
   unbound_member_count?: number;
@@ -265,6 +285,12 @@ export interface DownloadedUpdate {
 // --- Contact trust / safety numbers (src-tauri/src/trust.rs + chat_commands.rs) ---
 
 export interface TrustInfo {
+  first_seen_at_ms?: number | null;
+  device_changes?: Array<{
+    previous_fingerprint: string;
+    current_fingerprint: string;
+    observed_at_ms: number;
+  }>;
   account_id: string;
   /** The fingerprint pinned on first contact (the one to verify out-of-band). */
   first_seen_fingerprint: string;
@@ -295,6 +321,10 @@ export interface FavoriteInfo {
 // --- Tauri events (src-tauri/src/events.rs) ---
 
 export interface DmReceivedEvent {
+  /** Logical account message ID, matching history; legacy hosts may omit it. */
+  message_id?: string | null;
+  /** Account binding verified by the core, independent of roster arrival order. */
+  from_account?: string | null;
   from: string;
   from_name: string;
   text: string;
@@ -389,4 +419,12 @@ export interface PrivacySnapshot {
     name: string;
     source: "Manual" | "Initiated";
   }[];
+}
+
+/** Invalidation only. Read snapshots through the authorized IPC adapters. */
+export interface NodeStateChangedEvent {
+  owner: string;
+  account_id: string;
+  device_id: string;
+  kind: "state" | "roster" | "delivery" | "files";
 }

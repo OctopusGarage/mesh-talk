@@ -29,6 +29,8 @@ pub struct SentEntry {
 /// indexed in memory by conversation.
 pub struct SentLog {
     file: EncryptedRecordLog<SentEntry>,
+    revision: u64,
+    rewrite_revision: u64,
     by_conversation: HashMap<ConversationId, Vec<SentEntry>>,
     keys: HashMap<SentKey, (ConversationId, usize)>,
 }
@@ -69,6 +71,7 @@ impl SentLog {
         self.keys
             .insert(entry_key, (entry.conversation, entries.len()));
         entries.push(entry.clone());
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -93,6 +96,8 @@ impl SentLog {
         Ok(Self {
             file,
             by_conversation,
+            revision: 0,
+            rewrite_revision: 0,
             keys,
         })
     }
@@ -117,6 +122,7 @@ impl SentLog {
             .entry(key(&entry))
             .or_insert((conversation, entries.len()));
         entries.push(entry);
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -151,6 +157,8 @@ impl SentLog {
                 .insert(key(&entry), (entry.conversation, entries.len()));
             entries.push(entry);
         }
+        self.revision = self.revision.wrapping_add(1);
+        self.rewrite_revision = self.rewrite_revision.wrapping_add(1);
         Ok(removed)
     }
 
@@ -173,6 +181,14 @@ impl SentLog {
             .get(conversation)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Process-local invalidation for archive selectors; wire/storage stay unchanged.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub(crate) fn rewrite_revision(&self) -> u64 {
+        self.rewrite_revision
     }
 
     /// The conversation ids this log holds entries for.

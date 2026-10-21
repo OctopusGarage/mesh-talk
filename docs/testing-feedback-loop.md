@@ -28,6 +28,16 @@ cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
 
+Portable browser acceptance runs through `scripts/evals/portable-runner.mjs`.
+Windows uses two sequential Playwright shards with separate browser/dev-server
+lifetimes; other platforms use one. Each shard writes a unique nested evidence
+root and must exit successfully. The runner merges every outcome and validates
+the unchanged full scenario inventory before the existing screenshot/trace
+validator runs. Missing, duplicate, skipped, flaky or failed cases remain failures.
+This bounds process lifetime after Windows traces showed progressive local
+page-load latency and a 20-minute job cancellation after 55 of 57 passed cases;
+it does not increase the job deadline or establish a product latency guarantee.
+
 ## Validation stages and agent responsibilities
 
 Validation depth and business capability are separate dimensions. Use the same

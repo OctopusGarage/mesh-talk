@@ -38,6 +38,16 @@ impl QueryTracker {
     }
 
     pub fn accept(&mut self, ip: IpAddr, bytes: &[u8], now: Instant) -> Option<Announce> {
+        self.accept_with_latency(ip, bytes, now)
+            .map(|(announce, _)| announce)
+    }
+
+    pub(crate) fn accept_with_latency(
+        &mut self,
+        ip: IpAddr,
+        bytes: &[u8],
+        now: Instant,
+    ) -> Option<(Announce, Duration)> {
         // Read only the bounded nonce field before the full authenticated decode.
         let nonce: Nonce = bytes.get(5..21)?.try_into().ok()?;
         let key = (ip, nonce);
@@ -48,7 +58,7 @@ impl QueryTracker {
         }
         let announce = decode_response(bytes, nonce)?;
         self.pending.remove(&key);
-        Some(announce)
+        Some((announce, now.saturating_duration_since(sent)))
     }
 }
 

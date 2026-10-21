@@ -1,7 +1,15 @@
+import { createRosterRefresh } from "./rosterRefresh";
+import {
+  notifySyncInvalidation,
+  setPushStateSupport,
+  supportsPushState,
+} from "@/lib/syncInvalidation";
+import { readWithDeadline } from "@/lib/readDeadline";
 import { notifyIncomingFileDismissed } from "@/lib/incomingFileDismissal";
 import { saveAttachment } from "@/lib/attachmentSave";
 import { create } from "zustand";
 import { createChannelActions, type ChannelActions } from "./channelActions";
+import { createChannelRefresh } from "./channelRefresh";
 import { chat } from "@/lib/api/chat";
 import { contactPolicy, favorites as favoritesApi } from "@/lib/api/contacts";
 import { errorMessage } from "@/lib/error";
@@ -128,7 +136,7 @@ async function pollUntilReady(
     try {
       const owner = captureOwner().owner;
       if (!owner) return false;
-      const identity = await chat.ownerIdentity(owner);
+      const identity = await readWithDeadline(() => chat.ownerIdentity(owner));
       if (isCancelled()) return false;
       if (identity.owner !== owner)
         throw new Error("Node identity is not ready for this owner");
@@ -185,6 +193,7 @@ async function pollUntilReady(
           ready: true,
         };
       });
+      setPushStateSupport(identity.supports_push_state ? owner : null);
       syncChatAvatarIdentity(acct, () => !isCancelled());
       await get().refreshRoster();
       return true;
@@ -249,6 +258,7 @@ export interface ChatState
   dismissFile: (fileConv: string) => void;
   clearError: () => void;
   refreshRoster: () => Promise<void>;
+  refreshChannels: (channelId?: string | null) => Promise<void>;
   deleteContact: (account: string) => Promise<boolean>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
   markActiveRead: () => void;
@@ -334,6 +344,122 @@ function emptySessionData() {
   };
 }
 
+// The coordinator captures owner/runtime authority when work is requested.
+// Its callbacks are lazy because the store itself is initialized below.
+const channelRefresh = createChannelRefresh({
+  read: () => useChat.getState(),
+  write: (patch) => {
+    useChat.setState(patch);
+    refreshChannelRecovery(useChat.setState, useChat.getState);
+  },
+  capture: () => captureChat(useChat.getState),
+  commands: chat,
+});
+
+const rosterRefresh = createRosterRefresh({
+  capture: () => captureChat(useChat.getState),
+  refresh: (hasPending) =>
+    refreshRosterSnapshot(useChat.setState, useChat.getState, hasPending),
+});
+
+async function refreshRosterSnapshot(
+  rawSet: Set,
+  get: Get,
+  hasPending: () => boolean,
+) {
+  const lease = captureChat(get);
+  const set = guardedSet(rawSet, lease.current);
+  if (!lease.current()) return;
+  if (!get().ready || get().historyScanBusy) return;
+  const request = get().rosterRequest + 1;
+  set({ rosterRequest: request });
+  try {
+    let identity;
+    try {
+      identity = await readWithDeadline(() => chat.ownerIdentity(lease.owner!));
+    } catch {
+      if (get().rosterRequest === request && !hasPending())
+        set({ ready: false });
+      return;
+    }
+    if (!lease.current() || get().rosterRequest !== request) return;
+    if (
+      identity.device_id !== get().myId ||
+      identity.account_id !== get().myAccountId
+    ) {
+      // Runtime/account replacement can happen without a host logout. Invalidate
+      // old in-flight conversation work; the run's owned ticker performs fresh boot.
+      resetChatFileAvailability();
+      rawSet((state) => ({
+        ...invalidateConversationIdentity(state),
+        identityEpoch: state.identityEpoch + 1,
+        // The replacement identity is already resolved. Bind new arrivals to it
+        // while retryBoot hydrates its persisted state, after dropping old work.
+        myId: identity.device_id,
+        myAccountId: identity.account_id,
+      }));
+      get().retryBoot();
+      return;
+    }
+    const [peers, accounts] = await Promise.all([
+      readWithDeadline(() => chat.listPeers()),
+      readWithDeadline(() => chat.listAccounts()),
+    ]);
+    if (!lease.current() || get().rosterRequest !== request) return;
+    setPushStateSupport(identity.supports_push_state ? lease.owner : null);
+    const channelWork = channelRefresh.ifDue();
+    // Polling returns fresh arrays even when discovery has not changed. Preserve
+    // the previous references so sidebar subscribers do not redraw every tick.
+    const previous = get();
+    const rosterChanged =
+      JSON.stringify([previous.peers, previous.accounts]) !==
+      JSON.stringify([peers, accounts]);
+    const resolved = peers.filter(
+      (peer) => peer.account_id && previous.pendingUnknownUnread[peer.user_id],
+    );
+    if (rosterChanged || resolved.length) {
+      const unread = { ...previous.unread };
+      const pendingUnknownUnread = { ...previous.pendingUnknownUnread };
+      for (const peer of resolved) {
+        const key = `account:${peer.account_id}`;
+        unread[key] = (unread[key] ?? 0) + pendingUnknownUnread[peer.user_id];
+        delete pendingUnknownUnread[peer.user_id];
+      }
+      set({
+        ...(rosterChanged ? { peers, accounts } : {}),
+        ...(resolved.length ? { unread, pendingUnknownUnread } : {}),
+      });
+    }
+    await channelWork;
+    if (!lease.current() || get().rosterRequest !== request) return;
+    const channels = get().channels;
+    refreshChannelRecovery(rawSet, get);
+    if (identity.history_revision !== undefined) {
+      await scanConversationHistory(
+        rawSet,
+        get,
+        [
+          ...accounts.map((account): Conversation => ({
+            kind: "account",
+            id: account.account_id,
+            name: "",
+          })),
+          ...channels.map((channel): Conversation => ({
+            kind: "channel",
+            id: channel.channel_id,
+            name: channel.name,
+          })),
+        ],
+        identity.history_revision,
+        () => lease.current() && get().rosterRequest === request,
+      );
+      if (!lease.current() || get().rosterRequest !== request) return;
+    }
+  } catch {
+    // node may still be starting; ignore
+  }
+}
+
 export const useChat = create<ChatState>((rawSet, get) => ({
   ...emptySessionData(),
   runEpoch: 0,
@@ -342,6 +468,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   setError: (msg) => rawSet({ error: msg }),
 
   resetForLock: () => {
+    setPushStateSupport(null);
     lastUnknownSenderRefresh = 0;
     rawSet((state) => ({
       ...emptySessionData(),
@@ -389,6 +516,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     });
     try {
       await favoritesApi.setFavorite(lease.owner!, id, pinned);
+      if (lease.current())
+        notifySyncInvalidation({ owner: lease.owner!, kind: "contacts" });
     } catch (e) {
       set({ error: `Couldn't update pin: ${errorMessage(e)}` });
     }
@@ -416,6 +545,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     });
     try {
       await favoritesApi.setAlias(lease.owner!, id, trimmed);
+      if (lease.current())
+        notifySyncInvalidation({ owner: lease.owner!, kind: "contacts" });
     } catch (e) {
       set({ error: `Couldn't rename contact: ${errorMessage(e)}` });
     }
@@ -446,8 +577,12 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     });
     try {
       await favoritesApi.setChannelHidden(lease.owner!, id, hidden);
+      if (lease.current())
+        notifySyncInvalidation({ owner: lease.owner!, kind: "contacts" });
     } catch (e) {
-      set({ error: `Couldn't update channel visibility: ${errorMessage(e)}` });
+      set({
+        error: `Couldn't update channel visibility: ${errorMessage(e)}`,
+      });
     }
     if (lease.current()) await get().loadFavorites();
   },
@@ -561,15 +696,56 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (typeof document !== "undefined")
       document.addEventListener?.("visibilitychange", expire);
 
+    let rosterBusy = false;
+    let rosterDirty = false;
+    const refreshRoster = async (invalidate = false) => {
+      if (rosterBusy) {
+        rosterDirty ||= invalidate;
+        return;
+      }
+      rosterBusy = true;
+      try {
+        do {
+          rosterDirty = false;
+          await get().refreshRoster();
+        } while (rosterDirty && lease.current());
+      } finally {
+        rosterBusy = false;
+      }
+    };
+    let nextRosterFallback = 0;
+    let nextStatusFallback = 0;
     const roster = setInterval(() => {
       if (lease.current() && get().ready) {
-        void get().refreshRoster();
-        void get().refreshStatuses();
+        const now = performance.now();
+        if (!supportsPushState(lease.owner) || now >= nextRosterFallback) {
+          nextRosterFallback = now + 30000;
+          void refreshRoster();
+        }
+        if (!supportsPushState(lease.owner) || now >= nextStatusFallback) {
+          nextStatusFallback = now + 30000;
+          void get().refreshStatuses();
+        }
       } else if (lease.current() && !get().bootBusy && !get().bootFailed)
         get().retryBoot();
     }, 2000);
 
     const unlisten = subscribeNodeEvents({
+      onStateChanged: (e) => {
+        const state = get();
+        if (
+          !lease.current() ||
+          !state.ready ||
+          e.owner !== lease.owner ||
+          e.account_id !== state.myAccountId ||
+          e.device_id !== state.myId
+        )
+          return;
+        notifySyncInvalidation({ owner: e.owner, kind: e.kind });
+        if (e.kind === "state" || e.kind === "roster") void refreshRoster(true);
+        if (e.kind === "delivery" || e.kind === "files")
+          void state.refreshStatuses(undefined, true);
+      },
       onIntegrationMessageAccepted: (e) => {
         const state = get();
         if (
@@ -589,6 +765,18 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
       onDm: (e) => {
         if (lease.current()) get_handleDm(set, get, e);
+      },
+      onChannelChanged: (e) => {
+        const state = get();
+        if (
+          !lease.current() ||
+          !state.ready ||
+          e.owner !== lease.owner ||
+          e.account_id !== state.myAccountId ||
+          e.device_id !== state.myId
+        )
+          return;
+        void state.refreshChannels(e.channel_id);
       },
       onChannelMessage: (e) => {
         if (lease.current()) get_handleChannel(set, get, e);
@@ -663,160 +851,9 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }
   },
 
-  refreshRoster: async () => {
-    const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
-    if (!lease.current()) return;
-    if (!get().ready || get().historyScanBusy) return;
-    const request = get().rosterRequest + 1;
-    set({ rosterRequest: request });
-    try {
-      let identity;
-      try {
-        identity = await chat.ownerIdentity(lease.owner!);
-      } catch {
-        if (get().rosterRequest === request) set({ ready: false });
-        return;
-      }
-      if (!lease.current() || get().rosterRequest !== request) return;
-      if (
-        identity.device_id !== get().myId ||
-        identity.account_id !== get().myAccountId
-      ) {
-        // Runtime/account replacement can happen without a host logout. Invalidate
-        // old in-flight conversation work; the run's owned ticker performs fresh boot.
-        resetChatFileAvailability();
-        rawSet((state) => ({
-          ...invalidateConversationIdentity(state),
-          identityEpoch: state.identityEpoch + 1,
-          // The replacement identity is already resolved. Bind new arrivals to it
-          // while retryBoot hydrates its persisted state, after dropping old work.
-          myId: identity.device_id,
-          myAccountId: identity.account_id,
-        }));
-        get().retryBoot();
-        return;
-      }
-      const [peers, accounts, channels] = await Promise.all([
-        chat.listPeers(),
-        chat.listAccounts(),
-        chat.listChannels(),
-      ]);
-      if (!lease.current() || get().rosterRequest !== request) return;
-      // Polling returns fresh arrays even when discovery has not changed. Preserve
-      // the previous references so sidebar subscribers do not redraw every tick.
-      const previous = get();
-      const rosterChanged =
-        JSON.stringify([
-          previous.peers,
-          previous.accounts,
-          previous.channels,
-        ]) !== JSON.stringify([peers, accounts, channels]);
-      const resolved = peers.filter(
-        (peer) =>
-          peer.account_id && previous.pendingUnknownUnread[peer.user_id],
-      );
-      if (rosterChanged || resolved.length) {
-        const unread = { ...previous.unread };
-        const pendingUnknownUnread = { ...previous.pendingUnknownUnread };
-        for (const peer of resolved) {
-          const key = `account:${peer.account_id}`;
-          unread[key] = (unread[key] ?? 0) + pendingUnknownUnread[peer.user_id];
-          delete pendingUnknownUnread[peer.user_id];
-        }
-        set({
-          ...(rosterChanged ? { peers, accounts, channels } : {}),
-          ...(resolved.length ? { unread, pendingUnknownUnread } : {}),
-        });
-      }
-      const recoveryEntries = channels
-        .filter(
-          (channel) =>
-            Object.prototype.hasOwnProperty.call(channel, "recovery") ||
-            channel.dissolved ||
-            channel.left ||
-            channel.archived,
-        )
-        .map((channel): [string, ConversationReception] => {
-          const key = `channel:${channel.channel_id}`;
-          const prior = get().reception[key];
-          const evidence =
-            channel.dissolved || channel.left || channel.archived
-              ? null
-              : channel.recovery;
-          const phase = prior?.processing
-            ? ("catching_up" as const)
-            : evidence?.phase === "waiting_for_peer"
-              ? ("waiting" as const)
-              : evidence?.phase === "catching_up"
-                ? ("catching_up" as const)
-                : ("idle" as const);
-          return [
-            key,
-            {
-              ...prior,
-              phase,
-              received: prior?.received ?? 0,
-              checkedAt: evidence?.checked_at ?? undefined,
-            },
-          ];
-        });
-      if (recoveryEntries.length)
-        set((state) => ({
-          reception: Object.fromEntries(
-            Object.entries({
-              ...state.reception,
-              ...Object.fromEntries(recoveryEntries),
-            }).slice(-64),
-          ),
-        }));
-      if (identity.history_revision !== undefined) {
-        await scanConversationHistory(
-          rawSet,
-          get,
-          [
-            ...accounts.map((account): Conversation => ({
-              kind: "account",
-              id: account.account_id,
-              name: "",
-            })),
-            ...channels.map((channel): Conversation => ({
-              kind: "channel",
-              id: channel.channel_id,
-              name: channel.name,
-            })),
-          ],
-          identity.history_revision,
-          () => lease.current() && get().rosterRequest === request,
-        );
-        if (!lease.current() || get().rosterRequest !== request) return;
-      }
-      // Cache each channel's members for the composite group avatar (best-effort per
-      // channel; a single failure just leaves that channel's montage on its fallback).
-      const memberEntries = await Promise.all(
-        channels.map(async (c) => {
-          try {
-            return [
-              c.channel_id,
-              (await chat.channelMembers(c.channel_id)).members,
-            ] as const;
-          } catch {
-            return [c.channel_id, [] as ChannelMemberInfo[]] as const;
-          }
-        }),
-      );
-      if (get().rosterRequest === request) {
-        const channelMembersById = Object.fromEntries(memberEntries);
-        if (
-          JSON.stringify(get().channelMembersById) !==
-          JSON.stringify(channelMembersById)
-        )
-          set({ channelMembersById });
-      }
-    } catch {
-      // node may still be starting; ignore
-    }
-  },
+  refreshChannels: (channelId = null) => channelRefresh.request(channelId),
+
+  refreshRoster: () => rosterRefresh(),
 
   open: async (c, target) => {
     const lease = captureChat(get);
@@ -841,9 +878,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       }));
     if (c.kind === "channel") {
       try {
+        const baseline = get().members;
+        const ownerBaseline = get().channelOwner;
         const info = await chat.channelMembers(c.id);
         if (!lease.current() || get().activeRequest !== request) return;
-        set({ members: info.members, channelOwner: info.owner });
+        // A newer active-view refresh wins; a background avatar-only update
+        // from before navigation must not discard this navigation's details.
+        if (get().members === baseline && get().channelOwner === ownerBaseline)
+          set({ members: info.members, channelOwner: info.owner });
       } catch {
         /* ignore */
       }
@@ -909,8 +951,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   revealUnread: (key, id) => revealConversationIdentity(rawSet, get, key, id),
 
   reload: () => reloadConversation(rawSet, get),
-  refreshStatuses: (conversation) =>
-    refreshDeliveryStatuses(rawSet, get, conversation),
+  refreshStatuses: (conversation, invalidate) =>
+    refreshDeliveryStatuses(rawSet, get, conversation, invalidate),
 
   send: async (text, replyTo) => {
     const lease = captureChat(get);
@@ -1107,11 +1149,58 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     write: rawSet,
     capture: () => captureChat(get),
     commands: chat,
-    refreshRoster: () => get().refreshRoster(),
+    refreshRoster: async () => {
+      await get().refreshChannels();
+      await get().refreshRoster();
+    },
     open: (conversation) => get().open(conversation),
     reportError: (message) => rawSet({ error: message }),
   }),
 }));
+
+function refreshChannelRecovery(set: Set, get: Get) {
+  const recoveryEntries = get()
+    .channels.filter(
+      (channel) =>
+        Object.prototype.hasOwnProperty.call(channel, "recovery") ||
+        channel.dissolved ||
+        channel.left ||
+        channel.archived,
+    )
+    .map((channel): [string, ConversationReception] => {
+      const key = `channel:${channel.channel_id}`;
+      const prior = get().reception[key];
+      const evidence =
+        channel.dissolved || channel.left || channel.archived
+          ? null
+          : channel.recovery;
+      const phase = prior?.processing
+        ? ("catching_up" as const)
+        : evidence?.phase === "waiting_for_peer"
+          ? ("waiting" as const)
+          : evidence?.phase === "catching_up"
+            ? ("catching_up" as const)
+            : ("idle" as const);
+      return [
+        key,
+        {
+          ...prior,
+          phase,
+          received: prior?.received ?? 0,
+          checkedAt: evidence?.checked_at ?? undefined,
+        },
+      ];
+    });
+  if (recoveryEntries.length)
+    set((state) => ({
+      reception: Object.fromEntries(
+        Object.entries({
+          ...state.reception,
+          ...Object.fromEntries(recoveryEntries),
+        }).slice(-64),
+      ),
+    }));
+}
 
 // --- incoming event handlers (module fns to keep the store object lean) -----
 
@@ -1175,7 +1264,7 @@ function queueUnknownUnread(set: Set, sender: string) {
 function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
   // Route to the sender's account conversation (multi-device aware).
   const peer = get().peers.find((p) => p.user_id === e.from);
-  const accountId = peer?.account_id;
+  const accountId = e.from_account ?? peer?.account_id;
   if (!accountId) {
     // Unknown sender (not yet discovered). Throttle: a burst from an undiscovered account
     // would otherwise fire one roster refresh (3 invokes) per message. The 4s interval
@@ -1195,8 +1284,25 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
   };
   const key = convKey(conv);
   const isActive = get().active != null && convKey(get().active!) === key;
+  const messageId = e.message_id;
+  if (messageId) {
+    // DMs and their history share the logical envelope ID, not each device's
+    // transport-event ID. Realtime and history must use one receipt ledger.
+    set((state) =>
+      receptionPatch(
+        state,
+        receiveIdentity(state, key, {
+          event_id: messageId,
+          arrival_kind: "live",
+          own_device: accountId === state.myAccountId || e.from === state.myId,
+        }),
+      ),
+    );
+  } else {
+    // Compatibility for event providers predating logical DM identities.
+    bump(set, key, isActive && isConversationVisible());
+  }
   if (isActive) void get().reload();
-  bump(set, key, isActive && isConversationVisible());
 }
 
 function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {

@@ -7,7 +7,7 @@ use crate::discovery::roster::{PeerRecord, RelayedRollback};
 use crate::node::bridge_directory;
 use futures_util::{StreamExt, stream};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, atomic::Ordering};
 use std::time::{Duration, Instant};
 
 type BridgeResponse = (
@@ -16,9 +16,65 @@ type BridgeResponse = (
     HashMap<String, bridge_directory::PresenceDeadline>,
 );
 
+const DIRECTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(test)]
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_DIRECTORY_QUERIES: usize = 8;
 const DIRECTORY_MEMBERSHIP_TTL: Duration = crate::discovery::roster::PUBLIC_PRESENCE_TTL;
+
+#[derive(Default)]
+pub(in crate::node) struct BridgeRefreshState {
+    generation: Option<(u64, u64)>,
+    relays: HashMap<([u8; 32], [u8; 32]), RelayQueryState>,
+    active: Arc<Mutex<HashSet<DirectoryQueryKey>>>,
+}
+
+type DirectoryQueryKey = ([u8; 32], [u8; 32], std::net::SocketAddr);
+
+/// Owns one exact relay query across overlapping refresh waves, including cancellation.
+struct ActiveDirectoryQuery {
+    active: Arc<Mutex<HashSet<DirectoryQueryKey>>>,
+    key: DirectoryQueryKey,
+}
+
+impl ActiveDirectoryQuery {
+    fn acquire(
+        active: Arc<Mutex<HashSet<DirectoryQueryKey>>>,
+        key: DirectoryQueryKey,
+    ) -> Option<Self> {
+        {
+            let mut entries = active.lock().expect("directory activity lock not poisoned");
+            if entries.len() >= MAX_CONCURRENT_DIRECTORY_QUERIES || !entries.insert(key) {
+                return None;
+            }
+        }
+        Some(Self { active, key })
+    }
+}
+
+impl Drop for ActiveDirectoryQuery {
+    fn drop(&mut self) {
+        self.active
+            .lock()
+            .expect("directory activity lock not poisoned")
+            .remove(&self.key);
+    }
+}
+
+struct RelayQueryState {
+    endpoint: std::net::SocketAddr,
+    failures: u32,
+    retry_at: Instant,
+    version: usize,
+    upgrade_at: Instant,
+}
+
+#[derive(Debug)]
+enum QueryFailure {
+    Unavailable,
+    Unsupported,
+    Invalid,
+}
 
 /// Results staged in the roster are rolled back if persistence, policy checks,
 /// or cancellation prevent publication to the bridge recovery set.
@@ -43,6 +99,7 @@ impl Drop for StagedIntroductions<'_> {
     }
 }
 
+#[derive(PartialEq, Eq)]
 struct BridgePolicyStamp {
     directory: u64,
     privacy: u64,
@@ -91,26 +148,30 @@ impl Node {
             self.clear_bridge_introductions();
         }
         self.delivery_notify.notify_one();
-        if enabled {
-            self.bridge_notify.notify_one();
-        }
+        self.bridge_notify.notify_one();
     }
 
     pub(in crate::node) fn clear_bridge_introductions(&self) {
         self.bridge_generation.fetch_add(1, Ordering::AcqRel);
-        let introduced = std::mem::take(
-            &mut *self
-                .bridge_dm_pull_peers
-                .lock()
-                .expect("bridge peers lock not poisoned"),
-        );
-        self.forget_bridge_peers(&introduced);
-    }
-
-    fn forget_bridge_peers(&self, introduced: &HashMap<String, Instant>) {
+        self.bridge_dm_pull_peers
+            .lock()
+            .expect("bridge peers lock not poisoned")
+            .clear();
+        // Expired authorization may still have bounded presentation history.
+        // An explicit policy withdrawal revokes that history too.
         let mut roster = self.roster.lock().expect("roster lock not poisoned");
-        for id in introduced.keys() {
-            roster.forget_relayed(id);
+        let introduced = roster
+            .peers()
+            .into_iter()
+            .filter(|peer| {
+                peer.routes
+                    .iter()
+                    .any(|route| route.source == crate::discovery::roster::RouteSource::PostOffice)
+            })
+            .map(|peer| peer.public.user_id())
+            .collect::<Vec<_>>();
+        for id in introduced {
+            roster.forget_relayed(&id);
         }
     }
 
@@ -120,18 +181,46 @@ impl Node {
             .lock()
             .expect("bridge peers lock not poisoned");
         let now = Instant::now();
-        let expired: Vec<_> = peers
-            .iter()
-            .filter(|(_, seen)| now.saturating_duration_since(**seen) >= DIRECTORY_MEMBERSHIP_TTL)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &expired {
-            peers.remove(id);
-        }
-        drop(peers);
-        let mut roster = self.roster.lock().expect("roster lock not poisoned");
-        for id in expired {
-            roster.forget_relayed(&id);
+        peers.retain(|_, seen| now.saturating_duration_since(*seen) < DIRECTORY_MEMBERSHIP_TTL);
+        // Only recovery authorization expires here. Public origin deadlines and
+        // bounded presentation history remain owned by the roster, not this map.
+    }
+
+    /// Start-to-start waves keep healthy registration independent of stalled peers.
+    /// The task owns every child; retirement and network changes abort old work.
+    pub(in crate::node) async fn run_bridge_directory(self: Arc<Self>) {
+        let mut waves = tokio::task::JoinSet::new();
+        let mut tick = tokio::time::interval(DIRECTORY_REFRESH_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut network = self.network_changes.subscribe();
+        let mut policy = BridgePolicyStamp::capture(&self);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {},
+                _ = self.bridge_notify.notified() => {},
+                _ = network.changed() => {
+                    waves.shutdown().await;
+                    self.bridge_refresh.lock().await.generation = None;
+                }
+                completed = waves.join_next(), if !waves.is_empty() => {
+                    if let Some(Err(error)) = completed { log::debug!("directory refresh task ended: {error}"); }
+                    continue;
+                }
+            }
+            let current_policy = BridgePolicyStamp::capture(&self);
+            if current_policy != policy {
+                waves.shutdown().await;
+                self.bridge_refresh.lock().await.generation = None;
+                policy = current_policy;
+            }
+            if !self.bridge_directory_allowed() {
+                waves.shutdown().await;
+                continue;
+            }
+            if waves.len() < MAX_CONCURRENT_DIRECTORY_QUERIES {
+                let node = self.clone();
+                waves.spawn(async move { node.refresh_bridge_directory().await });
+            }
         }
     }
 
@@ -142,25 +231,119 @@ impl Node {
         if !self.bridge_directory_allowed() {
             return 0;
         }
-        let Ok(_refresh) = self.bridge_refresh.try_lock() else {
+        let Ok(mut refresh) = self.bridge_refresh.try_lock() else {
             return 0;
         };
         let policy = BridgePolicyStamp::capture(self);
+        let generation = (policy.directory, policy.privacy);
+        if refresh.generation != Some(generation) {
+            refresh.relays.clear();
+            refresh.generation = Some(generation);
+        }
         let candidates = {
             let roster = self.roster.lock().expect("roster lock not poisoned");
             self.post_office_candidates(&roster)
         };
+        let now = Instant::now();
+        let live: HashSet<_> = candidates
+            .iter()
+            .map(|relay| (relay.public.ed25519_pub, relay.public.x25519_pub))
+            .collect();
+        refresh.relays.retain(|key, _| live.contains(key));
+        let mut candidates = candidates
+            .into_iter()
+            .filter_map(|relay| {
+                let key = (relay.public.ed25519_pub, relay.public.x25519_pub);
+                let previous = refresh
+                    .relays
+                    .get(&key)
+                    .filter(|state| state.endpoint == relay.addr);
+                if previous.is_some_and(|state| state.retry_at > now) {
+                    return None;
+                }
+                let version = previous
+                    .filter(|state| state.upgrade_at > now)
+                    .map_or(0, |state| state.version);
+                Some((relay, version))
+            })
+            .collect::<Vec<_>>();
+        // Known healthy relays get the first available slot on a refresh wave.
+        candidates.sort_by_key(|(relay, _)| {
+            refresh
+                .relays
+                .get(&(relay.public.ed25519_pub, relay.public.x25519_pub))
+                .is_none_or(|state| state.failures != 0)
+        });
+        let active = refresh.active.clone();
+        drop(refresh); // Never hold scheduling metadata across network or persistence I/O.
         let mut introduced = HashSet::new();
-        let mut responses = stream::iter(candidates.into_iter().map(|relay| async move {
-            let response = self.query_bridge_relay(&relay).await;
-            (relay, response, Instant::now())
+        let mut responses = stream::iter(candidates.into_iter().map(|(relay, version)| {
+            let active = active.clone();
+            async move {
+                let query = ActiveDirectoryQuery::acquire(
+                    active,
+                    (
+                        relay.public.ed25519_pub,
+                        relay.public.x25519_pub,
+                        relay.addr,
+                    ),
+                )?;
+                let response = self.query_bridge_relay_versioned(&relay, version).await;
+                Some((relay, response, Instant::now(), query))
+            }
         }))
         .buffer_unordered(MAX_CONCURRENT_DIRECTORY_QUERIES);
-        while let Some((relay, response, received)) = responses.next().await {
+        while let Some(response) = responses.next().await {
+            let Some((relay, response, received, _query)) = response else {
+                continue;
+            };
             if !policy.current(self) {
                 return 0;
             }
             self.expire_bridge_introductions();
+            let key = (relay.public.ed25519_pub, relay.public.x25519_pub);
+            let mut refresh = self.bridge_refresh.lock().await;
+            if refresh.generation != Some(generation) {
+                return 0;
+            }
+            let response = match response {
+                Ok((response, version)) => {
+                    refresh.relays.insert(
+                        key,
+                        RelayQueryState {
+                            endpoint: relay.addr,
+                            failures: 0,
+                            retry_at: received,
+                            version,
+                            upgrade_at: received + Duration::from_secs(60),
+                        },
+                    );
+                    Some(response)
+                }
+                Err(_) => {
+                    let failures = refresh
+                        .relays
+                        .get(&key)
+                        .filter(|old| old.endpoint == relay.addr)
+                        .map_or(1, |old| old.failures.saturating_add(1));
+                    let ceiling =
+                        (1u64 << failures.min(6)).min(DIRECTORY_REFRESH_INTERVAL.as_secs()) * 1000;
+                    let delay = ceiling * 4 / 5
+                        + (uuid::Uuid::new_v4().as_u128() as u64 % (ceiling / 5 + 1));
+                    refresh.relays.insert(
+                        key,
+                        RelayQueryState {
+                            endpoint: relay.addr,
+                            failures,
+                            retry_at: received + Duration::from_millis(delay),
+                            version: 0,
+                            upgrade_at: received,
+                        },
+                    );
+                    None
+                }
+            };
+            drop(refresh);
             if let Some((proofs, gateway, expiries)) = response
                 && let Some(ids) = self
                     .publish_bridge_response_with_expiry(
@@ -262,52 +445,80 @@ impl Node {
         Some(ids)
     }
 
+    #[cfg(test)]
     async fn query_bridge_relay(&self, relay: &PeerRecord) -> Option<BridgeResponse> {
-        if !self.relay_allowed(&relay.public) {
-            return None;
-        }
-        let mut response = None;
-        for request in [
-            bridge_directory::freshness_request(),
-            bridge_directory::request(),
-            bridge_directory::gateway_request(),
-            bridge_directory::legacy_request(),
-        ] {
-            if let Some(snapshot) = self.query_bridge_relay_once(relay, request).await {
-                response = Some(snapshot);
-                break;
+        self.query_bridge_relay_versioned(relay, 0)
+            .await
+            .ok()
+            .map(|(response, _)| response)
+    }
+
+    async fn query_bridge_relay_versioned(
+        &self,
+        relay: &PeerRecord,
+        start_version: usize,
+    ) -> Result<(BridgeResponse, usize), QueryFailure> {
+        // One budget includes all route dialing and any authenticated legacy
+        // rejection. A timeout is never a reason to repeat four fresh dials.
+        self.adaptive_control_timeout(&relay.public, async {
+            if !self.relay_allowed(&relay.public) {
+                return Err(QueryFailure::Unavailable);
             }
-        }
-        let response = response?;
-        if !self.bridge_directory_allowed() || !self.relay_allowed(&relay.public) {
-            return None;
-        }
-        Some(response)
+            let requests = [
+                bridge_directory::freshness_request(),
+                bridge_directory::request(),
+                bridge_directory::gateway_request(),
+                bridge_directory::legacy_request(),
+            ];
+            for (version, request) in requests.into_iter().enumerate().skip(start_version) {
+                match self.query_bridge_relay_once(relay, request).await {
+                    Ok(response) => {
+                        if !self.bridge_directory_allowed() || !self.relay_allowed(&relay.public) {
+                            return Err(QueryFailure::Unavailable);
+                        }
+                        return Ok((response, version));
+                    }
+                    Err(QueryFailure::Unsupported) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(QueryFailure::Unsupported)
+        })
+        .await
+        .ok_or(QueryFailure::Unavailable)?
     }
 
     async fn query_bridge_relay_once(
         &self,
         relay: &PeerRecord,
         request: &[u8],
-    ) -> Option<BridgeResponse> {
-        let mut channel = self.privacy_dial(relay.addr, &relay.public).await.ok()?;
-        let response = tokio::time::timeout(BRIDGE_TIMEOUT, async {
-            channel.send(request).await.ok()?;
-            let mut response = bridge_directory::DirectoryResponse::new(relay.public.clone());
-            for _ in 0..bridge_directory::MAX_MEMBERS {
-                let bytes = channel.recv().await.ok()?;
-                match response.add_page(&bytes)? {
-                    bridge_directory::DirectoryProgress::More => {}
-                    bridge_directory::DirectoryProgress::Complete(snapshot) => {
-                        return Some((snapshot.0, snapshot.1, response.expiries));
-                    }
+    ) -> Result<BridgeResponse, QueryFailure> {
+        let started = Instant::now();
+        let mut channel = self
+            .privacy_dial(relay.addr, &relay.public)
+            .await
+            .map_err(|_| QueryFailure::Unavailable)?;
+        channel
+            .send(request)
+            .await
+            .map_err(|_| QueryFailure::Unavailable)?;
+        let mut response = bridge_directory::DirectoryResponse::new(relay.public.clone());
+        for page in 0..bridge_directory::MAX_MEMBERS {
+            let bytes = channel.recv().await.map_err(|error| {
+                if page == 0 && matches!(&error, crate::transport::TransportError::Io(io)
+                    if matches!(io.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset)) {
+                    QueryFailure::Unsupported
+                } else { QueryFailure::Unavailable }
+            })?;
+            match response.add_page(&bytes).ok_or(QueryFailure::Invalid)? {
+                bridge_directory::DirectoryProgress::More => {}
+                bridge_directory::DirectoryProgress::Complete(snapshot) => {
+                    self.observe_control_exchange(&channel, started);
+                    return Ok((snapshot.0, snapshot.1, response.expiries));
                 }
             }
-            None
-        })
-        .await
-        .ok()??;
-        Some(response)
+        }
+        Err(QueryFailure::Invalid)
     }
 
     fn record_gateway(
@@ -335,6 +546,339 @@ mod tests {
     use crate::identity::device::DeviceIdentity;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn expired_directory_membership_retains_origin_bound_presentation_until_explicit_disable()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let node = directory_client(temp.path());
+        let member = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&member, &Account::generate(), "remote", 1);
+        let observed = Instant::now() - Duration::from_secs(16);
+        let relay = "127.0.0.1:47479".parse().unwrap();
+        {
+            let mut roster = node.roster.lock().unwrap();
+            roster.update_relayed(&proof, relay, &node.user_id());
+            roster.set_directory_expiry(
+                &member.user_id(),
+                relay,
+                observed + DIRECTORY_MEMBERSHIP_TTL,
+                1,
+            );
+        }
+        node.bridge_dm_pull_peers
+            .lock()
+            .unwrap()
+            .insert(member.user_id(), observed);
+        node.expire_bridge_introductions();
+        assert!(
+            !node
+                .bridge_dm_pull_peers
+                .lock()
+                .unwrap()
+                .contains_key(&member.user_id()),
+            "expired membership must not authorize recovery"
+        );
+        {
+            let roster = node.roster.lock().unwrap();
+            let peer = roster
+                .get(&member.user_id())
+                .expect("expiry is not authoritative withdrawal");
+            assert!(peer.presence_evidence(Instant::now()).is_empty());
+            assert_eq!(
+                peer.reconnect_remaining(observed + Duration::from_secs(119)),
+                Duration::from_secs(1)
+            );
+            assert_eq!(
+                peer.reconnect_remaining(observed + Duration::from_secs(120)),
+                Duration::ZERO
+            );
+        }
+        node.set_bridge_discovery_enabled(false);
+        assert!(
+            node.roster.lock().unwrap().get(&member.user_id()).is_none(),
+            "explicit disable clears even expired introduction history"
+        );
+    }
+
+    #[tokio::test]
+    async fn healthy_directory_renews_while_a_previous_relay_query_is_still_pending() {
+        assert_directory_refresh_independence(false).await;
+    }
+
+    #[tokio::test]
+    async fn participant_directory_waves_renew_healthy_registration_before_a_slow_query_finishes() {
+        assert_directory_refresh_independence(true).await;
+    }
+
+    async fn assert_directory_refresh_independence(runtime: bool) {
+        use std::sync::atomic::AtomicUsize;
+        let temp = tempfile::tempdir().unwrap();
+        let node = directory_client(temp.path());
+        let healthy = DeviceIdentity::generate();
+        let slow = DeviceIdentity::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stalled_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        for (identity, address) in [
+            (&healthy, listener.local_addr().unwrap()),
+            (&slow, stalled_listener.local_addr().unwrap()),
+        ] {
+            let proof = Announce::new_post_office_with_account(
+                identity,
+                &Account::generate(),
+                "relay",
+                address.port(),
+            );
+            node.roster
+                .lock()
+                .unwrap()
+                .update(&proof, address.ip(), &node.user_id());
+        }
+        let healthy_count = Arc::new(AtomicUsize::new(0));
+        let slow_count = Arc::new(AtomicUsize::new(0));
+        let count = healthy_count.clone();
+        let directory = crate::postoffice::federation::FederationDirectory::new();
+        let member = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&member, &Account::generate(), "member", 1);
+        directory
+            .shared()
+            .lock()
+            .unwrap()
+            .register(&member.public(), Some(&proof), true, Instant::now())
+            .unwrap();
+        let keys = healthy.secret_bytes();
+        let office = Arc::new(Mutex::new(
+            crate::postoffice::PostOffice::open(&temp.path().join("office"), "pw", healthy)
+                .unwrap(),
+        ));
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let channel = crate::transport::SecureChannel::accept(
+                    stream,
+                    &DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+                )
+                .await
+                .unwrap();
+                super::super::postbox::serve_relay_or_bridge_connection(
+                    channel,
+                    office.clone(),
+                    Some(directory.shared()),
+                )
+                .await;
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let count = slow_count.clone();
+        let stalled = tokio::spawn(async move {
+            let mut tasks = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = stalled_listener.accept() => {
+                        let (stream, _) = accepted.unwrap();
+                        let keys = slow.secret_bytes();
+                        let count = count.clone();
+                        tasks.spawn(async move {
+                            let mut channel = crate::transport::SecureChannel::accept(stream, &DeviceIdentity::from_secret_bytes(keys.0, keys.1)).await.unwrap();
+                            assert!(bridge_directory::is_request(&channel.recv().await.unwrap()));
+                            count.fetch_add(1, Ordering::SeqCst);
+                            let _ = channel.recv().await;
+                        });
+                    }
+                    _ = tasks.join_next(), if !tasks.is_empty() => {},
+                }
+            }
+        });
+        let client = node.clone();
+        let first = tokio::spawn(async move {
+            if runtime {
+                client.run_bridge_directory().await;
+                0
+            } else {
+                client.refresh_bridge_directory().await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while healthy_count.load(Ordering::SeqCst) < 1
+                || slow_count.load(Ordering::SeqCst) < 1
+                || !node
+                    .bridge_dm_pull_peers
+                    .lock()
+                    .unwrap()
+                    .contains_key(&member.user_id())
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let next = if runtime {
+            tokio::time::timeout(Duration::from_secs(7), async {
+                while healthy_count.load(Ordering::SeqCst) < 2 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+        } else {
+            tokio::time::timeout(Duration::from_secs(3), node.refresh_bridge_directory())
+                .await
+                .map(|_| ())
+        };
+        let renewed = healthy_count.load(Ordering::SeqCst) >= 2;
+        let pending = !first.is_finished();
+        let duplicated = slow_count.load(Ordering::SeqCst);
+        let policy_refresh = if runtime {
+            node.set_bridge_discovery_enabled(false);
+            node.set_bridge_discovery_enabled(true);
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while slow_count.load(Ordering::SeqCst) < 2 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+        } else {
+            Ok(())
+        };
+        first.abort();
+        let _ = first.await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !node
+                .bridge_refresh
+                .lock()
+                .await
+                .active
+                .lock()
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retirement releases every query activity slot");
+        server.abort();
+        let _ = server.await;
+        stalled.abort();
+        let _ = stalled.await;
+        assert!(
+            next.is_ok() && renewed,
+            "a second healthy registration cannot wait for the previous stalled relay"
+        );
+        assert!(
+            pending,
+            "the original progressing/slow query was not cancelled to fake a refresh"
+        );
+        assert_eq!(duplicated, 1, "one active query per relay");
+        assert!(
+            policy_refresh.is_ok(),
+            "an off/on policy transition must retire old generation queries immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_directory_response_does_not_retry_other_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = directory_client(dir.path());
+        let relay = crate::identity::device::DeviceIdentity::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let proof = Announce::new_post_office_with_account(
+            &relay,
+            &Account::generate(),
+            "relay",
+            addr.port(),
+        );
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, addr.ip(), &node.user_id());
+        let peer = node
+            .roster
+            .lock()
+            .unwrap()
+            .get(&relay.user_id())
+            .unwrap()
+            .clone();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                seen.fetch_add(1, Ordering::SeqCst);
+                let mut channel = crate::transport::SecureChannel::accept(stream, &relay)
+                    .await
+                    .unwrap();
+                let _ = channel.recv().await.unwrap();
+                channel
+                    .send(b"malformed authenticated directory response")
+                    .await
+                    .unwrap();
+            }
+        });
+        assert!(node.query_bridge_relay(&peer).await.is_none());
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "malformed replies are failures, not version negotiation"
+        );
+        node.refresh_bridge_directory().await;
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        node.refresh_bridge_directory().await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "a failed relay must back off independently"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn authenticated_legacy_rejection_is_negotiated_once_and_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = directory_client(dir.path());
+        let relay = DeviceIdentity::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let proof = Announce::new_post_office_with_account(
+            &relay,
+            &Account::generate(),
+            "relay",
+            addr.port(),
+        );
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, addr.ip(), &node.user_id());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let received = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut channel = crate::transport::SecureChannel::accept(stream, &relay)
+                    .await
+                    .unwrap();
+                let request = channel.recv().await.unwrap();
+                received.lock().unwrap().push(request.clone());
+                if request == bridge_directory::freshness_request() {
+                    continue;
+                }
+                for page in bridge_directory::encode_for_request(&request, &[], None).unwrap() {
+                    channel.send(&page).await.unwrap();
+                }
+            }
+        });
+        node.refresh_bridge_directory().await;
+        node.refresh_bridge_directory().await;
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![
+                bridge_directory::freshness_request().to_vec(),
+                bridge_directory::request().to_vec(),
+                bridge_directory::request().to_vec(),
+            ]
+        );
+        server.abort();
+    }
 
     fn directory_client(path: &std::path::Path) -> Arc<Node> {
         let own = DeviceIdentity::generate();
