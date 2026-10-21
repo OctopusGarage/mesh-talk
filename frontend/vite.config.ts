@@ -92,6 +92,20 @@ export default defineConfig(({ command, mode }) => {
       // macOS 12 WKWebView can reject Radix's class static blocks, which Vite's
       // default Safari 16.4 target leaves intact.
       target: "safari15",
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              {
+                name: "react-vendor",
+                // Keep React, its renderer and scheduler together so the shared
+                // startup chunk stays small as application features grow.
+                test: /[\\/]node_modules[\\/](?:react|react-dom|scheduler)[\\/]/,
+              },
+            ],
+          },
+        },
+      },
       // The sign-in shell and authenticated chat are separate chunks. Assets load locally in
       // Tauri, so a modestly higher limit than Vite's web default is appropriate here.
       chunkSizeWarningLimit: 700,
