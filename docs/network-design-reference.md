@@ -183,8 +183,8 @@ When one machine runs both the app and a relay, their names, keys, TCP listeners
 **Online** is this client's presentation of eligible public availability, with
 source-specific loss tolerance. Pure physical LAN and unscoped discovery expire
 after 15 seconds. Verified routed observations, current-origin directory
-introductions, and public authenticated contact without a known physical LAN
-path retain Online until 120 seconds from their original public observation.
+introductions, and public authenticated contact without physical LAN discovery for the same
+endpoint address retain Online until 120 seconds from their original public observation.
 When their fresh evidence expires, show **Online · slow connection**. The
 presentation tolerance does not manufacture fresh device evidence or prove
 transport, delivery or read state. Group known-online counts use this same

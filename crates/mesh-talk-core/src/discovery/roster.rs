@@ -117,7 +117,6 @@ impl PeerRecord {
     /// loss for two minutes; private traffic and repeated directory metadata
     /// cannot move the original observation deadline.
     pub fn reconnect_remaining(&self, now: Instant) -> Duration {
-        let local = self.has_lan_route();
         self.routes
             .iter()
             .filter_map(|route| {
@@ -127,7 +126,11 @@ impl PeerRecord {
                     RouteSource::PostOffice => {
                         deadline + (CROSS_NETWORK_PRESENCE_TTL - PUBLIC_PRESENCE_TTL)
                     }
-                    RouteSource::Authenticated if !local => {
+                    RouteSource::Authenticated
+                        if !self.routes.iter().any(|other| {
+                            other.source == RouteSource::Lan && other.addr.ip() == route.addr.ip()
+                        }) =>
+                    {
                         deadline + (CROSS_NETWORK_PRESENCE_TTL - PUBLIC_PRESENCE_TTL)
                     }
                     _ => deadline,
@@ -937,6 +940,25 @@ mod routed_tests {
         assert_eq!(
             peer.reconnect_remaining(origin + Duration::from_secs(120)),
             Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn authenticated_tolerance_uses_the_observed_path_not_an_old_lan_address() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
+        let mut roster = Roster::default();
+        let lan = "192.168.1.2".parse().unwrap();
+        roster.update(&proof, lan, "self");
+        roster.update_authenticated(&proof, lan, "self");
+        let peer = roster.get(&proof.user_id).unwrap();
+        let after_local_expiry = Instant::now() + PUBLIC_PRESENCE_TTL;
+        assert_eq!(peer.reconnect_remaining(after_local_expiry), Duration::ZERO);
+        roster.update_authenticated(&proof, "100.64.0.2".parse().unwrap(), "self");
+        let peer = roster.get(&proof.user_id).unwrap();
+        assert!(
+            peer.reconnect_remaining(Instant::now() + Duration::from_secs(119)) > Duration::ZERO,
+            "old LAN discovery must not shorten a different authenticated path"
         );
     }
 
