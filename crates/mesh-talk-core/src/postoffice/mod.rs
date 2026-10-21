@@ -25,6 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub mod election;
 pub mod federation;
 pub mod gateway;
+pub mod network;
 pub mod opaque;
 
 pub use election::{elect, is_post_office};

@@ -3,8 +3,8 @@ use super::federation_config::FederationSeed;
 use futures_util::{StreamExt, future, stream};
 use mesh_talk_core::discovery::Roster;
 use mesh_talk_core::identity::device::DeviceIdentity;
-use mesh_talk_core::postoffice::PostOffice;
 use mesh_talk_core::postoffice::federation::FederationDirectory;
+use mesh_talk_core::postoffice::{PostOffice, network::RelayNetwork};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -20,9 +20,18 @@ pub(super) async fn run_federation_loop(
     identity: DeviceIdentity,
     store: Arc<Mutex<PostOffice>>,
     directory: FederationDirectory,
+    network: Option<RelayNetwork>,
 ) {
     loop {
-        federation_round(&roster, &seeds, &identity, &store, &directory).await;
+        federation_round(
+            &roster,
+            &seeds,
+            &identity,
+            &store,
+            &directory,
+            network.as_ref(),
+        )
+        .await;
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
@@ -33,6 +42,7 @@ async fn federation_round(
     identity: &DeviceIdentity,
     store: &Arc<Mutex<PostOffice>>,
     directory: &FederationDirectory,
+    network: Option<&RelayNetwork>,
 ) {
     let self_id = identity.user_id();
     let trusted = seeds
@@ -47,7 +57,8 @@ async fn federation_round(
             .post_offices()
             .into_iter()
             .filter(|peer| {
-                peer.public.user_id() != self_id && trusted.contains(peer.public.user_id().as_str())
+                peer.public.user_id() != self_id
+                    && (network.is_some() || trusted.contains(peer.public.user_id().as_str()))
             })
             .map(|peer| (peer.addr, peer.public))
             .collect::<Vec<_>>()
@@ -79,11 +90,22 @@ async fn federation_round(
             future::ready(seen.insert((*addr, peer.ed25519_pub, peer.x25519_pub)))
         })
         .for_each_concurrent(MAX_RELAY_SYNCS, |(addr, peer)| async move {
-            if let Err(error) = directory
-                .sync_with_relay(addr, identity, &peer, store)
-                .await
-            {
-                log::debug!("federation sync at {addr}: {error}");
+            let result = if let Some(network) = network {
+                directory
+                    .sync_with_network_relay(addr, identity, &peer, store, network)
+                    .await
+            } else {
+                directory
+                    .sync_with_relay(addr, identity, &peer, store)
+                    .await
+            };
+            match result {
+                Ok(_) if network.is_some() => log::info!(
+                    "post-office network connected to approved relay {} at {addr}",
+                    peer.user_id()
+                ),
+                Ok(_) => {}
+                Err(error) => log::debug!("post-office reconciliation at {addr}: {error}"),
             }
         })
         .await;
@@ -140,6 +162,7 @@ mod tests {
             identity,
             local_store(&temp),
             FederationDirectory::default(),
+            None,
         ));
         let mut held = Vec::new();
         for _ in 0..8 {
@@ -185,6 +208,7 @@ mod tests {
             identity,
             local_store(&temp),
             FederationDirectory::default(),
+            None,
         ));
         let connected = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await;
         runner.abort();
@@ -211,6 +235,7 @@ mod tests {
             DeviceIdentity::generate(),
             local_store(&temp),
             FederationDirectory::default(),
+            None,
         ));
         let mut bytes = [0u8; 2048];
         for _ in 0..8 {
@@ -227,5 +252,88 @@ mod tests {
             ninth.is_err(),
             "ninth UDP query started while eight remain pending"
         );
+    }
+    #[tokio::test]
+    async fn network_mode_reconciles_discovered_members_without_individual_seeds() {
+        use mesh_talk_core::eventlog::event::{ConversationId, Event, EventKind};
+        use mesh_talk_core::postoffice::{
+            network::{NetworkMembership, NetworkPolicy, unix_now},
+            opaque::RelayMailbox,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let authority = DeviceIdentity::generate();
+        let first = DeviceIdentity::generate();
+        let second = DeviceIdentity::generate();
+        let now = unix_now();
+        let enroll = |device: &DeviceIdentity| {
+            RelayNetwork::new(
+                NetworkPolicy::new(authority.public().ed25519_pub),
+                NetworkMembership::issue(
+                    &authority,
+                    &device.user_id(),
+                    now,
+                    Duration::from_secs(3600),
+                )
+                .unwrap(),
+                &device.public(),
+                now,
+            )
+            .unwrap()
+        };
+        let first_network = enroll(&first);
+        let second_network = enroll(&second);
+        let first_temp = tempfile::tempdir().unwrap();
+        let first_store = local_store(&first_temp);
+        let second_store = local_store(&temp);
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let inner = Event::new(
+            &alice,
+            ConversationId::new([88; 32]),
+            1,
+            vec![],
+            1,
+            10,
+            EventKind::Message,
+            b"private".to_vec(),
+        );
+        let outer = RelayMailbox::federated(&alice, &bob.public())
+            .unwrap()
+            .wrap(&inner)
+            .unwrap();
+        first_store.lock().unwrap().accept(outer.clone()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut roster = Roster::default();
+        roster.update(
+            &Announce::new_post_office(&second, "relay", addr.port()),
+            addr.ip(),
+            &first.user_id(),
+        );
+        let server = tokio::spawn(
+            mesh_talk_core::node::run_network_relay_accept_loop_with_directory(
+                second,
+                listener,
+                Arc::clone(&second_store),
+                second_network,
+                FederationDirectory::new(),
+            ),
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            federation_round(
+                &Mutex::new(roster),
+                &[],
+                &first,
+                &first_store,
+                &FederationDirectory::new(),
+                Some(&first_network),
+            ),
+        )
+        .await;
+        server.abort();
+        let _ = server.await;
+        result.unwrap();
+        assert!(second_store.lock().unwrap().has(&outer.id));
     }
 }

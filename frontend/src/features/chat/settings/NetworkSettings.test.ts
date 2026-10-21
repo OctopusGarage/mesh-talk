@@ -125,3 +125,15 @@ it("opens the existing manual address flow", async () => {
   await act(async () => button!.click());
   expect(host.querySelector('[data-testid="manual-connect"]')).not.toBeNull();
 });
+
+it("shows relay availability without requiring federation configuration", async () => {
+  await render();
+  expect(
+    host.querySelector('[data-testid="post-office-status"]')?.textContent,
+  ).toBe("settings.postOfficeStatusUnavailable");
+  controller.settings!.post_office_enabled = false;
+  await render();
+  expect(
+    host.querySelector('[data-testid="post-office-status"]')?.textContent,
+  ).toBe("settings.postOfficeStatusDisabled");
+});

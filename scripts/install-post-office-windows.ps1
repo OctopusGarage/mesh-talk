@@ -15,7 +15,10 @@ param(
     [ValidateRange(1, 65535)]
     [int]$LanAnnouncePort = 47474,
     [string[]]$FederationPeer = @(),
-    [string]$FederationConfig
+    [string]$FederationConfig,
+    [string]$RelayNetwork,
+    [string]$RelayMembership,
+    [string[]]$RelaySeed = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -58,6 +61,20 @@ if ($FederationConfig) {
     $StagedBinary = (Resolve-Path -LiteralPath $StagedBinary).ProviderPath
     & $StagedBinary federation --file $FederationConfig list | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Staged node rejected the federation config' }
+}
+
+if ($RelayNetwork -or $RelayMembership -or $RelaySeed.Count -gt 0) {
+    if (-not $RelayNetwork -or -not $RelayMembership -or $FederationConfig -or $FederationPeer.Count -gt 0 -or $BridgePeer) {
+        throw 'Network mode needs policy and membership and conflicts with federation pins or a bridge gateway'
+    }
+    foreach ($seed in $RelaySeed) {
+        if ($seed -notmatch '^[0-9A-Fa-f]{32}@.+:[0-9]+$') { throw "Invalid relay seed: $seed" }
+    }
+    $RelayNetwork = (Resolve-Path -LiteralPath $RelayNetwork).ProviderPath
+    $RelayMembership = (Resolve-Path -LiteralPath $RelayMembership).ProviderPath
+    $StagedBinary = (Resolve-Path -LiteralPath $StagedBinary).ProviderPath
+    & $StagedBinary network inspect --policy $RelayNetwork --membership $RelayMembership | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Staged node rejected the network policy or membership' }
 }
 
 # SYSTEM runs the boot task; Administrators can maintain and back up the data.
@@ -121,6 +138,19 @@ if ($FederationConfig) {
     $FederationConfig = $persistentConfig
 }
 
+if ($RelayNetwork) {
+    foreach ($entry in @(@($RelayNetwork, 'network.policy'), @($RelayMembership, 'relay.membership'))) {
+        $persistentFile = Join-Path $data $entry[1]
+        if (-not [string]::Equals($entry[0], $persistentFile, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $entry[0] -Destination "$persistentFile.next" -Force
+            Move-Item -LiteralPath "$persistentFile.next" -Destination $persistentFile -Force
+        }
+    }
+    $RelayNetwork = Join-Path $data 'network.policy'
+    $RelayMembership = Join-Path $data 'relay.membership'
+    Assert-RelayAcls
+}
+
 $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($existing) {
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -139,6 +169,12 @@ if ($FederationConfig) {
 }
 foreach ($seed in $FederationPeer) {
     $arguments += ' --federation-peer "{0}"' -f $seed
+}
+if ($RelayNetwork) {
+    $arguments += ' --relay-network "{0}" --relay-membership "{1}"' -f $RelayNetwork, $RelayMembership
+}
+foreach ($seed in $RelaySeed) {
+    $arguments += ' --relay-seed "{0}"' -f $seed
 }
 $action = New-ScheduledTaskAction -Execute $binary -Argument $arguments -WorkingDirectory $Root
 $trigger = New-ScheduledTaskTrigger -AtStartup

@@ -326,7 +326,7 @@ Transport awaits must not retain ordinary store/roster mutex guards. Network tas
 2. **Specific edges, explicit reachability.** A↔D does not imply B↔D or A↔E. Neither co-location nor an address with a Tailscale prefix proves a working application port.
 3. **Authenticate identities independently of routes.** Full device/account bindings survive address changes. Tailscale identity, a friendly name and an IP address cannot replace Mesh Talk authentication.
 4. **Separate visibility from authority.** Presence opt-in does not grant DM permissions, account secrets, group membership, file approval or historical access.
-5. **Equal relay roles with explicit trust.** There is no global primary relay. Automatic candidate discovery is compatible with explicit mutual enrollment; discovery itself does not authorize federation.
+5. **Equal relay roles with explicit trust.** There is no global primary relay. Automatic candidate discovery is compatible with explicit device pins or mutually verified operator-approved network memberships; discovery itself does not authorize federation. Network mode binds expiring authority-signed memberships to Noise device identities and a local revocation snapshot before any bulk exchange; it never falls back to pin-only admission.
 6. **Direct first, custody while needed.** Attempt the direct path first. Relay-enabled devices can also retain encrypted custody while exact recipient delivery is outstanding. Group recovery custody is independently useful after direct fanout.
 7. **Endpoint-owned delivery truth.** Valid recipient confirmation is distinct from local acceptance, relay custody, successful sync and human reading. One group member or sibling cannot acknowledge another destination's work.
 8. **Soft preference and recoverable failure.** A preference orders candidates; failure permits alternatives. A usable alternative needs a surviving onward graph, and later operations can return to the healthy preference.
@@ -417,6 +417,8 @@ Physical-only adapter classification is conservative. Common overlay, point-to-p
 | P5   | Legacy `--bridge-peer` plus pinned identity                                         | Compatibility TCP gateway. Gateway-only remote identities remain distinguishable from normal directly reachable relay choices. |
 
 All relays may use the same executable, role flags, public trust manifest and retention policy. Each must keep unique persistent keys, its own data directory, valid local endpoints and host-specific boot-service configuration. An app and relay on one host remain separate identities. Windows deployment data belongs on drive D in the maintained operator setup.
+
+Alternatively, `--relay-network` plus `--relay-membership` enables automatic discovery within an operator-approved network, using mutual expiring device certificates and a public revocation policy. It authorizes relay reconciliation only and does not attest the running binary. See [network membership operations](post-office-federation.md#automatic-membership-in-an-approved-network).
 
 The versioned public manifest provides enrollment, listing and whole-identity revocation, with serialized edits. Changes take effect after restarting each affected relay. Identity rotation requires verified replacement enrollment and removal of the old identity. Revocation cannot erase copies a previously trusted operator already obtained.
 
@@ -1394,6 +1396,6 @@ Use affected unit/integration tests during ordinary development. Add a real loop
 
 ### Extensions requiring a separate design decision
 
-True stream multiplexing, automatic trust enrollment, hot federation revocation, anonymity, TURN/media relay, mailbox-backed call signaling, stronger replicated-storage guarantees and unrestricted cross-site IP routing are not implied by this baseline. Each would change authority, resource or wire semantics and needs explicit requirements, compatibility/security analysis and its own acceptance evidence.
+True stream multiplexing, trust of unapproved discovered relays, hot federation revocation, anonymity, TURN/media relay, mailbox-backed call signaling, stronger replicated-storage guarantees and unrestricted cross-site IP routing are not implied by this baseline. Each would change authority, resource or wire semantics and needs explicit requirements, compatibility/security analysis and its own acceptance evidence.
 
 The guiding question for future changes is: **Does this preserve local-first communication, explicit authority, equal trusted relay roles, endpoint-owned delivery truth and bounded recoverable work across the actual reachable graph?** If not, revise the design deliberately before presenting the behavior as compatible.

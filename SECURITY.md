@@ -46,6 +46,27 @@ notification privacy, CSP-dependent features and interrupted media migrations
 need platform acceptance evidence; browser mocks cannot establish those results.
 See [platform validation](docs/platform-validation.md) for the evidence boundary.
 
+## Relay membership and software integrity
+
+Post-office reconciliation requires explicit identity pins or mutually verified,
+expiring memberships issued by an operator-approved network authority. Network
+memberships bind the authenticated device fingerprint and grant relay exchange
+only; they do not authorize conversation membership or verify a running binary.
+The enrollment private key stays off relays. Public policy and whole-device
+revocations are local startup snapshots: distribute policy and restart every
+affected relay. Protect policy deployment against replacement and rollback.
+Renewal uses a newly issued public certificate and a restart. Lost or compromised
+authority keys require replacing the network authority and all memberships.
+
+Relays can drop/delay mail and observe transport/mailbox metadata even when they
+hold valid memberships or use official binaries. Existing opaque-envelope
+validation, storage/connection limits, retention rules and recipient-authenticated
+receipts remain authoritative. Revocation cannot erase previously copied data.
+Downloaded release signatures/provenance establish artifact origin; they do not
+prove what a remote peer is executing. Self-reported versions or hashes are not
+software attestation. Hardware/platform remote attestation and remote malware
+detection are not implemented; membership is never presented as either guarantee.
+
 ## Known limitations
 
 This is an experimental project. The following are tracked, not yet hardened:

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useChat } from "@/store/chat";
 import { usePrivacy } from "@/store/privacy";
 import {
+  postOfficeAvailability,
   selectablePostOffices,
   savedIndirectPostOffice,
 } from "@/lib/postOfficeOptions";
@@ -131,6 +132,19 @@ export function NetworkSettings({
                 />
               }
             />
+            <p
+              role="status"
+              data-testid="post-office-status"
+              className="mb-3 text-xs leading-relaxed text-muted-foreground"
+            >
+              {t(
+                {
+                  disabled: "settings.postOfficeStatusDisabled",
+                  available: "settings.postOfficeStatusAvailable",
+                  unavailable: "settings.postOfficeStatusUnavailable",
+                }[postOfficeAvailability(s.post_office_enabled, peers)],
+              )}
+            </p>
             <div className="ml-2 border-l pl-4">
               {(
                 [
