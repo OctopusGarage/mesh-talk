@@ -415,8 +415,9 @@ try {
   assert.ok((await observe("list_accounts")).some(a => a.account_id === account));
   await passed("raw-peer-retained", { rawPeerPresent: true, accountPresent: true });
 
-  await writeChildCommand(peer, "/peers\n");
-  await until("CLI discovered GUI identity", () => peer.output.includes(`peer ${userId}`));
+  // Public restoration can race the next signed announcement. Query fresh
+  // roster snapshots instead of waiting forever on one early empty response.
+  await signedPeerObservation(coreContext);
   const hiddenText = `native-hidden-${randomBytes(4).toString("hex")}`;
   const guiAccount = await observe("account_id");
   assert.match(guiAccount, /^[0-9a-f]{32}$/);
