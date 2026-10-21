@@ -23,6 +23,64 @@ const MEDIA_CHUNK_BYTES: usize = 64 * 1024;
 const RECOVERY_ORIGIN_MAGIC: &[u8; 6] = b"MTORIG";
 const RECOVERY_CONTACT_MAGIC: &[u8; 6] = b"MTRACC";
 
+/// Process-local first-DM metadata. Append-only revisions scan only unseen suffixes;
+/// rewrites discard positions and routes, including an erased first envelope.
+#[derive(Default)]
+pub(in crate::node) struct KnownAccountCache {
+    sent: FirstDmIndex,
+    received: FirstDmIndex,
+    #[cfg(test)]
+    pub(in crate::node) scanned_rows: usize,
+}
+
+#[derive(Default)]
+struct FirstDmIndex {
+    revision: Option<u64>,
+    rewrite_revision: u64,
+    conversations: HashMap<ConversationId, FirstDmConversation>,
+}
+
+#[derive(Default)]
+struct FirstDmConversation {
+    scanned: usize,
+    route: Option<super::DmRoute>,
+}
+
+impl FirstDmIndex {
+    fn refresh(&mut self, revision: u64, rewrite_revision: u64) -> bool {
+        if self.revision == Some(revision) {
+            return false;
+        }
+        if self.rewrite_revision != rewrite_revision {
+            self.conversations.clear();
+        }
+        self.revision = Some(revision);
+        self.rewrite_revision = rewrite_revision;
+        true
+    }
+
+    fn scan<'a>(
+        &mut self,
+        conversation: ConversationId,
+        rows: impl Iterator<Item = &'a [u8]>,
+    ) -> usize {
+        let state = self.conversations.entry(conversation).or_default();
+        if state.route.is_some() {
+            return 0;
+        }
+        let mut scanned = 0;
+        for plaintext in rows.skip(state.scanned) {
+            scanned += 1;
+            state.scanned += 1;
+            if let Some(envelope) = super::DmEnvelope::decode(plaintext) {
+                state.route = Some(envelope.route);
+                break;
+            }
+        }
+        scanned
+    }
+}
+
 struct MediaDigest(Sha256);
 
 impl Write for MediaDigest {
@@ -459,44 +517,64 @@ impl Node {
     pub fn known_account_ids(&self) -> Vec<String> {
         let own = self.account.account_id();
         let mut ids: BTreeSet<String> = self.recovery_contacts.iter().cloned().collect();
-        let mut observe = |plaintext: &[u8]| {
-            let Some(envelope) = super::DmEnvelope::decode(plaintext) else {
-                return;
-            };
-            let route = envelope.route;
-            let other = if route.sender_account == own {
-                route.recipient_account
-            } else if route.recipient_account == own {
-                route.sender_account
-            } else {
-                return;
-            };
-            if other != own && other.len() == 32 && other.bytes().all(|c| c.is_ascii_hexdigit()) {
-                ids.insert(other);
-            }
-        };
+        let mut cache = self
+            .known_account_cache
+            .lock()
+            .expect("known account cache mutex not poisoned");
+        let mut scanned = 0;
         let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
-        for conversation in sent.conversations() {
-            if let Some(entry) = sent
-                .entries_ref(&conversation)
-                .iter()
-                .find(|entry| super::DmEnvelope::decode(&entry.plaintext).is_some())
-            {
-                observe(&entry.plaintext);
+        if cache.sent.refresh(sent.revision(), sent.rewrite_revision()) {
+            for conversation in sent.conversations() {
+                scanned += cache.sent.scan(
+                    conversation,
+                    sent.entries_ref(&conversation)
+                        .iter()
+                        .map(|entry| entry.plaintext.as_slice()),
+                );
             }
         }
         drop(sent);
         let received = self.received.lock().expect("received mutex not poisoned");
-        for conversation in received.conversations() {
-            if let Some(entry) = received
-                .entries_ref(&conversation)
-                .iter()
-                .find(|entry| super::DmEnvelope::decode(&entry.plaintext).is_some())
-            {
-                observe(&entry.plaintext);
+        if cache
+            .received
+            .refresh(received.revision(), received.rewrite_revision())
+        {
+            for conversation in received.conversations() {
+                scanned += cache.received.scan(
+                    conversation,
+                    received
+                        .entries_ref(&conversation)
+                        .iter()
+                        .map(|entry| entry.plaintext.as_slice()),
+                );
             }
         }
         drop(received);
+        #[cfg(test)]
+        {
+            cache.scanned_rows += scanned;
+        }
+        #[cfg(not(test))]
+        let _ = scanned;
+        for route in cache
+            .sent
+            .conversations
+            .values()
+            .chain(cache.received.conversations.values())
+            .filter_map(|state| state.route.as_ref())
+        {
+            let other = if route.sender_account == own {
+                &route.recipient_account
+            } else if route.recipient_account == own {
+                &route.sender_account
+            } else {
+                continue;
+            };
+            if other != &own && other.len() == 32 && other.bytes().all(|c| c.is_ascii_hexdigit()) {
+                ids.insert(other.clone());
+            }
+        }
+        drop(cache);
         let peers = self.historical_dm_peers();
         let files = self
             .received_files

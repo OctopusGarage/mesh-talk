@@ -48,7 +48,7 @@ export function ChatApp() {
     };
   }, [owner, generation]);
   useEffect(() => {
-    if (owner && ready) return startLinkedAppearance();
+    if (owner && ready) return startLinkedAppearance(owner);
   }, [owner, generation, ready]);
   useEffect(() => {
     if (owner && ready) return startLinkedContacts(owner);

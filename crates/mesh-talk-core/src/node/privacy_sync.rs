@@ -866,7 +866,110 @@ impl GuardedSyncStore<'_> {
         Some(metadata)
     }
 
+    fn outgoing_projection(
+        &self,
+        conversation: &ConversationId,
+        have: &HashSet<EventId>,
+        payloads: bool,
+    ) -> Vec<Event> {
+        if self.pull_only {
+            return Vec::new();
+        }
+        let mut events = self.visible_projection(conversation, payloads);
+        if self.node.certified_sibling(&self.peer)
+            && *conversation
+                == super::conversation::dm_conversation_id(&self.node.identity.public(), &self.peer)
+        {
+            let policy = self.node.device_sync_policy();
+            let mut available = have.clone();
+            events.retain(|event| {
+                let selected = match event.kind {
+                    EventKind::Message => policy.history,
+                    EventKind::FileManifest => policy.attachments,
+                    _ => true,
+                };
+                let allowed = selected
+                    && event
+                        .parents
+                        .iter()
+                        .all(|parent| available.contains(parent));
+                if allowed {
+                    available.insert(event.id);
+                }
+                allowed
+            });
+        }
+        if !self.inbound && !self.node.shares_replica(conversation) {
+            // Share-off applies to outbound retries and explicit sends too.
+            // Own records can advance only across parents the receiver already
+            // has, or other eligible own records in this same ordered batch.
+            // Missing third-party ancestry must come from a sharing holder.
+            let mut available = have.clone();
+            let own = self.node.identity.public().ed25519_pub;
+            return events
+                .into_iter()
+                .filter(|event| {
+                    let eligible = event.author.ed25519_pub() == &own
+                        && event
+                            .parents
+                            .iter()
+                            .all(|parent| available.contains(parent));
+                    if eligible {
+                        available.insert(event.id);
+                    }
+                    eligible && !have.contains(&event.id)
+                })
+                .collect();
+        }
+        events
+            .into_iter()
+            .filter(|event| !have.contains(&event.id))
+            .collect()
+    }
+
+    /// Authorized identities without cloning large message/file ciphertext.
+    /// Projection controls retain their exact signed bytes; ordinary Message
+    /// payloads are never inspected by the authority reducer (sealed receipts
+    /// are the exception and retain their complete bytes).
+    pub(in crate::node) fn authorized_event_ids(
+        &self,
+        conversation: &ConversationId,
+    ) -> Vec<EventId> {
+        self.outgoing_projection(conversation, &HashSet::new(), false)
+            .into_iter()
+            .map(|event| event.id)
+            .collect()
+    }
+
+    pub(in crate::node) fn authorized_event_page(
+        &self,
+        conversation: &ConversationId,
+        wanted: &HashSet<EventId>,
+        budget: usize,
+    ) -> Vec<Event> {
+        let ids = self.authorized_event_ids(conversation);
+        let log = self.node.log.lock().expect("log lock not poisoned");
+        let mut used = 0usize;
+        ids.into_iter()
+            .filter(|id| wanted.contains(id))
+            .filter_map(|id| log.get(&id))
+            .take_while(|event| {
+                let bytes = event.ciphertext.len().saturating_add(512);
+                if used > 0 && used.saturating_add(bytes) > budget {
+                    return false;
+                }
+                used = used.saturating_add(bytes);
+                true
+            })
+            .cloned()
+            .collect()
+    }
+
     fn visible(&self, conversation: &ConversationId) -> Vec<Event> {
+        self.visible_projection(conversation, true)
+    }
+
+    fn visible_projection(&self, conversation: &ConversationId, payloads: bool) -> Vec<Event> {
         if self.inbound && !self.node.shares_replica(conversation) {
             return Vec::new();
         }
@@ -884,7 +987,26 @@ impl GuardedSyncStore<'_> {
                 .events(conversation),
         )
         .into_iter()
-        .cloned()
+        .map(|event| {
+            if payloads
+                || event.kind != EventKind::Message
+                || super::delivery_receipt::valid_sealed_wire(&event.ciphertext)
+            {
+                return event.clone();
+            }
+            Event {
+                id: event.id,
+                conversation_id: event.conversation_id,
+                author: event.author,
+                seq: event.seq,
+                parents: event.parents.clone(),
+                lamport: event.lamport,
+                wall_clock: event.wall_clock,
+                kind: event.kind,
+                ciphertext: Vec::new(),
+                sig: event.sig.clone(),
+            }
+        })
         .collect::<Vec<_>>();
         if guard
             .as_ref()
@@ -1039,59 +1161,7 @@ impl SyncStore for GuardedSyncStore<'_> {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
     ) -> Vec<Event> {
-        if self.pull_only {
-            return Vec::new();
-        }
-        let mut events = self.visible(conversation);
-        if self.node.certified_sibling(&self.peer)
-            && *conversation
-                == super::conversation::dm_conversation_id(&self.node.identity.public(), &self.peer)
-        {
-            let policy = self.node.device_sync_policy();
-            let mut available = have.clone();
-            events.retain(|event| {
-                let selected = match event.kind {
-                    EventKind::Message => policy.history,
-                    EventKind::FileManifest => policy.attachments,
-                    _ => true,
-                };
-                let allowed = selected
-                    && event
-                        .parents
-                        .iter()
-                        .all(|parent| available.contains(parent));
-                if allowed {
-                    available.insert(event.id);
-                }
-                allowed
-            });
-        }
-        if !self.inbound && !self.node.shares_replica(conversation) {
-            // Share-off applies to outbound retries and explicit sends too.
-            // Own records can advance only across parents the receiver already
-            // has, or other eligible own records in this same ordered batch.
-            // Missing third-party ancestry must come from a sharing holder.
-            let mut available = have.clone();
-            let own = self.node.identity.public().ed25519_pub;
-            return events
-                .into_iter()
-                .filter(|event| {
-                    let eligible = event.author.ed25519_pub() == &own
-                        && event
-                            .parents
-                            .iter()
-                            .all(|parent| available.contains(parent));
-                    if eligible {
-                        available.insert(event.id);
-                    }
-                    eligible && !have.contains(&event.id)
-                })
-                .collect();
-        }
-        events
-            .into_iter()
-            .filter(|event| !have.contains(&event.id))
-            .collect()
+        self.outgoing_projection(conversation, have, true)
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         if let Some(result) = self.stage_uninvited_channel(&event) {
@@ -1271,6 +1341,68 @@ impl SyncStore for GuardedSyncStore<'_> {
 
 #[cfg(test)]
 mod causal_export_tests {
+    #[tokio::test]
+    async fn authorized_metadata_ids_and_bounded_pages_match_full_projection() {
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation =
+            super::super::conversation::dm_conversation_id(&node.identity.public(), &peer.public());
+        let parent = Event::new(
+            &node.identity,
+            conversation,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            vec![8; 40_000],
+        );
+        let child = Event::new(
+            &node.identity,
+            conversation,
+            2,
+            vec![parent.id],
+            2,
+            0,
+            EventKind::Message,
+            vec![9; 40_000],
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(parent.clone())
+            .unwrap();
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(child.clone())
+            .unwrap();
+        let guarded = node.sync_store(&peer.public());
+        let store = guarded.lock().unwrap();
+        assert_eq!(
+            store.authorized_event_ids(&conversation),
+            store.event_ids(&conversation)
+        );
+        let wanted = HashSet::from([parent.id, child.id]);
+        assert_eq!(
+            store.authorized_event_page(&conversation, &wanted, 50_000),
+            vec![parent]
+        );
+        assert_eq!(
+            store.authorized_event_page(&conversation, &HashSet::from([child.id]), 50_000),
+            vec![child]
+        );
+    }
+
     use super::*;
     use crate::eventlog::sync::{build_request, handle_request_bounded, handle_response};
 

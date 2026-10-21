@@ -1027,35 +1027,12 @@ impl Node {
             Arc::new(move || control.generation.load(Ordering::SeqCst) == generation),
         );
     }
-    pub(in crate::node) async fn privacy_dial(
+    pub(in crate::node) fn privacy_route_candidates(
         &self,
         addr: std::net::SocketAddr,
         expected: &PublicIdentity,
-    ) -> Result<SecureChannel<TcpStream>, TransportError> {
-        #[cfg(test)]
-        let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
-        let permits = self.sessions.outbound().await?;
-        let mut addr = addr;
-        addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
-        #[cfg(test)]
-        timing.phase("dial-privacy-gate");
-        let _operation = self.privacy.gate.read().await;
-        let own = self.own_presence();
-        #[cfg(test)]
-        timing.phase("dial-admission");
-        let generation = self.privacy.generation.load(Ordering::SeqCst);
-        let announce = self
-            .roster
-            .lock()
-            .expect("roster lock not poisoned")
-            .announcement(expected)
-            .cloned();
-        if !self.account_allowed(expected, announce.as_ref())
-            && !self.group_member(expected)
-            && !self.group_departure_peer(expected)
-        {
-            return Err(TransportError::AdmissionDenied);
-        }
+        announce: Option<&crate::discovery::Announce>,
+    ) -> Vec<std::net::SocketAddr> {
         let mut candidates = Vec::with_capacity(10);
         if let Some(preferred) = self
             .preferred_routes
@@ -1097,9 +1074,7 @@ impl Node {
         if let Ok(state) = self.privacy.state.read()
             && let Some(state) = state.as_ref()
         {
-            let port = announce
-                .as_ref()
-                .map_or(addr.port(), |proof| proof.tcp_port);
+            let port = announce.map_or(addr.port(), |proof| proof.tcp_port);
             candidates.extend(
                 state
                     .routes
@@ -1128,6 +1103,39 @@ impl Node {
         let mut unique = std::collections::HashSet::new();
         candidates.retain(|candidate| unique.insert(*candidate));
         candidates.truncate(10);
+        candidates
+    }
+
+    pub(in crate::node) async fn privacy_dial(
+        &self,
+        addr: std::net::SocketAddr,
+        expected: &PublicIdentity,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        #[cfg(test)]
+        let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
+        let permits = self.sessions.outbound().await?;
+        let mut addr = addr;
+        addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
+        #[cfg(test)]
+        timing.phase("dial-privacy-gate");
+        let _operation = self.privacy.gate.read().await;
+        let own = self.own_presence();
+        #[cfg(test)]
+        timing.phase("dial-admission");
+        let generation = self.privacy.generation.load(Ordering::SeqCst);
+        let announce = self
+            .roster
+            .lock()
+            .expect("roster lock not poisoned")
+            .announcement(expected)
+            .cloned();
+        if !self.account_allowed(expected, announce.as_ref())
+            && !self.group_member(expected)
+            && !self.group_departure_peer(expected)
+        {
+            return Err(TransportError::AdmissionDenied);
+        }
+        let candidates = self.privacy_route_candidates(addr, expected, announce.as_ref());
         let mut last_error = TransportError::Noise("no peer route available".into());
         let mut successful = None;
         for candidate in candidates {
@@ -1141,6 +1149,7 @@ impl Node {
                     timing.phase("dial-noise-presence");
                 }
                 stream.set_nodelay(true)?;
+                crate::transport::net::set_tcp_keepalive(&stream);
                 let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
                 SecureChannel::connect_with_visibility(
                     stream,
@@ -1161,6 +1170,7 @@ impl Node {
                 Err(_) => last_error = TransportError::Noise("dial timed out".into()),
             }
         }
+        let requested_addr = addr;
         let (addr, mut channel) = successful.ok_or(last_error)?;
         channel.retain_connection_permits(permits);
         #[cfg(test)]
@@ -1190,6 +1200,7 @@ impl Node {
             .expect("routes lock not poisoned")
             .insert(expected.user_id(), addr);
         self.guard_channel(&mut channel, generation);
+        self.note_dialed_route(requested_addr, &channel);
         #[cfg(test)]
         timing.finish();
         Ok(channel)
@@ -1215,6 +1226,7 @@ impl Node {
         let endpoint = stream.peer_addr()?;
         let ip = endpoint.ip();
         stream.set_nodelay(true)?;
+        crate::transport::net::set_tcp_keepalive(&stream);
         #[cfg(test)]
         timing.phase("accept-own-presence");
         #[cfg(test)]

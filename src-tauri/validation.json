@@ -24,8 +24,10 @@
             "desktop_session::",
             "services::auth_service::tests::",
             "runtime_admission::",
+            "runtime_bootstrap::tests::",
             "commands::tests::",
-            "owner_commands::tests::"
+            "owner_commands::tests::",
+            "chat_commands::state::tests::"
           ]
         }
       ],
@@ -85,7 +87,12 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["chat_commands::", "channel_reception::"]
+          "filters": [
+            "chat_commands::",
+            "channel_reception::",
+            "runtime_bootstrap::tests::",
+            "favorites::"
+          ]
         }
       ],
       "escalation": [

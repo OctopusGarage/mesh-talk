@@ -21,7 +21,7 @@ import { useAuth } from "./auth";
 import { useTransfers } from "./transfers";
 import { useAvatars } from "./avatars";
 
-it("old roster identity failure cannot undo newer readiness", async () => {
+it("coalesces roster invalidations and preserves readiness after an older failure", async () => {
   let reject!: (e: Error) => void;
   let count = 0;
   invoke.mockImplementation((command: string) => {
@@ -39,9 +39,9 @@ it("old roster identity failure cannot undo newer readiness", async () => {
     return Promise.resolve([]);
   });
   const old = useChat.getState().refreshRoster();
-  await useChat.getState().refreshRoster();
+  const next = useChat.getState().refreshRoster();
   reject(new Error("late identity failure"));
-  await old;
+  await Promise.all([old, next]);
   expect(useChat.getState().ready).toBe(true);
 });
 
@@ -449,7 +449,7 @@ const reset = () =>
     historyScanRevision: null,
     historyBaselines: [],
     historyFullBaselines: [],
-    runEpoch: 0,
+    runEpoch: useChat.getState().runEpoch + 1,
     identityEpoch: 0,
     historyRevision: null,
     bootBusy: false,
@@ -471,6 +471,8 @@ const reset = () =>
     peers: [],
     accounts: [],
     channels: [],
+    channelMembersById: {},
+    channelOwner: "",
     active: null,
     messages: {},
     reactions: {},
@@ -2905,9 +2907,11 @@ it("clears withdrawn host recovery evidence and retains checked-peer time", asyn
   await useChat.getState().refreshRoster();
   expect(useChat.getState().reception["channel:team"].phase).toBe("waiting");
   recovery = null;
+  await useChat.getState().refreshChannels("team");
   await useChat.getState().refreshRoster();
   expect(useChat.getState().reception["channel:team"].phase).toBe("idle");
   recovery = { phase: "peer_checked", checked_at: 42 };
+  await useChat.getState().refreshChannels("team");
   await useChat.getState().refreshRoster();
   expect(useChat.getState().reception["channel:team"].checkedAt).toBe(42);
 });
@@ -3483,5 +3487,271 @@ it("expires cached plaintext on focus and removes lifecycle listeners on stop", 
       expect.any(Function),
     );
     vi.unstubAllGlobals();
+  }
+});
+
+it("pushes group metadata into the open view and ignores foreign runtime identities", async () => {
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_channels")
+      return Promise.resolve([
+        {
+          channel_id: "team",
+          name: "Renamed",
+          owner: "new-owner",
+          member_count: 1,
+        },
+      ]);
+    if (command === "channel_members")
+      return Promise.resolve({
+        owner: "new-owner",
+        members: [
+          { user_id: "new-owner", name: "New", replica_enabled: false },
+        ],
+      });
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+    await useChat.getState().refreshRoster();
+    useChat.setState({
+      active: { kind: "channel", id: "team", name: "Old" },
+      members: [],
+      channelOwner: "old",
+    });
+    invoke.mockClear();
+    const event = {
+      owner: "host",
+      account_id: "myacct",
+      device_id: "me",
+      channel_id: "team",
+    };
+    captured.current!.onChannelChanged({ ...event, device_id: "retired" });
+    await Promise.resolve();
+    expect(invoke).not.toHaveBeenCalled();
+    captured.current!.onChannelChanged(event);
+    await vi.waitFor(() =>
+      expect(useChat.getState().channelOwner).toBe("new-owner"),
+    );
+    expect(useChat.getState().active?.name).toBe("Renamed");
+    expect(useChat.getState().members[0]?.replica_enabled).toBe(false);
+    expect(invoke.mock.calls.some(([name]) => name === "list_peers")).toBe(
+      false,
+    );
+  } finally {
+    stop();
+  }
+});
+
+it("does not refetch group members on each unchanged roster tick", async () => {
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_channels")
+      return Promise.resolve([
+        { channel_id: "team", name: "Team", owner: "me", member_count: 1 },
+      ]);
+    if (command === "channel_members")
+      return Promise.resolve({ owner: "me", members: [] });
+    return Promise.resolve([]);
+  });
+  await useChat.getState().refreshRoster();
+  invoke.mockClear();
+  await useChat.getState().refreshRoster();
+  expect(
+    invoke.mock.calls.some(
+      ([name]) => name === "channel_members" || name === "list_channels",
+    ),
+  ).toBe(false);
+});
+
+it.each([false, true])(
+  "does not replace pushed member details with an older open request (unchanged members: %s)",
+  async (unchangedMembers) => {
+    let finish!: (value: unknown) => void;
+    let first = true;
+    const members = [{ user_id: "new", name: "New" }];
+    if (unchangedMembers)
+      useChat.setState({
+        channelOwner: "old",
+        channelMembersById: { team: members },
+      });
+    invoke.mockImplementation((command: string) => {
+      if (command === "owner_node_identity")
+        return Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+        });
+      if (command === "list_channels")
+        return Promise.resolve([
+          { channel_id: "team", name: "Team", owner: "new", member_count: 1 },
+        ]);
+      if (command === "channel_members") {
+        if (first) {
+          first = false;
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        }
+        return Promise.resolve({
+          owner: "new",
+          members: [{ user_id: "new", name: "New" }],
+        });
+      }
+      return Promise.resolve([]);
+    });
+    const opening = useChat
+      .getState()
+      .open({ kind: "channel", id: "team", name: "Team" });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await useChat.getState().refreshChannels("team");
+    finish({
+      owner: "old",
+      members: unchangedMembers ? members : [{ user_id: "old", name: "Old" }],
+    });
+    await opening;
+    expect(useChat.getState().channelOwner).toBe("new");
+    expect(useChat.getState().members).toEqual([
+      { user_id: "new", name: "New" },
+    ]);
+  },
+);
+
+it("keeps newly opened member details when an earlier fallback only updates the avatar cache", async () => {
+  const finishes: Array<(value: unknown) => void> = [];
+  invoke.mockImplementation((command: string) => {
+    if (command === "list_channels")
+      return Promise.resolve([
+        { channel_id: "team", name: "Team", owner: "new", member_count: 1 },
+      ]);
+    if (command === "channel_members")
+      return new Promise((resolve) => {
+        finishes.push(resolve);
+      });
+    return Promise.resolve([]);
+  });
+  const fallback = useChat.getState().refreshChannels();
+  await vi.waitFor(() => expect(finishes).toHaveLength(1));
+  const opening = useChat
+    .getState()
+    .open({ kind: "channel", id: "team", name: "Team" });
+  await vi.waitFor(() => expect(finishes).toHaveLength(2));
+  finishes[0]({
+    owner: "older",
+    members: [{ user_id: "older", name: "Older" }],
+  });
+  await fallback;
+  finishes[1]({ owner: "new", members: [{ user_id: "new", name: "New" }] });
+  await opening;
+  expect(useChat.getState().channelOwner).toBe("new");
+  expect(useChat.getState().members).toEqual([{ user_id: "new", name: "New" }]);
+});
+
+it("publishes slow roster snapshots without overlapping periodic identity requests", async () => {
+  vi.useFakeTimers();
+  let slow = false;
+  const identity = { owner: "host", device_id: "me", account_id: "myacct" };
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return slow
+        ? new Promise((resolve) => setTimeout(() => resolve(identity), 3000))
+        : Promise.resolve(identity);
+    if (command === "list_peers")
+      return Promise.resolve(slow ? [{ user_id: "fresh", name: "Fresh" }] : []);
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    invoke.mockClear();
+    slow = true;
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(
+      useChat.getState().peers.some((peer) => peer.user_id === "fresh"),
+    ).toBe(true);
+    expect(
+      invoke.mock.calls.filter(
+        ([command]) => command === "owner_node_identity",
+      ),
+    ).toHaveLength(2);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("accepts scoped native state invalidations and ignores replaced devices", async () => {
+  invoke.mockImplementation((command: string) =>
+    command === "owner_node_identity"
+      ? Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+        })
+      : Promise.resolve([]),
+  );
+  const stop = useChat.getState().start();
+  try {
+    await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+    await useChat.getState().refreshRoster();
+    invoke.mockClear();
+    const event = {
+      owner: "host",
+      account_id: "myacct",
+      device_id: "old",
+      kind: "roster",
+    };
+    captured.current!.onStateChanged(event);
+    await Promise.resolve();
+    expect(invoke).not.toHaveBeenCalled();
+    captured.current!.onStateChanged({ ...event, device_id: "me" });
+    await vi.waitFor(() =>
+      expect(
+        invoke.mock.calls.some(([command]) => command === "list_peers"),
+      ).toBe(true),
+    );
+  } finally {
+    stop();
+  }
+});
+
+it("ignores an old roster response before negotiating push capability", async () => {
+  const { setPushStateSupport, supportsPushState } =
+    await import("@/lib/syncInvalidation");
+  let finish!: (value: unknown[]) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    if (command === "list_peers")
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    return Promise.resolve([]);
+  });
+  const refreshing = useChat.getState().refreshRoster();
+  await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+  useAuth.setState((state) => ({ generation: state.generation + 1 }));
+  setPushStateSupport("replacement");
+  try {
+    finish([]);
+    await refreshing;
+    expect(supportsPushState("replacement")).toBe(true);
+  } finally {
+    setPushStateSupport(null);
   }
 });

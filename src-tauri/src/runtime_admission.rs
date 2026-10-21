@@ -117,7 +117,9 @@ impl RuntimeAdmission {
         &self,
         operation: impl FnOnce(&NodeRuntime) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
-        let guard = self.node.0.lock().await;
+        let guard = tokio::time::timeout(std::time::Duration::from_secs(5), self.node.0.lock())
+            .await
+            .map_err(|_| CommandError::Internal("runtime admission timed out".into()))?;
         let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
         self.checked(runtime, || operation(runtime))
     }

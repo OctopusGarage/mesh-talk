@@ -1,3 +1,8 @@
+import {
+  subscribeSyncInvalidation,
+  supportsPushState,
+} from "@/lib/syncInvalidation";
+import { readWithDeadline } from "@/lib/readDeadline";
 import { create } from "zustand";
 import type { TFunction } from "i18next";
 import { presence as presenceApi } from "@/lib/api";
@@ -85,6 +90,8 @@ export const usePresence = create<PresenceState>((set, get) => ({
     let nextPoll = 0;
     let lastApplied = 0;
     let inFlight = 0;
+    let dirty = false;
+    let nextFallback = 0;
     let baseline: PresenceMap = {};
     let baselineAt = performance.now();
     const current = () => !cancelled && epoch === session && lease.current();
@@ -96,9 +103,14 @@ export const usePresence = create<PresenceState>((set, get) => ({
     const publishAge = () => {
       if (current()) set({ map: reconcile(get().map, age()) });
     };
-    const poll = async () => {
-      if (!current() || inFlight >= 2) return;
+    const poll = async (invalidate = false) => {
+      if (!current()) return;
+      if (inFlight >= 2) {
+        dirty ||= invalidate;
+        return;
+      }
       inFlight++;
+      nextFallback = performance.now() + 30000;
       const pollId = ++nextPoll;
       const requested = performance.now();
       const fail = () => {
@@ -110,7 +122,7 @@ export const usePresence = create<PresenceState>((set, get) => ({
       };
       const timeout = setTimeout(fail, 10000);
       try {
-        const next = await presenceApi.get();
+        const next = await readWithDeadline(() => presenceApi.get());
         if (!next || typeof next !== "object" || Array.isArray(next))
           throw new Error("invalid presence snapshot");
         if (current() && pollId > lastApplied) {
@@ -149,7 +161,7 @@ export const usePresence = create<PresenceState>((set, get) => ({
             ]),
           );
           lastApplied = pollId;
-          baseline = { ...history, ...withHistory };
+          baseline = reconcile(baseline, { ...history, ...withHistory });
           baselineAt = performance.now();
           set({ map: reconcile(get().map, baseline), unavailable: false });
         }
@@ -158,16 +170,31 @@ export const usePresence = create<PresenceState>((set, get) => ({
       } finally {
         inFlight--;
         clearTimeout(timeout);
+        // Only a real invalidation requests follow-up work; failures and ticks
+        // cannot recursively retry a failing native read.
+        if (current() && dirty) {
+          dirty = false;
+          queueMicrotask(() => void poll(true));
+        }
       }
     };
     void poll();
+    const unlisten = subscribeSyncInvalidation((change) => {
+      if (
+        change.owner === lease.owner &&
+        (change.kind === "roster" || change.kind === "state")
+      )
+        void poll(true);
+    });
     const id = setInterval(() => {
-      void poll();
+      if (!supportsPushState(lease.owner) || performance.now() >= nextFallback)
+        void poll();
       queueMicrotask(publishAge);
     }, POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(id);
+      unlisten();
       if (epoch === session) get().clear();
     };
   },

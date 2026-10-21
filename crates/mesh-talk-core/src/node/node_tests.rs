@@ -129,7 +129,7 @@ async fn auto_enrolls_certified_sibling_with_owner_signed_invitation() {
             if sibling
                 .list_channels()
                 .iter()
-                .any(|item| item.id == channel && item.pending_invite)
+                .any(|item| item.id == channel && !item.pending_invite)
             {
                 break;
             }
@@ -137,15 +137,24 @@ async fn auto_enrolls_certified_sibling_with_owner_signed_invitation() {
         }
     })
     .await
-    .expect("sibling receives owner-signed invitation");
-    assert_eq!(sibling.linked_invite_candidate(), Some(channel));
-    assert!(sibling.auto_accept_one_linked_invite().await.unwrap());
-    assert!(
-        sibling
-            .list_channels()
-            .iter()
-            .any(|item| item.id == channel && !item.pending_invite)
-    );
+    .expect("sibling automatically accepts the owner-signed invitation");
+    // The accept-loop worker may consume the invitation before this task ever
+    // observes its pending state. Assert its stable, signed acceptance instead.
+    assert_eq!(sibling.channel_owner(channel), alice.user_id());
+    let acceptance = sibling
+        .channels
+        .lock()
+        .unwrap()
+        .state(&channel)
+        .unwrap()
+        .accepted_event_id()
+        .expect("automatic acceptance leaves a signed event");
+    {
+        let log = sibling.log.lock().unwrap();
+        let event = log.get(&acceptance).unwrap();
+        assert_eq!(event.kind, EventKind::ChannelAccept);
+        assert_eq!(event.author.user_id(), sibling.user_id());
+    }
     assert!(!sibling.auto_accept_one_linked_invite().await.unwrap());
     let ordinary = alice
         .create_channel_invited("ordinary", vec![sibling.identity.public()])
@@ -2853,6 +2862,95 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
     fast_task.abort();
 }
 
+#[tokio::test]
+async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
+    let alice = DeviceIdentity::generate();
+    let mut slow = DeviceIdentity::generate();
+    let mut fast = DeviceIdentity::generate();
+    if slow.public().user_id() > fast.public().user_id() {
+        std::mem::swap(&mut slow, &mut fast);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let slow_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let slow_port = slow_listener.local_addr().unwrap().port();
+    let fast_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let fast_port = fast_listener.local_addr().unwrap().port();
+    let alice_roster = seed_roster(&slow, "Slow", slow_port, &alice.public().user_id());
+    add_peer(
+        &alice_roster,
+        &fast,
+        "Fast",
+        fast_port,
+        &alice.public().user_id(),
+    );
+    let open = |identity, roster, name: &str| {
+        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
+        let (ch_tx, ch_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm_tx,
+            ch_tx,
+            file_tx,
+            &dir.path().join(format!("{name}.log")),
+            &dir.path().join(format!("{name}-sent.log")),
+            "pw",
+        )
+        .unwrap();
+        (node, ch_rx)
+    };
+    let (alice_node, mut alice_rx) = open(alice, alice_roster, "alice");
+    let (slow_node, _slow_rx) = open(slow, Arc::new(Mutex::new(Roster::default())), "slow");
+    let (fast_node, _fast_rx) = open(fast, Arc::new(Mutex::new(Roster::default())), "fast");
+    let slow_task = tokio::spawn(Arc::clone(&slow_node).run_accept_loop(slow_listener));
+    let fast_task = tokio::spawn(Arc::clone(&fast_node).run_accept_loop(fast_listener));
+    let channel = alice_node
+        .create_channel(
+            "stalled-peer",
+            vec![slow_node.identity.public(), fast_node.identity.public()],
+        )
+        .await
+        .unwrap();
+
+    slow_task.abort();
+    let _ = slow_task.await;
+    let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, slow_port))
+        .await
+        .unwrap();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let stalled_task = tokio::spawn(async move {
+        let (socket, _) = stalled_listener.accept().await.unwrap();
+        let _ = accepted_tx.send(());
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        drop(socket);
+    });
+
+    fast_node
+        .send_channel_message(channel, b"recover promptly")
+        .await
+        .unwrap();
+    let recovery = tokio::spawn({
+        let node = Arc::clone(&alice_node);
+        async move { node.pull_one_channel_from_member(0).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), accepted_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(5), alice_rx.recv())
+        .await
+        .expect("healthy recovery must progress before a stalled peer times out")
+        .unwrap();
+    assert_eq!(received.text, b"recover promptly");
+    tokio::time::timeout(Duration::from_secs(1), recovery)
+        .await
+        .expect("successful recovery must free its group lane before the stalled timeout")
+        .unwrap();
+    stalled_task.abort();
+    fast_task.abort();
+}
+
 /// A restarted member recovers from another member when the author and post office
 /// are unavailable. Discovery of the serving member wakes recovery immediately.
 #[tokio::test]
@@ -3602,6 +3700,16 @@ async fn channel_sending_survives_restart() {
 /// (late-join isolation / forward secrecy).
 #[tokio::test]
 async fn adding_a_channel_member_lets_them_receive_new_messages() {
+    async fn next_message(
+        receiver: &mut mpsc::UnboundedReceiver<crate::node::channel::ReceivedChannelMessage>,
+    ) -> Option<crate::node::channel::ReceivedChannelMessage> {
+        loop {
+            let event = receiver.recv().await?;
+            if !event.reception_only {
+                return Some(event);
+            }
+        }
+    }
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let carol = DeviceIdentity::generate();
@@ -3701,7 +3809,7 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         .send_channel_message(channel, b"epoch0 msg")
         .await
         .unwrap();
-    let got0 = tokio::time::timeout(Duration::from_secs(5), b_ch_r.recv())
+    let got0 = tokio::time::timeout(Duration::from_secs(5), next_message(&mut b_ch_r))
         .await
         .expect("bob received the epoch-0 message within 5s")
         .expect("channel stream open");
@@ -3727,7 +3835,7 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         .await
         .unwrap();
 
-    let got_carol = tokio::time::timeout(Duration::from_secs(5), c_ch_r.recv())
+    let got_carol = tokio::time::timeout(Duration::from_secs(5), next_message(&mut c_ch_r))
         .await
         .expect("carol received the epoch-1 message within 5s")
         .expect("channel stream open");
@@ -3744,10 +3852,11 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         .send_channel_message(channel, b"bob after invite")
         .await
         .unwrap();
-    let from_existing_member = tokio::time::timeout(Duration::from_secs(5), c_ch_r.recv())
-        .await
-        .expect("new member receives an established member after accepting")
-        .expect("channel stream open");
+    let from_existing_member =
+        tokio::time::timeout(Duration::from_secs(5), next_message(&mut c_ch_r))
+            .await
+            .expect("new member receives an established member after accepting")
+            .expect("channel stream open");
     assert_eq!(from_existing_member.text, b"bob after invite");
 
     // Late-join isolation: Carol never receives the epoch-0 message (she joined at
@@ -3759,7 +3868,7 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
     );
     assert!(carol_hist.iter().any(|h| h.text == b"epoch1 msg"));
     assert!(
-        c_ch_r.try_recv().is_err(),
+        std::iter::from_fn(|| c_ch_r.try_recv().ok()).all(|event| event.reception_only),
         "carol must not receive the pre-join epoch-0 message"
     );
 
@@ -4158,7 +4267,15 @@ async fn renaming_a_channel_propagates_to_members_and_is_owner_only() {
         empty_name.to_string().starts_with("invalid input:"),
         "local name rejection must be typed invalid input"
     );
+    let mut info_changes = bob_node.subscribe_channel_changes();
     alice_node.rename_channel(channel, "renamed").await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), info_changes.recv())
+            .await
+            .expect("remote rename must invalidate group info without a chat message")
+            .unwrap(),
+        channel
+    );
     // A message after the rename carries the new name — a deterministic barrier proving
     // Bob processed the rename's MembershipChange.
     alice_node

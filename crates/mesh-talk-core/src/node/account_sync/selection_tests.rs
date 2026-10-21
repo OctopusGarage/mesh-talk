@@ -55,6 +55,307 @@ fn sibling_peer(receiver: &Node, source: &Node, address: std::net::SocketAddr) -
     receiver.routing_peer(&source.user_id()).unwrap()
 }
 
+fn reusable_sibling_peer(
+    directory: &std::path::Path,
+    receiver: &Node,
+    source: &Node,
+    address: std::net::SocketAddr,
+) -> PeerRecord {
+    let announce = source.signed_announce("source", address.port());
+    source
+        .configure_privacy(
+            &directory.join("source"),
+            "pw",
+            &announce,
+            Arc::new(crate::discovery::visibility::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    receiver
+        .roster
+        .lock()
+        .unwrap()
+        .update(&announce, address.ip(), &receiver.user_id());
+    receiver.routing_peer(&source.user_id()).unwrap()
+}
+
+// Old implementations close on the optional tag before accepting the original
+// one-shot request. Keep downgrade fixtures explicit about this extra probe.
+pub(super) async fn accept_legacy_account_request(
+    listener: &tokio::net::TcpListener,
+    node: &Arc<Node>,
+) -> (SecureChannel<TcpStream>, Vec<u8>) {
+    loop {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut channel = node.privacy_accept(stream).await.unwrap();
+        let bytes = channel.recv().await.unwrap();
+        if matches!(
+            AccountHistoryFrame::decode_versioned(&bytes),
+            Some((_, AccountHistoryFrame::SessionRequest { .. }))
+        ) {
+            continue;
+        }
+        return (channel, bytes);
+    }
+}
+
+// A malformed data fixture must complete capability negotiation first so the
+// receiver still reaches the history/attachment assertion under test.
+async fn accept_account_test_request(
+    listener: &tokio::net::TcpListener,
+    node: &Arc<Node>,
+) -> (
+    SecureChannel<TcpStream>,
+    AccountSyncVersion,
+    AccountHistoryFrame,
+) {
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut channel = node.privacy_accept(stream).await.unwrap();
+    let bytes = channel.recv().await.unwrap();
+    let (version, frame) = AccountHistoryFrame::decode_versioned(&bytes).unwrap();
+    let frame = match frame {
+        AccountHistoryFrame::SessionRequest {
+            request_id,
+            request,
+        } => {
+            send_frame(
+                &mut channel,
+                version,
+                &AccountHistoryFrame::SessionReady { request_id },
+            )
+            .await
+            .unwrap();
+            request.into_frame()
+        }
+        frame => frame,
+    };
+    (channel, version, frame)
+}
+
+#[tokio::test]
+async fn account_history_pages_reuse_one_authenticated_connection() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+    let (dir, source, receiver) = sibling_nodes();
+    source
+        .set_device_sync_category(SyncCategory::Attachments, true)
+        .unwrap();
+    receiver
+        .set_device_sync_category(SyncCategory::Attachments, true)
+        .unwrap();
+    let contents = b"reusable sibling attachment";
+    let path = dir.path().join("reuse.bin");
+    std::fs::write(&path, contents).unwrap();
+    let (_, file) = source
+        .enqueue_file_to_account(&source.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = reusable_sibling_peer(
+        dir.path(),
+        &receiver,
+        &source,
+        listener.local_addr().unwrap(),
+    );
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let server_accepted = accepted.clone();
+    let server = tokio::spawn(async move {
+        let mut sessions = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            server_accepted.fetch_add(1, Ordering::SeqCst);
+            let source = source.clone();
+            sessions.spawn(async move {
+                let channel = source.privacy_accept(stream).await.unwrap();
+                source.serve_connection(channel).await;
+            });
+        }
+    });
+    for _ in 0..3 {
+        let mut rejected = false;
+        receiver
+            .pull_account_history_version(
+                &peer,
+                None,
+                [0; 32],
+                AccountSyncVersion::V2,
+                &mut rejected,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    receiver.send_account_wake(&peer, 1).await.unwrap();
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    receiver
+        .pull_account_attachment(&peer, file, AccountSyncVersion::V2)
+        .await
+        .unwrap();
+    let saved = dir.path().join("received-reuse.bin");
+    receiver.save_directory_archive(file, &saved).unwrap();
+    assert_eq!(std::fs::read(saved).unwrap(), contents);
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn account_legacy_v2_rejects_one_session_probe_then_keeps_one_shot_requests() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+    let (_dir, source, receiver) = sibling_nodes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let server_accepted = accepted.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            server_accepted.fetch_add(1, Ordering::SeqCst);
+            let mut channel = source.privacy_accept(stream).await.unwrap();
+            let bytes = channel.recv().await.unwrap();
+            match AccountHistoryFrame::decode_versioned(&bytes).unwrap() {
+                (_, AccountHistoryFrame::SessionRequest { .. }) => {}
+                (
+                    version,
+                    AccountHistoryFrame::Request {
+                        account_id,
+                        cursor,
+                        known_digest,
+                        wanted,
+                        ..
+                    },
+                ) => {
+                    assert_eq!(version, AccountSyncVersion::V2);
+                    source
+                        .serve_account_history(
+                            &mut channel,
+                            version,
+                            &account_id,
+                            cursor,
+                            known_digest,
+                            wanted,
+                        )
+                        .await;
+                }
+                _ => panic!("unexpected legacy account request"),
+            }
+        }
+    });
+    for _ in 0..3 {
+        let (_, _, version) = receiver
+            .pull_account_history_page(&peer, None, [0; 32])
+            .await
+            .unwrap();
+        assert_eq!(version, AccountSyncVersion::V2);
+    }
+    server.abort();
+    let _ = server.await;
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        4,
+        "one optional probe plus three legacy requests"
+    );
+}
+
+#[tokio::test]
+async fn account_session_ready_errors_never_retry_a_legacy_request() {
+    use tokio::net::TcpListener;
+    for response in ["malformed", "wrong nonce", "ready then eof"] {
+        let (_dir, source, receiver) = sibling_nodes();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut channel = source.privacy_accept(stream).await.unwrap();
+            let bytes = channel.recv().await.unwrap();
+            let Some((version, AccountHistoryFrame::SessionRequest { mut request_id, .. })) =
+                AccountHistoryFrame::decode_versioned(&bytes)
+            else {
+                panic!("expected optional session request");
+            };
+            if response == "malformed" {
+                channel
+                    .send(b"invalid account session reply")
+                    .await
+                    .unwrap();
+            } else {
+                if response == "wrong nonce" {
+                    request_id[0] ^= 1;
+                    if request_id == [0; 16] {
+                        request_id[1] = 1;
+                    }
+                }
+                send_frame(
+                    &mut channel,
+                    version,
+                    &AccountHistoryFrame::SessionReady { request_id },
+                )
+                .await
+                .unwrap();
+            }
+            drop(channel);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), listener.accept())
+                    .await
+                    .is_err(),
+                "a malformed, mismatched, or acknowledged session failure must not trigger a legacy retry"
+            );
+        });
+        assert!(
+            receiver
+                .pull_account_history_page(&peer, None, [0; 32])
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn account_and_sync_reuse_separate_authenticated_connections() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+    let (dir, source, receiver) = sibling_nodes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = reusable_sibling_peer(
+        dir.path(),
+        &receiver,
+        &source,
+        listener.local_addr().unwrap(),
+    );
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let server_accepted = accepted.clone();
+    let server = tokio::spawn(async move {
+        let mut sessions = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            server_accepted.fetch_add(1, Ordering::SeqCst);
+            let source = source.clone();
+            sessions.spawn(async move {
+                let channel = source.privacy_accept(stream).await.unwrap();
+                source.serve_connection(channel).await;
+            });
+        }
+    });
+    receiver
+        .pull_account_history_page(&peer, None, [0; 32])
+        .await
+        .unwrap();
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    let conversation =
+        crate::node::conversation::dm_conversation_id(&receiver.identity.public(), &peer.public);
+    receiver.deliver_direct(&peer, conversation).await.unwrap();
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    receiver
+        .pull_account_history_page(&peer, None, [0; 32])
+        .await
+        .unwrap();
+    receiver.deliver_direct(&peer, conversation).await.unwrap();
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    server.abort();
+    let _ = server.await;
+}
+
 #[tokio::test]
 async fn account_sync_v2_falls_back_once_only_before_a_valid_reply() {
     use tokio::net::TcpListener;
@@ -68,9 +369,8 @@ async fn account_sync_v2_falls_back_once_only_before_a_valid_reply() {
         let peer = sibling_peer(&receiver, &source, listener.local_addr().unwrap());
         let server_source = source.clone();
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut channel = server_source.privacy_accept(stream).await.unwrap();
-            let first = channel.recv().await.unwrap();
+            let (mut channel, first) =
+                accept_legacy_account_request(&listener, &server_source).await;
             let (version, _) = AccountHistoryFrame::decode_versioned(&first).unwrap();
             assert_eq!(version, AccountSyncVersion::V2);
             if valid_reply {
@@ -95,9 +395,8 @@ async fn account_sync_v2_falls_back_once_only_before_a_valid_reply() {
                 );
             } else {
                 drop(channel);
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut channel = server_source.privacy_accept(stream).await.unwrap();
-                let bytes = channel.recv().await.unwrap();
+                let (mut channel, bytes) =
+                    accept_legacy_account_request(&listener, &server_source).await;
                 let (
                     version,
                     AccountHistoryFrame::Request {
@@ -338,9 +637,11 @@ async fn account_sync_attachment_receiver_rejects_off_on_revision_before_commit(
         let serving = source.clone();
         let changing = receiver.clone();
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut channel = serving.privacy_accept(stream).await.unwrap();
-            channel.recv().await.unwrap();
+            let (mut channel, _, request) = accept_account_test_request(&listener, &serving).await;
+            assert!(matches!(
+                request,
+                AccountHistoryFrame::AttachmentRequest { .. }
+            ));
             let checksum: [u8; 32] = Sha256::digest(bytes).into();
             send_frame(
                 &mut channel,
@@ -917,4 +1218,735 @@ async fn account_sync_pending_channel_requester_receives_no_archive_or_file_byte
     }
     server.abort();
     let _ = server.await;
+}
+
+#[test]
+fn pairing_export_stops_at_record_budget_before_building_the_remaining_archive() {
+    let (_dir, source, _) = sibling_nodes();
+    let own = source.account_id();
+    let conv = account_conversation_id(&own, &own);
+    let mut sent = source.sentlog.lock().unwrap();
+    for index in 0..4100u64 {
+        let mut id = [0; 32];
+        id[..8].copy_from_slice(&index.to_be_bytes());
+        let wire = DmEnvelope::new(own.clone(), own.clone(), id, b"bounded".to_vec()).encode();
+        sent.record(conv, index, index, &wire).unwrap();
+    }
+    drop(sent);
+    assert_eq!(source.export_account_backfill().len(), 4096);
+}
+
+#[tokio::test]
+async fn account_history_worker_drains_continuation_without_waiting_retry_interval() {
+    use tokio::net::TcpListener;
+    let (_dir, source, receiver) = sibling_nodes();
+    for index in 0..40 {
+        source
+            .enqueue_to_account(
+                &source.account_id(),
+                format!("history-{index}").as_bytes(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let worker = tokio::spawn(receiver.clone().run_account_history_loop());
+    let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if receiver.account_history(&receiver.account_id(), 100).len() == 40 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    outcome.expect("backlog drains promptly instead of waiting ten seconds per page");
+}
+
+#[test]
+fn growing_archive_continuation_keeps_progress_without_claiming_up_to_date() {
+    let mut state = PeerCursor::default();
+    assert!(!state.complete_page(
+        Some(HistoryCursor {
+            tag: 0,
+            id: [1; 32]
+        }),
+        [1; 32]
+    ));
+    assert!(!state.complete_page(
+        Some(HistoryCursor {
+            tag: 0,
+            id: [2; 32]
+        }),
+        [2; 32]
+    ));
+    assert_eq!(state.next.unwrap().id, [2; 32]);
+    // Finishing a changed sweep schedules a fresh sweep to recover lower new IDs.
+    assert!(!state.complete_page(None, [3; 32]));
+    assert!(state.next.is_none());
+    assert_eq!(state.known_digest, [0; 32]);
+    assert!(state.complete_page(None, [3; 32]));
+}
+
+#[tokio::test]
+async fn archive_selectors_reuse_pages_and_scan_only_appends_but_invalidate_erasure() {
+    let (_dir, source, receiver) = sibling_nodes();
+    for index in 0..40 {
+        source
+            .enqueue_to_account(
+                &source.account_id(),
+                format!("row-{index}").as_bytes(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let public = receiver.identity.public();
+    let (_, next, _) =
+        source.export_sync_records(&public, None, true, false, AccountSyncVersion::V2);
+    let scanned = source.account_archive_cache.lock().unwrap().scanned_rows;
+    source.export_sync_records(&public, next, true, false, AccountSyncVersion::V2);
+    {
+        let cache = source.account_archive_cache.lock().unwrap();
+        assert_eq!(cache.builds, 1, "another page uses the same metadata index");
+        assert_eq!(cache.scanned_rows, scanned);
+    }
+    source
+        .enqueue_to_account(&source.account_id(), b"one append", None)
+        .await
+        .unwrap();
+    source.export_sync_records(&public, None, true, false, AccountSyncVersion::V2);
+    let appended = source.account_archive_cache.lock().unwrap().scanned_rows;
+    assert!(
+        appended <= scanned + 2,
+        "appending must not decode the retained archive again"
+    );
+    source
+        .sentlog
+        .lock()
+        .unwrap()
+        .remove_where(|_| true)
+        .unwrap();
+    let (records, next, _) =
+        source.export_sync_records(&public, None, true, false, AccountSyncVersion::V2);
+    assert!(
+        records.is_empty(),
+        "erasure invalidates index positions and old payload selectors"
+    );
+    assert!(next.is_none());
+}
+
+#[test]
+fn known_account_index_skips_unchanged_group_rows_and_invalidates_erased_routes() {
+    let (_dir, source, receiver) = sibling_nodes();
+    let conversation = ConversationId::new([77; 32]);
+    let record = |index: u64, plaintext: &[u8]| {
+        let mut id = [0; 32];
+        id[..8].copy_from_slice(&index.to_le_bytes());
+        source
+            .received
+            .lock()
+            .unwrap()
+            .record(
+                conversation,
+                source.user_id(),
+                index,
+                plaintext,
+                EventId::new(id),
+            )
+            .unwrap();
+    };
+    for index in 0..500 {
+        record(index, b"group plaintext");
+    }
+    source.known_account_ids();
+    let scanned = source.known_account_cache.lock().unwrap().scanned_rows;
+    assert_eq!(scanned, 500);
+    for _ in 0..3 {
+        source.export_sync_records(
+            &receiver.identity.public(),
+            None,
+            true,
+            true,
+            AccountSyncVersion::V2,
+        );
+    }
+    assert_eq!(
+        source.known_account_cache.lock().unwrap().scanned_rows,
+        scanned
+    );
+    record(500, b"one group append");
+    source.export_sync_records(
+        &receiver.identity.public(),
+        None,
+        true,
+        true,
+        AccountSyncVersion::V2,
+    );
+    assert_eq!(
+        source.known_account_cache.lock().unwrap().scanned_rows,
+        scanned + 1
+    );
+    let other = "a".repeat(32);
+    let envelope = super::super::DmEnvelope::new(
+        source.account_id(),
+        other.clone(),
+        [11; 32],
+        b"body".to_vec(),
+    )
+    .encode();
+    record(501, &envelope);
+    assert!(source.known_account_ids().contains(&other));
+    source
+        .received
+        .lock()
+        .unwrap()
+        .remove_where(|entry| entry.wall_clock == 501)
+        .unwrap();
+    assert!(
+        !source.known_account_ids().contains(&other),
+        "erased first-DM metadata must not retain authority"
+    );
+    assert_eq!(
+        source.known_account_cache.lock().unwrap().scanned_rows,
+        scanned + 503
+    );
+}
+
+#[tokio::test]
+async fn stalled_account_attachment_does_not_block_history_and_policy_off_cancels_it() {
+    use tokio::net::TcpListener;
+    let (dir, source, receiver) = sibling_nodes();
+    for node in [&source, &receiver] {
+        node.set_device_sync_category(SyncCategory::Attachments, true)
+            .unwrap();
+    }
+    let path = dir.path().join("stalled.txt");
+    std::fs::write(&path, b"retained bytes").unwrap();
+    source
+        .enqueue_file_to_account(&source.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let (cards, _, _) = source.export_sync_records(
+        &receiver.identity.public(),
+        None,
+        false,
+        true,
+        AccountSyncVersion::V2,
+    );
+    receiver
+        .apply_account_history_page(&cards, AccountSyncVersion::V2)
+        .unwrap();
+    for index in 0..40 {
+        source
+            .enqueue_to_account(
+                &source.account_id(),
+                format!("history-{index}").as_bytes(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    let server_source = source.clone();
+    let server_started = started.clone();
+    let server_cancelled = cancelled.clone();
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let source = server_source.clone(); let started = server_started.clone(); let cancelled = server_cancelled.clone();
+                    connections.spawn(async move {
+                        let mut io = source.privacy_accept(stream).await.unwrap();
+                        let bytes = io.recv().await.unwrap();
+                        let (version, request) = AccountHistoryFrame::decode_versioned(&bytes).unwrap();
+                        match request {
+                            AccountHistoryFrame::SessionRequest { .. } => {},
+                            AccountHistoryFrame::Request { account_id, cursor, known_digest, wanted, .. } => {
+                                source.serve_account_history(&mut io, version, &account_id, cursor, known_digest, wanted).await;
+                            }
+                            AccountHistoryFrame::AttachmentRequest { .. } => {
+                                started.notify_one();
+                                // No reply: only receiver cancellation can close this channel promptly.
+                                assert!(io.recv().await.is_err());
+                                cancelled.notify_one();
+                            }
+                            _ => panic!("unexpected sibling request"),
+                        }
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    let worker = tokio::spawn(receiver.clone().run_account_history_loop());
+    let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+        started.notified().await;
+        loop {
+            if receiver.account_history(&receiver.account_id(), 100).len() >= 41 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        receiver
+            .set_device_sync_category(SyncCategory::Attachments, false)
+            .unwrap();
+        cancelled.notified().await;
+    })
+    .await;
+    worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    outcome.expect(
+        "history stays live and disabling attachments cancels its pending network exchange",
+    );
+}
+
+#[tokio::test]
+async fn archive_authorization_transition_rebuilds_cached_membership_selection() {
+    let (_dir, source, receiver) = sibling_nodes();
+    let channel = source
+        .create_channel_invited("private", vec![receiver.identity.public()])
+        .await
+        .unwrap();
+    source
+        .send_channel_message(channel, b"accepted only")
+        .await
+        .unwrap();
+    let public = receiver.identity.public();
+    let (rows, _, _) =
+        source.export_sync_records(&public, None, true, false, AccountSyncVersion::V2);
+    assert!(rows.is_empty());
+    source
+        .channels
+        .lock()
+        .unwrap()
+        .state_mut(&channel)
+        .unwrap()
+        .accept_invite(&receiver.user_id(), EventId::new([91; 32]));
+    let (rows, _, _) =
+        source.export_sync_records(&public, None, true, false, AccountSyncVersion::V2);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(source.account_archive_cache.lock().unwrap().builds, 2);
+}
+
+#[tokio::test]
+async fn account_history_worker_reaches_original_archive_while_source_keeps_appending() {
+    use tokio::net::TcpListener;
+    let (_dir, source, receiver) = sibling_nodes();
+    for index in 0..96 {
+        source
+            .enqueue_to_account(
+                &source.account_id(),
+                format!("original-{index}").as_bytes(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let original: HashSet<_> = source
+        .account_history(&source.account_id(), 200)
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+    let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let served_pages = pages.clone();
+    let server_source = source.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut io, bytes) = accept_legacy_account_request(&listener, &server_source).await;
+            let (
+                version,
+                AccountHistoryFrame::Request {
+                    account_id,
+                    cursor,
+                    known_digest,
+                    wanted,
+                    ..
+                },
+            ) = AccountHistoryFrame::decode_versioned(&bytes).unwrap()
+            else {
+                panic!("expected history request");
+            };
+            server_source
+                .serve_account_history(&mut io, version, &account_id, cursor, known_digest, wanted)
+                .await;
+            let index = served_pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            server_source
+                .enqueue_to_account(
+                    &server_source.account_id(),
+                    format!("concurrent-{index}").as_bytes(),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let worker = tokio::spawn(receiver.clone().run_account_history_loop());
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let imported: HashSet<_> = receiver
+                .account_history(&receiver.account_id(), 20_000)
+                .into_iter()
+                .map(|row| row.id)
+                .collect();
+            if original.is_subset(&imported) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = server.await;
+    assert!(
+        pages.load(std::sync::atomic::Ordering::SeqCst) >= 3,
+        "the source must change between at least three continuation pages"
+    );
+    outcome.expect("append-only source changes must preserve forward cursor progress");
+}
+
+#[tokio::test]
+async fn account_preference_local_edit_wakes_sibling_before_periodic_retry() {
+    use tokio::net::TcpListener;
+    let (_dir, source, receiver) = sibling_nodes();
+    for node in [&source, &receiver] {
+        node.set_device_sync_category(SyncCategory::Appearance, true)
+            .unwrap();
+    }
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let receiver_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&receiver, &source, source_listener.local_addr().unwrap());
+    sibling_peer(&source, &receiver, receiver_listener.local_addr().unwrap());
+    let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
+    let receiver_server = tokio::spawn(receiver.clone().run_accept_loop(receiver_listener));
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if [&source, &receiver].iter().all(|node| {
+                node.device_sync_status()
+                    .iter()
+                    .any(|status| status.phase == SyncPhase::UpToDate)
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        source
+            .set_account_preference(
+                SyncCategory::Appearance,
+                "theme".into(),
+                Some("dark".into()),
+            )
+            .unwrap();
+        loop {
+            if receiver
+                .account_preferences(SyncCategory::Appearance)
+                .iter()
+                .any(|record| record.value.as_deref() == Some("dark"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    source_server.abort();
+    receiver_server.abort();
+    let _ = source_server.await;
+    let _ = receiver_server.await;
+    outcome.expect(
+        "local preference publication must wake the certified sibling before its ten-second retry",
+    );
+}
+
+#[tokio::test]
+async fn account_wake_requires_exact_linked_noise_identity_and_deduplicates_revisions() {
+    use tokio::net::TcpListener;
+    let (dir, source, sibling) = sibling_nodes();
+    let outsider = open_sibling(&dir.path().join("outsider"), &Account::generate());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_source = source.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let io = server_source.privacy_accept(stream).await.unwrap();
+            server_source.serve_connection(io).await;
+        }
+    });
+    for (index, sender) in [&outsider, &sibling, &sibling].into_iter().enumerate() {
+        let mut io = sender
+            .privacy_dial(address, &source.identity.public())
+            .await
+            .unwrap();
+        send_frame(
+            &mut io,
+            AccountSyncVersion::V2,
+            &AccountHistoryFrame::Wake {
+                account_id: source.account_id(),
+                epoch: [7; 16],
+                revision: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(2), io.recv())
+            .await
+            .unwrap();
+        if index == 0 {
+            assert!(
+                reply.is_err(),
+                "an unrelated Noise identity gets no wake acknowledgement"
+            );
+        } else {
+            assert!(matches!(
+                AccountHistoryFrame::decode_versioned(&reply.unwrap()),
+                Some((
+                    AccountSyncVersion::V2,
+                    AccountHistoryFrame::WakeAck {
+                        epoch,
+                        revision: 1
+                    }
+                )) if epoch == [7; 16]
+            ));
+        }
+        let notified = tokio::time::timeout(
+            Duration::from_millis(30),
+            source.account_sync_notify.notified(),
+        )
+        .await;
+        assert_eq!(
+            notified.is_ok(),
+            index == 1,
+            "only the first certified revision wakes a pull"
+        );
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_sibling_rejects_optional_wake_once_and_periodic_history_still_repairs() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+    let (_dir, source, legacy) = sibling_nodes();
+    for node in [&source, &legacy] {
+        node.set_device_sync_category(SyncCategory::Appearance, true)
+            .unwrap();
+    }
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let legacy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&legacy, &source, source_listener.local_addr().unwrap());
+    sibling_peer(&source, &legacy, legacy_listener.local_addr().unwrap());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let legacy_attempts = attempts.clone();
+    let legacy_server_node = legacy.clone();
+    let legacy_server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = legacy_listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let node = legacy_server_node.clone(); let attempts = legacy_attempts.clone();
+                    connections.spawn(async move {
+                        let mut io = node.privacy_accept(stream).await.unwrap();
+                        let bytes = io.recv().await.unwrap();
+                        let (version, request) = AccountHistoryFrame::decode_versioned(&bytes).unwrap();
+                        match request {
+                            AccountHistoryFrame::SessionRequest { .. } => {},
+                            AccountHistoryFrame::Wake { .. } => { attempts.fetch_add(1, Ordering::SeqCst); }
+                            AccountHistoryFrame::Request { account_id, cursor, known_digest, wanted, .. } => {
+                                node.serve_account_history(&mut io, version, &account_id, cursor, known_digest, wanted).await;
+                            }
+                            _ => panic!("unexpected legacy request"),
+                        }
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
+    let legacy_worker = tokio::spawn(legacy.clone().run_account_history_loop());
+    let outcome = tokio::time::timeout(Duration::from_secs(13), async {
+        loop {
+            if attempts.load(Ordering::SeqCst) == 1
+                && legacy
+                    .device_sync_status()
+                    .iter()
+                    .any(|status| status.phase == SyncPhase::UpToDate)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        for value in ["dark", "light", "oled"] {
+            source
+                .set_account_preference(
+                    SyncCategory::Appearance,
+                    "theme".into(),
+                    Some(value.into()),
+                )
+                .unwrap();
+        }
+        loop {
+            if legacy
+                .account_preferences(SyncCategory::Appearance)
+                .iter()
+                .any(|record| record.value.as_deref() == Some("oled"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "unsupported peers stay in capability cooldown while ordinary pulls repair"
+        );
+    })
+    .await;
+    source_server.abort();
+    legacy_server.abort();
+    legacy_worker.abort();
+    let _ = source_server.await;
+    let _ = legacy_server.await;
+    let _ = legacy_worker.await;
+    outcome.expect(
+        "a legacy sibling keeps its ten-second history fallback after rejecting optional hints",
+    );
+}
+
+#[tokio::test]
+async fn account_network_children_retain_retirement_admission_until_cancelled() {
+    use tokio::net::TcpListener;
+    for wake in [false, true] {
+        let (_dir, local, remote) = sibling_nodes();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        sibling_peer(&local, &remote, listener.local_addr().unwrap());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut io = remote.privacy_accept(stream).await.unwrap();
+            io.recv().await.unwrap();
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let worker = if wake {
+            tokio::spawn(local.clone().run_account_wake_loop())
+        } else {
+            tokio::spawn(local.clone().run_account_history_loop())
+        };
+        tokio::time::timeout(Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        local.runtime_work.close();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), local.runtime_work.drain())
+                .await
+                .is_err(),
+            "an admitted account network child must remain visible to retirement (wake={wake})"
+        );
+        worker.abort();
+        let _ = worker.await;
+        tokio::time::timeout(Duration::from_secs(2), local.runtime_work.drain())
+            .await
+            .unwrap();
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[tokio::test]
+async fn account_wake_stays_quiet_with_all_sync_categories_off_then_wakes_on_enable() {
+    use tokio::net::TcpListener;
+    let (_dir, local, remote) = sibling_nodes();
+    local
+        .set_device_sync_category(SyncCategory::History, false)
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&local, &remote, listener.local_addr().unwrap());
+    let worker = tokio::spawn(local.clone().run_account_wake_loop());
+    local
+        .set_account_preference(
+            SyncCategory::Appearance,
+            "theme".into(),
+            Some("dark".into()),
+        )
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), listener.accept())
+            .await
+            .is_err()
+    );
+    local
+        .set_device_sync_category(SyncCategory::Appearance, true)
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+    worker.abort();
+    let _ = worker.await;
+    assert!(
+        result.is_ok(),
+        "enabling a selected category advertises its retained state"
+    );
+}
+
+#[tokio::test]
+async fn account_wake_failed_route_cooldown_does_not_suppress_a_new_endpoint() {
+    use tokio::net::TcpListener;
+    let (_dir, local, remote) = sibling_nodes();
+    let old_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&local, &remote, old_listener.local_addr().unwrap());
+    let old_remote = remote.clone();
+    let old_server = tokio::spawn(async move {
+        let (stream, _) = old_listener.accept().await.unwrap();
+        let mut io = old_remote.privacy_accept(stream).await.unwrap();
+        io.recv().await.unwrap();
+        // Legacy endpoint closes on the appended optional request tag.
+    });
+    let worker = tokio::spawn(local.clone().run_account_wake_loop());
+    tokio::time::timeout(Duration::from_secs(2), old_server)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let new_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&local, &remote, new_listener.local_addr().unwrap());
+    let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+        let (mut io, version, frame) = accept_account_test_request(&new_listener, &remote).await;
+        let AccountHistoryFrame::Wake {
+            account_id,
+            epoch,
+            revision,
+        } = frame
+        else {
+            panic!("expected wake request");
+        };
+        remote
+            .serve_account_wake(&mut io, version, &account_id, epoch, revision)
+            .await;
+    })
+    .await;
+    worker.abort();
+    let _ = worker.await;
+    outcome.expect("a changed authenticated route bypasses the old endpoint's capability cooldown");
 }

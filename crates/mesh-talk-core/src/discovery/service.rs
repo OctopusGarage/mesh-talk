@@ -158,9 +158,10 @@ const PEER_TTL: Duration = Duration::from_secs(30);
 
 /// Listen for announces on `socket`, feeding the roster, until a fatal socket
 /// error or task cancellation. Peer reset/refusal errors are transient and do not
-/// end discovery. Also evicts stale peers each iteration —
-/// after every datagram (busy network) and on a `PEER_TTL` recv timeout (silent
-/// network) — so a roster never grows unbounded or retains dead endpoints.
+/// end discovery. Stale-route cleanup runs at most once per second while
+/// receiving, including query/rejection traffic, and after a `PEER_TTL` receive
+/// timeout on a silent network. Busy traffic never triggers a full roster scan
+/// for every individual datagram.
 ///
 /// Announce/response (LocalSend's mechanism): on FIRST sight of a peer
 /// ([`UpdateOutcome::New`]) we unicast our own announce straight back to the
@@ -229,7 +230,17 @@ async fn run_listen_with_routed(
     let mut buf = vec![0u8; 2048];
     let mut physical_scope = visibility.discovery_scope();
     let mut scope_refreshed = Instant::now();
+    let mut last_prune = Instant::now();
     loop {
+        // Routed queries and rejected packets take early continue paths below.
+        // Their traffic must not indefinitely postpone stale-route cleanup.
+        if last_prune.elapsed() >= Duration::from_secs(1) {
+            roster
+                .lock()
+                .expect("roster mutex not poisoned")
+                .evict_stale(PEER_TTL);
+            last_prune = Instant::now();
+        }
         match tokio::time::timeout(PEER_TTL, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, source))) => {
                 if !visibility.accepts_source(source) {
@@ -304,10 +315,6 @@ async fn run_listen_with_routed(
             }
             Err(_) => {} // recv timed out → fall through to evict
         }
-        roster
-            .lock()
-            .expect("roster mutex not poisoned")
-            .evict_stale(PEER_TTL);
     }
 }
 
@@ -403,6 +410,12 @@ async fn run_broadcast_with_visibility(
 /// the fallback for when those are blocked but unicast is allowed).
 const SCAN_STARTUP_DELAYS_SECS: [u64; 3] = [1, 3, 7];
 const SCAN_STEADY_INTERVAL: Duration = Duration::from_secs(5);
+// Together with the two-second sweep budget this stays below public presence's
+// 15-second lease on networks where unicast is the only discovery path.
+const SCAN_MAX_INTERVAL: Duration = Duration::from_secs(10);
+const SCAN_SWEEP_BUDGET: Duration = Duration::from_secs(2);
+const SCAN_MAX_TARGETS: usize = 512;
+const SCAN_PACKET_SPACING: Duration = Duration::from_millis(2);
 
 /// Unicast-UDP /24 scan fallback (the analog of LocalSend's HTTP /24 scan, adapted
 /// to our fixed UDP discovery port). For each local non-loopback IPv4 interface,
@@ -434,6 +447,7 @@ async fn run_scan_with_visibility(
     trigger: Option<Arc<Notify>>,
     visibility: Arc<DiscoveryVisibility>,
 ) {
+    let mut cursor = 0usize;
     let started = tokio::time::Instant::now();
     for delay in SCAN_STARTUP_DELAYS_SECS {
         let deadline = started + Duration::from_secs(delay);
@@ -448,27 +462,39 @@ async fn run_scan_with_visibility(
                 break;
             }
             let bytes = current_announce(&announce);
-            scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility).await;
+            scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility, &mut cursor)
+                .await;
         }
         let bytes = current_announce(&announce);
-        scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility).await;
+        scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility, &mut cursor).await;
     }
-    let mut tick = tokio::time::interval(SCAN_STEADY_INTERVAL);
-    tick.tick().await; // consume the immediate first tick (we just scanned)
+    let mut idle_sweeps = 0u32;
     loop {
-        // Steady sweep on the timer, OR an immediate one when triggered.
-        match &trigger {
+        let ceiling = SCAN_STEADY_INTERVAL
+            .saturating_mul(1u32 << idle_sweeps.min(2))
+            .min(SCAN_MAX_INTERVAL);
+        let max_ms = ceiling.as_millis() as u64;
+        let floor_ms = max_ms * 4 / 5;
+        let delay = Duration::from_millis(
+            floor_ms + uuid::Uuid::new_v4().as_u128() as u64 % (max_ms - floor_ms + 1),
+        );
+        let triggered = match &trigger {
             Some(notify) => tokio::select! {
-                _ = tick.tick() => {}
-                _ = notify.notified() => {}
+                _ = tokio::time::sleep(delay) => false,
+                _ = notify.notified() => true,
             },
             None => {
-                tick.tick().await;
+                tokio::time::sleep(delay).await;
+                false
             }
-        }
-        // Re-read the current announce each sweep so a runtime rename takes effect.
+        };
+        idle_sweeps = if triggered {
+            0
+        } else {
+            idle_sweeps.saturating_add(1)
+        };
         let bytes = current_announce(&announce);
-        scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility).await;
+        scan_once_with_visibility(&socket, &bytes, discovery_port, &visibility, &mut cursor).await;
     }
 }
 
@@ -508,6 +534,7 @@ async fn scan_once(socket: &UdpSocket, bytes: &[u8], discovery_port: u16) {
         bytes,
         discovery_port,
         &DiscoveryVisibility::default(),
+        &mut 0,
     )
     .await;
 }
@@ -517,28 +544,60 @@ async fn scan_once_with_visibility(
     bytes: &[u8],
     discovery_port: u16,
     visibility: &DiscoveryVisibility,
+    cursor: &mut usize,
 ) {
     let interfaces = if visibility.physical_lan_only() {
         visibility.physical_ipv4_addrs()
     } else {
         ipv4_interface_addrs()
     };
-    let targets = scan_targets_for_interfaces(&interfaces)
+    let mut targets = scan_targets_for_interfaces(&interfaces)
         .into_iter()
         .map(|ip| SocketAddr::new(IpAddr::V4(ip), discovery_port))
         // A /24 fallback scan can exceed the real interface netmask. Skip
         // disallowed targets instead of ending the scan before another LAN.
-        .filter(|target| visibility.accepts_source(*target));
-    let _ = scan_addresses(socket, bytes, targets, visibility).await;
+        .filter(|target| visibility.accepts_source(*target))
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return;
+    }
+    let start = *cursor % targets.len();
+    targets.rotate_left(start);
+    let count = targets.len().min(SCAN_MAX_TARGETS);
+    targets.truncate(count);
+    let mut visited = 0;
+    let _ = tokio::time::timeout(
+        SCAN_SWEEP_BUDGET,
+        scan_addresses_counted(socket, bytes, targets, visibility, &mut visited),
+    )
+    .await;
+    // Preserve progress even if cancellation or socket backpressure cuts a
+    // sweep short. Restarting at zero would starve the last interface forever.
+    *cursor = start.wrapping_add(visited);
 }
 
+#[cfg(test)]
 async fn scan_addresses(
     socket: &UdpSocket,
     bytes: &[u8],
     targets: impl IntoIterator<Item = SocketAddr>,
     visibility: &DiscoveryVisibility,
 ) -> bool {
-    for target in targets {
+    scan_addresses_counted(socket, bytes, targets, visibility, &mut 0).await
+}
+
+async fn scan_addresses_counted(
+    socket: &UdpSocket,
+    bytes: &[u8],
+    targets: impl IntoIterator<Item = SocketAddr>,
+    visibility: &DiscoveryVisibility,
+    visited: &mut usize,
+) -> bool {
+    for (index, target) in targets.into_iter().enumerate() {
+        if index != 0 {
+            tokio::time::sleep(SCAN_PACKET_SPACING).await;
+        }
+        *visited += 1;
         if matches!(
             visibility.send_announce(socket, bytes, target).await,
             Ok(false)
@@ -778,6 +837,27 @@ mod privacy_tests;
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn fallback_scan_paces_datagrams_instead_of_bursting_a_subnet() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = receiver.local_addr().unwrap();
+        let started = Instant::now();
+        assert!(
+            scan_addresses(
+                &socket,
+                b"scan",
+                std::iter::repeat_n(target, 32),
+                &DiscoveryVisibility::default()
+            )
+            .await
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "fallback probes must be paced"
+        );
+    }
+
     #[test]
     fn interface_changes_refresh_discovery_without_waiting_for_periodic_rejoin() {
         let first = [("en0".to_owned(), "192.168.1.10".parse().unwrap(), Some(2))].into();

@@ -64,6 +64,14 @@ export interface ReactionInfo {
   who: string[];
 }
 
+/** Owner-scoped invalidation; null requests a full repair after event-buffer lag. */
+export interface ChannelChangedEvent {
+  owner: string;
+  account_id: string;
+  device_id: string;
+  channel_id: string | null;
+}
+
 export interface ChannelMemberInfo {
   user_id: string;
   name: string;
@@ -389,4 +397,12 @@ export interface PrivacySnapshot {
     name: string;
     source: "Manual" | "Initiated";
   }[];
+}
+
+/** Invalidation only. Read snapshots through the authorized IPC adapters. */
+export interface NodeStateChangedEvent {
+  owner: string;
+  account_id: string;
+  device_id: string;
+  kind: "state" | "roster" | "delivery" | "files";
 }

@@ -249,7 +249,7 @@ identities rather than invented account associations.
 | Public authenticated contact                               | 15 seconds                                 | No inferred LAN scope or continuing connection. Private route knowledge remains excluded.                               |
 | Directory/federation introduction                          | Original origin expiry, at most 15 seconds | v4 client response preserves expiry; forwarding and re-querying cannot renew it. Legacy responses provide routing only. |
 
-Public observation leases are 15 seconds. The frontend's shared two-second poll
+Public observation leases are 15 seconds. The frontend's shared two-second evidence-aging clock
 ages those leases locally, so a stopped desktop loses Online within 20 seconds
 without needing a logout packet. Route retention is independent: authenticated
 routes remain dial candidates for 300 seconds and routed candidates for 120 seconds.
@@ -289,9 +289,11 @@ with blocked TCP can still validly show Online. Only current authenticated
 transport evidence could justify “Connected”; the presence projection makes no
 such claim and opens no new connections.
 
-The isolated frontend store uses the shared two-second scheduling loop, permits
-at most two outstanding refreshes, guards owner/runtime generations and response
-ordering, and ages every observation locally even during failure. IPC timeouts,
+The isolated frontend store uses pushed snapshots with bounded fallback reads,
+permits at most two active UI refreshes, guards owner/runtime generations and
+response ordering, and ages every observation on the shared two-second clock even
+during failure. Timed-out native operations retain their global admission slots
+until they actually settle. IPC timeouts,
 failed reads and discovery task termination produce a global availability notice,
 not an empty successful snapshot or a fabricated network diagnosis. Successful
 withdrawals take effect immediately. Up to 1,024 actually observed historical
@@ -496,13 +498,19 @@ A failed operation can try R. If R has a surviving trusted path to Q, recipient 
 
 An alternate relay that accepts ciphertext has demonstrated custody only. It has not demonstrated an onward route, recipient admission or confirmation. Retrying P/R must not create duplicate user-visible events.
 
+When local storage cannot persist a received file-consent control, the current mailbox operation defers that wrapper after its first failed attempt and continues admitting unrelated messages. This deferral is operation-local: it does not mark the control durably received, and a later drain retries it after storage recovers. A failed control must not create repeated apparent sync progress within one operation.
+
 ### D. Group creation, distribution and member recovery
 
 Membership and key controls are signed authority. Invitations require normal acceptance; owners, transfers, removals and departures affect the projected authorized membership. A directory or relay cannot grant access. Historical recovery obeys invitation/key/visibility constraints and must not expose uninvited ancestry to a new participant.
 
 Small groups retain direct fanout. Text/sticker distribution in larger groups seeds a bounded subset and relies on authorized member recovery; membership/key controls retain their broader bounded fanout. File manifests have their own fanout behavior and must not inherit a text-only optimization without an explicit retention/recovery design.
 
-Each accepted member controls **Share a copy**. A receiver can obtain its own authorized events while declining to serve retained history. Background recovery polls a bounded set of peers; newly validated messages coalesce a recovery wake, while duplicate processing and empty rounds remain quiet. Identity/channel-specific rotation distributes peer selection.
+Each accepted member controls **Share a copy**. A receiver can obtain its own authorized events while declining to serve retained history. Recovery automatically selects accepted sharing members from signed group state; users need not inspect individual members or grant separate DM permissions. Lower-frequency reconciliation still checks known non-sharing members so a later sharing change can be learned. The serving peer always enforces current authority and sharing preference.
+
+Newly validated messages and projected group-info changes coalesce targeted recovery work. Duplicate processing and empty rounds remain quiet. Recovery bounds concurrent groups and peer exchanges, so a stalled peer does not delay a healthy source in the same batch. Identity/channel-specific rotation distributes peer selection. Idle history reconciliation uses capped exponential backoff with jitter; discovery changes wake recovery immediately. Custody and failed plaintext retain their own retry schedules.
+
+Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A 30-second full metadata reconciliation repairs missed events and older hosts; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Local contact aliases remain local presentation preferences.
 
 ```mermaid
 flowchart LR
@@ -1249,7 +1257,7 @@ A deleted local record or recalled event does not recall already copied data fro
 | Default IPv4 discovery               | Multicast `224.0.0.167`, UDP 47474; configurable discovery port.                                                                                  | Custom deployments must make the actual UDP endpoint discoverable/probeable. TCP listen ports are separately advertised/configured.                                                        |
 | Node-managed TCP capacity            | Eight shared slots; at most seven per direction.                                                                                                  | Counts managed dialing, handshakes, active sessions, retained idle sessions and accept reservations. OS backlog sockets, UDP, WebRTC and separate relay processes are outside this budget. |
 | Capacity wait                        | Two seconds.                                                                                                                                      | A bound on waiting for a managed slot, not a delivery deadline.                                                                                                                            |
-| Idle sync reuse                      | Fifteen seconds; at most one idle session per exact identity/endpoint.                                                                            | Concurrent busy sessions to the same relay remain possible. One-shot protocols dial fresh; no wire multiplexing is implemented.                                                            |
+| Idle sync reuse                      | Fifteen seconds; at most one idle session per exact identity/endpoint/protocol class.                                                              | Concurrent busy sessions to the same relay remain possible. One-shot protocols dial fresh; no wire multiplexing is implemented.                                                            |
 | Routed discovery requests            | At most 256 pending IP/nonce pairs, expiring after five seconds; desktop inventories interleave both standard service ports within 256 endpoints. | Colocated services cannot overwrite one another's nonce; inventory presence still requires signed discovery and pinned transport authentication.                                           |
 | Durable delivery control scheduling  | At most two destination retries, one receipt retry and one peer reconciliation; 15 seconds per complete direct or relay exchange.                 | Separate lanes allow routed round trips without serializing file scheduling. Worker-owned tasks retain retirement admission and share the existing TCP limits.                             |
 | Roster and routes                    | Up to 1,024 known peers and eight route observations per peer.                                                                                    | Identity deduplication and route expiry are independent of the managed connection budget.                                                                                                  |
@@ -1257,11 +1265,11 @@ A deleted local record or recalled event does not recall already copied data fro
 | Legacy directory/federation snapshot | 128 entries.                                                                                                                                      | Explicit version negotiation/fallback retains legacy limits on compatible fresh sessions.                                                                                                  |
 | Client directory scheduling          | At most eight concurrent queries; overlapping refresh suppressed.                                                                                 | Later eligible relays are visited, not permanently skipped after the first eight. Successful results publish without waiting for every stalled candidate.                                  |
 | Directory presence                   | At most 15 seconds.                                                                                                                               | Origin freshness is not renewed by forwarding. Refresh and network delays can still affect observed liveness.                                                                              |
-| Relay seed probes / reconciliation   | Eight concurrent probes and eight relay sync operations, separately. A new round follows the previous round plus a five-second sleep.             | Not a fixed five-second end-to-end convergence promise or a global eight-socket cap for the relay process.                                                                                 |
+| Relay seed probes / reconciliation   | Eight concurrent probes and eight relay sync operations, separately. Coalesced durable/directory/route wakes; immediate bounded-batch continuation; adaptive jittered idle fallback.             | Not a fixed five-second end-to-end convergence promise or a global eight-socket cap for the relay process.                                                                                 |
 | Relay storage                        | Soft limits of 100,000 events and 512 MiB, with 5,000-event / 16 MiB compaction slack.                                                            | Storage can temporarily exceed soft limits; capacity may evict younger copies before their age limit.                                                                                      |
 | Maximum relay event age              | Thirty days from retained original arrival semantics.                                                                                             | Upper age bound, not minimum guaranteed retention. Forwarding/restart must preserve expiry behavior.                                                                                       |
 | Group initial text/sticker seeding   | Small-group threshold five members; larger groups normally seed two peers.                                                                        | Authority controls and file manifests retain their separate fanout rules.                                                                                                                  |
-| Group recovery                       | Three peers per channel recovery step; three-second periodic interval; coalesced wake can visit up to eight joined channels.                      | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                        |
+| Group recovery                       | Three peers per channel recovery step; coalesced wakes visit up to eight joined channels; jittered recovery fallback grows from three to sixty seconds, with independent three-second custody work.                      | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                        |
 | Group control fanout                 | At most four concurrent contacts.                                                                                                                 | A stalled peer must not serialize every healthy member's control delivery.                                                                                                                 |
 
 The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/delivery_runtime.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
@@ -1269,6 +1277,33 @@ The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, 
 ### Session reuse contract
 
 A retained session is exclusive to one borrower and reusable only after a complete successful sequential sync exchange has consumed its responses. The key/admission checks include full public identity, endpoint, current policy generation and authenticated account/role consistency. Canceled operations, malformed replies, pending unexpected bytes, EOF and stale policy/bindings cause eviction. Idle expiry releases capacity even without another checkout.
+
+Event-log sync and negotiated sibling account requests use separate pool classes.
+V2 history, attachment and wake requests can carry an appended optional session
+envelope with a random request ID. A matching ready acknowledgement confirms
+reuse before the ordinary response, without another client request round trip.
+Every request rechecks certified sibling and current policy authority; handlers
+retain their existing deadlines and only continue after a successful terminal
+write. V1 and older V2 peers retain fresh one-shot exchanges. Only an authenticated
+clean close before acknowledgement permits fallback; truncated frames, malformed
+acknowledgements and acknowledged failures do not downgrade. Unsupported-state
+entries are capped at 256, expire after sixty seconds, and bind the actual
+authenticated endpoint, full identity and privacy generation. A successful
+negotiation clears that endpoint's negative entry.
+
+Pool lookup preserves explicit listener isolation. Up to 256 bounded route
+affinities remember an actually authenticated fallback for the same requested
+endpoint, identity and policy generation; a fallback is reusable only while the
+shared fresh-dial route policy still permits it. IPv4-mapped inputs canonicalize
+before lookup. A different explicit listener cannot inherit another request's
+fallback. Privacy/network invalidation clears affinities and capability state.
+Stale reused DM and relay exchanges may retry a fresh connection once within
+their existing caller deadline. Fresh failures and malformed/authentication
+responses do not receive that retry. New file transfers borrow compatible pooled
+sync channels, and successful final file custody proofs return their fully
+consumed channel to the pool. Production inbound and
+outbound sockets use `TCP_NODELAY` and best-effort TCP keepalive; application
+deadlines remain authoritative for liveness.
 
 One-shot call, pairing and directory protocols keep their first-frame semantics by dialing fresh. A managed permit follows the connection lifetime. The accept loop reserves capacity before accepting and retains inbound handshake bounds. Opposite-direction progress must remain possible.
 
@@ -1397,3 +1432,82 @@ Use affected unit/integration tests during ordinary development. Add a real loop
 True stream multiplexing, automatic trust enrollment, hot federation revocation, anonymity, TURN/media relay, mailbox-backed call signaling, stronger replicated-storage guarantees and unrestricted cross-site IP routing are not implied by this baseline. Each would change authority, resource or wire semantics and needs explicit requirements, compatibility/security analysis and its own acceptance evidence.
 
 The guiding question for future changes is: **Does this preserve local-first communication, explicit authority, equal trusted relay roles, endpoint-owned delivery truth and bounded recoverable work across the actual reachable graph?** If not, revise the design deliberately before presenting the behavior as compatible.
+
+
+## Push-driven reconciliation and recovery
+
+Durable state is authoritative. Notifications schedule reconciliation; they never
+serve as delivery proof, replace signed membership, or transfer plaintext authority.
+Per-domain coalescing watches retain only the newest generation. Desktop host
+producers subscribe before installation, wait for the installation barrier, and
+stop with their exact runtime authority. Invalidations carry host owner, account,
+device and domain; locked sessions suppress emission and frontend consumers reject
+retired scopes. Boot/unlock and periodic reconciliation repair missed notifications.
+
+The desktop advertises push support through its owner identity snapshot. Supported
+clients refresh roster, delivery, file availability and sibling preferences on
+invalidations, with bounded fallback sweeps. Presence evidence still ages locally;
+a timer used for expiry does not require a fresh IPC snapshot. Older hosts retain
+the compatibility polling path. UI observations have ten-second watchdogs and an
+explicit global budget of 64 unfinished read operations; a watchdog cannot cancel a
+native mutation or release its actual backend resources. Runtime observation and
+admission waits have five-second deadlines. Successful group summaries and member
+subsets publish without waiting for a stalled member; publication bursts coalesce.
+Periodic roster work is single-flight and preserves one pending event refresh.
+Presence, delivery and file observations also retain a coalesced follow-up when
+an invalidation arrives during a read, so stale snapshots cannot consume a wake.
+
+Relay upload and download bound each candidate independently and retain bounded
+cooldowns and rotating mailbox cursors. A silent preferred relay cannot consume
+all attempts. Waiting file consent releases sockets and worker capacity; durable
+offers remain retryable. File exchanges use independent workers and a network
+operation deadline rather than a 400-ms scheduler quantum. Recipient recovery
+uses plausible author/authorized-member sources, bounded concurrent requests,
+coalesced consent/route/network wakes and adaptive anti-entropy. Opaque exchanges
+retain event identifiers and a two-MiB wrapper cache, authorize bounded outgoing
+pages afresh and process incoming wrappers without rebuilding every ciphertext
+projection for each chunk. Existing protocol inventory metadata still scales with
+retained event count; the cache is not a claim of constant-cost large-file sync.
+
+Sibling history immediately continues bounded pages with fair peer scheduling.
+Optional V2 wake hints carry only account identity, a process epoch and a monotonic
+local revision. Exact certified siblings acknowledge the hint and schedule the
+existing policy-checked pull. Two senders coalesce changes for 100 ms, use a
+five-second exchange deadline and retain a sixty-second failed-capability cooldown.
+Local durable changes coalesce into bounded hint senders; imports do not republish
+hints, preventing feedback loops. Old peers
+reject the appended optional tags safely and keep ten-second anti-entropy.
+Existing frame indices and stored encodings remain unchanged.
+Appending records does not reset a forward cursor: a changed sweep schedules a
+fresh pass for IDs inserted behind that cursor. Up-to-date status requires a
+completed validated sweep and no pending attachment work. Four history workers
+and two attachment workers separate text/preferences from slow file downloads;
+whole-operation deadlines and policy cancellation bound their lifetimes. Tracked
+blocking work keeps source scans and durable imports out of the shared network
+accept task, and runtime retirement waits for admitted persistence work.
+One metadata index selects at most sixteen payloads per page; append-only sources
+extend the index, while erasure, policy and membership changes invalidate it.
+Known-account history uses a first-DM metadata index that scans only appended
+suffixes and discards remembered routes after erasure or rewrite.
+Pairing applies record and serialized-byte limits while selecting borrowed rows,
+before copying plaintext. Avatar ties use one deterministic content order during
+both live admission and replay, with clear tombstones winning equal revisions.
+Preference consumers use the core's `(revision, device_id)` order. Contact imports
+persist whole records in bounded batches, compare the expected local record at
+the commit boundary to preserve concurrent local edits, and reload each affected
+UI projection once. Linked imports preserve device-local contact deletions;
+local committed mutations wake publication immediately.
+
+Federation wakes on durable mailbox, directory and effective route changes,
+coalesces bursts, caches unchanged inventories and continues full mailbox batches
+without waiting for the idle fallback. Complete outgoing and inbound exchanges
+have absolute deadlines and rotate mailbox attempts across failures. Bridge
+negotiation distinguishes transport/malformed/policy failures from supported
+compatibility fallback and retains bounded per-relay retry state. Discovery keeps
+startup/interface/manual probes prompt, paces bounded unicast slices, rotates
+unfinished sweeps and backs off with jitter within the public presence lease.
+Periodic discovery, lease refresh and anti-entropy remain required recovery paths.
+
+Regression evidence belongs to owning unit/loopback suites and validation contracts.
+Native cross-platform lifecycle and large-workload throughput acceptance remain
+separate from mocked browser behavior and local focused test results.

@@ -31,6 +31,8 @@ pub struct ReceivedEntry {
 /// indexed in memory by conversation.
 pub struct ReceivedLog {
     file: EncryptedRecordLog<ReceivedEntry>,
+    revision: u64,
+    rewrite_revision: u64,
     by_conversation: HashMap<ConversationId, Vec<ReceivedEntry>>,
     allow_aliases: bool,
     /// First host for each event ID. Message logs reject another host; file-card
@@ -76,6 +78,7 @@ impl ReceivedLog {
             .entry(entry.event_id)
             .or_insert((entry.conversation, entries.len()));
         entries.push(entry.clone());
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -117,6 +120,7 @@ impl ReceivedLog {
         self.seen
             .insert(entry.event_id, (entry.conversation, entries.len()));
         entries.push(entry.clone());
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
     /// Open (or create) the received log at `path`, replaying stored entries.
@@ -152,6 +156,8 @@ impl ReceivedLog {
         Ok(Self {
             file,
             by_conversation,
+            revision: 0,
+            rewrite_revision: 0,
             seen,
             allow_aliases,
             #[cfg(test)]
@@ -195,6 +201,7 @@ impl ReceivedLog {
         let entries = self.by_conversation.entry(conversation).or_default();
         self.seen.insert(event_id, (conversation, entries.len()));
         entries.push(entry);
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -233,6 +240,8 @@ impl ReceivedLog {
                 .or_insert((entry.conversation, entries.len()));
             entries.push(entry);
         }
+        self.revision = self.revision.wrapping_add(1);
+        self.rewrite_revision = self.rewrite_revision.wrapping_add(1);
         Ok(removed)
     }
 
@@ -255,6 +264,14 @@ impl ReceivedLog {
             .get(conversation)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Process-local invalidation for archive selectors; wire/storage stay unchanged.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub(crate) fn rewrite_revision(&self) -> u64 {
+        self.rewrite_revision
     }
 
     /// The conversation ids this log holds entries for.

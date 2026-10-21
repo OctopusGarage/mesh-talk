@@ -248,6 +248,26 @@
           {
             "name": "Participant retirement drains admitted control tasks and only authenticated recipient evidence confirms delivery",
             "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Signed accepted membership and per-member sharing preferences select automatic history sources while control fallback learns preference changes",
+            "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Only projected group info changes emit bounded invalidations; targeted coalesced recovery and capped jittered fallback retain independent custody timing",
+            "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Failed file-consent persistence defers each wrapper until the next mailbox operation without adding it to the node-wide seen cache or blocking unrelated messages",
+            "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Fair bounded per-peer exchanges, mutation-safe sibling continuation and coalesced host invalidations preserve progress under partial failure.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          },
+          {
+            "name": "Completed protocol-specific sessions reuse authenticated sockets; stale sockets retry once while malformed frames never trigger capability downgrade and legacy peers retain bounded fallback.",
+            "reference": "docs/network-design-reference.md#session-reuse-contract"
           }
         ]
       },

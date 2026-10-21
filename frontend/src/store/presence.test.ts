@@ -4,11 +4,16 @@ const { getPresence } = vi.hoisted(() => ({ getPresence: vi.fn() }));
 vi.mock("@/lib/api", () => ({ presence: { get: getPresence } }));
 
 import { useAuth } from "./auth";
+import {
+  notifySyncInvalidation,
+  setPushStateSupport,
+} from "@/lib/syncInvalidation";
 import { agePresence, presenceStatus, usePresence } from "./presence";
 
 beforeEach(() => {
   vi.useFakeTimers();
   getPresence.mockReset();
+  setPushStateSupport(null);
   usePresence.setState({ map: {} });
   useAuth.setState({
     user: { id: "alice", username: "alice", display_name: "Alice" },
@@ -193,7 +198,9 @@ it("bounds stalled overlapping polls and marks timeout without freezing evidence
   const stop = usePresence.getState().start();
   try {
     await vi.advanceTimersByTimeAsync(32000);
-    expect(getPresence).toHaveBeenCalledTimes(3);
+    // Watchdogs free UI slots; original native calls remain globally bounded.
+    expect(getPresence.mock.calls.length).toBeGreaterThan(3);
+    expect(getPresence.mock.calls.length).toBeLessThanOrEqual(9);
     expect(usePresence.getState().unavailable).toBe(true);
     expect(usePresence.getState().map.bob.online).toBe(false);
   } finally {
@@ -227,4 +234,81 @@ it("expires compatibility snapshots within the twenty-second logout budget", () 
   expect(
     agePresence({ bob: { online: true, last_seen_secs: 0 } }, 20).bob.online,
   ).toBe(false);
+});
+
+it("recovers after two presence IPCs remain unresolved past their deadlines", async () => {
+  const releases: Array<(snapshot: Record<string, unknown>) => void> = [];
+  getPresence
+    .mockImplementationOnce(
+      () => new Promise((resolve) => releases.push(resolve)),
+    )
+    .mockImplementationOnce(
+      () => new Promise((resolve) => releases.push(resolve)),
+    )
+    .mockResolvedValue({ bob: { online: true, last_seen_secs: 0 } });
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(14000);
+    expect(usePresence.getState().map.bob?.online).toBe(true);
+  } finally {
+    stop();
+    releases.forEach((resolve) => resolve({}));
+  }
+});
+
+it("retains one push invalidation while both presence reads are occupied", async () => {
+  const releases: Array<(snapshot: Record<string, unknown>) => void> = [];
+  getPresence
+    .mockImplementationOnce(
+      () => new Promise((resolve) => releases.push(resolve)),
+    )
+    .mockImplementationOnce(
+      () => new Promise((resolve) => releases.push(resolve)),
+    )
+    .mockResolvedValue({ bob: { online: true, last_seen_secs: 0 } });
+  setPushStateSupport("alice");
+  const stop = usePresence.getState().start();
+  try {
+    notifySyncInvalidation({ owner: "alice", kind: "roster" });
+    for (let i = 0; i < 8; i++)
+      notifySyncInvalidation({ owner: "alice", kind: "roster" });
+    expect(getPresence).toHaveBeenCalledTimes(2);
+    releases[0]({ bob: { online: false, last_seen_secs: 30 } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getPresence).toHaveBeenCalledTimes(3);
+    expect(usePresence.getState().map.bob.online).toBe(true);
+    releases[1]({ bob: { online: false, last_seen_secs: 30 } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getPresence).toHaveBeenCalledTimes(3);
+    expect(usePresence.getState().map.bob.online).toBe(true);
+  } finally {
+    stop();
+    releases.forEach((resolve) => resolve({}));
+  }
+});
+
+it("does not retry a failed presence push follow-up without another invalidation", async () => {
+  const releases: Array<(snapshot: Record<string, unknown>) => void> = [];
+  getPresence
+    .mockImplementationOnce(
+      () => new Promise((resolve) => releases.push(resolve)),
+    )
+    .mockImplementationOnce(
+      () => new Promise((resolve) => releases.push(resolve)),
+    )
+    .mockRejectedValue(new Error("read unavailable"));
+  setPushStateSupport("alice");
+  const stop = usePresence.getState().start();
+  try {
+    notifySyncInvalidation({ owner: "alice", kind: "roster" });
+    notifySyncInvalidation({ owner: "alice", kind: "roster" });
+    releases[0]({});
+    await vi.advanceTimersByTimeAsync(0);
+    releases[1]({});
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(getPresence).toHaveBeenCalledTimes(3);
+  } finally {
+    stop();
+    releases.forEach((resolve) => resolve({}));
+  }
 });

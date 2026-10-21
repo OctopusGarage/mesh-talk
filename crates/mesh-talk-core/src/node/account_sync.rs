@@ -28,12 +28,16 @@ use tokio::net::TcpStream;
 #[cfg(test)]
 use super::account_sync_wire::VERSION;
 
+mod archive;
+mod wake;
+pub(in crate::node) use wake::AccountWake;
 mod page;
+pub(in crate::node) use archive::ArchiveCache;
 #[cfg(test)]
 mod selection_tests;
+use page::{ChannelRecord, FileCardRecord, HistoryPageAssembler, HistoryRecord};
 #[cfg(test)]
-use page::PendingRecord;
-use page::{ChannelRecord, FileCardRecord, HistoryPageAssembler, HistoryRecord, PageBuilder};
+use page::{PageBuilder, PendingRecord};
 
 const RECORDS_PER_PAGE: usize = 16;
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
@@ -49,7 +53,7 @@ pub enum SyncPhase {
     Disabled,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DeviceSyncStatus {
     pub device_id: String,
     pub phase: SyncPhase,
@@ -64,6 +68,29 @@ struct PeerCursor {
     known_digest: [u8; 32],
     sweep_digest: [u8; 32],
     next_file: usize,
+}
+
+impl PeerCursor {
+    /// Continue forward through a changing archive. A changed sweep gets one
+    /// fresh sweep afterward to collect new IDs behind the exclusive cursor.
+    fn complete_page(&mut self, next: Option<HistoryCursor>, digest: [u8; 32]) -> bool {
+        match next {
+            Some(next) => {
+                if self.next.is_none() {
+                    self.sweep_digest = digest;
+                }
+                self.next = Some(next);
+                self.known_digest = [0; 32];
+                false
+            }
+            None => {
+                let complete = self.next.is_none() || self.sweep_digest == digest;
+                self.next = None;
+                self.known_digest = if complete { digest } else { [0; 32] };
+                complete
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -94,6 +121,24 @@ async fn send_frame(
 }
 
 impl Node {
+    /// Keep disk/scan work out of the shared accept/delivery task. Retirement
+    /// holds its permit inside the writer even if the awaiting future is cancelled.
+    pub(in crate::node) async fn account_blocking<T: Send + 'static>(
+        self: &Arc<Self>,
+        work: impl FnOnce(Arc<Self>) -> Result<T, NodeError> + Send + 'static,
+    ) -> Result<T, NodeError> {
+        let permit = self
+            .runtime_work
+            .admit()
+            .ok_or_else(|| NodeError::Channel("participant runtime is stopping".into()))?;
+        let node = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work(node)
+        })
+        .await
+        .map_err(|error| NodeError::Channel(format!("account sync worker: {error}")))?
+    }
     async fn send_account_frame(
         &self,
         channel: &mut SecureChannel<TcpStream>,
@@ -118,6 +163,7 @@ impl Node {
     pub(in crate::node) fn note_account_history_change(&self) {
         self.account_history_revision
             .fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.note_ui_change();
     }
 
     pub fn device_sync_status(&self) -> Vec<DeviceSyncStatus> {
@@ -177,6 +223,8 @@ impl Node {
         if self.device_sync_policy().enabled(category) {
             self.account_sync_notify.notify_one();
         }
+        self.note_ui_change();
+        self.note_account_local_change();
         Ok(record)
     }
 
@@ -206,21 +254,20 @@ impl Node {
         category: SyncCategory,
         enabled: bool,
     ) -> Result<(), NodeError> {
-        self.account_sync_policy
-            .lock()
-            .expect("account sync policy mutex not poisoned")
-            .set(category, enabled)
-            .map_err(NodeError::Log)?;
-        if matches!(
-            category,
-            SyncCategory::History
-                | SyncCategory::Attachments
-                | SyncCategory::Appearance
-                | SyncCategory::Contacts
-        ) && enabled
         {
-            self.account_sync_notify.notify_one();
+            let _commit = self
+                .account_sync_commit
+                .lock()
+                .expect("account sync commit mutex not poisoned");
+            self.account_sync_policy
+                .lock()
+                .expect("account sync policy mutex not poisoned")
+                .set(category, enabled)
+                .map_err(NodeError::Log)?;
         }
+        self.account_sync_notify.notify_one();
+        self.note_ui_change();
+        self.note_account_local_change();
         if category == SyncCategory::History && enabled {
             let conversations = self
                 .log
@@ -245,6 +292,7 @@ impl Node {
         Ok(())
     }
 
+    #[cfg(test)]
     fn export_sync_records(
         &self,
         requester: &PublicIdentity,
@@ -253,282 +301,45 @@ impl Node {
         include_files: bool,
         version: AccountSyncVersion,
     ) -> (Vec<HistoryRecord>, Option<HistoryCursor>, [u8; 32]) {
-        let own = self.account_id();
-        let mut page = PageBuilder::new(after);
-        let requester_id = requester.user_id();
-        let me = self.user_id();
-        let channels = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.channel_ids()
-                .into_iter()
-                .filter(|id| {
-                    book.state(id).is_some_and(|state| {
-                        !state.is_dissolved()
-                            && state.is_accepted_member(&me)
-                            && state.is_accepted_member(&requester_id)
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        if include_history {
-            {
-                let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
-                for conversation in sent.conversations() {
-                    for entry in sent.entries_ref(&conversation) {
-                        if entry.plaintext.is_empty() || entry.plaintext.len() > MAX_RECORD {
-                            continue;
-                        }
-                        let Some(env) = DmEnvelope::decode(&entry.plaintext) else {
-                            continue;
-                        };
-                        if self.recipient_expired(
-                            &env.body,
-                            EventId::new(env.msg_id),
-                            entry.wall_clock,
-                        ) {
-                            continue;
-                        }
-                        if env.route.sender_account != own
-                            || *account_conversation_id(&own, &env.route.recipient_account)
-                                .as_bytes()
-                                != *conversation.as_bytes()
-                        {
-                            continue;
-                        }
-                        page.offer(
-                            HistoryCursor {
-                                tag: 0,
-                                id: env.msg_id,
-                            },
-                            || {
-                                HistoryRecord::Direct(BackfillRecord {
-                                    conv: *conversation.as_bytes(),
-                                    from: own.clone(),
-                                    wall_clock: entry.wall_clock,
-                                    plaintext: entry.plaintext.clone(),
-                                    event_id: env.msg_id,
-                                })
-                            },
-                        );
-                    }
-                }
-            }
-            {
-                let received = self.received.lock().expect("received mutex not poisoned");
-                for conversation in received.conversations() {
-                    for entry in received.entries_ref(&conversation) {
-                        if entry.plaintext.is_empty() || entry.plaintext.len() > MAX_RECORD {
-                            continue;
-                        }
-                        let Some(env) = DmEnvelope::decode(&entry.plaintext) else {
-                            continue;
-                        };
-                        let other = if env.route.sender_account == own {
-                            &env.route.recipient_account
-                        } else if env.route.recipient_account == own {
-                            &env.route.sender_account
-                        } else {
-                            continue;
-                        };
-                        if env.route.sender_account != entry.from
-                            || *account_conversation_id(&own, other).as_bytes()
-                                != *conversation.as_bytes()
-                        {
-                            continue;
-                        }
-                        if self.recipient_expired(&env.body, entry.event_id, entry.wall_clock) {
-                            continue;
-                        }
-                        page.offer(
-                            HistoryCursor {
-                                tag: 0,
-                                id: env.msg_id,
-                            },
-                            || {
-                                HistoryRecord::Direct(BackfillRecord {
-                                    conv: *conversation.as_bytes(),
-                                    from: entry.from.clone(),
-                                    wall_clock: entry.wall_clock,
-                                    plaintext: entry.plaintext.clone(),
-                                    event_id: env.msg_id,
-                                })
-                            },
-                        );
-                    }
-                }
-            }
-            for &channel in &channels {
-                {
-                    let log = self.log.lock().expect("log mutex not poisoned");
-                    let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
-                    let recovered = self
-                        .recovered_sent_ids
-                        .lock()
-                        .expect("recovered sent ids mutex not poisoned");
-                    let author =
-                        crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
-                    for entry in sent.entries_ref(&channel) {
-                        if entry.plaintext.is_empty() || entry.plaintext.len() > MAX_RECORD {
-                            continue;
-                        }
-                        let id = recovered
-                            .as_ref()
-                            .and_then(|saved| saved.id_for(entry))
-                            .or_else(|| {
-                                log.authored_event(channel, author, entry.seq)
-                                    .filter(|event| {
-                                        event.kind == crate::eventlog::EventKind::Message
-                                    })
-                                    .map(|event| event.id)
-                            });
-                        let Some(id) = id else { continue };
-                        if self.recipient_expired(&entry.plaintext, id, entry.wall_clock) {
-                            continue;
-                        }
-                        page.offer(
-                            HistoryCursor {
-                                tag: 1,
-                                id: *id.as_bytes(),
-                            },
-                            || {
-                                HistoryRecord::Channel(ChannelRecord {
-                                    conversation: *channel.as_bytes(),
-                                    from: me.clone(),
-                                    wall_clock: entry.wall_clock,
-                                    event_id: *id.as_bytes(),
-                                    plaintext: entry.plaintext.clone(),
-                                })
-                            },
-                        );
-                    }
-                }
-                let received = self.received.lock().expect("received mutex not poisoned");
-                for entry in received.entries_ref(&channel) {
-                    if entry.plaintext.is_empty() || entry.plaintext.len() > MAX_RECORD {
-                        continue;
-                    }
-                    if self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock) {
-                        continue;
-                    }
-                    page.offer(
-                        HistoryCursor {
-                            tag: 1,
-                            id: *entry.event_id.as_bytes(),
-                        },
-                        || {
-                            HistoryRecord::Channel(ChannelRecord {
-                                conversation: *channel.as_bytes(),
-                                from: entry.from.clone(),
-                                wall_clock: entry.wall_clock,
-                                event_id: *entry.event_id.as_bytes(),
-                                plaintext: entry.plaintext.clone(),
-                            })
-                        },
-                    );
-                }
-            }
-        }
-        if include_files {
-            let mut allowed_hosts: HashMap<ConversationId, Option<String>> = HashMap::new();
-            for &channel in &channels {
-                allowed_hosts.insert(channel, None);
-            }
-            if version == AccountSyncVersion::V2 {
-                allowed_hosts.insert(account_conversation_id(&own, &own), Some(own.clone()));
-            }
-            for other in self.known_account_ids() {
-                allowed_hosts.insert(account_conversation_id(&own, &other), Some(other));
-            }
-            let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
-            let rows = self
-                .received_files
-                .lock()
-                .expect("received files mutex not poisoned");
-            let log = self.log.lock().expect("log mutex not poisoned");
-            let proofs = self
-                .account_file_proofs
-                .lock()
-                .expect("file proofs mutex not poisoned");
-            let suppression = self
-                .account_suppression
-                .lock()
-                .expect("account suppression mutex not poisoned");
-            for host in rows.conversations() {
-                let Some(peer_account) = allowed_hosts.get(&host) else {
-                    continue;
-                };
-                for entry in rows.entries_ref(&host) {
-                    if entry.plaintext.is_empty()
-                        || self.recipient_expired(
-                            &entry.plaintext,
-                            entry.event_id,
-                            entry.wall_clock,
-                        )
-                        || delivery.file_erased(host, entry.event_id)
-                        || delivery.manifest_event_erased(entry.event_id)
-                        || suppression.contains(host, entry.event_id)
-                    {
-                        continue;
-                    }
-                    let Some(proof) = log
-                        .get(&entry.event_id)
-                        .or_else(|| proofs.get(&entry.event_id))
-                    else {
-                        continue;
-                    };
-                    if super::files::eligible_manifest_row(entry, Some(proof), None).is_none() {
-                        continue;
-                    }
-                    let payload_size = bincode::DefaultOptions::new()
-                        .with_fixint_encoding()
-                        .serialized_size(&FileCardPayloadRef {
-                            manifest: &entry.plaintext,
-                            proof,
-                        })
-                        .unwrap_or(u64::MAX);
-                    if payload_size > MAX_RECORD as u64 {
-                        continue;
-                    }
-                    page.offer(
-                        HistoryCursor {
-                            tag: 2,
-                            id: *entry.event_id.as_bytes(),
-                        },
-                        || {
-                            let payload = bincode::DefaultOptions::new()
-                                .with_fixint_encoding()
-                                .serialize(&FileCardPayloadRef {
-                                    manifest: &entry.plaintext,
-                                    proof,
-                                })
-                                .expect("validated file payload serializes");
-                            HistoryRecord::FileCard(FileCardRecord {
-                                host: *host.as_bytes(),
-                                peer_account: peer_account.clone(),
-                                from: entry.from.clone(),
-                                wall_clock: entry.wall_clock,
-                                event_id: *entry.event_id.as_bytes(),
-                                payload,
-                            })
-                        },
-                    );
-                }
-            }
-        }
-        page.finish()
+        self.prepare_account_export(requester, after, include_history, include_files, version)
+            .unwrap()
     }
 
     pub(in crate::node) async fn serve_account_history(
-        &self,
+        self: &Arc<Self>,
         channel: &mut SecureChannel<TcpStream>,
         version: AccountSyncVersion,
         account_id: &str,
         cursor: Option<HistoryCursor>,
         known_digest: [u8; 32],
         wanted: DeviceSyncPolicy,
-    ) {
+    ) -> bool {
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            self.serve_account_history_inner(
+                channel,
+                version,
+                account_id,
+                cursor,
+                known_digest,
+                wanted,
+            ),
+        )
+        .await
+        .unwrap_or(false)
+    }
+
+    async fn serve_account_history_inner(
+        self: &Arc<Self>,
+        channel: &mut SecureChannel<TcpStream>,
+        version: AccountSyncVersion,
+        account_id: &str,
+        cursor: Option<HistoryCursor>,
+        known_digest: [u8; 32],
+        wanted: DeviceSyncPolicy,
+    ) -> bool {
         if account_id != self.account_id() || !channel.io_admitted() {
-            return;
+            return false;
         }
         let peer = channel.peer_identity().clone();
         if !self.linked_devices().iter().any(|device| {
@@ -537,7 +348,7 @@ impl Node {
                 && device.certificate.account_id() == account_id
                 && device.certificate.device_ed25519_pub == peer.ed25519_pub
         }) {
-            return;
+            return false;
         }
         let (offered, revision) = self.device_sync_policy_snapshot();
         for device in self.linked_devices() {
@@ -551,7 +362,7 @@ impl Node {
                 .await
                 .is_err()
             {
-                return;
+                return false;
             }
         }
         let mut preferences = Vec::new();
@@ -572,18 +383,26 @@ impl Node {
         });
         let (records, next_cursor, history_digest) =
             if (offered.history && wanted.history) || (offered.attachments && wanted.attachments) {
-                self.export_sync_records(
-                    &peer,
-                    cursor,
-                    offered.history && wanted.history,
-                    version.includes_file_cards(
-                        offered.history && wanted.history,
-                        offered.attachments && wanted.attachments,
-                    ),
-                    version,
-                )
+                let result = self
+                    .account_blocking(move |node| {
+                        node.prepare_account_export(
+                            &peer,
+                            cursor,
+                            offered.history && wanted.history,
+                            version.includes_file_cards(
+                                offered.history && wanted.history,
+                                offered.attachments && wanted.attachments,
+                            ),
+                            version,
+                        )
+                    })
+                    .await;
+                let Ok(page) = result else {
+                    return false;
+                };
+                page
             } else {
-                PageBuilder::new(None).finish()
+                (Vec::new(), None, archive::empty_history_digest())
             };
         let mut digest_hasher = Sha256::new();
         digest_hasher.update(b"mesh-talk-account-sync-v2");
@@ -604,7 +423,7 @@ impl Node {
         }
         let digest: [u8; 32] = digest_hasher.finalize().into();
         if cursor.is_none() && known_digest == digest {
-            let _ = self
+            return self
                 .send_account_frame(
                     channel,
                     version,
@@ -614,8 +433,8 @@ impl Node {
                         digest,
                     },
                 )
-                .await;
-            return;
+                .await
+                .is_ok();
         }
         if cursor.is_none() {
             for record in preferences {
@@ -629,7 +448,7 @@ impl Node {
                     .await
                     .is_err()
                 {
-                    return;
+                    return false;
                 }
             }
         }
@@ -672,7 +491,7 @@ impl Node {
                 .await
                 .is_err()
             {
-                return;
+                return false;
             }
             for chunk in plaintext.chunks(MAX_CHUNK) {
                 if self
@@ -687,21 +506,21 @@ impl Node {
                     .await
                     .is_err()
                 {
-                    return;
+                    return false;
                 }
             }
         }
-        let _ = self
-            .send_account_frame(
-                channel,
-                version,
-                revision,
-                &AccountHistoryFrame::Complete {
-                    next_cursor,
-                    digest,
-                },
-            )
-            .await;
+        self.send_account_frame(
+            channel,
+            version,
+            revision,
+            &AccountHistoryFrame::Complete {
+                next_cursor,
+                digest,
+            },
+        )
+        .await
+        .is_ok()
     }
 
     fn import_account_file_card(
@@ -917,37 +736,70 @@ impl Node {
     }
 
     pub(in crate::node) async fn serve_account_attachment(
-        &self,
+        self: &Arc<Self>,
         channel: &mut SecureChannel<TcpStream>,
         version: AccountSyncVersion,
         account_id: &str,
         file_conv: ConversationId,
-    ) {
+    ) -> bool {
+        let size = self
+            .files
+            .lock()
+            .expect("files mutex not poisoned")
+            .manifest(&file_conv)
+            .map_or(0, |manifest| manifest.size());
+        let deadline =
+            Duration::from_secs(30).saturating_add(Duration::from_secs(size.div_ceil(16 * 1024)));
+        tokio::time::timeout(
+            deadline,
+            self.serve_account_attachment_inner(channel, version, account_id, file_conv),
+        )
+        .await
+        .unwrap_or(false)
+    }
+
+    async fn serve_account_attachment_inner(
+        self: &Arc<Self>,
+        channel: &mut SecureChannel<TcpStream>,
+        version: AccountSyncVersion,
+        account_id: &str,
+        file_conv: ConversationId,
+    ) -> bool {
         let (offered, revision) = self.device_sync_policy_snapshot();
         if account_id != self.account_id() || !channel.io_admitted() || !offered.attachments {
-            return;
+            return false;
         }
-        let peer = channel.peer_identity();
+        let peer = channel.peer_identity().clone();
         if !self.linked_devices().iter().any(|device| {
-            device.public == *peer
+            device.public == peer
                 && device.certificate.verify()
                 && device.certificate.account_id() == account_id
                 && device.certificate.device_ed25519_pub == peer.ed25519_pub
         }) {
-            return;
+            return false;
         }
-        let Some(manifest) = self.attachment_for_sibling(file_conv, peer) else {
-            return;
-        };
-        let Ok(staging) = tempfile::tempdir() else {
-            return;
+        let staging = self
+            .account_blocking(move |node| {
+                let manifest = node
+                    .attachment_for_sibling(file_conv, &peer)
+                    .ok_or_else(|| {
+                        NodeError::Authorization("attachment no longer shared".into())
+                    })?;
+                let staging =
+                    tempfile::tempdir().map_err(|error| NodeError::File(error.to_string()))?;
+                node.save_directory_archive(
+                    file_conv,
+                    &staging.path().join("verified-attachment"),
+                )?;
+                Ok((staging, manifest))
+            })
+            .await;
+        let Ok((staging, manifest)) = staging else {
+            return false;
         };
         let path = staging.path().join("verified-attachment");
-        if self.save_directory_archive(file_conv, &path).is_err() {
-            return;
-        }
         let Ok(mut source) = tokio::fs::File::open(&path).await else {
-            return;
+            return false;
         };
         if self
             .send_account_frame(
@@ -964,14 +816,14 @@ impl Node {
             .await
             .is_err()
         {
-            return;
+            return false;
         }
         let mut hasher = Sha256::new();
         let mut total = 0u64;
         let mut buffer = vec![0u8; MAX_CHUNK];
         loop {
             let Ok(read) = source.read(&mut buffer).await else {
-                return;
+                return false;
             };
             if read == 0 {
                 break;
@@ -990,24 +842,26 @@ impl Node {
                 .await
                 .is_err()
             {
-                return;
+                return false;
             }
         }
         let actual: [u8; 32] = hasher.finalize().into();
         if total == manifest.size() && actual == manifest.checksum() {
-            let _ = self
-                .send_account_frame(
-                    channel,
-                    version,
-                    revision,
-                    &AccountHistoryFrame::AttachmentComplete,
-                )
-                .await;
+            self.send_account_frame(
+                channel,
+                version,
+                revision,
+                &AccountHistoryFrame::AttachmentComplete,
+            )
+            .await
+            .is_ok()
+        } else {
+            false
         }
     }
 
     async fn pull_account_attachment(
-        &self,
+        self: &Arc<Self>,
         peer: &PeerRecord,
         file_conv: ConversationId,
         version: AccountSyncVersion,
@@ -1037,21 +891,18 @@ impl Node {
             .cloned()
             .ok_or_else(|| NodeError::File("unknown attachment".into()))?;
         let mut channel = self
-            .privacy_dial(peer.addr, &peer.public)
-            .await
-            .map_err(transport)?;
-        send_frame(
-            &mut channel,
-            version,
-            &AccountHistoryFrame::AttachmentRequest {
-                version: version.number(),
-                account_id: own,
-                file_conv: *file_conv.as_bytes(),
-            },
-        )
-        .await?;
+            .begin_account_exchange(
+                peer,
+                version,
+                AccountHistoryFrame::AttachmentRequest {
+                    version: version.number(),
+                    account_id: own,
+                    file_conv: *file_conv.as_bytes(),
+                },
+            )
+            .await?;
         let mut staging: Option<tempfile::TempDir> = None;
-        let mut output: Option<std::fs::File> = None;
+        let mut output: Option<tokio::fs::File> = None;
         let mut hasher = Sha256::new();
         let mut received = 0u64;
         loop {
@@ -1078,7 +929,8 @@ impl Node {
                 {
                     let dir = tempfile::tempdir()
                         .map_err(|e| NodeError::File(format!("attachment staging: {e}")))?;
-                    let file = std::fs::File::create(dir.path().join("incoming"))
+                    let file = tokio::fs::File::create(dir.path().join("incoming"))
+                        .await
                         .map_err(|e| NodeError::File(format!("attachment staging: {e}")))?;
                     output = Some(file);
                     staging = Some(dir);
@@ -1092,11 +944,12 @@ impl Node {
                         return Err(NodeError::File("attachment exceeds manifest size".into()));
                     }
                     hasher.update(&bytes);
-                    use std::io::Write;
+                    use tokio::io::AsyncWriteExt;
                     output
                         .as_mut()
                         .unwrap()
                         .write_all(&bytes)
+                        .await
                         .map_err(|e| NodeError::File(format!("attachment staging: {e}")))?;
                 }
                 AccountHistoryFrame::AttachmentComplete if output.is_some() => {
@@ -1108,30 +961,14 @@ impl Node {
                         .take()
                         .unwrap()
                         .sync_all()
+                        .await
                         .map_err(|e| NodeError::File(format!("attachment staging: {e}")))?;
                     let dir = staging.take().unwrap();
-                    let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
-                    let policy = self
-                        .account_sync_policy
-                        .lock()
-                        .expect("account sync policy mutex not poisoned");
-                    if policy.revision() != revision
-                        || !policy.current().attachments
-                        || self
-                            .files
-                            .lock()
-                            .expect("files mutex not poisoned")
-                            .manifest(&file_conv)
-                            .is_none()
-                        || !self.has_live_local_file_card_with(file_conv, &delivery)
-                    {
-                        return Err(NodeError::File("attachment was removed during sync".into()));
-                    }
-                    // MediaStore encrypts verified plaintext into this account's private store.
-                    self.media
-                        .store_from_path(file_conv, manifest.name(), &dir.path().join("incoming"))
-                        .map_err(|e| NodeError::File(format!("attachment save: {e}")))?;
-                    self.note_account_history_change();
+                    self.account_blocking(move |node| {
+                        node.commit_account_attachment(file_conv, revision, &manifest, dir)
+                    })
+                    .await?;
+                    channel.recycle(self);
                     return Ok(());
                 }
                 _ => return Err(NodeError::File("unexpected attachment frame".into())),
@@ -1139,7 +976,47 @@ impl Node {
         }
     }
 
-    fn preserve_available_attachment(&self, file_conv: ConversationId) -> Result<bool, NodeError> {
+    fn commit_account_attachment(
+        &self,
+        file_conv: ConversationId,
+        revision: u64,
+        manifest: &crate::file::AnyManifest,
+        dir: tempfile::TempDir,
+    ) -> Result<(), NodeError> {
+        let _commit = self
+            .account_sync_commit
+            .lock()
+            .expect("account sync commit mutex not poisoned");
+        let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
+        let policy = self
+            .account_sync_policy
+            .lock()
+            .expect("account sync policy mutex not poisoned");
+        if policy.revision() != revision
+            || !policy.current().attachments
+            || self
+                .files
+                .lock()
+                .expect("files mutex not poisoned")
+                .manifest(&file_conv)
+                .is_none()
+            || !self.has_live_local_file_card_with(file_conv, &delivery)
+        {
+            return Err(NodeError::File("attachment was removed during sync".into()));
+        }
+        // MediaStore encrypts verified plaintext into this account's private store.
+        self.media
+            .store_from_path(file_conv, manifest.name(), &dir.path().join("incoming"))
+            .map_err(|e| NodeError::File(format!("attachment save: {e}")))?;
+        self.note_account_history_change();
+        Ok(())
+    }
+
+    fn preserve_available_attachment(
+        &self,
+        file_conv: ConversationId,
+        revision: u64,
+    ) -> Result<bool, NodeError> {
         if self.media.contains(file_conv) {
             return Ok(true);
         }
@@ -1161,21 +1038,39 @@ impl Node {
             tempfile::tempdir().map_err(|e| NodeError::File(format!("attachment staging: {e}")))?;
         let path = staging.path().join("verified-attachment");
         self.save_directory_archive(file_conv, &path)?;
-        // Preserve an already verified chunk transfer in encrypted managed storage.
-        // Saving a generic file can prune its transient chunks, so the archive needs
-        // an independent durable copy for this linked device.
-        self.media
-            .store_from_path(file_conv, manifest.name(), &path)
-            .map_err(|e| NodeError::File(format!("attachment save: {e}")))?;
+        // The same final current-policy/card guard covers local retention and remote pulls.
+        // commit_account_attachment expects the verified file at this staging path.
+        std::fs::rename(&path, staging.path().join("incoming"))
+            .map_err(|error| NodeError::File(error.to_string()))?;
+        self.commit_account_attachment(file_conv, revision, &manifest, staging)?;
         Ok(true)
     }
 
+    #[cfg(test)]
     fn apply_account_history_page(
         &self,
         page: &[HistoryRecord],
         version: AccountSyncVersion,
     ) -> Result<(), NodeError> {
-        let policy = self.device_sync_policy();
+        self.apply_account_history_page_at_revision(page, version, None)
+    }
+
+    fn apply_account_history_page_at_revision(
+        &self,
+        page: &[HistoryRecord],
+        version: AccountSyncVersion,
+        expected_revision: Option<u64>,
+    ) -> Result<(), NodeError> {
+        let _commit = self
+            .account_sync_commit
+            .lock()
+            .expect("account sync commit mutex not poisoned");
+        let (policy, revision) = self.device_sync_policy_snapshot();
+        if expected_revision.is_some_and(|expected| expected != revision) {
+            return Err(NodeError::Authorization(
+                "account sync policy changed".into(),
+            ));
+        }
         if policy.history {
             {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
@@ -1271,7 +1166,7 @@ impl Node {
     }
 
     async fn pull_account_history_page(
-        &self,
+        self: &Arc<Self>,
         peer: &PeerRecord,
         cursor: Option<HistoryCursor>,
         known_digest: [u8; 32],
@@ -1305,7 +1200,7 @@ impl Node {
     }
 
     async fn pull_account_history_version(
-        &self,
+        self: &Arc<Self>,
         peer: &PeerRecord,
         cursor: Option<HistoryCursor>,
         known_digest: [u8; 32],
@@ -1330,30 +1225,27 @@ impl Node {
             ));
         }
         let mut channel = self
-            .privacy_dial(peer.addr, &peer.public)
-            .await
-            .map_err(transport)?;
-        send_frame(
-            &mut channel,
-            version,
-            &AccountHistoryFrame::Request {
-                version: version.number(),
-                account_id: own.clone(),
-                cursor: if wanted.history || wanted.attachments {
-                    cursor
-                } else {
-                    None
+            .begin_account_exchange(
+                peer,
+                version,
+                AccountHistoryFrame::Request {
+                    version: version.number(),
+                    account_id: own.clone(),
+                    cursor: if wanted.history || wanted.attachments {
+                        cursor
+                    } else {
+                        None
+                    },
+                    known_digest,
+                    wanted,
                 },
-                known_digest,
-                wanted,
-            },
-        )
-        .await?;
+            )
+            .await?;
         let mut page = HistoryPageAssembler::new();
         let mut seen_devices = HashSet::new();
         let mut seen_preferences = HashSet::new();
         let mut started_records = false;
-        let mut valid_reply = false;
+        let mut valid_reply = channel.reusable();
         loop {
             let bytes = tokio::time::timeout(READ_TIMEOUT, channel.recv())
                 .await
@@ -1403,13 +1295,31 @@ impl Node {
                     {
                         return Err(NodeError::Authorization("unknown preference author".into()));
                     }
-                    if self.device_sync_policy().enabled(record.category) {
-                        self.account_preferences
+                    self.account_blocking(move |node| {
+                        let _commit = node
+                            .account_sync_commit
                             .lock()
-                            .expect("account preferences mutex not poisoned")
-                            .merge(record)
-                            .map_err(NodeError::Log)?;
-                    }
+                            .expect("account sync commit mutex not poisoned");
+                        let policy = node
+                            .account_sync_policy
+                            .lock()
+                            .expect("account sync policy mutex not poisoned");
+                        if policy.revision() == revision
+                            && policy.current().enabled(record.category)
+                        {
+                            let changed = node
+                                .account_preferences
+                                .lock()
+                                .expect("account preferences mutex not poisoned")
+                                .merge(record)
+                                .map_err(NodeError::Log)?;
+                            if changed {
+                                node.note_ui_change();
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await?;
                 }
                 other => {
                     if matches!(
@@ -1427,8 +1337,24 @@ impl Node {
                         if self.device_sync_policy_snapshot().1 != revision {
                             return Ok((None, [0; 32]));
                         }
-                        self.apply_account_history_page(&complete.records, version)?;
-                        return Ok((complete.next_cursor, complete.digest));
+                        let next = complete.next_cursor;
+                        let digest = complete.digest;
+                        self.account_blocking(move |node| {
+                            // Recheck after waiting for the blocking pool.
+                            if node.device_sync_policy_snapshot().1 != revision {
+                                return Err(NodeError::Authorization(
+                                    "account sync policy changed".into(),
+                                ));
+                            }
+                            node.apply_account_history_page_at_revision(
+                                &complete.records,
+                                version,
+                                Some(revision),
+                            )
+                        })
+                        .await?;
+                        channel.recycle(self);
+                        return Ok((next, digest));
                     }
                 }
             }
@@ -1436,36 +1362,189 @@ impl Node {
     }
 
     pub(in crate::node) async fn run_account_history_loop(self: Arc<Self>) {
+        use std::collections::VecDeque;
+        const HISTORY_WORKERS: usize = 4;
+        const ATTACHMENT_WORKERS: usize = 2;
         let mut tick = tokio::time::interval(RETRY_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursors: HashMap<String, PeerCursor> = HashMap::new();
+        let mut queue: VecDeque<(String, PeerRecord)> = VecDeque::new();
+        let mut active = HashSet::new();
+        let mut history = tokio::task::JoinSet::new();
+        let mut history_owners: HashMap<tokio::task::Id, String> = HashMap::new();
+        let mut attachment_owners: HashMap<tokio::task::Id, String> = HashMap::new();
+        let mut attachments = tokio::task::JoinSet::new();
+        let mut active_attachments = HashSet::new();
+        let mut retry_attachment: HashMap<String, std::time::Instant> = HashMap::new();
         let mut revision = self.device_sync_policy_snapshot().1;
         loop {
+            while active.len() < HISTORY_WORKERS {
+                let Some((id, peer)) = queue.pop_front() else {
+                    break;
+                };
+                if !active.insert(id.clone()) {
+                    continue;
+                }
+                let state = cursors.remove(&id).unwrap_or_default();
+                let node = self.clone();
+                let Some(permit) = self.runtime_work.admit() else {
+                    return;
+                };
+                let owner = id.clone();
+                let task = history.spawn(permit.track(async move {
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(20),
+                        node.pull_account_history_page(&peer, state.next, state.known_digest),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(NodeError::Channel(
+                            "account history exchange timed out".into(),
+                        ))
+                    });
+                    (id, peer, state, result)
+                }));
+                history_owners.insert(task.id(), owner);
+            }
+            let mut enqueue_all = false;
             tokio::select! {
-                _ = tick.tick() => {}
-                _ = self.account_sync_notify.notified() => {}
+                _ = tick.tick() => { enqueue_all = true; }
+                _ = self.account_sync_notify.notified() => { enqueue_all = true; }
+                result = history.join_next_with_id(), if !history.is_empty() => {
+                    if let Some(Err(error)) = &result
+                        && let Some(id) = history_owners.remove(&error.id()) {
+                            active.remove(&id); cursors.remove(&id);
+                            self.set_account_sync_status(id.clone(), DeviceSyncStatus { device_id: id,
+                                phase: SyncPhase::Error, pending_attachments: 0, legacy_file_metadata: false,
+                                error: Some("account history worker terminated".into()) });
+                    }
+                    if let Some(Ok((task, (id, peer, mut state, result)))) = result {
+                        history_owners.remove(&task);
+                        active.remove(&id);
+                        let (policy, current_revision) = self.device_sync_policy_snapshot();
+                        if current_revision != revision { enqueue_all = true; }
+                        else {
+                            let mut status = DeviceSyncStatus { device_id: id.clone(), phase: SyncPhase::CatchingUp,
+                                pending_attachments: 0, legacy_file_metadata: false, error: None };
+                            let mut continuation = false;
+                            match result {
+                                Ok((next, digest, version)) => {
+                                    status.legacy_file_metadata = version == AccountSyncVersion::V1;
+                                    if state.complete_page(next, digest) { status.phase = SyncPhase::UpToDate; }
+                                    else { continuation = true; }
+                                }
+                                Err(error) => {
+                                    status.phase = SyncPhase::Error;
+                                    status.error = Some(error.to_string().chars().take(160).collect());
+                                }
+                            }
+                            if policy.attachments {
+                                let missing = self.account_blocking(|node| {
+                                    let mut missing = node.files.lock().expect("files mutex not poisoned").file_convs();
+                                    missing.sort_by_key(|id| *id.as_bytes());
+                                    missing.retain(|file| !node.media.contains(*file));
+                                    Ok(missing)
+                                }).await.unwrap_or_default();
+                                status.pending_attachments = missing.len();
+                                if !missing.is_empty() && attachments.len() < ATTACHMENT_WORKERS
+                                    && !active_attachments.contains(&id)
+                                    && retry_attachment.get(&id).is_none_or(|at| *at <= std::time::Instant::now()) {
+                                    let file = missing[state.next_file % missing.len()];
+                                    state.next_file = state.next_file.wrapping_add(1);
+                                    active_attachments.insert(id.clone());
+                                    let node = self.clone(); let peer = peer.clone(); let id = id.clone();
+                                    let version = if status.legacy_file_metadata { AccountSyncVersion::V1 } else { AccountSyncVersion::V2 };
+                                    let transfer_size = self.files.lock().expect("files mutex not poisoned")
+                                        .manifest(&file).map_or(0, |manifest| manifest.size());
+                                    // Bound the complete exchange without rejecting large legitimate
+                                    // archives solely because they need more than a fixed short timeout.
+                                    let deadline = Duration::from_secs(30).saturating_add(
+                                        Duration::from_secs(transfer_size.div_ceil(16 * 1024)));
+                                    let Some(permit) = self.runtime_work.admit() else { return; };
+                                    let owner = id.clone();
+                                    let task = attachments.spawn(permit.track(async move {
+                                        let result = tokio::time::timeout(deadline, async {
+                                            if node.account_blocking(move |node| node.preserve_available_attachment(file, revision)).await? {
+                                                Ok(())
+                                            } else { node.pull_account_attachment(&peer, file, version).await }
+                                        }).await.unwrap_or_else(|_| Err(NodeError::File("account attachment exchange timed out".into())));
+                                        (id, result)
+                                    }));
+                                    attachment_owners.insert(task.id(), owner);
+                                }
+                                if status.pending_attachments > 0 && status.phase == SyncPhase::UpToDate {
+                                    status.phase = SyncPhase::CatchingUp;
+                                }
+                            }
+                            self.set_account_sync_status(id.clone(), status);
+                            cursors.insert(id.clone(), state);
+                            if continuation {
+                                // One page per peer per turn: tail insertion gives waiting siblings
+                                // their turn while bounded workers immediately drain the backlog.
+                                queue.push_back((id, peer));
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                    }
+                }
+                result = attachments.join_next_with_id(), if !attachments.is_empty() => {
+                    if let Some(Err(error)) = &result
+                        && let Some(id) = attachment_owners.remove(&error.id()) {
+                            active_attachments.remove(&id);
+                            retry_attachment.insert(id, std::time::Instant::now() + RETRY_INTERVAL);
+                    }
+                    if let Some(Ok((task, (id, result)))) = result {
+                        attachment_owners.remove(&task);
+                        active_attachments.remove(&id);
+                        if let Err(error) = result {
+                            retry_attachment.insert(id.clone(), std::time::Instant::now() + RETRY_INTERVAL);
+                            let previous_status = self.account_sync_status.lock().expect("account sync status mutex not poisoned").get(&id).cloned();
+                            if let Some(mut status) = previous_status {
+                                status.phase = SyncPhase::Error;
+                                status.error = Some(error.to_string().chars().take(160).collect());
+                                self.set_account_sync_status(id, status);
+                            }
+                        } else {
+                            retry_attachment.remove(&id);
+                            enqueue_all = true;
+                        }
+                    }
+                }
             }
             let (policy, current_revision) = self.device_sync_policy_snapshot();
-            if revision != current_revision {
-                // Cursors/digests describe an applied category selection, not
-                // merely a remote log. Category changes require a fresh sweep.
+            if current_revision != revision {
+                // Cancellation drops every network future. Blocking writers retain retirement
+                // admission and perform their own current-policy checks before commit.
+                history.abort_all();
+                attachments.abort_all();
+                while history.join_next().await.is_some() {}
+                while attachments.join_next().await.is_some() {}
+                active.clear();
+                active_attachments.clear();
+                history_owners.clear();
+                attachment_owners.clear();
+                queue.clear();
                 cursors.clear();
+                retry_attachment.clear();
                 revision = current_revision;
+                enqueue_all = true;
             }
             if !policy.history && !policy.attachments && !policy.appearance && !policy.contacts {
+                queue.clear();
                 cursors.clear();
                 continue;
             }
-            for device in self.linked_devices() {
-                let id = device.public.user_id();
-                if id == self.user_id() {
-                    continue;
-                }
-                let Some(peer) = self.routing_peer(&id) else {
-                    self.account_sync_status
-                        .lock()
-                        .expect("account sync status mutex not poisoned")
-                        .insert(
+            if enqueue_all {
+                for device in self.linked_devices() {
+                    let id = device.public.user_id();
+                    if id == self.user_id()
+                        || active.contains(&id)
+                        || queue.iter().any(|(queued, _)| queued == &id)
+                    {
+                        continue;
+                    }
+                    let Some(peer) = self.routing_peer(&id) else {
+                        self.set_account_sync_status(
                             id.clone(),
                             DeviceSyncStatus {
                                 device_id: id,
@@ -1475,13 +1554,10 @@ impl Node {
                                 error: None,
                             },
                         );
-                    continue;
-                };
-                if peer.public != device.public {
-                    self.account_sync_status
-                        .lock()
-                        .expect("account sync status mutex not poisoned")
-                        .insert(
+                        continue;
+                    };
+                    if peer.public != device.public {
+                        self.set_account_sync_status(
                             id.clone(),
                             DeviceSyncStatus {
                                 device_id: id,
@@ -1491,103 +1567,23 @@ impl Node {
                                 error: Some("discovered device identity changed".into()),
                             },
                         );
-                    continue;
-                }
-                let state = cursors.entry(id.clone()).or_default();
-                let mut status = DeviceSyncStatus {
-                    device_id: id.clone(),
-                    phase: SyncPhase::CatchingUp,
-                    pending_attachments: 0,
-                    legacy_file_metadata: false,
-                    error: None,
-                };
-                if !policy.history && !policy.attachments {
-                    state.next = None;
-                }
-                match self
-                    .pull_account_history_page(&peer, state.next, state.known_digest)
-                    .await
-                {
-                    Ok((next, digest, version)) => {
-                        status.legacy_file_metadata = version == AccountSyncVersion::V1;
-                        match next {
-                            Some(next) if state.next.is_none() => {
-                                state.next = Some(next);
-                                state.sweep_digest = digest;
-                                state.known_digest = [0; 32];
-                            }
-                            Some(next) if state.sweep_digest == digest => state.next = Some(next),
-                            Some(_) => {
-                                state.next = None;
-                                state.known_digest = [0; 32];
-                            }
-                            None if state.next.is_none() || state.sweep_digest == digest => {
-                                state.next = None;
-                                state.known_digest = digest;
-                            }
-                            None => {
-                                state.next = None;
-                                state.known_digest = [0; 32];
-                            }
-                        }
-                        if state.next.is_none() {
-                            status.phase = SyncPhase::UpToDate;
-                        }
+                        continue;
                     }
-                    Err(error) => {
-                        status.phase = SyncPhase::Error;
-                        status.error = Some(error.to_string().chars().take(160).collect());
-                    }
+                    queue.push_back((id, peer));
                 }
-                if policy.attachments {
-                    let mut missing = self
-                        .files
-                        .lock()
-                        .expect("files mutex not poisoned")
-                        .file_convs();
-                    missing.sort_by_key(|id| *id.as_bytes());
-                    missing.retain(|id| !self.media.contains(*id));
-                    status.pending_attachments = missing.len();
-                    if !missing.is_empty() {
-                        let file = missing[state.next_file % missing.len()];
-                        state.next_file = state.next_file.wrapping_add(1);
-                        let result = match self.preserve_available_attachment(file) {
-                            Ok(true) => Ok(()),
-                            Ok(false) => {
-                                self.pull_account_attachment(
-                                    &peer,
-                                    file,
-                                    if status.legacy_file_metadata {
-                                        AccountSyncVersion::V1
-                                    } else {
-                                        AccountSyncVersion::V2
-                                    },
-                                )
-                                .await
-                            }
-                            Err(error) => Err(error),
-                        };
-                        match result {
-                            Ok(()) => {
-                                status.pending_attachments =
-                                    status.pending_attachments.saturating_sub(1)
-                            }
-                            Err(error) if status.error.is_none() => {
-                                status.phase = SyncPhase::Error;
-                                status.error = Some(error.to_string().chars().take(160).collect());
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                    if status.pending_attachments > 0 && status.phase == SyncPhase::UpToDate {
-                        status.phase = SyncPhase::CatchingUp;
-                    }
-                }
-                self.account_sync_status
-                    .lock()
-                    .expect("account sync status mutex not poisoned")
-                    .insert(id, status);
             }
+        }
+    }
+
+    fn set_account_sync_status(&self, id: String, status: DeviceSyncStatus) {
+        let mut statuses = self
+            .account_sync_status
+            .lock()
+            .expect("account sync status mutex not poisoned");
+        if statuses.get(&id) != Some(&status) {
+            statuses.insert(id, status);
+            drop(statuses);
+            self.note_ui_change();
         }
     }
 }
@@ -1666,9 +1662,9 @@ mod tests {
                 let mut first = Some((request_seen, released));
                 let mut second_seen = Some(second_seen);
                 loop {
-                    let (stream, _) = listener.accept().await.unwrap();
-                    let mut channel = server_remote.privacy_accept(stream).await.unwrap();
-                    let bytes = channel.recv().await.unwrap();
+                    let (mut channel, bytes) =
+                        selection_tests::accept_legacy_account_request(&listener, &server_remote)
+                            .await;
                     let Some(AccountHistoryFrame::Request {
                         account_id,
                         cursor,
@@ -2029,6 +2025,24 @@ mod tests {
                 file_conv: *attachment.as_bytes(),
             },
         ];
+        let requests = requests.into_iter().flat_map(|request| {
+            let mut session_request = request.clone();
+            match &mut session_request {
+                AccountHistoryFrame::Request { version, .. }
+                | AccountHistoryFrame::AttachmentRequest { version, .. } => {
+                    *version = AccountSyncVersion::V2.number();
+                }
+                _ => unreachable!("only history and attachment requests are in this table"),
+            }
+            let wrapped = AccountHistoryFrame::SessionRequest {
+                request_id: [7; 16],
+                request: super::super::account_sync_wire::AccountSessionRequest::from_frame(
+                    &session_request,
+                )
+                .unwrap(),
+            };
+            [request, wrapped]
+        });
         for request in requests {
             // Bypass sibling-selection client helpers: the unrelated account
             // completes Noise authentication and directly submits a valid frame.
@@ -2036,7 +2050,15 @@ mod tests {
                 .privacy_dial(address, &victim.identity.public())
                 .await
                 .unwrap();
-            channel.send(&request.encode().unwrap()).await.unwrap();
+            let version = if matches!(request, AccountHistoryFrame::SessionRequest { .. }) {
+                AccountSyncVersion::V2
+            } else {
+                AccountSyncVersion::V1
+            };
+            channel
+                .send(&request.encode_version(version).unwrap())
+                .await
+                .unwrap();
             let response = tokio::time::timeout(Duration::from_secs(3), channel.recv())
                 .await
                 .expect("server promptly closes an unauthorized sibling request");

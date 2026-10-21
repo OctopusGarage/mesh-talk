@@ -279,7 +279,41 @@ pub(super) fn descends_from(
     false
 }
 
+/// Presentation-relevant accepted projection, excluding sender chains and message state.
+#[derive(PartialEq, Eq)]
+pub(in crate::node) struct ChannelInfoProjection {
+    name: String,
+    owner: String,
+    dissolved: bool,
+    pending: bool,
+    members: Vec<(PublicIdentity, bool, bool)>,
+}
+
 impl ChannelBook {
+    pub(in crate::node) fn info_projection(
+        &self,
+        channel: ConversationId,
+    ) -> Option<ChannelInfoProjection> {
+        let state = self.state(&channel)?;
+        Some(ChannelInfoProjection {
+            name: state.name().to_owned(),
+            owner: state.owner().to_owned(),
+            dissolved: state.is_dissolved(),
+            pending: state.pending_invite(),
+            members: state
+                .members()
+                .iter()
+                .map(|member| {
+                    let id = member.user_id();
+                    (
+                        member.clone(),
+                        state.is_accepted_member(&id),
+                        self.replica_enabled(channel, &id),
+                    )
+                })
+                .collect(),
+        })
+    }
     /// Missing preference means the member participates by default.
     pub fn replica_enabled(&self, channel: ConversationId, member: &str) -> bool {
         self.replica_preferences

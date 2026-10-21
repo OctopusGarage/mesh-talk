@@ -2,6 +2,16 @@ import { invoke } from "@tauri-apps/api/core";
 import type { FavoriteInfo, HiddenContactsSnapshot } from "../types";
 
 export const contactPolicy = {
+  apply: (
+    owner: string,
+    records: Array<{ account: string; hidden: boolean; name: string }>,
+    expected: Record<string, string | null>,
+  ) =>
+    invoke<HiddenContactsSnapshot>("set_contact_hidden_batch", {
+      owner,
+      records,
+      expected,
+    }),
   delete: (owner: string, account: string) =>
     invoke<HiddenContactsSnapshot>("delete_contact", { owner, account }),
   get: (owner: string) =>
@@ -16,6 +26,11 @@ export const contactPolicy = {
 };
 
 export const favorites = {
+  apply: (
+    owner: string,
+    records: FavoriteInfo[],
+    expected: Record<string, Omit<FavoriteInfo, "id"> | null>,
+  ) => invoke<void>("set_favorite_records", { owner, records, expected }),
   /** Every favorites entry the user has set (pin and/or alias), keyed by id. */
   get: (owner: string) => invoke<FavoriteInfo[]>("get_favorites", { owner }),
   /** Pin or unpin a contact by id. */

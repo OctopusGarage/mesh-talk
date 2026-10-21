@@ -249,6 +249,10 @@ pub struct Node {
     pub(in crate::node) account_file_proofs: Mutex<super::account_file_proofs::AccountFileProofs>,
     pub(in crate::node) account_sync_notify: tokio::sync::Notify,
     pub(in crate::node) account_history_revision: std::sync::atomic::AtomicU64,
+    pub(in crate::node) account_archive_cache: Mutex<super::account_sync::ArchiveCache>,
+    pub(in crate::node) known_account_cache: Mutex<super::recovery::KnownAccountCache>,
+    pub(in crate::node) account_sync_commit: Mutex<()>,
+    pub(in crate::node) account_wake: super::account_sync::AccountWake,
     pub(in crate::node) account_sync_status:
         Mutex<std::collections::HashMap<String, super::account_sync::DeviceSyncStatus>>,
     /// One-time pairing code while in "link a device" mode (linker side). Set by
@@ -294,6 +298,13 @@ pub struct Node {
     /// missed push would strand the file at 0 chunks). Cleared once a file completes; not
     /// seeded from saved files (whose chunks are pruned), so we never re-pull a saved file.
     pub(in crate::node) pending_files: Mutex<HashSet<ConversationId>>,
+    pub(in crate::node) file_pull_notify: tokio::sync::Notify,
+    pub(in crate::node) file_pull_cursor: std::sync::atomic::AtomicUsize,
+    pub(in crate::node) file_pull_gate: tokio::sync::Mutex<()>,
+    pub(in crate::node) relay_retry_after: Mutex<HashMap<String, std::time::Instant>>,
+    pub(in crate::node) relay_drain_cursor: Mutex<HashMap<String, usize>>,
+    pub(in crate::node) ui_changes: tokio::sync::watch::Sender<u64>,
+    pub(in crate::node) file_changes: tokio::sync::watch::Sender<u64>,
     /// Encrypted, account-local attachment receive preferences and exact offer decisions.
     pub(in crate::node) attachment_consent: Mutex<super::attachment_consent::AttachmentConsent>,
     /// Durable pairwise file-consent controls, separate from local receive policy.
@@ -312,6 +323,8 @@ pub struct Node {
     /// Last authenticated recipient answer for each outgoing manifest destination.
     pub(in crate::node) outgoing_file_consents:
         Mutex<HashMap<(EventId, EventId), crate::eventlog::sync::FileConsentStatus>>,
+    pub(in crate::node) channel_changes: tokio::sync::broadcast::Sender<ConversationId>,
+    pub(in crate::node) channel_recovery_pending: Mutex<HashSet<ConversationId>>,
     pub(in crate::node) channel_recovery_notify: tokio::sync::Notify,
     pub(in crate::node) channel_recovery:
         Mutex<HashMap<ConversationId, super::channels::ChannelRecovery>>,
@@ -328,7 +341,8 @@ pub struct Node {
     pub(in crate::node) bridge_discovery_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) bridge_hub_id: Mutex<Option<String>>,
     pub(in crate::node) bridge_notify: tokio::sync::Notify,
-    pub(in crate::node) bridge_refresh: tokio::sync::Mutex<()>,
+    pub(in crate::node) bridge_refresh:
+        tokio::sync::Mutex<super::bridge_client::BridgeRefreshState>,
     pub(in crate::node) bridge_generation: std::sync::atomic::AtomicU64,
     pub(in crate::node) delivery_control_ids:
         Mutex<HashMap<EventId, super::delivery_store::ControlBinding>>,
@@ -719,6 +733,10 @@ impl Node {
             account_file_proofs: Mutex::new(account_file_proofs),
             account_sync_notify: tokio::sync::Notify::new(),
             account_history_revision: std::sync::atomic::AtomicU64::new(0),
+            account_archive_cache: Mutex::new(Default::default()),
+            known_account_cache: Mutex::new(Default::default()),
+            account_sync_commit: Mutex::new(()),
+            account_wake: Default::default(),
             account_sync_status: Mutex::new(std::collections::HashMap::new()),
             account_profiles,
             profile_incoming: profile_tx,
@@ -750,6 +768,13 @@ impl Node {
             file_incoming,
             files: Mutex::new(files),
             pending_files: Mutex::new(HashSet::new()),
+            file_pull_notify: tokio::sync::Notify::new(),
+            file_pull_cursor: std::sync::atomic::AtomicUsize::new(0),
+            file_pull_gate: tokio::sync::Mutex::new(()),
+            relay_retry_after: Mutex::new(HashMap::new()),
+            relay_drain_cursor: Mutex::new(HashMap::new()),
+            ui_changes: tokio::sync::watch::channel(0).0,
+            file_changes: tokio::sync::watch::channel(0).0,
             attachment_consent: Mutex::new(attachment_consent),
             file_consent: Mutex::new(file_consent),
             media,
@@ -757,6 +782,8 @@ impl Node {
             delivery: Mutex::new(delivery),
             outgoing_file_acks: Mutex::new(HashMap::new()),
             outgoing_file_consents: Mutex::new(HashMap::new()),
+            channel_changes: tokio::sync::broadcast::channel(256).0,
+            channel_recovery_pending: Mutex::new(HashSet::new()),
             channel_recovery_notify: tokio::sync::Notify::new(),
             channel_recovery: Mutex::new(HashMap::new()),
             delivery_notify: tokio::sync::Notify::new(),
@@ -768,7 +795,7 @@ impl Node {
             bridge_discovery_enabled: std::sync::atomic::AtomicBool::new(false),
             bridge_hub_id: Mutex::new(None),
             bridge_notify: tokio::sync::Notify::new(),
-            bridge_refresh: tokio::sync::Mutex::new(()),
+            bridge_refresh: tokio::sync::Mutex::new(Default::default()),
             sessions: super::session_pool::SessionPool::default(),
             bridge_generation: std::sync::atomic::AtomicU64::new(0),
             delivery_control_ids: Mutex::new(delivery_control_ids),

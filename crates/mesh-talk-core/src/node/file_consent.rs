@@ -305,6 +305,7 @@ impl Node {
                 .expect("outgoing consent lock not poisoned")
                 .insert((card, payload.manifest), status(payload.decision));
             self.delivery_notify.notify_one();
+            self.note_file_change();
         }
         Ok(true)
     }
@@ -381,10 +382,15 @@ impl Node {
             .lock()
             .expect("consent lock not poisoned")
             .observe_remote_decision(manifest, decision)?;
-        self.outgoing_file_consents
+        let previous = self
+            .outgoing_file_consents
             .lock()
             .expect("outgoing consent lock not poisoned")
             .insert((card, manifest), answer);
+        if previous != Some(answer) {
+            self.note_file_change();
+            self.delivery_notify.notify_one();
+        }
         Ok(())
     }
 

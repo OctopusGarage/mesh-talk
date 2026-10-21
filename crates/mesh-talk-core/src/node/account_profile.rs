@@ -201,6 +201,28 @@ mod tests {
         assert!(current.verify());
     }
     #[test]
+    fn equal_signed_revisions_converge_after_opposite_delivery_orders() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let avatar = ProfilePayload::new(&account, Some(b"photo".to_vec()), 100);
+        let clear = ProfilePayload::new(&account, None, 100);
+        let left = open(&dir.path().join("left"), &account);
+        let right = open(&dir.path().join("right"), &account);
+        left.receive(&avatar).unwrap();
+        left.receive(&clear).unwrap();
+        right.receive(&clear).unwrap();
+        right.receive(&avatar).unwrap();
+        assert_eq!(left.current(), right.current());
+        assert_eq!(left.current().unwrap().avatar, None);
+        drop(left);
+        drop(right);
+        assert_eq!(
+            open(&dir.path().join("left"), &account).current(),
+            open(&dir.path().join("right"), &account).current()
+        );
+    }
+
+    #[test]
     fn exhausted_profile_revision_rejects_edits_without_changing_current_or_disk() {
         for avatar in [Some(b"sibling".to_vec()), None] {
             let dir = tempfile::tempdir().unwrap();

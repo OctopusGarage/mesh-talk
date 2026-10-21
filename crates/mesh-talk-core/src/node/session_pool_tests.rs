@@ -477,3 +477,100 @@ async fn sync_pool_rejects_retired_account_before_new_presence_arrives() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn fresh_sync_protocol_errors_do_not_trigger_another_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", addr.port());
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, addr.ip(), &alice.user_id());
+    let peer = alice
+        .roster
+        .lock()
+        .unwrap()
+        .get(&bob.user_id())
+        .unwrap()
+        .clone();
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = accepted.clone();
+    let server = tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            count.fetch_add(1, Ordering::SeqCst);
+            let bob = bob.clone();
+            tasks.spawn(async move {
+                let mut channel = bob.privacy_accept(stream).await.unwrap();
+                channel.recv().await.unwrap();
+                channel.send(b"malformed sync response").await.unwrap();
+            });
+        }
+    });
+    let result = alice
+        .deliver_direct(&peer, crate::eventlog::ConversationId::new([227; 32]))
+        .await;
+    server.abort();
+    assert!(result.is_err());
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "fresh malformed responses must not be retried"
+    );
+}
+
+#[tokio::test]
+async fn sync_pool_reuses_authenticated_fallback_route_and_mapped_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let expected = bob.identity.public();
+    let (addr, accepted, server) = counted_sync_peer(bob).await;
+    let unused = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let absent = unused.local_addr().unwrap();
+    drop(unused);
+    // Learn an authenticated route, then actually fall back to it from the
+    // unavailable input. Other explicit listener addresses remain independent.
+    drop(alice.privacy_dial(addr, &expected).await.unwrap());
+    let mut warm = alice.privacy_sync_dial(absent, &expected).await.unwrap();
+    super::session::request_round(
+        &mut warm,
+        &alice.sync_store(&expected),
+        crate::eventlog::ConversationId::new([228; 32]),
+    )
+    .await
+    .unwrap();
+    alice.recycle_sync_channel(warm);
+    for endpoint in [
+        absent,
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V6(std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped()),
+            addr.port(),
+        ),
+    ] {
+        let (mut channel, reused) = alice
+            .privacy_sync_dial_with_reuse(endpoint, &expected)
+            .await
+            .unwrap();
+        assert!(
+            reused,
+            "a retained authenticated route must be found before dialing"
+        );
+        super::session::request_round(
+            &mut channel,
+            &alice.sync_store(&expected),
+            crate::eventlog::ConversationId::new([228; 32]),
+        )
+        .await
+        .unwrap();
+        alice.recycle_sync_channel(channel);
+    }
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    server.abort();
+}

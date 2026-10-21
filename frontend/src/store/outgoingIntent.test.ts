@@ -278,3 +278,50 @@ it("retires an expired completion after its conversation cache was evicted", () 
   expect(result.intents).toEqual({});
   expect(result.messages).toEqual({});
 });
+
+it("coalesces delivery invalidations received during a stale status read", async () => {
+  const store = session();
+  store.setState({
+    messages: { [key]: [{ ...row("event-a"), delivery: "awaiting" }] },
+  });
+  let release!: (rows: unknown[]) => void;
+  invoke
+    .mockImplementationOnce(() => new Promise((resolve) => (release = resolve)))
+    .mockResolvedValue([{ id: "event-a", status: "delivered" }]);
+  const read = refreshDeliveryStatuses(store.setState, store.getState);
+  for (let i = 0; i < 8; i++)
+    await refreshDeliveryStatuses(
+      store.setState,
+      store.getState,
+      undefined,
+      true,
+    );
+  expect(invoke).toHaveBeenCalledTimes(1);
+  release([{ id: "event-a", status: "awaiting" }]);
+  await read;
+  expect(invoke).toHaveBeenCalledTimes(2);
+  expect(store.getState().messages[key][0].delivery).toBe("delivered");
+  expect(store.getState().statusBusy).toBe(false);
+});
+
+it("drops queued delivery invalidations when the captured runtime changes", async () => {
+  const store = session();
+  store.setState({
+    messages: { [key]: [{ ...row("event-a"), delivery: "awaiting" }] },
+  });
+  let release!: (rows: unknown[]) => void;
+  invoke.mockImplementationOnce(
+    () => new Promise((resolve) => (release = resolve)),
+  );
+  const read = refreshDeliveryStatuses(store.setState, store.getState);
+  await refreshDeliveryStatuses(
+    store.setState,
+    store.getState,
+    undefined,
+    true,
+  );
+  store.setState({ runEpoch: 1, statusBusy: false });
+  release([{ id: "event-a", status: "awaiting" }]);
+  await read;
+  expect(invoke).toHaveBeenCalledTimes(1);
+});

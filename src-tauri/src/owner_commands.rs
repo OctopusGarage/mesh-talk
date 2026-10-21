@@ -30,6 +30,7 @@ pub struct NodeIdentity {
     device_id: String,
     account_id: String,
     history_revision: u64,
+    supports_push_state: bool,
 }
 
 /// Atomically observes Session + runtime identity, including installation authority.
@@ -47,6 +48,7 @@ pub async fn owner_node_identity(
                 device_id: runtime.user_id().into(),
                 account_id: runtime.account_id().into(),
                 history_revision: runtime.account_history_revision(),
+                supports_push_state: true,
             })
         })
         .await
@@ -842,11 +844,11 @@ mod tests {
         for (command, body) in [
             (
                 "set_device_sync_category",
-                serde_json::json!({"category":"history", "enabled":false}),
+                serde_json::json!({"owner":"alice","category":"history", "enabled":false}),
             ),
             (
                 "set_account_preference",
-                serde_json::json!({"category":"appearance", "key":"theme", "value":"dark"}),
+                serde_json::json!({"owner":"alice","category":"appearance", "key":"theme", "value":"dark"}),
             ),
         ] {
             let result = fixture.invoke(command, body);
@@ -1220,19 +1222,25 @@ mod tests {
         let fixture = Fixture::new();
         let before = fixture.sync_documents();
         let cases = [
-            ("get_device_sync_policy", serde_json::json!({})),
-            ("get_device_sync_status", serde_json::json!({})),
+            (
+                "get_device_sync_policy",
+                serde_json::json!({"owner":"alice"}),
+            ),
+            (
+                "get_device_sync_status",
+                serde_json::json!({"owner":"alice"}),
+            ),
             (
                 "set_device_sync_category",
-                serde_json::json!({"category":"history", "enabled":false}),
+                serde_json::json!({"owner":"alice","category":"history", "enabled":false}),
             ),
             (
                 "get_account_preferences",
-                serde_json::json!({"category":"appearance"}),
+                serde_json::json!({"owner":"alice","category":"appearance"}),
             ),
             (
                 "set_account_preference",
-                serde_json::json!({"category":"appearance", "key":"theme", "value":"dark"}),
+                serde_json::json!({"owner":"alice","category":"appearance", "key":"theme", "value":"dark"}),
             ),
             (
                 "send_file_to_account",
@@ -1306,11 +1314,11 @@ mod tests {
         let commands = [
             (
                 "set_device_sync_category",
-                serde_json::json!({"category":"history", "enabled":false}),
+                serde_json::json!({"owner":"alice","category":"history", "enabled":false}),
             ),
             (
                 "set_account_preference",
-                serde_json::json!({"category":"appearance", "key":"theme", "value":"dark"}),
+                serde_json::json!({"owner":"alice","category":"appearance", "key":"theme", "value":"dark"}),
             ),
         ];
         for lock in [false, true] {

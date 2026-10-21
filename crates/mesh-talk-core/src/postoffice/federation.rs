@@ -26,6 +26,8 @@ const RESPONSE: &[u8] = b"MTFI1R";
 const IDS_PER_PAGE: usize = 512;
 const MAX_PAGES: usize = 256;
 const ROUND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum mailbox work in one bounded exchange; a full batch schedules continuation.
+pub const MAX_MAILBOXES_PER_EXCHANGE: usize = 16;
 const PRESENCE_FRAME: &[u8] = b"MTFP1D";
 const PRESENCE_PER_PAGE: usize = 16;
 
@@ -121,6 +123,22 @@ impl FederationDirectory {
         Self(Arc::new(Mutex::new(BridgeDirectory::with_gateway(gateway))))
     }
 
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0
+            .lock()
+            .expect("directory lock not poisoned")
+            .subscribe_changes()
+    }
+
+    pub fn has_live_presence(&self) -> bool {
+        !self
+            .0
+            .lock()
+            .expect("directory lock not poisoned")
+            .export_federated(Instant::now(), unix_now())
+            .is_empty()
+    }
+
     pub(crate) fn shared(&self) -> Arc<Mutex<BridgeDirectory>> {
         Arc::clone(&self.0)
     }
@@ -171,6 +189,20 @@ fn decode_presence_page(bytes: &[u8]) -> Result<(Vec<FederatedPresence>, bool), 
     Ok((proofs, body[0] == 1))
 }
 
+async fn send_frame<IO>(channel: &mut SecureChannel<IO>, bytes: &[u8]) -> Result<(), String>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    tokio::time::timeout(ROUND_TIMEOUT, channel.send(bytes)).await
+        .map_err(|_| "federation write deadline exceeded".to_string())?
+        .map_err(|e| {
+            if matches!(&e, crate::transport::TransportError::Io(io) if matches!(io.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::UnexpectedEof)) {
+                "unsupported federation version".to_string()
+            } else { e.to_string() }
+        })
+}
+
 async fn send_presence_pages<IO>(
     channel: &mut SecureChannel<IO>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
@@ -190,16 +222,14 @@ where
     proofs.truncate(limit);
     let chunks = proofs.chunks(PRESENCE_PER_PAGE).collect::<Vec<_>>();
     if chunks.is_empty() {
-        channel
-            .send(&encode_presence_page(&[], true)?)
-            .await
-            .map_err(|e| e.to_string())?;
+        send_frame(channel, &encode_presence_page(&[], true)?).await?;
     } else {
         for (index, chunk) in chunks.iter().enumerate() {
-            channel
-                .send(&encode_presence_page(chunk, index + 1 == chunks.len())?)
-                .await
-                .map_err(|e| e.to_string())?;
+            send_frame(
+                channel,
+                &encode_presence_page(chunk, index + 1 == chunks.len())?,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -298,16 +328,10 @@ where
     }
     let chunks = ids.chunks(IDS_PER_PAGE).collect::<Vec<_>>();
     if chunks.is_empty() {
-        channel
-            .send(&encode_page(&[], true)?)
-            .await
-            .map_err(|e| e.to_string())?;
+        send_frame(channel, &encode_page(&[], true)?).await?;
     } else {
         for (index, chunk) in chunks.iter().enumerate() {
-            channel
-                .send(&encode_page(chunk, index + 1 == chunks.len())?)
-                .await
-                .map_err(|e| e.to_string())?;
+            send_frame(channel, &encode_page(chunk, index + 1 == chunks.len())?).await?;
         }
     }
     Ok(())
@@ -321,11 +345,20 @@ where
 {
     let mut entries = Vec::new();
     let mut complete = false;
-    for _ in 0..MAX_PAGES {
+    for page_number in 0..MAX_PAGES {
         let page = tokio::time::timeout(ROUND_TIMEOUT, channel.recv())
             .await
             .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                if page_number == 0
+                    && matches!(&e, crate::transport::TransportError::Io(io)
+                    if matches!(io.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset))
+                {
+                    "unsupported federation version".to_string()
+                } else {
+                    e.to_string()
+                }
+            })?;
         let (remote, last) = decode_page(&page)?;
         entries.extend(remote);
         if last {
@@ -340,6 +373,23 @@ where
 }
 
 pub(crate) async fn send_inventory<IO>(
+    channel: &mut SecureChannel<IO>,
+    store: &Arc<Mutex<PostOffice>>,
+    directory: Option<&Arc<Mutex<BridgeDirectory>>>,
+    limit: usize,
+) -> Result<FederationStore, String>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    tokio::time::timeout(
+        ROUND_TIMEOUT,
+        send_inventory_inner(channel, store, directory, limit),
+    )
+    .await
+    .map_err(|_| "federation inventory deadline exceeded".to_string())?
+}
+
+async fn send_inventory_inner<IO>(
     channel: &mut SecureChannel<IO>,
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
@@ -383,10 +433,20 @@ async fn sync_with_directory(
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
 ) -> Result<usize, String> {
-    match sync_version(addr, identity, expected, store, directory, REQUEST_V2).await {
-        Ok(count) => Ok(count),
-        Err(_) => sync_version(addr, identity, expected, store, directory, REQUEST).await,
-    }
+    tokio::time::timeout(ROUND_TIMEOUT, async {
+        match sync_version(addr, identity, expected, store, directory, REQUEST_V2).await {
+            Ok(count) => Ok(count),
+            // A clean authenticated close before the first protocol response is
+            // the deployed legacy version-rejection signal. Network, malformed
+            // data and post-negotiation errors must not repeat the whole exchange.
+            Err(error) if error == "unsupported federation version" => {
+                sync_version(addr, identity, expected, store, directory, REQUEST).await
+            }
+            Err(error) => Err(error),
+        }
+    })
+    .await
+    .map_err(|_| "federation exchange deadline exceeded".to_string())?
 }
 
 async fn sync_version(
@@ -410,7 +470,7 @@ async fn sync_version(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    channel.send(request).await.map_err(|e| e.to_string())?;
+    send_frame(&mut channel, request).await?;
     send_presence_pages(&mut channel, directory, limit).await?;
     let mut local = {
         let mut office = store.lock().map_err(|e| e.to_string())?;
@@ -443,10 +503,19 @@ async fn sync_version(
             .filter(|entry| !remote_ids.contains(&entry.id))
             .map(|entry| entry.id),
     );
-    let mut ids = changed.into_iter().collect::<Vec<_>>();
-    ids.sort_by_key(|id| *id.as_bytes());
+    let ids = store.lock().map_err(|e| e.to_string())?.federation_batch(
+        expected,
+        changed.into_iter().collect(),
+        MAX_MAILBOXES_PER_EXCHANGE,
+    );
     let session_store = Mutex::new(FederationStore::new(store, remote));
     for id in &ids {
+        // Advance before awaiting: a timeout or malformed mailbox cannot pin
+        // every later conversation behind the same failing first item.
+        store
+            .lock()
+            .map_err(|e| e.to_string())?
+            .advance_federation_cursor(expected, *id);
         tokio::time::timeout(
             ROUND_TIMEOUT,
             request_round(&mut channel, &session_store, *id),
@@ -463,6 +532,99 @@ mod tests {
     use super::*;
     use crate::{discovery::Announce, identity::account::Account};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn federation_inventory_write_releases_a_backpressured_peer() {
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let (client, server) = tokio::io::duplex(64);
+        let expected = b.public();
+        let (outgoing, incoming) = tokio::join!(
+            SecureChannel::connect(client, &a, Some(&expected)),
+            SecureChannel::accept(server, &b),
+        );
+        let mut outgoing = outgoing.unwrap();
+        let _incoming = incoming.unwrap(); // authenticated peer stops reading
+        let page = FederatedMailbox {
+            id: ConversationId::new([3; 32]),
+            digest: [1; 32],
+            first_seen_secs: unix_now(),
+        };
+        tokio::time::pause();
+        let task = tokio::spawn(async move { send_inventory_pages(&mut outgoing, &[page]).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let result = tokio::time::timeout(Duration::from_secs(1), task).await;
+        assert!(
+            result.is_ok(),
+            "authenticated backpressure must have a write deadline"
+        );
+        assert!(result.unwrap().unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_noise_handshake_does_not_repeat_as_legacy_federation() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = Arc::new(Mutex::new(
+            PostOffice::open(&temp.path().join("relay"), "pw", DeviceIdentity::generate()).unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        assert!(
+            sync_with_relay(
+                addr,
+                &DeviceIdentity::generate(),
+                &DeviceIdentity::generate().public(),
+                &local
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn complete_federation_exchange_has_one_deadline() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = Arc::new(Mutex::new(
+            PostOffice::open(&temp.path().join("relay"), "pw", DeviceIdentity::generate()).unwrap(),
+        ));
+        let identity = DeviceIdentity::generate();
+        let remote = DeviceIdentity::generate();
+        let expected = remote.public();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted, ready) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(stream, &remote).await.unwrap();
+            assert_eq!(channel.recv().await.unwrap(), REQUEST_V2);
+            accepted.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let task =
+            tokio::spawn(async move { sync_with_relay(addr, &identity, &expected, &local).await });
+        ready.await.unwrap();
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let result = tokio::time::timeout(Duration::from_secs(1), task).await;
+        server.abort();
+        assert!(
+            result.is_ok(),
+            "transport and compatibility phases must share one deadline"
+        );
+        assert!(result.unwrap().unwrap().is_err());
+    }
 
     #[test]
     fn dropping_sessions_with_unknown_inventory_never_persists_hints() {

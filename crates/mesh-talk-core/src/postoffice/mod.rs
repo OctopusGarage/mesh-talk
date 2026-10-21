@@ -95,9 +95,53 @@ pub struct PostOffice {
     max_bytes: usize,
     byte_slack: usize,
     opaque_only: bool,
+    changes: tokio::sync::watch::Sender<u64>,
+    inventory_cache: std::cell::RefCell<Option<Vec<FederatedMailbox>>>,
+    mailbox_digests: std::cell::RefCell<HashMap<ConversationId, [u8; 32]>>,
+    federation_cursors: HashMap<([u8; 32], [u8; 32]), ConversationId>,
 }
 
 impl PostOffice {
+    /// Durable mailbox changes, broadcast independently to each scheduler.
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn publish_change(&mut self) {
+        self.inventory_cache.get_mut().take();
+        self.changes
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    pub(crate) fn federation_batch(
+        &self,
+        peer: &PublicIdentity,
+        mut ids: Vec<ConversationId>,
+        limit: usize,
+    ) -> Vec<ConversationId> {
+        ids.sort_by_key(|id| *id.as_bytes());
+        if let Some(cursor) = self
+            .federation_cursors
+            .get(&(peer.ed25519_pub, peer.x25519_pub))
+        {
+            let next = ids.partition_point(|id| id.as_bytes() <= cursor.as_bytes());
+            if next < ids.len() {
+                ids.rotate_left(next);
+            }
+        }
+        ids.truncate(limit);
+        ids
+    }
+
+    pub(crate) fn advance_federation_cursor(&mut self, peer: &PublicIdentity, id: ConversationId) {
+        let key = (peer.ed25519_pub, peer.x25519_pub);
+        if self.federation_cursors.len() >= 1024 && !self.federation_cursors.contains_key(&key) {
+            // Scheduling hints are disposable; persistent custody is unchanged.
+            self.federation_cursors.clear();
+        }
+        self.federation_cursors.insert(key, id);
+    }
+
     /// Open (or create) the post office's replica at `path`, under `identity`.
     pub fn open(path: &Path, password: &str, identity: DeviceIdentity) -> Result<Self, LogError> {
         Self::open_at(path, password, identity, SystemTime::now())
@@ -165,6 +209,10 @@ impl PostOffice {
             max_bytes: MAX_RELAY_BYTES,
             byte_slack: RETENTION_BYTE_SLACK,
             opaque_only: false,
+            changes: tokio::sync::watch::channel(0).0,
+            inventory_cache: std::cell::RefCell::new(None),
+            mailbox_digests: std::cell::RefCell::new(HashMap::new()),
+            federation_cursors: HashMap::new(),
         };
         office.prune_expired_at(now)?;
         Ok(office)
@@ -219,6 +267,11 @@ impl PostOffice {
             Ok(())
         })?;
         if matches!(outcome, AppendOutcome::Appended) {
+            // The append is durable even if later retention maintenance fails.
+            // Hash only this changed mailbox on the next inventory, preserving
+            // cached digests for unrelated conversations under active load.
+            self.mailbox_digests.get_mut().remove(&conv);
+            self.publish_change();
             if new_mailbox {
                 self.first_seen.insert(conv, first_seen_secs);
                 self.next_expiry_secs = next_expiry(&self.first_seen);
@@ -260,6 +313,10 @@ impl PostOffice {
             return Ok(());
         }
         self.log.retain_conversations(&keep)?;
+        self.mailbox_digests
+            .get_mut()
+            .retain(|id, _| keep.contains(id));
+        self.publish_change();
         self.first_seen
             .retain(|conversation, _| keep.contains(conversation));
         self.next_expiry_secs = next_expiry(&self.first_seen);
@@ -329,6 +386,10 @@ impl PostOffice {
             self.touch.remove(conv);
         }
         let dropped = self.log.retain_conversations(&keep)?;
+        self.mailbox_digests
+            .get_mut()
+            .retain(|id, _| keep.contains(id));
+        self.publish_change();
         self.total -= dropped;
         self.bytes = running_bytes;
         self.first_seen
@@ -391,18 +452,27 @@ impl PostOffice {
     }
 
     pub fn federated_inventory(&self) -> Vec<FederatedMailbox> {
-        self.federated_mailboxes()
+        if let Some(cached) = self.inventory_cache.borrow().as_ref() {
+            return cached.clone();
+        }
+        let inventory: Vec<_> = self
+            .federated_mailboxes()
             .into_iter()
             .map(|id| {
-                let mut ids = self.held_ids(&id);
-                ids.sort();
-                let mut hash = Sha256::new();
-                for event_id in ids {
-                    hash.update(event_id.as_bytes());
-                }
+                let digest = *self
+                    .mailbox_digests
+                    .borrow_mut()
+                    .entry(id)
+                    .or_insert_with(|| {
+                        let mut hash = Sha256::new();
+                        for event_id in self.held_ids(&id) {
+                            hash.update(event_id.as_bytes());
+                        }
+                        hash.finalize().into()
+                    });
                 FederatedMailbox {
                     id,
-                    digest: hash.finalize().into(),
+                    digest,
                     first_seen_secs: self
                         .first_seen
                         .get(&id)
@@ -410,7 +480,9 @@ impl PostOffice {
                         .unwrap_or_else(|| unix_seconds(SystemTime::now())),
                 }
             })
-            .collect()
+            .collect();
+        *self.inventory_cache.borrow_mut() = Some(inventory.clone());
+        inventory
     }
 
     pub(crate) fn adopt_federated_arrivals(
@@ -454,6 +526,7 @@ impl PostOffice {
                 .collect::<Vec<_>>();
             self.arrivals.rewrite(&records)?;
             self.first_seen.extend(changes);
+            self.publish_change();
             self.next_expiry_secs = next_expiry(&self.first_seen);
             self.prune_expired_at(now)?;
         }
@@ -524,6 +597,95 @@ mod tests {
             EventKind::Message,
             body.to_vec(),
         )
+    }
+
+    #[test]
+    fn durable_changes_wake_each_subscriber_and_duplicates_are_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut office =
+            PostOffice::open(&dir.path().join("relay"), "pw", DeviceIdentity::generate()).unwrap();
+        let mut first = office.subscribe_changes();
+        let second = office.subscribe_changes();
+        let sender = DeviceIdentity::generate();
+        let recipient = DeviceIdentity::generate();
+        let mailbox = opaque::RelayMailbox::federated(&sender, &recipient.public()).unwrap();
+        let event = mailbox
+            .wrap(&message(&sender, 1, vec![], 1, b"one"))
+            .unwrap();
+        assert!(office.federated_inventory().is_empty());
+        assert!(office.inventory_cache.borrow().is_some());
+        office.accept(event.clone()).unwrap();
+        assert!(first.has_changed().unwrap());
+        assert!(second.has_changed().unwrap());
+        assert!(office.inventory_cache.borrow().is_none());
+        let before = office.federated_inventory();
+        first.borrow_and_update();
+        office.accept(event).unwrap();
+        assert!(!first.has_changed().unwrap());
+        assert!(office.inventory_cache.borrow().is_some());
+        assert_eq!(office.federated_inventory()[0].digest, before[0].digest);
+        let next = mailbox
+            .wrap(&message(&sender, 2, vec![], 2, b"two"))
+            .unwrap();
+        office.accept(next).unwrap();
+        assert_ne!(office.federated_inventory()[0].digest, before[0].digest);
+    }
+
+    #[test]
+    fn failed_mailbox_attempt_rotates_before_retry_and_bounds_the_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut office =
+            PostOffice::open(&dir.path().join("relay"), "pw", DeviceIdentity::generate()).unwrap();
+        let peer = DeviceIdentity::generate().public();
+        let ids = (1..=20)
+            .map(|byte| ConversationId::new([byte; 32]))
+            .collect::<Vec<_>>();
+        let batch = office.federation_batch(&peer, ids.clone(), 16);
+        assert_eq!(batch.len(), 16);
+        assert_eq!(batch[0], ids[0]);
+        office.advance_federation_cursor(&peer, batch[0]); // cancelled/failed I/O
+        let next = office.federation_batch(&peer, ids.clone(), 16);
+        assert_eq!(
+            next[0], ids[1],
+            "one failed mailbox cannot starve unrelated conversations"
+        );
+        office.advance_federation_cursor(&peer, *ids.last().unwrap());
+        assert_eq!(office.federation_batch(&peer, ids.clone(), 16)[0], ids[0]);
+        assert_eq!(
+            office.federation_batch(&DeviceIdentity::generate().public(), ids.clone(), 16)[0],
+            ids[0]
+        );
+    }
+
+    #[test]
+    fn inventory_cache_invalidates_when_custody_expires_or_arrival_is_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut office = PostOffice::open_at(
+            &dir.path().join("relay"),
+            "pw",
+            DeviceIdentity::generate(),
+            start,
+        )
+        .unwrap();
+        let sender = DeviceIdentity::generate();
+        let mailbox =
+            opaque::RelayMailbox::federated(&sender, &DeviceIdentity::generate().public()).unwrap();
+        let event = mailbox
+            .wrap(&message(&sender, 1, vec![], 1, b"one"))
+            .unwrap();
+        office.record_at(event, start).unwrap();
+        let mut inventory = office.federated_inventory();
+        inventory[0].first_seen_secs -= 10;
+        office.adopt_federated_arrivals(&inventory, start).unwrap();
+        assert_eq!(
+            office.federated_inventory()[0].first_seen_secs,
+            inventory[0].first_seen_secs
+        );
+        office.prune_expired_at(start + MAX_RELAY_AGE).unwrap();
+        assert!(office.federated_inventory().is_empty());
+        assert!(office.mailbox_digests.borrow().is_empty());
+        assert!(office.mailbox_digests.borrow().is_empty());
     }
 
     #[test]
