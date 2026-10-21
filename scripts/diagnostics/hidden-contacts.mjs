@@ -206,7 +206,7 @@ async function contextMenu(id) {
 }
 async function screenshot(name, expected) {
   const filename = `${name}.png`;
-  const { png, observation, paint } = await captureNativeEvidence({ command, execute, until }, expected);
+  const { png, observation, paint } = await captureNativeEvidence({ command, execute, until, focus: focusOwnedWindow }, expected);
   assert.ok(png.length > 100 && png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), "native driver returned a PNG screenshot");
   await writeFile(join(output, filename), png);
   return expected ? { filename, ...observation, ...(paint ? { paint } : {}) } : filename;
