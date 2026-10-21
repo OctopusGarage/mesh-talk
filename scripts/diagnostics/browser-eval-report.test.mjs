@@ -58,3 +58,28 @@ test("swapping evidence between viewports fails even when titles and revision ma
   assert.doesNotThrow(() => validateScenarioIdentity({ scenario: "profile", scenarioPath: result.scenarioPath }, result));
   assert.throws(() => validateScenarioIdentity({ scenario: "profile", scenarioPath: ["portable-core.spec.ts", "1040x720 browser-only core", "profile"] }, result));
 });
+
+
+test("isolated portable shards preserve the complete strict inventory and every failure", async () => {
+  const { portableShards, mergePortableReports } = await import("../evals/portable-runner.mjs");
+  const { validateBrowserReport } = await import("../evals/browser-report.mjs");
+  assert.equal(portableShards("win32"), 2);
+  for (const os of ["darwin", "linux"]) assert.equal(portableShards(os), 1);
+  const first = complete(), second = structuredClone(first);
+  second.suites[0].specs[0].id = "second";
+  second.suites[0].specs[0].title = "second case";
+  for (const attachment of second.suites[0].specs[0].tests[0].results[0].attachments) attachment.path += "-second";
+  const options = { count: 2, browser: "chromium", expectedPaths: [
+    ["portable-core.spec.ts", "fixture case"], ["portable-core.spec.ts", "second case"],
+  ] };
+  assert.equal(validateBrowserReport(mergePortableReports([first, second]), options).length, 2);
+  assert.throws(() => validateBrowserReport(mergePortableReports([first]), options), /Missing or zero/);
+  assert.throws(() => validateBrowserReport(mergePortableReports([first, first]), options), /Duplicate/);
+  for (const statistic of ["unexpected", "skipped", "flaky"]) {
+    const bad = structuredClone(second); bad.stats[statistic] = 1;
+    assert.throws(() => validateBrowserReport(mergePortableReports([first, bad]), options), /Nonpassing/);
+  }
+  const bad = structuredClone(second); bad.errors.push({ message: "worker failed" });
+  assert.throws(() => validateBrowserReport(mergePortableReports([first, bad]), options), /harness errors/);
+  assert.throws(() => mergePortableReports([]), /Missing/);
+});

@@ -247,6 +247,7 @@
       "id": "portable-browser-reporting",
       "paths": [
         "scripts/evals/browser-report.mjs",
+        "scripts/evals/portable-runner.mjs",
         "scripts/diagnostics/browser-eval-report.test.mjs"
       ],
       "node": ["scripts/diagnostics/browser-eval-report.test.mjs"],

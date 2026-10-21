@@ -306,7 +306,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Failed to expand the Windows TCP client port range" }
           netsh int ipv4 show dynamicport tcp
       - name: Run real React portable workflows (mocked IPC boundary)
-        run: npx playwright test --config playwright.portable.config.ts
+        run: node ../scripts/evals/portable-runner.mjs
         env:
           EVAL_BROWSER: ${{ matrix.browser }}
           EVAL_SOURCE_SHA: ${{ github.sha }}
@@ -349,7 +349,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npx playwright install --with-deps firefox
-      - run: npx playwright test --config playwright.portable.config.ts
+      - run: node ../scripts/evals/portable-runner.mjs
         env:
           EVAL_BROWSER: firefox
           EVAL_TIER: extended
