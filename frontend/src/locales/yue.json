@@ -248,9 +248,8 @@
     "moreUnread": "仲有更多未讀訊息"
   },
   "presence": {
-    "slowMessages": "網絡較慢，訊息同送達確認可能有延遲。",
-    "onlineWeak": "在線 · 連線較弱",
-    "reconnecting": "連線較弱",
+    "onlineWeak": "在線 · 連線較慢",
+    "reconnecting": "連線較慢",
     "online": "在線",
     "lastSeenJustNow": "本機啱啱發現",
     "lastSeenSecs": "本機 {{count}} 秒前發現",
@@ -265,7 +264,7 @@
     "groupUpdating": "更新緊成員在線資訊…",
     "groupUnbound": "{{summary}} · 另有 {{count}} 個未綁定帳戶嘅成員裝置",
     "queuePersistenceFailed": "無法儲存自動下載佇列，重新啟動後可能需要重新接收：{{error}}",
-    "unavailable": "暫時更新唔到在線狀態，已有資訊會正常過期；自動重試緊。",
+    "unavailable": "暫時更新唔到在線狀態",
     "observedDevices": "發現 {{count}} 部在線裝置",
     "source_local": "本地網絡發現",
     "source_routed": "跨網絡發現",

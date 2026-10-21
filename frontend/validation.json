@@ -240,6 +240,7 @@
         "frontend/src/components/identity/PresenceDot.tsx",
         "frontend/src/features/chat/connectionState.ts",
         "frontend/src/features/chat/connectionState.test.ts",
+        "frontend/DESIGN.md",
         "frontend/e2e/person-presence.spec.ts",
         "frontend/src/components/identity/IdentityCrest.tsx"
       ],
@@ -249,11 +250,11 @@
         "src/features/chat/connectionState.test.ts"
       ],
       "capability": {
-        "summary": "Age public observations into bounded reconnect presentation without retaining expired Online evidence.",
+        "summary": "Age source-specific presence presentation independently of fresh device evidence.",
         "guide": "docs/network-design-reference.md#person-presence-contract",
         "invariants": [
           {
-            "name": "Routed online leases learn verified RTT within fifteen to sixty seconds; weak presentation and recovery do not slide past sixty seconds; stable recovery needs five seconds and a renewed origin, weak quality clears after thirty healthy seconds; authoritative withdrawal bypasses grace",
+            "name": "LAN-only presence expires at fifteen seconds; cross-network Online tolerance expires at 120 seconds from the original public observation without manufacturing fresh evidence; concise quality labels are shared; quality clears after thirty healthy seconds; authoritative withdrawal bypasses tolerance",
             "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]

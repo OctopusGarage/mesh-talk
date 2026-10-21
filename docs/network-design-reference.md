@@ -180,21 +180,23 @@ When one machine runs both the app and a relay, their names, keys, TCP listeners
 
 ### Person presence contract
 
-**Online** means this client has unexpired eligible public evidence for at least
-one currently valid device bound to the person's verified account. **Offline**
-means this client has no such evidence; the person may have exited or may simply
-be undiscoverable from this client's network. It is not a global sign-out claim.
-Expired eligible public observations may show **Weak connection** until sixty
-seconds total from their original observation. This is a bounded recovery
-presentation, not fresh Online evidence. It does not count as known online or
-claim message/call readiness. Initial fresh discovery displays Online immediately.
-After reconnecting, the desktop requires five seconds of successful fresh
-observations, including a newer public observation, before displaying Online
-again. Failed refreshes or expired evidence reset this confirmation. Delivery
-does not wait for this presentation confirmation. Authoritative withdrawal ends
-recovery immediately. Private routes and
-never-observed peers cannot create recovery. Recent history enriches Offline
-(for example, “Offline · Seen by this client 3m ago”) without inventing last-seen times.
+**Online** is this client's presentation of eligible public availability, with
+source-specific loss tolerance. Pure physical LAN and unscoped discovery expire
+after 15 seconds. Verified routed observations, current-origin directory
+introductions, and public authenticated contact without a known physical LAN
+path retain Online until 120 seconds from their original public observation.
+When their fresh evidence expires, show **Online · slow connection**. The
+presentation tolerance does not manufacture fresh device evidence or prove
+transport, delivery or read state. Group known-online counts use this same
+presentation consistently. **Offline** means the bounded observation has expired
+here, not a global sign-out claim.
+
+Initial discovery displays Online immediately. After a loss, fresh observations
+must remain successful for five seconds and include a renewed origin before
+clearing recovery confirmation. Authoritative withdrawal or revoked account
+binding ends the presentation immediately. Private traffic, cached addresses,
+failed probes, failed IPC and re-querying the same directory origin cannot renew
+it. Recent local history can enrich Offline without inventing observation times.
 
 The member profile shows fresh devices once each and their actual sources:
 local network discovery, cross-network discovery, post-office discovery, or
@@ -217,24 +219,20 @@ when a device's account cannot be verified, the UI explicitly adds “unbound de
 members” separately rather than counting them as people. Those rows remain
 inspectable and use their device-scoped observations without inventing an account.
 
-Local and permitted public authenticated observations last 15 seconds. Routed
-query observations adapt from 15 to 60 seconds using the measured round trip of
-the exact nonce-bound, signature-verified response. RTT up to 100 ms keeps the
-15-second lease; additional RTT adds 150 times its duration, capped at 60 seconds
-(400 ms reaches the cap). The primary conversation state stays Online during
-the learned lease. A routed lease of at least forty-five seconds indicates a
-slow-path hint unless a fresh physical LAN path is available; the header adds
-“Slow connection. Messages and delivery confirmations may take longer.” Once
-shown, that quality hint clears only after thirty seconds of successful healthy
-observations including renewed public evidence. It does not cancel or postpone
-message/receipt work. Individual alternating samples cannot toggle the hint.
-A healthy sample reduces a previous longer lease by
-at most five seconds per new observation. Tolerated routed observations display
-**Online · weak connection** and remain online for the learned lease; they do
-not enter the weak-only recovery presentation at a fixed fifteen-second mark.
-The total loss/expiry boundary remains sixty seconds from the original public
-observation. Only a new valid public observation can move it. This changes local
-routed liveness tolerance, not the directory origin's authority or lifetime.
+Public freshness remains distinct from presentation tolerance. Local and public
+authenticated observations last 15 seconds. Signed routed observations learn a
+freshness lease from verified nonce-bound RTT within 15–60 seconds, with healthy
+samples shrinking a prior long lease by at most five seconds. A learned lease of
+at least 45 seconds indicates slow connection unless fresh physical LAN evidence
+is available. Across member headers, profiles and status tooltips, use the same
+concise **Online · slow connection** label; do not add a long explanatory paragraph.
+The quality hint clears only after thirty seconds of successful healthy renewed
+observations. Delivery and receipt retries progress independently.
+
+The separate cross-network presentation expiry is 120 seconds from the original
+public observation, even when the learned freshness lease is shorter. LAN-only
+observations receive no extended recovery grace. Directory origin authority is
+never extended or advertised onward by this local presentation policy.
 Directory presence lasts at most 15 seconds from its origin observation, retaining the original expiry through
 federation and the versioned v4 client directory response. Legacy directory
 responses still provide route hints but cannot establish fresh presence because
@@ -270,13 +268,14 @@ identities rather than invented account associations.
 | ---------------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | Local signed discovery within the observed interface scope | 15 seconds                                 | No TCP success required; no physical co-location claim.                                                                 |
 | Signed UDP discovery with undetermined scope               | 15 seconds                                 | Show signed discovery only; do not infer local or cross-network location.                                               |
-| Routed signed discovery                                    | 15 seconds                                 | A permitted Tailscale candidate alone is insufficient.                                                                  |
+| Routed signed discovery                                    | 15–60 seconds                                 | A permitted Tailscale candidate alone is insufficient.                                                                  |
 | Public authenticated contact                               | 15 seconds                                 | No inferred LAN scope or continuing connection. Private route knowledge remains excluded.                               |
 | Directory/federation introduction                          | Original origin expiry, at most 15 seconds | v4 client response preserves expiry; forwarding and re-querying cannot renew it. Legacy responses provide routing only. |
 
-Public observation leases are 15 seconds. The frontend's shared two-second poll
-ages those leases locally, so a stopped desktop loses Online within 20 seconds
-without needing a logout packet. Route retention is independent: authenticated
+The frontend's shared two-second poll ages freshness and source-specific
+presentation deadlines locally, even when IPC fails. LAN-only observations lose
+Online at their 15-second deadline; cross-network observations at 120 seconds
+without a new valid public observation. Explicit withdrawal remains immediate. Route retention is independent: authenticated
 routes remain dial candidates for 300 seconds and routed candidates for 120 seconds.
 Transport-only authentication cannot renew the public observation deadline.
 Historical-route authentication probes run once per device, with its addresses
@@ -288,13 +287,10 @@ renew presence; the fifteen-second observation lease is unchanged.
 Routed probes and the local fallback scan run every five seconds; routed candidate
 pacing is 20 ms (at most 256 candidates per sweep). Bridge registration refreshes
 five seconds after each exchange. Existing admission and per-source response limits
-remain unchanged. Packet loss or long exchanges can show a still-running peer Offline;
-expired evidence never remains Online. The separate reconnect deadline is
-forty-five seconds after the original public expiry, capped at sixty seconds total
-from the origin observation. Repeated metadata, private transport activity, failed
-IPC and failed probes cannot renew that deadline. The frontend schedules expiry
-independently of the two-second poll and suppresses the stranded prompt while
-recent peers recover. Shell and diagnostics use the same presence projection.
+remain unchanged. The frontend schedules exact presentation expiry independently
+of polling and suppresses the stranded prompt while a recently observed
+cross-network peer remains Online under the bounded tolerance. Shell, group
+counts, member headers and diagnostics consume the same account projection.
 Known names and signed avatars persist independently of these observation leases.
 
 The explicitly negotiated `MTBD4Q`/`MTBD4R` directory extension carries the

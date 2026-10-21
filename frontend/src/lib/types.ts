@@ -178,13 +178,15 @@ export interface PresenceDevice {
   evidence: PresenceEvidence[];
 }
 export interface PresenceInfo {
-  /** Person has fresh eligible device evidence; groups use member counts instead. */
+  /** Person has eligible public presence or bounded cross-network tolerance. */
   online: boolean;
   devices?: PresenceDevice[];
   /** Latency-tolerant online observation; present as online with a weak connection. */
   connection_weak?: boolean;
   /** Remaining nonrenewing grace, never fresh Online evidence. */
   reconnect_expires_in_secs?: number;
+  /** Host-owned presentation expiry; fresh device evidence remains separate. */
+  online_expires_in_secs?: number;
   member_count?: number;
   online_count?: number;
   unbound_member_count?: number;

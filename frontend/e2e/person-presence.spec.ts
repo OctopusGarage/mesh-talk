@@ -95,7 +95,7 @@ test("failed refresh announces unavailability, expires evidence, and recovers", 
   await expect(
     page
       .getByRole("status")
-      .filter({ hasText: "Presence updates are unavailable" }),
+      .filter({ hasText: "Presence updates unavailable" }),
   ).toBeVisible();
   await expect(page.getByTestId("conversation-member-profile")).toContainText(
     "Offline",
@@ -112,7 +112,7 @@ test("failed refresh announces unavailability, expires evidence, and recovers", 
   await expect(
     page
       .getByRole("status")
-      .filter({ hasText: "Presence updates are unavailable" }),
+      .filter({ hasText: "Presence updates unavailable" }),
   ).toBeHidden();
 });
 
@@ -134,14 +134,14 @@ test("expired presence reconnects without green status or an offline prompt, the
     });
   }, BOB);
   await expect(page.getByTestId("conversation-member-profile")).toContainText(
-    "Weak connection",
+    "Slow connection",
   );
   await expect(page.getByTestId("connection-status")).toContainText(
-    "Weak connection",
+    "Slow connection",
   );
   await expect(
     page.getByTestId(`contact-profile-${BOB}`).getByRole("status"),
-  ).toHaveAttribute("aria-label", "Weak connection");
+  ).toHaveAttribute("aria-label", "Slow connection");
   await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
   await page.evaluate(() => {
     (
@@ -174,7 +174,7 @@ test("expired presence reconnects without green status or an offline prompt, the
   );
 });
 
-test("poor-network recovery stays visible for sixty seconds without restarting network search", async ({
+test("cross-network presence stays online for two minutes with one concise quality label", async ({
   page,
 }) => {
   await page.clock.install();
@@ -188,12 +188,13 @@ test("poor-network recovery stays visible for sixty seconds without restarting n
         online: true,
         connection_weak: true,
         last_seen_secs: 0,
-        reconnect_expires_in_secs: 60,
+        reconnect_expires_in_secs: 120,
+        online_expires_in_secs: 120,
         devices: [
           {
             user_id: "device_bob_2222",
             evidence: [
-              { source: "routed", last_seen_secs: 0, expires_in_secs: 60 },
+              { source: "routed", last_seen_secs: 0, expires_in_secs: 15 },
             ],
           },
         ],
@@ -214,17 +215,67 @@ test("poor-network recovery stays visible for sixty seconds without restarting n
     "Searching",
   );
   await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
-  await page.clock.runFor(26_000);
+  await page.clock.runFor(86_000);
   await expect(page.getByTestId("conversation-member-profile")).toContainText(
     "Online",
   );
   await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
-  await expect(page.getByTestId("connection-quality")).toContainText(
-    "Messages and delivery confirmations may take longer",
+  await expect(page.getByTestId("conversation-member-profile")).toContainText(
+    "Online · slow connection",
   );
-  await page.screenshot({ path: "test-results/recovery-sixty-seconds.png" });
+  await expect(page.getByTestId("connection-quality")).toHaveCount(0);
+  await expect(
+    page.getByText("Messages and delivery confirmations may take longer", {
+      exact: false,
+    }),
+  ).toHaveCount(0);
+  await page.screenshot({ path: "test-results/cross-network-two-minutes.png" });
   await page.clock.runFor(4000);
   await expect(page.getByTestId("conversation-member-profile")).toContainText(
     "Offline",
   );
+});
+
+test("pure LAN presence expires promptly without a long network-quality notice", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate((account) => {
+    (
+      window as unknown as { __mockSetPresence: (map: PresenceMap) => void }
+    ).__mockSetPresence({
+      [account]: {
+        online: true,
+        connection_weak: false,
+        last_seen_secs: 0,
+        online_expires_in_secs: 15,
+        reconnect_expires_in_secs: 15,
+        devices: [
+          {
+            user_id: "device_bob_2222",
+            evidence: [
+              { source: "local", last_seen_secs: 0, expires_in_secs: 15 },
+            ],
+          },
+        ],
+      },
+    });
+  }, BOB);
+  await page.clock.runFor(2100);
+  await page.evaluate(() =>
+    (
+      window as unknown as { __mockPresenceFailure: (failed: boolean) => void }
+    ).__mockPresenceFailure(true),
+  );
+  await page.clock.runFor(13_000);
+  await expect(page.getByTestId("conversation-member-profile")).toContainText(
+    "Online",
+  );
+  await page.clock.runFor(2100);
+  await expect(page.getByTestId("conversation-member-profile")).toContainText(
+    "Offline",
+  );
+  await expect(page.getByTestId("connection-quality")).toHaveCount(0);
 });

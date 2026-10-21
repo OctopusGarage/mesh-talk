@@ -248,9 +248,8 @@
     "moreUnread": "他にも未読メッセージがあります"
   },
   "presence": {
-    "slowMessages": "接続が遅いため、メッセージや配信確認に時間がかかる場合があります。",
-    "onlineWeak": "オンライン · 接続が不安定",
-    "reconnecting": "接続が不安定",
+    "onlineWeak": "オンライン · 低速接続",
+    "reconnecting": "低速接続",
     "online": "オンライン",
     "lastSeenJustNow": "このクライアントでたった今確認",
     "lastSeenSecs": "このクライアントで {{count}} 秒前に確認",
@@ -265,7 +264,7 @@
     "groupUpdating": "メンバーの状態を更新中…",
     "groupUnbound": "{{summary}} · アカウント未関連付けのメンバー端末 {{count}} 台",
     "queuePersistenceFailed": "自動ダウンロードの待機リストを再起動後に復元できません：{{error}}",
-    "unavailable": "オンライン状態を更新できません。既存の観測情報は通常どおり期限切れになります。自動で再試行しています。",
+    "unavailable": "オンライン状態を更新できません",
     "observedDevices": "新しく確認したオンライン端末：{{count}} 台",
     "source_local": "ローカルネットワークで検出",
     "source_routed": "ネットワークをまたいで検出",

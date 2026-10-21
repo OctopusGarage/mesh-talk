@@ -248,9 +248,8 @@
     "moreUnread": "Más mensajes sin leer"
   },
   "presence": {
-    "slowMessages": "Conexión lenta. Los mensajes y las confirmaciones de entrega pueden tardar más.",
-    "onlineWeak": "En línea · conexión inestable",
-    "reconnecting": "Conexión inestable",
+    "onlineWeak": "En línea · conexión lenta",
+    "reconnecting": "Conexión lenta",
     "online": "En línea",
     "lastSeenJustNow": "Observado por este cliente ahora",
     "lastSeenSecs": "Observado por este cliente hace {{count}} s",
@@ -265,7 +264,7 @@
     "groupUpdating": "Actualizando presencia de miembros…",
     "groupUnbound": "{{summary}} · {{count}} dispositivos de miembros sin cuenta vinculada",
     "queuePersistenceFailed": "No se pueden recordar las descargas automáticas después de reiniciar: {{error}}",
-    "unavailable": "No se puede actualizar la presencia. Las observaciones caducarán normalmente; se reintentará automáticamente.",
+    "unavailable": "Estado de presencia no disponible",
     "observedDevices": "Dispositivos observados recientemente: {{count}}",
     "source_local": "Descubrimiento en la red local",
     "source_routed": "Descubrimiento entre redes",

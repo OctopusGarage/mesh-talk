@@ -106,18 +106,9 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
           variant="compact"
         />
         <span className="block pl-12 text-[11px] text-muted-foreground">
-          {presence.online ? t("presence.online") : presenceLabel(presence, t)}
+          {presenceLabel(presence, t)}
         </span>
       </button>
-      {presence.online && presence.connection_weak && (
-        <p
-          data-testid="connection-quality"
-          role="status"
-          className="pl-12 text-[11px] leading-relaxed text-attention"
-        >
-          {t("presence.slowMessages")}
-        </p>
-      )}
       <MemberProfileDialog
         target={profileOpen ? { name, accountId: id } : null}
         onOpenChange={setProfileOpen}

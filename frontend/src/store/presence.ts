@@ -62,8 +62,24 @@ export function agePresence(
               value.reconnect_expires_in_secs - elapsed,
             ),
           }),
-      // Compatibility snapshots also have a bounded lease; no frozen green dots.
-      online: value.online && (devices ? devices.length > 0 : elapsed < 15),
+      ...(value.online_expires_in_secs == null
+        ? {}
+        : {
+            online_expires_in_secs: Math.max(
+              0,
+              value.online_expires_in_secs - elapsed,
+            ),
+            connection_weak:
+              value.connection_weak || (value.online && devices?.length === 0),
+          }),
+      // The host owns topology tolerance; legacy snapshots retain their short lease.
+      online:
+        value.online &&
+        (value.online_expires_in_secs != null
+          ? value.online_expires_in_secs > elapsed
+          : devices
+            ? devices.length > 0
+            : elapsed < 15),
       last_seen_secs:
         value.last_seen_secs == null
           ? null
@@ -132,6 +148,8 @@ export const usePresence = create<PresenceState>((set, get) => ({
         if (deadline > elapsed) next = Math.min(next, deadline - elapsed);
       };
       for (const value of Object.values(baseline)) {
+        if (value.online_expires_in_secs != null)
+          consider(value.online_expires_in_secs);
         if (value.reconnect_expires_in_secs != null)
           consider(value.reconnect_expires_in_secs);
         if (value.devices) {

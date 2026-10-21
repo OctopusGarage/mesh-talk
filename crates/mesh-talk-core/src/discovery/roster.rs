@@ -51,8 +51,10 @@ impl PeerEndpoint {
 const MAX_ROUTES_PER_PEER: usize = 8;
 /// Public observations expire promptly after logout, independently of dial-route retention.
 pub const PUBLIC_PRESENCE_TTL: Duration = Duration::from_secs(15);
-/// Presentation recovery ends sixty seconds from the original public observation.
+/// Maximum adaptive freshness lease for measured routed observations.
 pub const PUBLIC_RECONNECT_TTL: Duration = Duration::from_secs(60);
+/// Cross-network presentation tolerance, anchored to the original public observation.
+pub const CROSS_NETWORK_PRESENCE_TTL: Duration = Duration::from_secs(120);
 
 /// Keep a directly discovered endpoint ahead of a bridge gateway, even when
 /// the gateway refreshes its directory more recently. Routes within each tier
@@ -110,22 +112,47 @@ impl PeerRecord {
             .collect()
     }
 
-    /// A bounded recovery hint, never fresh Online evidence. Repeated directory
-    /// metadata and private transport activity cannot move this deadline.
+    /// Bounded presentation tolerance, independent of fresh device evidence.
+    /// Physical LAN observations expire promptly. Other public paths tolerate
+    /// loss for two minutes; private traffic and repeated directory metadata
+    /// cannot move the original observation deadline.
     pub fn reconnect_remaining(&self, now: Instant) -> Duration {
+        let local = self.has_lan_route();
         self.routes
             .iter()
             .filter_map(|route| {
                 let deadline = route.public_presence_deadline()?;
-                Some(if route.source == RouteSource::RoutedQuery {
-                    route.last_seen + PUBLIC_RECONNECT_TTL
-                } else {
-                    deadline + (PUBLIC_RECONNECT_TTL - PUBLIC_PRESENCE_TTL)
+                Some(match route.source {
+                    RouteSource::RoutedQuery => route.last_seen + CROSS_NETWORK_PRESENCE_TTL,
+                    RouteSource::PostOffice => {
+                        deadline + (CROSS_NETWORK_PRESENCE_TTL - PUBLIC_PRESENCE_TTL)
+                    }
+                    RouteSource::Authenticated if !local => {
+                        deadline + (CROSS_NETWORK_PRESENCE_TTL - PUBLIC_PRESENCE_TTL)
+                    }
+                    _ => deadline,
                 })
             })
             .map(|deadline| deadline.saturating_duration_since(now))
             .max()
             .unwrap_or(Duration::ZERO)
+    }
+
+    /// Age of the newest original public observation, never a private route refresh.
+    pub fn public_observation_age(&self, now: Instant) -> Option<Duration> {
+        self.routes
+            .iter()
+            .filter_map(|route| {
+                let deadline = route.public_presence_deadline()?;
+                let observed = match route.source {
+                    RouteSource::Authenticated | RouteSource::PostOffice => {
+                        deadline.checked_sub(PUBLIC_PRESENCE_TTL)?
+                    }
+                    _ => route.last_seen,
+                };
+                Some(now.saturating_duration_since(observed))
+            })
+            .min()
     }
 
     /// A known application route without an intermediate Mesh Talk post office.
@@ -886,7 +913,7 @@ mod routed_tests {
     }
 
     #[test]
-    fn routed_latency_lease_tolerates_loss_without_sliding_beyond_sixty_seconds() {
+    fn routed_latency_lease_tolerates_loss_without_sliding_beyond_two_minutes() {
         let device = DeviceIdentity::generate();
         let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
         let mut roster = Roster::default();
@@ -900,7 +927,7 @@ mod routed_tests {
                 .is_empty()
         );
         assert_eq!(
-            peer.reconnect_remaining(origin + Duration::from_secs(59)),
+            peer.reconnect_remaining(origin + Duration::from_secs(119)),
             Duration::from_secs(1)
         );
         assert!(
@@ -908,7 +935,7 @@ mod routed_tests {
                 .is_empty()
         );
         assert_eq!(
-            peer.reconnect_remaining(origin + Duration::from_secs(60)),
+            peer.reconnect_remaining(origin + Duration::from_secs(120)),
             Duration::ZERO
         );
     }
@@ -921,28 +948,42 @@ mod routed_tests {
         roster.update_authenticated(&proof, "127.0.0.1".parse().unwrap(), "self");
         let peer = roster.get(&proof.user_id).unwrap();
         let origin = peer.routes[0].presence_expires_at.unwrap() - PUBLIC_PRESENCE_TTL;
-        assert_eq!(peer.reconnect_remaining(origin), Duration::from_secs(60));
+        assert_eq!(peer.reconnect_remaining(origin), Duration::from_secs(120));
         assert!(
             peer.presence_evidence(origin + Duration::from_secs(15))
                 .is_empty()
         );
         assert_eq!(
             peer.reconnect_remaining(origin + Duration::from_secs(15)),
-            Duration::from_secs(45)
+            Duration::from_secs(105)
         );
         assert_eq!(
-            peer.reconnect_remaining(origin + Duration::from_secs(60)),
+            peer.reconnect_remaining(origin + Duration::from_secs(120)),
             Duration::ZERO
         );
         assert_eq!(
-            peer.reconnect_remaining(origin + Duration::from_secs(59)),
+            peer.reconnect_remaining(origin + Duration::from_secs(119)),
             Duration::from_secs(1)
         );
         let mut copy = peer.clone();
-        copy.routes[0].last_seen = origin + Duration::from_secs(59);
+        copy.routes[0].last_seen = origin + Duration::from_secs(119);
         copy.routes[0].last_authenticated = Some(copy.routes[0].last_seen);
         assert_eq!(
-            copy.reconnect_remaining(origin + Duration::from_secs(60)),
+            copy.reconnect_remaining(origin + Duration::from_secs(120)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            copy.public_observation_age(origin + Duration::from_secs(119)),
+            Some(Duration::from_secs(119)),
+            "private route refresh does not rewrite public history"
+        );
+        copy.routes[0].source = RouteSource::PostOffice;
+        assert_eq!(
+            copy.reconnect_remaining(origin + Duration::from_secs(119)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            copy.reconnect_remaining(origin + Duration::from_secs(120)),
             Duration::ZERO
         );
         copy.routes[0].presence_expires_at = None;

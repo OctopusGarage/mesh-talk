@@ -23,6 +23,8 @@ pub struct PresenceDevice {
 pub struct PresenceInfo {
     pub online: bool,
     pub connection_weak: bool,
+    /// Remaining local/cross-network presentation lease; not fresh device evidence.
+    pub online_expires_in_secs: u64,
     pub last_seen_secs: Option<u64>,
     /// Nonrenewing presentation hint; does not count as fresh presence.
     pub reconnect_expires_in_secs: u64,
@@ -69,19 +71,20 @@ fn add_peer(out: &mut HashMap<String, PresenceInfo>, peer: &PeerRecord, now: Ins
     let entry = out.entry(key).or_default();
     let remaining = peer.reconnect_remaining(now).as_secs();
     entry.reconnect_expires_in_secs = entry.reconnect_expires_in_secs.max(remaining);
-    if remaining > 0 {
-        let age = mesh_talk_core::discovery::roster::PUBLIC_RECONNECT_TTL
-            .as_secs()
-            .saturating_sub(remaining);
+    entry.online_expires_in_secs = entry.online_expires_in_secs.max(remaining);
+    if let Some(age) = peer.public_observation_age(now).map(|age| age.as_secs()) {
         entry.last_seen_secs = Some(entry.last_seen_secs.map_or(age, |old| old.min(age)));
     }
-    if let Some(age) = evidence.iter().map(|e| e.last_seen_secs).min() {
-        entry.last_seen_secs = Some(entry.last_seen_secs.map_or(age, |old| old.min(age)));
-        let weak = evidence.iter().any(|e| {
-            e.source == "routed" && e.last_seen_secs.saturating_add(e.expires_in_secs) >= 44
-        }) && !evidence.iter().any(|e| e.source == "local");
+    let fresh = !evidence.is_empty();
+    if remaining > 0 || fresh {
+        let weak = !fresh
+            || (evidence.iter().any(|e| {
+                e.source == "routed" && e.last_seen_secs.saturating_add(e.expires_in_secs) >= 44
+            }) && !evidence.iter().any(|e| e.source == "local"));
         entry.connection_weak = weak && (!entry.online || entry.connection_weak);
         entry.online = true;
+    }
+    if fresh {
         entry.devices.push(PresenceDevice {
             user_id: peer.public.user_id(),
             evidence,
@@ -218,6 +221,42 @@ mod tests {
         identity::{account::Account, device::DeviceIdentity},
     };
     #[test]
+    fn cross_lan_presence_tolerates_two_minutes_but_local_expires_at_fifteen_seconds() {
+        let account = Account::generate();
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &account, "Peer", 1);
+        for routed in [false, true] {
+            let mut roster = Roster::default();
+            if routed {
+                roster.update_routed(&proof, "100.64.0.2".parse().unwrap(), "self");
+            } else {
+                roster.update(&proof, "192.168.1.2".parse().unwrap(), "self");
+            }
+            let peer = roster.get(&proof.user_id).unwrap();
+            let origin = peer.routes[0].last_seen;
+            let deadline = if routed { 120 } else { 15 };
+            for age in [0, 14, 15, 60, 119, 120] {
+                let mut out = HashMap::new();
+                add_peer(&mut out, peer, origin + std::time::Duration::from_secs(age));
+                let p = &out[&account.account_id()];
+                assert_eq!(p.online, age < deadline, "routed={routed} age={age}");
+                assert_eq!(
+                    p.last_seen_secs,
+                    Some(age),
+                    "history retains the original observation"
+                );
+                if routed && (15..120).contains(&age) {
+                    assert!(p.connection_weak);
+                    assert!(
+                        p.devices.is_empty(),
+                        "tolerance is not fresh device evidence"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn adaptive_online_lease_is_presented_as_online_with_a_weak_connection() {
         let account = Account::generate();
         let device = DeviceIdentity::generate();
@@ -236,7 +275,7 @@ mod tests {
         let p = &out[&account.account_id()];
         assert!(p.online);
         assert!(p.connection_weak);
-        assert_eq!(p.reconnect_expires_in_secs, 15);
+        assert_eq!(p.reconnect_expires_in_secs, 75);
     }
 
     #[test]
@@ -275,10 +314,10 @@ mod tests {
         let peer = roster.get(&proof.user_id).unwrap();
         let observed = peer.routes[0].last_seen;
         for (age, online, remaining) in [
-            (0, true, 60),
-            (15, false, 45),
-            (30, false, 30),
-            (59, false, 1),
+            (0, true, 15),
+            (15, false, 0),
+            (30, false, 0),
+            (59, false, 0),
             (60, false, 0),
         ] {
             let mut out = HashMap::new();

@@ -35,18 +35,15 @@ The composer is a stable bottom dock. Attachment, media, expression and send con
 
 Empty conversation and no-selection states have a quiet concentric motif, a clear explanation and the existing next action. Loading, connection, offline and error states say what is happening and offer retry or diagnostics when available. Technical values remain selectable and easy to compare. Text and controls must wrap or truncate within their pane, including long names, identifiers, messages and filenames.
 
-People keep Online as the primary conversation status while a valid learned
-lease remains. Slow paths add a quiet secondary message explaining that messages
-and delivery confirmations may be delayed. This quality hint requires thirty
-seconds of healthy renewed observations before clearing, independently of the
-online state. Member details retain Online · weak connection; expired recovery
-uses Weak connection, and the bounded loss state is Offline.
-Slow signed routed discovery adapts its online lease up to sixty seconds. A lost public observation has a
-sixty-second total recovery window; returning presence must stay fresh for five
-seconds before the desktop returns to Online. Message transport progresses
-independently of this display confirmation. Recent local observation
-history can supplement Offline. The member profile shows fresh devices and their
-overlapping discovery sources, alongside the client-relative offline explanation.
+People use one concise status line: Online, Online · slow connection, or Offline
+with recent local observation history. Do not add a long quality paragraph.
+Physical LAN observations expire at 15 seconds; cross-network observations keep
+Online for 120 seconds from their last valid public observation. Fresh device
+evidence remains independently bounded. A slow quality hint clears after thirty
+healthy seconds and renewed public evidence, avoiding flicker. Withdrawal is
+immediate. Returning observations use the existing five-second confirmation;
+delivery progresses independently. The member profile shows fresh devices and
+their overlapping discovery sources without turning tolerance into fresh evidence.
 Group headers use accepted account totals and known-online people counts, with
 unresolved device memberships stated separately. Source provenance does not imply
 physical location or successful communication. A quiet global status notice

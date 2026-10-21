@@ -248,9 +248,8 @@
     "moreUnread": "More unread messages"
   },
   "presence": {
-    "slowMessages": "Slow connection. Messages and delivery confirmations may take longer.",
-    "onlineWeak": "Online · weak connection",
-    "reconnecting": "Weak connection",
+    "onlineWeak": "Online · slow connection",
+    "reconnecting": "Slow connection",
     "online": "Online",
     "lastSeenJustNow": "Seen by this client just now",
     "lastSeenSecs": "Seen by this client {{count}}s ago",
@@ -265,7 +264,7 @@
     "groupUpdating": "Updating member presence…",
     "groupUnbound": "{{summary}} · {{count}} unbound device members",
     "queuePersistenceFailed": "Automatic downloads can't be remembered across restarts: {{error}}",
-    "unavailable": "Presence updates are unavailable. Retained observations will expire normally; retrying automatically.",
+    "unavailable": "Presence updates unavailable",
     "observedDevices": "Freshly observed devices: {{count}}",
     "source_local": "Local network discovery",
     "source_routed": "Cross-network discovery",

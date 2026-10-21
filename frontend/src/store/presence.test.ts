@@ -523,3 +523,69 @@ it("keeps weak quality steady until thirty seconds of healthy renewed observatio
     stop();
   }
 });
+
+it("ages cross-network online tolerance independently of expired device evidence", () => {
+  const snapshot = {
+    bob: {
+      online: true,
+      connection_weak: false,
+      last_seen_secs: 0,
+      online_expires_in_secs: 120,
+      reconnect_expires_in_secs: 120,
+      devices: [
+        {
+          user_id: "bob-device",
+          evidence: [
+            {
+              source: "routed" as const,
+              last_seen_secs: 0,
+              expires_in_secs: 15,
+            },
+          ],
+        },
+      ],
+    },
+    group: {
+      online: false,
+      last_seen_secs: null,
+      member_keys: ["bob"],
+      member_count: 1,
+      online_count: 1,
+    },
+  };
+  const tolerated = agePresence(snapshot, 119);
+  expect(tolerated.bob.online).toBe(true);
+  expect(tolerated.bob.connection_weak).toBe(true);
+  expect(tolerated.bob.devices).toEqual([]);
+  expect(tolerated.group.online_count).toBe(1);
+  const expired = agePresence(snapshot, 120);
+  expect(expired.bob.online).toBe(false);
+  expect(expired.group.online_count).toBe(0);
+});
+
+it("expires cross-network tolerance exactly during IPC failure without extending the observation", async () => {
+  getPresence
+    .mockResolvedValueOnce({
+      bob: {
+        online: true,
+        connection_weak: true,
+        last_seen_secs: 119,
+        online_expires_in_secs: 1,
+        reconnect_expires_in_secs: 1,
+        devices: [],
+      },
+    })
+    .mockRejectedValue(new Error("IPC unavailable"));
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(usePresence.getState().map.bob.online).toBe(true);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(usePresence.getState().map.bob.online).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(usePresence.getState().map.bob.online).toBe(false);
+    expect(presenceStatus(usePresence.getState().map.bob)).toBe("offline");
+  } finally {
+    stop();
+  }
+});

@@ -248,9 +248,8 @@
     "moreUnread": "还有更多未读消息"
   },
   "presence": {
-    "slowMessages": "网络较慢，消息和送达确认可能延迟。",
-    "onlineWeak": "在线 · 连接较弱",
-    "reconnecting": "连接较弱",
+    "onlineWeak": "在线 · 连接较慢",
+    "reconnecting": "连接较慢",
     "online": "在线",
     "lastSeenJustNow": "本机刚刚发现",
     "lastSeenSecs": "本机 {{count}} 秒前发现",
@@ -265,7 +264,7 @@
     "groupUpdating": "正在更新成员在线信息…",
     "groupUnbound": "{{summary}} · 另有 {{count}} 个未绑定账号的成员设备",
     "queuePersistenceFailed": "无法保存自动下载队列，重启后可能需要重新接收：{{error}}",
-    "unavailable": "在线状态暂无法更新，已有在线信息将正常过期；正在自动重试。",
+    "unavailable": "在线状态暂无法更新",
     "observedDevices": "发现 {{count}} 台在线设备",
     "source_local": "本地网络发现",
     "source_routed": "跨网络发现",
