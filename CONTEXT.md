@@ -216,3 +216,19 @@ _Avoid_: file downloaded because its message arrived.
 A retained authorized copy served by an accepted channel member. It is distinct
 from an opaque post-office copy whose holder cannot decrypt channel content.
 _Avoid_: post-office membership, global archive.
+
+## Peer trust evidence
+
+- **Trust card**: an Account-signed public profile statement, not proof of a human
+  identity or honesty. A valid signature identifies the claiming Account.
+- **Creation claim**: a self-declared Account creation date. Unknown dates remain
+  unknown; local User registration and backup dates are not Account creation.
+- **Creation witness receipt**: an independent Account’s signed observation of an
+  Account creation claim, using the witness’s clock. It is not a trusted clock or
+  timestamp-authority certificate.
+- **Signed introduction**: an Account-attributed statement about another Account;
+  its credibility depends on the issuer, not the number of signatures.
+- **First observed by this installation**: private local evidence of the first
+  recorded certified Account/Device observation. It is never a public account age.
+
+The [peer trust guide](docs/peer-trust.md) owns evidence limits and sharing rules.

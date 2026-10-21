@@ -44,6 +44,7 @@ pub mod state;
 mod tailscale_discovery;
 pub mod tray;
 pub mod trust;
+pub mod trust_cards;
 pub mod updates;
 mod window_geometry;
 mod window_visibility;
@@ -430,6 +431,11 @@ pub fn run_tauri_configured(
                 crate::settings::set_app_settings,
                 crate::trust::get_trust,
                 crate::trust::mark_verified,
+                crate::trust_cards::get_trust_card,
+                crate::trust_cards::publish_trust_card,
+                crate::trust_cards::import_trust_artifact,
+                crate::trust_cards::create_trust_introduction,
+                crate::trust_cards::witness_trust_creation,
                 crate::favorites::get_favorites,
                 crate::favorites::set_favorite,
                 crate::favorites::set_alias,

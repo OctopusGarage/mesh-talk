@@ -982,7 +982,8 @@ otherwise a backup containing that plaintext is required. Offline DM peers are
 discovered from durable account history.
 
 Snapshots include visible plaintext history, signed event provenance, file cards,
-managed media referenced by visible cards, received peer avatars, and recall marks.
+managed media referenced by visible cards, received peer avatars, signed public
+trust cards and their attached proofs, and recall marks.
 Verified peer recall marks are persisted before export so a restored device does not
 redisplay recalled plaintext it cannot decrypt from the old device's events. A
 password-encrypted local index retains original IDs for restored outgoing messages;
@@ -1109,9 +1110,26 @@ Messages have no content-language restrictions. The core does not bundle languag
 models, classify message text, or persist language-based visibility decisions.
 Display-language localization remains a device preference.
 
-New account profiles use avatar-only `MTPF1`. Decoding still authenticates existing
+Avatar compatibility publications use `MTPF1`; accounts with a signed trust card
+publish the `MTC1` card first, then its `MTPF1` avatar under the same publication
+lock. The avatar event requires the card event as a causal parent.
+Decoding still authenticates existing
 `MTPF2` signatures so retained avatar events and linked devices remain readable;
 retired metadata is ignored and never re-emitted as a preference. Snapshot schema 2
 retains the positional tags of its two retired metadata records for old-backup
 compatibility. Imports validate those records without installing filtering state;
 new exports omit them. Existing `language.log` sidecars are not opened or applied.
+
+## Signed peer trust cards
+
+Account-signed trust cards add public presentation claims and optional creation
+evidence without changing account IDs, device certificates or manual verification
+authority. The core validates separately domain-separated card, introduction and
+creation-witness signatures, bounded fields and subject bindings. Revisioned cards
+are persisted encrypted and propagated only through authenticated profile paths.
+An imported signature never authorizes verified-contact DM pulls. Desktop IPC
+retains exact-session admission at local mutation, while private first-observed
+and device-change records remain in the owner-scoped trust store.
+
+The [peer trust guide](peer-trust.md) owns timestamp semantics and evidence limits;
+creation claims and witness clocks are explicitly distinct from trusted time.

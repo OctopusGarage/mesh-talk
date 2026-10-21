@@ -47,7 +47,11 @@ and previous identity cannot be recovered by a password reset.
 
 ## Snapshot compatibility
 
-New backups use snapshot schema 2; this build also accepts schema 1. The retired
+New backups use snapshot schema 3; this build also accepts schemas 1 and 2.
+Schema 3 preserves signed public [trust cards](peer-trust.md), including their
+self-declared creation claims and attached proofs. Older snapshots contain no
+trust-card evidence and never gain an inferred creation date. Private relationship
+observations are not included in public card records. The retired
 message-language metadata in older schema 2 backups is validated for format and
 authenticity but does not restore restrictions or hidden-message decisions.
 New backups omit that metadata. Display-language preferences remain ordinary

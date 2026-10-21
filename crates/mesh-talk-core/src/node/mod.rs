@@ -129,3 +129,8 @@ pub use outgoing_message::{MessageAcceptance, MessageDestination, OutgoingMessag
 mod timeline;
 
 pub use channels::ChannelRecovery;
+
+mod trust_card;
+pub use trust_card::{Introduction, TimestampWitness, TrustCard};
+
+mod trust_card_io;

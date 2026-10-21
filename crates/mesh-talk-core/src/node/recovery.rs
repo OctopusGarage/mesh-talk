@@ -372,6 +372,14 @@ impl Node {
                     // Preserve old snapshot tags without restoring retired filtering state.
                     SnapshotRecordV1::DmLanguageProfile { .. }
                     | SnapshotRecordV1::DmLanguageDecision { .. } => {}
+                    SnapshotRecordV1::PeerTrustCard { card } => {
+                        if !node
+                            .receive_trust_card(&card)
+                            .map_err(|_| SnapshotError::Io)?
+                        {
+                            return Err(SnapshotError::InvalidEncoding);
+                        }
+                    }
                     SnapshotRecordV1::Profile {
                         account_id,
                         updated_at,
@@ -598,11 +606,17 @@ impl Node {
             .expect("recalls mutex not poisoned")
             .snapshot_marks();
         let profiles = self.account_profiles.snapshot();
+        let trust_cards = self
+            .trust_cards
+            .lock()
+            .expect("trust cards mutex not poisoned")
+            .all();
         let mut record_count = u64::try_from(
             sent_count
                 .checked_add(received_count)
                 .and_then(|count| count.checked_add(recalls.len()))
                 .and_then(|count| count.checked_add(profiles.len()))
+                .and_then(|count| count.checked_add(trust_cards.len()))
                 .and_then(|count| count.checked_add(event_count))
                 .and_then(|count| count.checked_add(file_count))
                 .and_then(|count| count.checked_add(file_contacts.len()))
@@ -748,6 +762,9 @@ impl Node {
                 updated_at,
                 avatar,
             })?;
+        }
+        for card in trust_cards {
+            writer.push(&SnapshotRecordV1::PeerTrustCard { card })?;
         }
         for (file_conv, size, digest) in media {
             writer.push(&SnapshotRecordV1::MediaDescriptor {

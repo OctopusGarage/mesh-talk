@@ -344,6 +344,7 @@ pub struct Node {
     /// restart (unlike own reactions).
     pub(in crate::node) recalls: Mutex<crate::node::recall::RecallLog>,
     /// Owns profile journals, local publication and coordinated account transitions.
+    pub(in crate::node) trust_cards: Mutex<super::trust_card::TrustCardStore>,
     pub(in crate::node) account_profiles: super::account_profile::AccountProfiles,
     /// Live stream of received peer profiles (avatar updates), surfaced to the app. The
     /// node owns BOTH ends (created in `open_with_account`) so the constructor signature
@@ -513,6 +514,10 @@ impl Node {
         let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let account_profiles = super::account_profile::AccountProfiles::new(&account, profiles);
+        let trust_cards = Mutex::new(super::trust_card::TrustCardStore::open(
+            &dir.join("trust-cards.log"),
+            password,
+        )?);
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -721,6 +726,7 @@ impl Node {
             account_history_revision: std::sync::atomic::AtomicU64::new(0),
             account_sync_status: Mutex::new(std::collections::HashMap::new()),
             account_profiles,
+            trust_cards,
             profile_incoming: profile_tx,
             profile_rx: Mutex::new(Some(profile_rx)),
             call_signal_incoming: call_signal_tx,
@@ -783,6 +789,8 @@ impl Node {
             recalls: Mutex::new(recalls),
             my_dm_reactions: Mutex::new(my_dm_reactions),
         });
+        node.reconcile_trust_profiles_on_open()
+            .map_err(|error| LogError::CorruptFile(format!("trust card projection: {error}")))?;
         node.prune_expired_received_on_open()
             .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
         node.queue_approved_incomplete_files();
@@ -958,6 +966,18 @@ impl Node {
         kind: EventKind,
         ciphertext: Vec<u8>,
     ) -> Result<u64, NodeError> {
+        self.append_event_with_profile_parent(channel, kind, ciphertext, None)
+            .map(|(seq, _)| seq)
+    }
+
+    /// Reuse ordinary allocation while retaining a required signed-profile parent.
+    pub(in crate::node) fn append_event_with_profile_parent(
+        &self,
+        channel: ConversationId,
+        kind: EventKind,
+        ciphertext: Vec<u8>,
+        required_profile_parent: Option<EventId>,
+    ) -> Result<(u64, EventId), NodeError> {
         if self
             .channels
             .lock()
@@ -985,6 +1005,25 @@ impl Node {
             // categories are paused. The event log permits sparse author sequences.
             parents.clear();
         }
+        if let Some(parent) = required_profile_parent {
+            if kind != EventKind::Profile
+                || !log.get(&parent).is_some_and(|event| {
+                    event.kind == EventKind::Profile
+                        && event.conversation_id == channel
+                        && event.author == self_author
+                })
+            {
+                return Err(NodeError::InvalidInput(
+                    "required profile parent is not a local profile in this conversation".into(),
+                ));
+            }
+            // Even independent sibling profiles retain this Profile-only edge. It
+            // never depends on paused message/file categories and prevents a legacy
+            // avatar projection from overtaking its signed metadata across pages.
+            parents.push(parent);
+            parents.sort_unstable();
+            parents.dedup();
+        }
         let seq = log
             .next_sequence(&channel, &self_author)
             .map_err(NodeError::Log)?;
@@ -1003,8 +1042,9 @@ impl Node {
                 "file manifest exceeds transport frame".into(),
             ));
         }
+        let id = event.id;
         log.append(event).map_err(NodeError::Log)?;
-        Ok(seq)
+        Ok((seq, id))
     }
 }
 

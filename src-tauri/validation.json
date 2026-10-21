@@ -294,6 +294,39 @@
       "escalation": [
         "Desktop entry points/build configuration, binary-only Linux renderer, native capabilities and integration harnesses use conservative library coverage. Explicitly build changed binary/example targets, run affected integration targets and native platform/renderer/capability checks; library filters do not execute them."
       ]
+    },
+    {
+      "id": "desktop-trust-cards",
+      "paths": ["src-tauri/src/trust_cards.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "trust_cards::tests::",
+            "owner_commands::tests::registered_trust_card_commands_reject_wrong_owner_and_locked_app",
+            "owner_commands::tests::registered_trust_card_commands_round_trip_public_evidence_without_verifying",
+            "owner_commands::tests::registered_trust_card_commands_reject_replaced_queued_authority",
+            "trust::tests::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Adapt signed public trust evidence behind exact-session authority without importing private verification.",
+        "guide": "docs/peer-trust.md",
+        "invariants": [
+          {
+            "name": "Public signatures never grant private verification or trusted time",
+            "reference": "docs/peer-trust.md"
+          },
+          {
+            "name": "Logout and replacement invalidate trust card mutation authority",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
+      "escalation": [
+        "Run trust-card browser interaction and native owner/lock/replacement command evidence; JSON parser unit tests alone do not prove runtime wiring."
+      ]
     }
   ],
   "prScenarios": [
@@ -324,6 +357,12 @@
         "scripts/evals/png-evidence.mjs"
       ],
       "native": ["darwin", "linux", "win32"]
+    },
+    {
+      "id": "desktop-trust-card-acceptance",
+      "paths": ["src-tauri/src/trust_cards.rs", "src-tauri/src/trust.rs"],
+      "browser": ["e2e/trust-cards.spec.ts"],
+      "native": ["host"]
     }
   ]
 }
