@@ -1467,7 +1467,7 @@ impl Node {
             match exchange {
                 Ok(held) => {
                     self.observe_delivery_exchange(&channel, started);
-                    if held {
+                    if held || conversation != destination.event.conversation_id {
                         self.recycle_sync_channel(channel);
                     }
                     return held && self.delivery_destination_allowed(destination);

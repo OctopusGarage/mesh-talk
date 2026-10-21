@@ -2,6 +2,33 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-presence",
+      "paths": [
+        "frontend/src/store/presence.ts",
+        "frontend/src/store/presence.test.ts",
+        "frontend/src/features/chat/PresenceAvailability.tsx",
+        "frontend/src/features/chat/PresenceAvailability.test.ts",
+        "frontend/e2e/person-presence.spec.ts"
+      ],
+      "frontend": [
+        "src/store/presence.test.ts",
+        "src/features/chat/PresenceAvailability.test.ts"
+      ],
+      "capability": {
+        "summary": "Refresh and age client-relative presence, retaining session-scoped diagnostic failures for a non-obstructing sidebar disclosure.",
+        "guide": "docs/network-design-reference.md#person-presence-contract",
+        "invariants": [
+          {
+            "name": "Failed refreshes do not freeze presence or establish peer sign-out",
+            "reference": "docs/network-design-reference.md#person-presence-contract"
+          }
+        ]
+      },
+      "escalation": [
+        "Visible presence failures require the person-presence browser scenarios, including footer containment, keyboard disclosure and recovery. Native discovery semantics remain owned by the host/core."
+      ]
+    },
+    {
       "id": "frontend-history",
       "paths": [
         "frontend/src/store/conversationHistory.ts",
@@ -401,6 +428,17 @@
     }
   ],
   "prScenarios": [
+    {
+      "id": "frontend-presence-acceptance",
+      "paths": [
+        "frontend/src/store/presence.ts",
+        "frontend/src/features/chat/PresenceAvailability.tsx",
+        "frontend/src/features/chat/Sidebar.tsx",
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/e2e/person-presence.spec.ts"
+      ],
+      "browser": ["e2e/person-presence.spec.ts"]
+    },
     {
       "id": "frontend-saved-devices",
       "paths": [

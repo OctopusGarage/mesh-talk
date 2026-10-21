@@ -39,6 +39,7 @@ import {
 import { useConversationNavigation } from "./sidebar/useConversationNavigation";
 import { useSerialPoll } from "./useSerialPoll";
 import { CONNECTION_LABEL, connectionState } from "./connectionState";
+import { PresenceAvailability } from "./PresenceAvailability";
 
 function SectionLabel({
   children,
@@ -504,6 +505,7 @@ export function Sidebar() {
             title="Mesh-Talk"
           />
         </div>
+        <PresenceAvailability />
       </div>
 
       {/* Right-edge resize handle: drag to resize (persisted), double-click to reset. The

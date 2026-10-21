@@ -8,6 +8,7 @@ import type { TFunction } from "i18next";
 import { presence as presenceApi } from "@/lib/api";
 import type { PresenceInfo, PresenceMap } from "@/lib/types";
 import type { PresenceStatus } from "@/lib/presence";
+import { errorMessage } from "@/lib/error";
 import { captureRuntimeOwner } from "./ownership";
 
 const POLL_MS = 2000;
@@ -15,9 +16,14 @@ const MAX_HISTORY = 1024;
 const RECOVERY_STABLE_MS = 5000;
 const QUALITY_STABLE_MS = 30_000;
 let epoch = 0;
+type PresenceFailure =
+  | { kind: "request"; message: string }
+  | { kind: "timeout" }
+  | { kind: "invalid" };
 interface PresenceState {
   map: PresenceMap;
   unavailable: boolean;
+  failure: PresenceFailure | null;
   clear: () => void;
   start: () => () => void;
 }
@@ -106,9 +112,10 @@ export function agePresence(
 export const usePresence = create<PresenceState>((set, get) => ({
   map: EMPTY,
   unavailable: false,
+  failure: null,
   clear: () => {
     epoch++;
-    set({ map: EMPTY, unavailable: false });
+    set({ map: EMPTY, unavailable: false, failure: null });
   },
   start: () => {
     const lease = captureRuntimeOwner();
@@ -181,20 +188,22 @@ export const usePresence = create<PresenceState>((set, get) => ({
       nextFallback = performance.now() + 30000;
       const pollId = ++nextPoll;
       const requested = performance.now();
-      const fail = () => {
+      const fail = (failure: PresenceFailure) => {
         if (current() && pollId > lastApplied) {
           lastApplied = pollId;
           recoveryConfirmations.clear();
           qualityConfirmations.clear();
-          set({ unavailable: true });
+          set({ unavailable: true, failure });
           publishAge();
         }
       };
-      const timeout = setTimeout(fail, 10000);
+      const timeout = setTimeout(() => fail({ kind: "timeout" }), 10000);
       try {
         const next = await readWithDeadline(() => presenceApi.get());
-        if (!next || typeof next !== "object" || Array.isArray(next))
-          throw new Error("invalid presence snapshot");
+        if (!next || typeof next !== "object" || Array.isArray(next)) {
+          fail({ kind: "invalid" });
+          return;
+        }
         if (current() && pollId > lastApplied) {
           const old = age();
           // A successful empty snapshot withdraws presence immediately, while
@@ -308,11 +317,15 @@ export const usePresence = create<PresenceState>((set, get) => ({
             agePresence({ ...history, ...withHistory }, 0),
           );
           baselineAt = performance.now();
-          set({ map: reconcile(get().map, baseline), unavailable: false });
+          set({
+            map: reconcile(get().map, baseline),
+            unavailable: false,
+            failure: null,
+          });
           scheduleExpiry();
         }
-      } catch {
-        fail();
+      } catch (error) {
+        fail({ kind: "request", message: errorMessage(error) });
       } finally {
         inFlight--;
         clearTimeout(timeout);

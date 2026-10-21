@@ -46,7 +46,11 @@ delivery progresses independently. The member profile shows fresh devices and
 their overlapping discovery sources without turning tolerance into fresh evidence.
 Group headers use accepted account totals and known-online people counts, with
 unresolved device memberships stated separately. Source provenance does not imply
-physical location or successful communication. A quiet global status notice
-explains unavailable presence updates while evidence continues to expire.
+physical location or successful communication. A compact status disclosure in
+the sidebar's connection footer announces unavailable online updates and retry.
+It never overlays the conversation header. Expanding it explains potentially
+stale indicators and reveals the latest refresh error; long errors wrap and
+scroll within the footer. Successful refresh removes the notice. Evidence
+continues to expire independently of this presentation.
 
 Controls need accessible names, keyboard focus indicators and at least the existing touch target sizes. Native buttons handle Enter and Space; Escape closes Radix dialogs and menus. Brief 150–190ms motion is reserved for press feedback and floating surfaces. Ordinary message reading does not animate on entry. Reduced-motion settings remove spatial movement while preserving 80ms color and opacity feedback; progress that would otherwise be shown by a spinner has readable text. Theme previews use the actual canvas, signal and rail tokens. At narrow widths, the existing responsive conversation behavior remains intact; at short heights, dialogs scroll and tools remain reachable. Title-bar drag regions and native control insets remain clear on macOS, Windows and Linux.
