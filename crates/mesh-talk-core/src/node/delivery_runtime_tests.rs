@@ -7011,3 +7011,183 @@ async fn relocated_recipient_cancels_stalled_old_route_before_exchange_deadline(
         "fresh recipient route must preempt a stalled old exchange without reducing the routed exchange budget"
     );
 }
+
+#[tokio::test]
+async fn automatic_delivery_uses_slow_reachable_route_behind_stalled_former_lan() {
+    delayed_route_delivery(
+        std::time::Duration::from_millis(3200),
+        std::time::Duration::ZERO,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn automatic_delivery_with_one_second_rtt_does_not_take_minutes() {
+    delayed_route_delivery(
+        std::time::Duration::ZERO,
+        std::time::Duration::from_millis(500),
+    )
+    .await;
+}
+
+async fn delayed_route_delivery(
+    initial_delay: std::time::Duration,
+    frame_delay: std::time::Duration,
+) {
+    use std::time::{Duration, Instant};
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let old = TcpListener::bind("[::1]:0").await.unwrap();
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", proxy.local_addr().unwrap().port());
+    let old_bp = Announce::new_with_account(&bob, &ba, "Bob", old.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, mut incoming) = node(bd.path(), bob, ba, &ap);
+    a.configure_privacy(
+        ad.path(),
+        "pw",
+        &ap,
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&old_bp, old.local_addr().unwrap().ip(), &a.user_id());
+    a.initiate_contact_locally(&b.account_id()).await.unwrap();
+    let backend = bl.local_addr().unwrap();
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(a.clone().run_accept_loop(al));
+    tasks.spawn(b.clone().run_accept_loop(bl));
+    tasks.spawn(async move {
+        let mut streams = Vec::new();
+        loop {
+            let (stream, _) = old.accept().await.unwrap();
+            streams.push(stream); // Simulate a proxy accepting the departed LAN route.
+        }
+    });
+    tasks.spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                result = proxy.accept() => {
+                    let (client, _) = result.unwrap();
+                    connections.spawn(async move {
+                        // Routed authentication can legitimately exceed three seconds.
+                        tokio::time::sleep(initial_delay).await;
+                        let server = tokio::net::TcpStream::connect(backend).await.unwrap();
+                        let (client_read, client_write) = client.into_split();
+                        let (server_read, server_write) = server.into_split();
+                        let forward = |mut input: tokio::net::tcp::OwnedReadHalf, mut output: tokio::net::tcp::OwnedWriteHalf| async move {
+                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                            let mut buffer = vec![0u8; 65536];
+                            loop {
+                                let count = input.read(&mut buffer).await?;
+                                if count == 0 { return output.shutdown().await; }
+                                tokio::time::sleep(frame_delay).await;
+                                output.write_all(&buffer[..count]).await?;
+                            }
+                        };
+                        let _ = tokio::try_join!(forward(client_read, server_write), forward(server_read, client_write));
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    let start = Instant::now();
+    let id = tokio::time::timeout(
+        Duration::from_millis(500),
+        a.enqueue_to_account(&b.account_id(), b"hotspot handoff", None),
+    )
+    .await
+    .expect("local enqueue remains independent of network latency")
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(25), async {
+        let message = incoming.recv().await.unwrap();
+        assert_eq!(message.text, b"hotspot handoff");
+        assert_eq!(
+            message.message_id,
+            Some(id),
+            "live DM identity must match the logical history identity"
+        );
+        assert_eq!(
+            message.from_account.as_deref(),
+            Some(a.account_id().as_str())
+        );
+        let received = start.elapsed();
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        (received, start.elapsed())
+    })
+    .await;
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    let (received, confirmed) = result.expect("automatic delivery and authenticated receipt must progress over the slow valid route without waiting for the stale route");
+    eprintln!("handoff received={received:?} confirmed={confirmed:?}");
+}
+
+#[tokio::test]
+async fn automatic_send_collects_receipt_when_recipient_can_only_serve_inbound_connections() {
+    use std::time::Duration;
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, mut incoming) = node(bd.path(), bob, ba, &ap);
+    let recipient = b.account_id();
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(a.clone().run_accept_loop(al));
+    tasks.spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                result = bl.accept() => {
+                    let (stream, _) = result.unwrap();
+                    let node = b.clone();
+                    connections.spawn(async move {
+                        if let Ok(channel) = node.privacy_accept(stream).await {
+                            node.serve_connection(channel).await;
+                        }
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    let id = a
+        .enqueue_to_account(&recipient, b"receipt without reverse dial", None)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        assert_eq!(
+            incoming.recv().await.unwrap().text,
+            b"receipt without reverse dial"
+        );
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    assert!(
+        result.is_ok(),
+        "an accepted outgoing message must collect its authenticated receipt over the reachable path without requiring a reverse dial or unrelated background history sweep"
+    );
+}

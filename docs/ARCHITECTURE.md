@@ -445,12 +445,28 @@ the message delivery WAL; portable recovery snapshots currently omit reactions.
     departed peer's ICMP port-unreachable response as receive error 10054. Local
     socket failures remain fatal and are logged with their OS error.
     The roster and encrypted route cache retain multiple addresses per device and
-    a pinned dial tries alternatives. Shared discovery observes interface names,
+    a pinned dial staggers up to two candidate handshakes by 200 ms, with a
+    ten-second authentication deadline per candidate. Every attempt owns separate
+    TCP capacity permits; cancellation drops losing attempts. An obsolete LAN
+    endpoint accepting TCP through a proxy cannot block the first alternate route
+    for a full handshake deadline. Reusing an existing durable contact grant does
+    not acquire the disclosure gate's writer or repeat policy/proof persistence;
+    new grants and binding changes retain the serialized commit path and host
+    authorization. Slow local text acceptance, route authentication and delivery
+    attempts emit elapsed-time diagnostics with stage/outcome and route/identity
+    metadata, excluding message bodies. Shared discovery observes interface names,
     addresses and indexes every two seconds; changes rejoin multicast and wake
     privacy-gated LAN/routed producers without restarting the participant. A
     30-second multicast retry remains as a fallback. See [routed network discovery](routed-network-discovery.md)
     for the protocol, limitations, and cross-network release checks; see
     [network topologies](network-topologies.md) for the A–F deployment scenarios.
+- **Automatic account delivery** — after a direct durable-have response, the sender
+  also requests the intended device's authenticated receipt scope over the same
+  reachable path, within the existing control-attempt deadline. A recipient need
+  not establish a reverse connection before confirmation can return. Custody
+  alone never becomes a recipient-confirmation claim. Live account DM notifications
+  carry the authenticated sender account and logical envelope message ID through
+  desktop IPC; their unread projection shares that ID with account history.
 - **Legacy/channel delivery** — these paths append the sealed event, then `deliver_direct` (Noise dial +
   one sync round) and, on failure/always, `replicate_to_post_office`. Receivers run an
   accept loop (`serve_connection` → `serve_one` ingest → `emit_new_messages` decrypt/surface).

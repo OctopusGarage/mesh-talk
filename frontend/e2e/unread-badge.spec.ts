@@ -542,3 +542,102 @@ test("a replacement account does not inherit unread after identity lookup fails"
       .getByText("1", { exact: true }),
   ).toHaveCount(0);
 });
+
+test("one logical DM remains one unread badge across duplicate live events and history scanning", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await observeBadge(page);
+  await page.evaluate(() => {
+    const w = window as unknown as Record<string, unknown>;
+    const internals = w.__TAURI_INTERNALS__ as {
+      invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+    };
+    const original = internals.invoke;
+    w.__unreadHistoryRevision = 1;
+    w.__dmHistoryScans = 0;
+    internals.invoke = async (cmd, args) => {
+      const result = await original(cmd, args);
+      if (cmd === "owner_account_history" && w.__unreadHistoryRevision === 2)
+        w.__dmHistoryScans = Number(w.__dmHistoryScans) + 1;
+      if (cmd === "owner_node_identity")
+        return {
+          ...(result as object),
+          history_revision: w.__unreadHistoryRevision,
+        };
+      return result;
+    };
+  });
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() =>
+          localStorage.getItem(
+            "mesh-talk-reception-v2:u_self:acc_self_aaaa1111",
+          ),
+        ),
+      { timeout: 10_000 },
+    )
+    .toContain(`account:${BOB.account}`);
+  await page.evaluate(({ account, device }) => {
+    const w = window as unknown as {
+      __mockInject: (
+        conv: string,
+        text: string,
+        who: string,
+        metadata: { id: string },
+      ) => void;
+      __mockEmit: (event: string, payload: unknown) => void;
+      __unreadHistoryRevision: number;
+    };
+    const id = "one-logical-dm";
+    w.__mockInject(`acc:${account}`, "one new message", device, { id });
+    const event = {
+      from: device,
+      from_account: account,
+      message_id: id,
+      from_name: "bob",
+      text: "one new message",
+      reply_to: null,
+    };
+    w.__mockEmit("dm-received", event);
+    w.__mockEmit("dm-received", event);
+    w.__unreadHistoryRevision = 2;
+  }, BOB);
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  const row = page.getByTestId(`conversation-row-${BOB.account}`);
+  await expect(row.locator("..").getByText("1", { exact: true })).toBeVisible();
+  // The next roster/history scan reads the same stable logical ID.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const saved = JSON.parse(
+            localStorage.getItem(
+              "mesh-talk-reception-v2:u_self:acc_self_aaaa1111",
+            ) ?? "{}",
+          );
+          return JSON.stringify(saved);
+        }),
+      { timeout: 10_000 },
+    )
+    .toContain("one-logical-dm");
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __dmHistoryScans: number })
+              .__dmHistoryScans,
+        ),
+      { timeout: 10_000 },
+    )
+    .toBeGreaterThan(0);
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await expect(row.locator("..").getByText("1", { exact: true })).toBeVisible();
+  await row.click();
+  await expect(
+    page.getByTestId("message-bubble").filter({ hasText: "one new message" }),
+  ).toHaveCount(1);
+  await expect.poll(() => latestBadgeCount(page)).toBe(0);
+});

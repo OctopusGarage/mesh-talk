@@ -367,7 +367,9 @@
         "crates/mesh-talk-core/src/discovery/",
         "crates/mesh-talk-core/src/node/session.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
-        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/session_pool.rs"
       ],
       "native": ["host"]
     }

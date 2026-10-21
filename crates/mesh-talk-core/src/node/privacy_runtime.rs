@@ -371,10 +371,46 @@ impl Node {
         account: &str,
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        // Reusing a durable grant is an observation, not a policy transition.
+        // Handshakes hold the disclosure gate while doing network IO; taking
+        // its writer for every message makes local acceptance depend on them.
+        if self.local_contact_grant_current(account) {
+            let mut current = false;
+            authorize(&mut || {
+                current = self.local_contact_grant_current(account);
+                Ok(())
+            })?;
+            if current {
+                return Ok(());
+            }
+        }
         let _operation = self.privacy.gate.write().await;
         authorize(&mut || {
             self.change_allowed_locked(account, true, PermissionSource::Initiated, || Ok(()))
                 .map_err(|error| NodeError::Log(crate::eventlog::LogError::Io(error)))
+        })
+    }
+
+    fn local_contact_grant_current(&self, account: &str) -> bool {
+        let announcements = self
+            .roster
+            .lock()
+            .expect("roster lock not poisoned")
+            .announcements();
+        let state = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned");
+        state.as_ref().is_none_or(|state| {
+            state.policy.allows(account)
+                && announcements
+                    .iter()
+                    .filter(|proof| proof.account_id().as_deref() == Some(account))
+                    .all(|proof| {
+                        state.proofs.account_for(&proof.public()).as_deref() == Some(account)
+                            && state.proofs.accepts_binding(proof)
+                    })
         })
     }
     /// Recheck the active owner under the policy gate before committing an initiated grant.
@@ -1128,40 +1164,77 @@ impl Node {
         let mut unique = std::collections::HashSet::new();
         candidates.retain(|candidate| unique.insert(*candidate));
         candidates.truncate(10);
+        // A departed LAN endpoint may still accept TCP through a proxy/TUN but
+        // never complete Noise. Give a second verified candidate a turn after
+        // 200ms instead of serially spending a whole handshake deadline there.
+        // Futures are owned here: returning/cancellation drops every loser.
+        use futures_util::{StreamExt, stream::FuturesUnordered};
+        let attempt = |candidate, permits| {
+            let own = own.as_ref();
+            async move {
+                let started = std::time::Instant::now();
+                let result = tokio::time::timeout(super::transport::HANDSHAKE_TIMEOUT, async {
+                    let stream = TcpStream::connect(candidate).await?;
+                    stream.set_nodelay(true)?;
+                    let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
+                    SecureChannel::connect_with_visibility(
+                        stream,
+                        &self.identity,
+                        Some(expected),
+                        own,
+                        publicly_visible,
+                    )
+                    .await
+                })
+                .await
+                .unwrap_or_else(|_| Err(TransportError::Noise("dial timed out".into())));
+                if started.elapsed() >= Duration::from_secs(2) {
+                    log::warn!(
+                        target: "mesh_talk::delivery",
+                        "slow peer authentication peer={} endpoint={} elapsed_ms={} outcome={}",
+                        expected.user_id(), candidate, started.elapsed().as_millis(),
+                        result.as_ref().err().map_or_else(|| "authenticated".to_string(), ToString::to_string),
+                    );
+                }
+                (candidate, permits, result)
+            }
+        };
+        let mut candidates = candidates.into_iter().peekable();
+        let mut attempts = FuturesUnordered::new();
+        if let Some(candidate) = candidates.next() {
+            attempts.push(attempt(candidate, permits));
+        }
+        let mut stagger = tokio::time::interval(Duration::from_millis(200));
+        stagger.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        stagger.tick().await;
         let mut last_error = TransportError::Noise("no peer route available".into());
         let mut successful = None;
-        for candidate in candidates {
-            let attempt = tokio::time::timeout(Duration::from_secs(3), async {
-                #[cfg(test)]
-                timing.phase("dial-tcp-connect");
-                let stream = TcpStream::connect(candidate).await?;
-                #[cfg(test)]
-                {
-                    timing.socket(&stream);
-                    timing.phase("dial-noise-presence");
+        while !attempts.is_empty() {
+            tokio::select! {
+                result = attempts.next() => {
+                    let Some((candidate, permits, result)) = result else { break };
+                    match result {
+                        Ok(channel) => {
+                            successful = Some((candidate, channel, permits));
+                            break;
+                        }
+                        Err(error) => {
+                            last_error = error;
+                            if let Some(candidate) = candidates.next() {
+                                attempts.push(attempt(candidate, permits));
+                            }
+                        }
+                    }
                 }
-                stream.set_nodelay(true)?;
-                let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
-                SecureChannel::connect_with_visibility(
-                    stream,
-                    &self.identity,
-                    Some(expected),
-                    own.as_ref(),
-                    publicly_visible,
-                )
-                .await
-            })
-            .await;
-            match attempt {
-                Ok(Ok(channel)) => {
-                    successful = Some((candidate, channel));
-                    break;
+                _ = stagger.tick(), if attempts.len() < 2 && candidates.peek().is_some() => {
+                    if let Some(permits) = self.sessions.try_outbound() {
+                        attempts.push(attempt(candidates.next().expect("candidate available"), permits));
+                    }
                 }
-                Ok(Err(error)) => last_error = error,
-                Err(_) => last_error = TransportError::Noise("dial timed out".into()),
             }
         }
-        let (addr, mut channel) = successful.ok_or(last_error)?;
+        drop(attempts);
+        let (addr, mut channel, permits) = successful.ok_or(last_error)?;
         channel.retain_connection_permits(permits);
         #[cfg(test)]
         timing.phase("dial-proof-validation");

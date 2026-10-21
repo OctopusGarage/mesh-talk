@@ -1930,6 +1930,100 @@ describe("incoming events", () => {
     stop();
   });
 
+  it("counts one logical DM once when duplicate delivery callbacks arrive", async () => {
+    const stop = await boot();
+    const event = {
+      from: "dev1",
+      from_name: "Alice",
+      text: "one message",
+      reply_to: null,
+      message_id: "logical-dm",
+      from_account: "acctA",
+    };
+    captured.current!.onDm(event);
+    captured.current!.onDm(event);
+    expect(useChat.getState().unread["account:acctA"]).toBe(1);
+    stop();
+  });
+
+  it("does not count a live DM again when the same logical history row is scanned", async () => {
+    const stop = await boot();
+    useChat.setState({
+      ledger: { "account:acctA": {} },
+      historyBaselines: ["account:acctA"],
+      historyFullBaselines: ["account:acctA"],
+    });
+    captured.current!.onDm({
+      from: "dev1",
+      from_name: "Alice",
+      text: "one message",
+      reply_to: null,
+      message_id: "logical-dm",
+      from_account: "acctA",
+    });
+    expect(useChat.getState().unread["account:acctA"]).toBe(1);
+    invoke.mockImplementation((command: string) => {
+      if (command === "owner_node_identity")
+        return Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+          history_revision: 2,
+        });
+      if (command === "list_peers") return Promise.resolve([peer]);
+      if (command === "list_accounts")
+        return Promise.resolve([
+          { account_id: "acctA", name: "Alice", devices: ["dev1"] },
+        ]);
+      if (command === "owner_account_history")
+        return Promise.resolve([
+          {
+            id: "logical-dm",
+            from_me: false,
+            text: "one message",
+            who: "acctA",
+            wall_clock: 1,
+          },
+        ]);
+      return Promise.resolve([]);
+    });
+    await useChat.getState().refreshRoster();
+    expect(useChat.getState().unread["account:acctA"]).toBe(1);
+    stop();
+  });
+
+  it("counts two distinct logical messages even when their text is identical", async () => {
+    const stop = await boot();
+    for (const id of ["first-message", "second-message"])
+      captured.current!.onDm({
+        from: "dev1",
+        from_name: "Alice",
+        text: "same text",
+        reply_to: null,
+        message_id: id,
+        from_account: "acctA",
+      });
+    expect(useChat.getState().unread["account:acctA"]).toBe(2);
+    stop();
+  });
+
+  it("indexes an identified DM before discovery without adding a second pending unread count", async () => {
+    const stop = await boot();
+    const event = {
+      from: "not-yet-discovered",
+      from_name: "Alice",
+      text: "one message",
+      reply_to: null,
+      message_id: "early-message",
+      from_account: "acctA",
+    };
+    captured.current!.onDm(event);
+    captured.current!.onDm(event);
+    expect(useChat.getState().unread["account:acctA"]).toBe(1);
+    expect(useChat.getState().pendingUnknownUnread).toEqual({});
+    stop();
+  });
+
   it("does not count existing unread messages again when the same node recovers", async () => {
     const stop = await boot();
     useChat.setState({

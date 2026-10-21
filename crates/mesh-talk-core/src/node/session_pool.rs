@@ -67,16 +67,20 @@ impl SessionPool {
         self.idle.lock().unwrap().clear();
     }
 
-    async fn acquire(
-        &self,
-        direction: &Arc<Semaphore>,
-    ) -> Result<Vec<OwnedSemaphorePermit>, TransportError> {
+    fn prepare_capacity(&self, direction: &Arc<Semaphore>) {
         self.prune();
         if direction.available_permits() == 0 || self.total.available_permits() == 0 {
             // Idle connections must never prevent a new identity/route or an
             // incoming peer from making progress. Active sessions are untouched.
             self.clear();
         }
+    }
+
+    async fn acquire(
+        &self,
+        direction: &Arc<Semaphore>,
+    ) -> Result<Vec<OwnedSemaphorePermit>, TransportError> {
+        self.prepare_capacity(direction);
         tokio::time::timeout(CAPACITY_WAIT, async {
             let directional = direction
                 .clone()
@@ -99,6 +103,15 @@ impl SessionPool {
         &self,
     ) -> Result<Vec<OwnedSemaphorePermit>, TransportError> {
         self.acquire(&self.outbound).await
+    }
+
+    /// An alternate route gets its own socket permits. Racing addresses must
+    /// not turn one logical dial into unaccounted TCP connections.
+    pub(in crate::node) fn try_outbound(&self) -> Option<Vec<OwnedSemaphorePermit>> {
+        self.prepare_capacity(&self.outbound);
+        let directional = self.outbound.clone().try_acquire_owned().ok()?;
+        let shared = self.total.clone().try_acquire_owned().ok()?;
+        Some(vec![directional, shared])
     }
 
     pub(in crate::node) async fn inbound(

@@ -105,6 +105,20 @@ state. Chat supplies these capabilities; standalone send/status tests use the
 same cache defaults without initializing chat. Feature work should extend these
 owners instead of importing the aggregate chat getter/setter into them.
 
+The text composer transfers submitted content synchronously to the existing bounded,
+owner-scoped outgoing intent. A refused local submission retains the draft and
+creates no bubble. An admitted submission clears the input immediately; its bubble
+alone owns pending acceptance, failure and retry. Backend acceptance and recipient
+confirmation remain distinct states, and later completion cannot overwrite a new
+draft or put submitted text back into the composer.
+
+Account DM arrivals carry the authenticated sender account and the envelope's
+logical message ID from core through desktop IPC. The receipt ledger uses that
+same identity as account history, so live callbacks, repeat delivery and history
+coverage cannot count one logical message twice. Independent messages with equal
+text retain separate IDs and counts. Legacy providers without a logical identity
+retain their compatibility counter path.
+
 `ui/store/channelActions.ts` owns channel creation, member edits, ownership
 transfer, invitation acceptance, leaving, dissolution and renaming. Its narrow
 state/context defines channel projections and explicit capture, command,

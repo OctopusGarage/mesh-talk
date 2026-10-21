@@ -295,6 +295,10 @@ export interface FavoriteInfo {
 // --- Tauri events (src-tauri/src/events.rs) ---
 
 export interface DmReceivedEvent {
+  /** Logical account message ID, matching history; legacy hosts may omit it. */
+  message_id?: string | null;
+  /** Account binding verified by the core, independent of roster arrival order. */
+  from_account?: string | null;
   from: string;
   from_name: string;
   text: string;

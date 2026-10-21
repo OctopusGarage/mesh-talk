@@ -2,7 +2,6 @@
 //! message/contact/network/file-transfer events were retired with the legacy stack.)
 
 use crate::settings::SettingsState;
-use mesh_talk_core::eventlog::event::EventId;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
@@ -218,6 +217,8 @@ pub fn emit_call_signal<R: Runtime>(
 
 #[derive(serde::Serialize, Clone)]
 pub struct DmReceivedEvent {
+    pub message_id: Option<String>,
+    pub from_account: Option<String>,
     pub from: String,
     pub from_name: String,
     pub text: String,
@@ -324,16 +325,15 @@ pub struct FileReceivedEvent {
 /// Emit a received DM to the frontend (text decoded lossily for display).
 pub fn emit_dm_received<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    from: String,
-    from_name: String,
-    text: Vec<u8>,
-    reply_to: Option<EventId>,
+    dm: mesh_talk_core::node::ReceivedDm,
 ) {
     let event = DmReceivedEvent {
-        from,
-        from_name,
-        text: String::from_utf8_lossy(&text).into_owned(),
-        reply_to: reply_to.map(|id| hex::encode(id.as_bytes())),
+        message_id: dm.message_id.map(|id| id.to_hex()),
+        from_account: dm.from_account,
+        from: dm.from,
+        from_name: dm.from_name,
+        text: String::from_utf8_lossy(&dm.text).into_owned(),
+        reply_to: dm.reply_to.map(|id| hex::encode(id.as_bytes())),
     };
     notify_if_unfocused(
         app_handle,

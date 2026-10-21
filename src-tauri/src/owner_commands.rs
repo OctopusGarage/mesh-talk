@@ -62,10 +62,11 @@ pub async fn owner_enqueue_text(
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
+    let started = std::time::Instant::now();
     let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     validate_account(&account)?;
     let reply = reply_to.as_deref().map(parse_id).transpose()?;
-    admission
+    let result = admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
                 let id = runtime
@@ -82,7 +83,16 @@ pub async fn owner_enqueue_text(
                 Ok(hex::encode(id.as_bytes()))
             })
         })
-        .await
+        .await;
+    if started.elapsed() >= std::time::Duration::from_secs(1) {
+        log::warn!(
+            target: "mesh_talk::delivery",
+            "slow local text acceptance elapsed_ms={} outcome={}",
+            started.elapsed().as_millis(),
+            if result.is_ok() { "accepted" } else { "rejected" },
+        );
+    }
+    result
 }
 
 #[tauri::command]

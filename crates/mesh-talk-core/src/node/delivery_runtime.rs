@@ -976,20 +976,23 @@ impl Node {
                     .expect("emitted lock not poisoned")
                     .insert(entry.event_id)
                 {
-                    let inner = DmEnvelope::decode(&entry.plaintext)
-                        .map_or_else(|| entry.plaintext.clone(), |env| env.body);
-                    if self.recipient_expired(&inner, entry.event_id, entry.wall_clock) {
+                    let envelope = DmEnvelope::decode(&entry.plaintext);
+                    let inner = envelope
+                        .as_ref()
+                        .map_or(entry.plaintext.as_slice(), |env| env.body.as_slice());
+                    if self.recipient_expired(inner, entry.event_id, entry.wall_clock) {
                         continue;
                     }
-                    let body = DmEnvelope::decode(&entry.plaintext).map_or_else(
-                        || MessageBody::decode(&entry.plaintext),
-                        |env| MessageBody::decode(&env.body),
-                    );
+                    let body = MessageBody::decode(inner);
                     let from_name = self
                         .historical_author(&sender.ed25519_pub)
                         .map_or_else(|| sender.user_id(), |proof| proof.name);
                     if !self.certified_sibling(&sender) {
                         let _ = self.incoming.send(ReceivedDm {
+                            message_id: envelope.as_ref().map(|env| EventId::new(env.msg_id)),
+                            from_account: envelope
+                                .as_ref()
+                                .map(|env| env.route.sender_account.clone()),
                             from: sender.user_id(),
                             from_name,
                             text: body.text,
@@ -1800,6 +1803,7 @@ impl Node {
         if !self.delivery_destination_allowed(destination) {
             return false;
         }
+        let started = std::time::Instant::now();
         let mut held = false;
         if let Some(peer) = self
             .routing_peer(&destination.device.user_id())
@@ -1809,24 +1813,49 @@ impl Node {
                     && self.known_account_allowed(&p.public)
             })
         {
-            held = tokio::time::timeout(
-                CONTROL_EXCHANGE_TIMEOUT,
-                self.transfer_delivery_destination(
-                    &peer,
-                    destination,
-                    destination.event.conversation_id,
-                ),
-            )
+            held = tokio::time::timeout(CONTROL_EXCHANGE_TIMEOUT, async {
+                let held = self
+                    .transfer_delivery_destination(
+                        &peer,
+                        destination,
+                        destination.event.conversation_id,
+                    )
+                    .await;
+                self.emit_new_messages(destination.event.conversation_id);
+                if held {
+                    // Receipt delivery must not require the recipient to
+                    // establish a reverse connection after a network handoff.
+                    // Use the same exact-peer control scope as flush_delivery,
+                    // within this attempt's existing total deadline.
+                    let control = super::delivery_receipt::delivery_conversation_id(
+                        &self.identity.public(),
+                        &peer.public,
+                    );
+                    self.transfer_delivery_destination(&peer, destination, control)
+                        .await;
+                    self.emit_new_messages(control);
+                }
+                held
+            })
             .await
             .unwrap_or(false);
-            self.emit_new_messages(destination.event.conversation_id);
         }
+        let direct_elapsed = started.elapsed();
         let relay_held = tokio::time::timeout(
             CONTROL_EXCHANGE_TIMEOUT,
             self.replicate_delivery_destination(destination),
         )
         .await
         .unwrap_or(false);
+        if started.elapsed() >= std::time::Duration::from_secs(10) {
+            log::warn!(
+                target: "mesh_talk::delivery",
+                "slow delivery attempt peer={} event={} direct_ms={} relay_ms={} direct_held={} relay_held={}",
+                destination.device.user_id(), hex::encode(destination.event.id.as_bytes()),
+                direct_elapsed.as_millis(), started.elapsed().saturating_sub(direct_elapsed).as_millis(),
+                held, relay_held,
+            );
+        }
         held || relay_held
     }
 

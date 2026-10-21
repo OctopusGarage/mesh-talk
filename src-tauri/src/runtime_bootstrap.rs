@@ -89,13 +89,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
             mesh_talk_core::node::RuntimeEvents {
                 on_dm: Box::new(move |dm| {
                     let _ = dm_authority.current(|_| {
-                        crate::events::emit_dm_received(
-                            &app_handle_for_dm,
-                            dm.from,
-                            dm.from_name,
-                            dm.text,
-                            dm.reply_to,
-                        );
+                        crate::events::emit_dm_received(&app_handle_for_dm, dm);
                     });
                 }),
                 on_channel: Box::new(move |msg: mesh_talk_core::node::ReceivedChannelMessage| {

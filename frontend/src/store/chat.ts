@@ -1175,7 +1175,7 @@ function queueUnknownUnread(set: Set, sender: string) {
 function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
   // Route to the sender's account conversation (multi-device aware).
   const peer = get().peers.find((p) => p.user_id === e.from);
-  const accountId = peer?.account_id;
+  const accountId = e.from_account ?? peer?.account_id;
   if (!accountId) {
     // Unknown sender (not yet discovered). Throttle: a burst from an undiscovered account
     // would otherwise fire one roster refresh (3 invokes) per message. The 4s interval
@@ -1195,8 +1195,25 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
   };
   const key = convKey(conv);
   const isActive = get().active != null && convKey(get().active!) === key;
+  const messageId = e.message_id;
+  if (messageId) {
+    // DMs and their history share the logical envelope ID, not each device's
+    // transport-event ID. Realtime and history must use one receipt ledger.
+    set((state) =>
+      receptionPatch(
+        state,
+        receiveIdentity(state, key, {
+          event_id: messageId,
+          arrival_kind: "live",
+          own_device: accountId === state.myAccountId || e.from === state.myId,
+        }),
+      ),
+    );
+  } else {
+    // Compatibility for event providers predating logical DM identities.
+    bump(set, key, isActive && isConversationVisible());
+  }
   if (isActive) void get().reload();
-  bump(set, key, isActive && isConversationVisible());
 }
 
 function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {

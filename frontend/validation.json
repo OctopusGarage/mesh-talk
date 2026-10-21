@@ -180,6 +180,56 @@
       "escalation": [
         "Shared mocked IPC changes require affected browser scenarios; mocks do not prove native transport or persistent cleanup."
       ]
+    },
+    {
+      "id": "frontend-text-submission",
+      "paths": [
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/e2e/automatic-delivery.spec.ts"
+      ],
+      "frontend": [
+        "src/store/chat.test.ts",
+        "src/store/outgoingIntent.test.ts",
+        "src/features/chat/ComposerAdmission.test.ts",
+        "src/features/chat/conversationDrafts.test.ts"
+      ],
+      "capability": {
+        "summary": "Move submitted text from the composer into one owner-scoped outgoing intent immediately, retaining draft text only when local admission refuses.",
+        "guide": "docs/module-boundaries.md#coordinated-state-owners",
+        "invariants": [
+          {
+            "name": "Submitted content is owned by its outgoing bubble, independently of backend acceptance and recipient confirmation",
+            "reference": "CONTEXT.md#acceptance-and-delivery"
+          },
+          {
+            "name": "Late acceptance or failure never restores submitted text over the next draft",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      }
+    },
+    {
+      "id": "frontend-dm-reception-acceptance",
+      "paths": ["frontend/e2e/unread-badge.spec.ts"],
+      "frontend": [
+        "src/store/chat.test.ts",
+        "src/store/reception.test.ts",
+        "src/store/conversationHistory.test.ts"
+      ],
+      "capability": {
+        "summary": "Verify that duplicate live DM callbacks and logical history rows contribute one unread identity to sidebar and OS badge projections.",
+        "guide": "docs/module-boundaries.md#coordinated-state-owners",
+        "invariants": [
+          {
+            "name": "Live DM and account history share a logical message identity",
+            "reference": "CONTEXT.md#conversations-and-history"
+          },
+          {
+            "name": "Equal message text does not imply equal identity or read state",
+            "reference": "CONTEXT.md#acceptance-and-delivery"
+          }
+        ]
+      }
     }
   ],
   "prScenarios": [
@@ -257,6 +307,27 @@
         "frontend/e2e/tauri-mock.ts"
       ],
       "browser": ["e2e/message-expiry.spec.ts"]
+    },
+    {
+      "id": "frontend-text-submission-acceptance",
+      "paths": [
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/e2e/automatic-delivery.spec.ts"
+      ],
+      "browser": ["e2e/automatic-delivery.spec.ts"]
+    },
+    {
+      "id": "frontend-dm-unread-acceptance",
+      "paths": [
+        "frontend/src/store/chat.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/e2e/unread-badge.spec.ts",
+        "src-tauri/src/events.rs",
+        "src-tauri/src/runtime_bootstrap.rs",
+        "crates/mesh-talk-core/src/node/node.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
+      ],
+      "browser": ["e2e/unread-badge.spec.ts"]
     }
   ]
 }

@@ -121,3 +121,88 @@ test("a native picker completed after conversation navigation cannot send to the
   expect(enqueues).toBe(0);
   await expect(page.getByText("stale.txt")).toHaveCount(0);
 });
+
+test("a pending local text acceptance moves the submitted text out of the composer", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate(() => {
+    const w = window as unknown as Record<string, unknown>;
+    const internals = w.__TAURI_INTERNALS__ as {
+      invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+    };
+    const original = internals.invoke;
+    internals.invoke = async (cmd, args) => {
+      if (cmd === "owner_enqueue_text") return new Promise(() => {});
+      return original(cmd, args);
+    };
+  });
+  const input = page.getByTestId("composer-input");
+  await input.fill("queued during hotspot handoff");
+  await page.getByTestId("composer-send").click();
+  await expect(
+    page
+      .getByTestId("message-bubble")
+      .filter({ hasText: "queued during hotspot handoff" }),
+  ).toHaveCount(1);
+  await expect(input).toHaveValue("");
+  await input.fill("my next draft");
+  await expect(input).toHaveValue("my next draft");
+  await expect(page.getByTestId("composer-send")).toBeEnabled();
+});
+
+for (const accepted of [true, false]) {
+  test(`submitted text stays in its bubble after ${accepted ? "acceptance" : "rejection"} and navigation`, async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await openBobDm(page);
+    await page.evaluate(() => {
+      const w = window as unknown as Record<string, unknown>;
+      const internals = w.__TAURI_INTERNALS__ as {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      const original = internals.invoke;
+      internals.invoke = async (cmd, args) => {
+        if (cmd === "owner_enqueue_text")
+          return new Promise((resolve, reject) => {
+            w.__settleHandoffSend = (accepted: boolean) => {
+              if (accepted) resolve(original(cmd, args));
+              else reject(new Error("local acceptance rejected"));
+            };
+          });
+        return original(cmd, args);
+      };
+    });
+    const submitted = "submitted exactly once during handoff";
+    const input = page.getByTestId("composer-input");
+    await input.fill(submitted);
+    await page.getByTestId("composer-send").click();
+    await expect(input).toHaveValue("");
+    const bubble = page
+      .getByTestId("message-bubble")
+      .filter({ hasText: submitted });
+    await expect(bubble).toHaveCount(1);
+    await input.fill("a separate next draft");
+    await page.getByTestId("conversation-row-acc_carol_cccc3333").click();
+    await openBobDm(page);
+    await expect(input).toHaveValue("a separate next draft");
+    await page.evaluate((accepted) => {
+      (
+        window as unknown as {
+          __settleHandoffSend: (accepted: boolean) => void;
+        }
+      ).__settleHandoffSend(accepted);
+    }, accepted);
+    if (accepted)
+      await expect(bubble.locator('[data-delivery="awaiting"]')).toBeVisible();
+    else
+      await expect(bubble.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(input).toHaveValue("a separate next draft");
+    await expect(bubble).toHaveCount(1);
+  });
+}
