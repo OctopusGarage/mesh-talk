@@ -35,9 +35,23 @@ pub struct PeerEndpoint {
     pub presence_origin_expires_at: Option<u64>,
 }
 
+impl PeerEndpoint {
+    fn public_presence_deadline(&self) -> Option<Instant> {
+        match self.source {
+            RouteSource::Lan | RouteSource::Discovery | RouteSource::RoutedQuery => {
+                Some(self.last_seen + PUBLIC_PRESENCE_TTL)
+            }
+            RouteSource::Authenticated | RouteSource::PostOffice => self.presence_expires_at,
+            RouteSource::Gateway => None,
+        }
+    }
+}
+
 const MAX_ROUTES_PER_PEER: usize = 8;
 /// Public observations expire promptly after logout, independently of dial-route retention.
 pub const PUBLIC_PRESENCE_TTL: Duration = Duration::from_secs(15);
+/// Presentation recovery ends thirty seconds from the original public observation.
+pub const PUBLIC_RECONNECT_TTL: Duration = Duration::from_secs(30);
 
 /// Keep a directly discovered endpoint ahead of a bridge gateway, even when
 /// the gateway refreshes its directory more recently. Routes within each tier
@@ -83,15 +97,7 @@ impl PeerRecord {
             .iter()
             .filter_map(|route| {
                 let age = now.saturating_duration_since(route.last_seen).as_secs();
-                let deadline = match route.source {
-                    RouteSource::Lan | RouteSource::Discovery | RouteSource::RoutedQuery => {
-                        route.last_seen + PUBLIC_PRESENCE_TTL
-                    }
-                    RouteSource::Authenticated | RouteSource::PostOffice => {
-                        route.presence_expires_at?
-                    }
-                    RouteSource::Gateway => return None,
-                };
+                let deadline = route.public_presence_deadline()?;
                 (deadline > now).then(|| {
                     (
                         route.source,
@@ -101,6 +107,20 @@ impl PeerRecord {
                 })
             })
             .collect()
+    }
+
+    /// A bounded recovery hint, never fresh Online evidence. Repeated directory
+    /// metadata and private transport activity cannot move this deadline.
+    pub fn reconnect_remaining(&self, now: Instant) -> Duration {
+        self.routes
+            .iter()
+            .filter_map(|route| route.public_presence_deadline())
+            .map(|deadline| {
+                (deadline + (PUBLIC_RECONNECT_TTL - PUBLIC_PRESENCE_TTL))
+                    .saturating_duration_since(now)
+            })
+            .max()
+            .unwrap_or(Duration::ZERO)
     }
 
     /// A known application route without an intermediate Mesh Talk post office.
@@ -773,6 +793,45 @@ mod routed_tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn reconnect_window_is_bounded_by_public_deadline_not_route_refresh() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
+        let mut roster = Roster::default();
+        roster.update_authenticated(&proof, "127.0.0.1".parse().unwrap(), "self");
+        let peer = roster.get(&proof.user_id).unwrap();
+        let origin = peer.routes[0].presence_expires_at.unwrap() - PUBLIC_PRESENCE_TTL;
+        assert_eq!(peer.reconnect_remaining(origin), Duration::from_secs(30));
+        assert!(
+            peer.presence_evidence(origin + Duration::from_secs(15))
+                .is_empty()
+        );
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(15)),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(30)),
+            Duration::ZERO
+        );
+        let mut copy = peer.clone();
+        copy.routes[0].last_seen = origin + Duration::from_secs(29);
+        copy.routes[0].last_authenticated = Some(copy.routes[0].last_seen);
+        assert_eq!(
+            copy.reconnect_remaining(origin + Duration::from_secs(30)),
+            Duration::ZERO
+        );
+        copy.routes[0].presence_expires_at = None;
+        assert_eq!(copy.reconnect_remaining(origin), Duration::ZERO);
+        copy.routes[0].source = RouteSource::Gateway;
+        assert_eq!(copy.reconnect_remaining(origin), Duration::ZERO);
+        roster.forget(&proof.public());
+        assert!(
+            roster.get(&proof.user_id).is_none(),
+            "explicit withdrawal has no reconnect grace"
+        );
+    }
 
     #[test]
     fn logout_expires_authenticated_presence_without_discarding_routes() {

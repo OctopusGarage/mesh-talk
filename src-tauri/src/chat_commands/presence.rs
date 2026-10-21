@@ -23,6 +23,8 @@ pub struct PresenceDevice {
 pub struct PresenceInfo {
     pub online: bool,
     pub last_seen_secs: Option<u64>,
+    /// Nonrenewing presentation hint; does not count as fresh presence.
+    pub reconnect_expires_in_secs: u64,
     devices: Vec<PresenceDevice>,
     /// Accepted distinct certified accounts. Unresolved devices are separate.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,6 +66,14 @@ fn add_peer(out: &mut HashMap<String, PresenceInfo>, peer: &PeerRecord, now: Ins
         .collect();
     // Never manufacture history from the timestamp of a mere route.
     let entry = out.entry(key).or_default();
+    let remaining = peer.reconnect_remaining(now).as_secs();
+    entry.reconnect_expires_in_secs = entry.reconnect_expires_in_secs.max(remaining);
+    if remaining > 0 {
+        let age = mesh_talk_core::discovery::roster::PUBLIC_RECONNECT_TTL
+            .as_secs()
+            .saturating_sub(remaining);
+        entry.last_seen_secs = Some(entry.last_seen_secs.map_or(age, |old| old.min(age)));
+    }
     if let Some(age) = evidence.iter().map(|e| e.last_seen_secs).min() {
         entry.last_seen_secs = Some(entry.last_seen_secs.map_or(age, |old| old.min(age)));
         entry.online = true;
@@ -226,6 +236,40 @@ mod tests {
             raced.is_empty(),
             "a stale unbound snapshot must not publish a fallback after certification"
         );
+    }
+
+    #[test]
+    fn expired_public_observation_projects_recovery_without_online_or_a_sliding_deadline() {
+        let account = Account::generate();
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &account, "Peer", 1);
+        let mut roster = Roster::default();
+        roster.update(&proof, "127.0.0.1".parse().unwrap(), "self");
+        let peer = roster.get(&proof.user_id).unwrap();
+        let observed = peer.routes[0].last_seen;
+        for (age, online, remaining) in [
+            (0, true, 30),
+            (15, false, 15),
+            (29, false, 1),
+            (30, false, 0),
+        ] {
+            let mut out = HashMap::new();
+            add_peer(
+                &mut out,
+                peer,
+                observed + std::time::Duration::from_secs(age),
+            );
+            let p = &out[&account.account_id()];
+            assert_eq!(p.online, online);
+            assert_eq!(p.reconnect_expires_in_secs, remaining);
+        }
+        let mut private = peer.clone();
+        private.routes[0].source = RouteSource::Authenticated;
+        private.routes[0].presence_expires_at = None;
+        let mut out = HashMap::new();
+        add_peer(&mut out, &private, observed);
+        assert!(!out[&account.account_id()].online);
+        assert_eq!(out[&account.account_id()].reconnect_expires_in_secs, 0);
     }
 
     #[test]

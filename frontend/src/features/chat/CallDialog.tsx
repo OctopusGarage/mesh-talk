@@ -13,7 +13,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { IdentityGlyph } from "@/components/identity";
-import { presenceStatus, usePresenceFor } from "@/store/presence";
+import { usePresenceFor } from "@/store/presence";
 import { useCalls, type CallPhase } from "@/store/calls";
 import { useChat } from "@/store/chat";
 import { useSettings } from "@/store/settings";
@@ -38,7 +38,7 @@ export function CallButtons({
   const callsEnabled = useSettings((s) => s.callsEnabled);
   const phase = useCalls((s) => s.phase);
   const presence = usePresenceFor(accountId);
-  const online = presenceStatus(presence) !== "offline";
+  const online = presence.online;
   // Subscribe to a BOOLEAN (does the account have any discovered device?), not the whole
   // roster array — the array's identity changes every ~4s on the roster poll and would
   // re-render the header for nothing.

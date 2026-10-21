@@ -1492,7 +1492,7 @@ impl Node {
                 _ = interval.tick() => {},
                 _ = self.delivery_notify.notified() => {},
                 _ = network.changed() => {
-                    self.sessions.clear();
+                    self.sessions.network_changed();
                     controls.shutdown().await;
                     active.clear();
                     self.channel_recovery_notify.notify_one();

@@ -477,3 +477,47 @@ async fn sync_pool_rejects_retired_account_before_new_presence_arrives() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn sync_pool_reuses_authenticated_route_after_verified_hint_loses_route_race() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let expected = bob.identity.public();
+    let (reachable, count, server) = counted_sync_peer(bob.clone()).await;
+    let proof = bob.signed_announce("Bob", reachable.port());
+    bob.configure_privacy(
+        &dir.path().join("bob"),
+        "pw",
+        &proof,
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    let departed = std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), reachable.port());
+    {
+        let mut roster = alice.roster.lock().unwrap();
+        roster.update(&proof, reachable.ip(), &alice.user_id());
+        roster.update(&proof, departed.ip(), &alice.user_id());
+    }
+    for _ in 0..2 {
+        // The caller keeps its verified snapshot; the route race chooses the
+        // reachable address and returns that actual socket to the sync pool.
+        let mut channel = alice.privacy_sync_dial(departed, &expected).await.unwrap();
+        assert_eq!(channel.tcp_peer_addr().unwrap(), reachable);
+        let store = alice.sync_store(channel.peer_identity());
+        super::session::request_round(
+            &mut channel,
+            &store,
+            crate::eventlog::event::ConversationId::new([47; 32]),
+        )
+        .await
+        .unwrap();
+        alice.recycle_sync_channel(channel);
+    }
+    let connections = count.load(Ordering::SeqCst);
+    server.abort();
+    assert_eq!(
+        connections, 1,
+        "the completed authenticated route must carry the next sync scope without another Noise handshake"
+    );
+}

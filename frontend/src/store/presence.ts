@@ -44,7 +44,7 @@ export function agePresence(
         evidence: device.evidence
           .map((e) => ({
             ...e,
-            last_seen_secs: e.last_seen_secs + elapsed,
+            last_seen_secs: e.last_seen_secs + Math.floor(elapsed),
             expires_in_secs: Math.max(0, e.expires_in_secs - elapsed),
           }))
           .filter((e) => e.expires_in_secs > 0),
@@ -52,10 +52,20 @@ export function agePresence(
       .filter((device) => device.evidence.length > 0);
     next[key] = {
       ...value,
+      ...(value.reconnect_expires_in_secs == null
+        ? {}
+        : {
+            reconnect_expires_in_secs: Math.max(
+              0,
+              value.reconnect_expires_in_secs - elapsed,
+            ),
+          }),
       // Compatibility snapshots also have a bounded lease; no frozen green dots.
       online: devices ? devices.length > 0 : value.online && elapsed < 15,
       last_seen_secs:
-        value.last_seen_secs == null ? null : value.last_seen_secs + elapsed,
+        value.last_seen_secs == null
+          ? null
+          : value.last_seen_secs + Math.floor(elapsed),
       ...(devices ? { devices } : {}),
     };
   }
@@ -87,14 +97,43 @@ export const usePresence = create<PresenceState>((set, get) => ({
     let inFlight = 0;
     let baseline: PresenceMap = {};
     let baselineAt = performance.now();
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
     const current = () => !cancelled && epoch === session && lease.current();
     const age = () =>
       agePresence(
         baseline,
-        Math.max(0, Math.floor((performance.now() - baselineAt) / 1000)),
+        Math.max(0, (performance.now() - baselineAt) / 1000),
       );
     const publishAge = () => {
-      if (current()) set({ map: reconcile(get().map, age()) });
+      if (current()) {
+        set({ map: reconcile(get().map, age()) });
+        scheduleExpiry();
+      }
+    };
+    // Deadline ageing is independent of the two-second IPC poll. A grace ending
+    // between poll ticks must not remain visible beyond the approved bound.
+    const scheduleExpiry = () => {
+      clearTimeout(expiryTimer);
+      if (!current()) return;
+      const elapsed = Math.max(0, (performance.now() - baselineAt) / 1000);
+      let next = Infinity;
+      const consider = (deadline: number) => {
+        if (deadline > elapsed) next = Math.min(next, deadline - elapsed);
+      };
+      for (const value of Object.values(baseline)) {
+        if (value.reconnect_expires_in_secs != null)
+          consider(value.reconnect_expires_in_secs);
+        if (value.devices) {
+          for (const device of value.devices)
+            for (const evidence of device.evidence)
+              consider(evidence.expires_in_secs);
+        } else if (value.online) consider(15);
+      }
+      if (Number.isFinite(next))
+        expiryTimer = setTimeout(
+          publishAge,
+          Math.max(1, Math.ceil(next * 1000)),
+        );
     };
     const poll = async () => {
       if (!current() || inFlight >= 2) return;
@@ -136,7 +175,7 @@ export const usePresence = create<PresenceState>((set, get) => ({
           }
           const aged = agePresence(
             next,
-            Math.max(0, Math.floor((performance.now() - requested) / 1000)),
+            Math.max(0, (performance.now() - requested) / 1000),
           );
           const withHistory = Object.fromEntries(
             Object.entries(aged).map(([key, value]) => [
@@ -152,6 +191,7 @@ export const usePresence = create<PresenceState>((set, get) => ({
           baseline = { ...history, ...withHistory };
           baselineAt = performance.now();
           set({ map: reconcile(get().map, baseline), unavailable: false });
+          scheduleExpiry();
         }
       } catch {
         fail();
@@ -168,17 +208,23 @@ export const usePresence = create<PresenceState>((set, get) => ({
     return () => {
       cancelled = true;
       clearInterval(id);
+      clearTimeout(expiryTimer);
       if (epoch === session) get().clear();
     };
   },
 }));
 
 export function presenceStatus(p: PresenceInfo): PresenceStatus {
-  return p.online ? "online" : "offline";
+  return p.online
+    ? "online"
+    : (p.reconnect_expires_in_secs ?? 0) > 0
+      ? "reconnecting"
+      : "offline";
 }
 
 export function presenceLabel(p: PresenceInfo, t: TFunction): string {
   if (p.online) return t("presence.online");
+  if (presenceStatus(p) === "reconnecting") return t("presence.reconnecting");
   const s = p.last_seen_secs;
   if (s == null) return t("presence.offline");
   const history =
@@ -205,4 +251,17 @@ export function groupPresenceLabel(p: PresenceInfo, t: TFunction): string {
 
 export function usePresenceFor(id: string | undefined): PresenceInfo {
   return usePresence((s) => (id ? (s.map[id] ?? OFFLINE) : OFFLINE));
+}
+
+/** Recovery is presentation only and excludes groups and the local account. */
+export function hasReconnectingPresence(
+  map: PresenceMap,
+  ownAccount?: string | null,
+): boolean {
+  return Object.entries(map).some(
+    ([key, p]) =>
+      key !== ownAccount &&
+      !p.member_keys &&
+      presenceStatus(p) === "reconnecting",
+  );
 }

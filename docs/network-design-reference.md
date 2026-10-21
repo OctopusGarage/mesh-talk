@@ -184,9 +184,13 @@ When one machine runs both the app and a relay, their names, keys, TCP listeners
 one currently valid device bound to the person's verified account. **Offline**
 means this client has no such evidence; the person may have exited or may simply
 be undiscoverable from this client's network. It is not a global sign-out claim.
-Recent observations enrich Offline (for example, “Offline · Seen by this client
-3m ago”); they are not a third primary state. A never-observed member has no
-invented last-seen time.
+Expired eligible public observations may show **Reconnecting** until thirty
+seconds total from their original observation. This is a bounded recovery
+presentation, not fresh Online evidence. It does not count as known online or
+claim message/call readiness. Fresh evidence restores Online immediately;
+authoritative withdrawal ends recovery immediately. Private routes and
+never-observed peers cannot create recovery. Recent history enriches Offline
+(for example, “Offline · Seen by this client 3m ago”) without inventing last-seen times.
 
 The member profile shows fresh devices once each and their actual sources:
 local network discovery, cross-network discovery, post-office discovery, or
@@ -264,7 +268,12 @@ Routed probes and the local fallback scan run every five seconds; routed candida
 pacing is 20 ms (at most 256 candidates per sweep). Bridge registration refreshes
 five seconds after each exchange. Existing admission and per-source response limits
 remain unchanged. Packet loss or long exchanges can show a still-running peer Offline;
-expired evidence is never retained to smooth over missing observations.
+expired evidence never remains Online. The separate reconnect deadline is
+fifteen seconds after the original public expiry, capped at thirty seconds total
+from the origin observation. Repeated metadata, private transport activity, failed
+IPC and failed probes cannot renew that deadline. The frontend schedules expiry
+independently of the two-second poll and suppresses the stranded prompt while
+recent peers recover. Shell and diagnostics use the same presence projection.
 Known names and signed avatars persist independently of these observation leases.
 
 The explicitly negotiated `MTBD4Q`/`MTBD4R` directory extension carries the
@@ -1270,11 +1279,25 @@ A deleted local record or recalled event does not recall already copied data fro
 | Group recovery                       | Three peers per channel recovery step; three-second periodic interval; coalesced wake can visit up to eight joined channels.                      | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                        |
 | Group control fanout                 | At most four concurrent contacts.                                                                                                                 | A stalled peer must not serialize every healthy member's control delivery.                                                                                                                 |
 
-The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/delivery_runtime.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
+The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
 
 ### Session reuse contract
 
-A retained session is exclusive to one borrower and reusable only after a complete successful sequential sync exchange has consumed its responses. The key/admission checks include full public identity, endpoint, current policy generation and authenticated account/role consistency. Canceled operations, malformed replies, pending unexpected bytes, EOF and stale policy/bindings cause eviction. Idle expiry releases capacity even without another checkout.
+A retained session is exclusive to one borrower and reusable only after a complete successful sequential sync exchange has consumed its responses. The key/admission checks include full public identity, endpoint, current policy generation and authenticated account/role consistency. Canceled operations, malformed replies, pending unexpected bytes, EOF and stale policy/bindings cause eviction. Idle expiry releases capacity even without another checkout. When an authenticated
+route race wins a different endpoint from the caller's verified roster hint, the
+next sync exchange may reuse the winning session only while both exact endpoints
+remain direct routes for the same full verified identity. Explicit unadvertised
+endpoints still require their own channel; account/role and policy checks remain.
+
+Authentication durations are tracked separately per device and endpoint, with at
+most 256 estimates. An exponentially smoothed duration plus variation margin sets
+a three-to-ten-second deadline; unknown routes retain the ten-second ceiling.
+Actual timeouts double the route's deadline within the same ceiling. Only a fully
+validated successful authentication updates the duration estimate; malformed or
+wrong-identity responses do not. A local network change discards those timing
+hints and idle sessions. These performance hints never establish authorization,
+fresh presence, custody or recipient delivery. Control-exchange deadlines and
+socket permit/race budgets remain unchanged.
 
 One-shot call, pairing and directory protocols keep their first-frame semantics by dialing fresh. A managed permit follows the connection lifetime. The accept loop reserves capacity before accepting and retains inbound handshake bounds. Opposite-direction progress must remain possible.
 

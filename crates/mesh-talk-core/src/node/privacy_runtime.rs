@@ -1173,21 +1173,27 @@ impl Node {
             let own = own.as_ref();
             async move {
                 let started = std::time::Instant::now();
-                let result = tokio::time::timeout(super::transport::HANDSHAKE_TIMEOUT, async {
-                    let stream = TcpStream::connect(candidate).await?;
-                    stream.set_nodelay(true)?;
-                    let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
-                    SecureChannel::connect_with_visibility(
-                        stream,
-                        &self.identity,
-                        Some(expected),
-                        own,
-                        publicly_visible,
-                    )
-                    .await
-                })
+                let result = tokio::time::timeout(
+                    self.sessions.authentication_timeout(expected, candidate),
+                    async {
+                        let stream = TcpStream::connect(candidate).await?;
+                        stream.set_nodelay(true)?;
+                        let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
+                        SecureChannel::connect_with_visibility(
+                            stream,
+                            &self.identity,
+                            Some(expected),
+                            own,
+                            publicly_visible,
+                        )
+                        .await
+                    },
+                )
                 .await
-                .unwrap_or_else(|_| Err(TransportError::Noise("dial timed out".into())));
+                .unwrap_or_else(|_| {
+                    self.sessions.authentication_timed_out(expected, candidate);
+                    Err(TransportError::Noise("dial timed out".into()))
+                });
                 if started.elapsed() >= Duration::from_secs(2) {
                     log::warn!(
                         target: "mesh_talk::delivery",
@@ -1195,7 +1201,7 @@ impl Node {
                         candidate, started.elapsed().as_millis(), result.is_ok(),
                     );
                 }
-                (candidate, permits, result)
+                (candidate, permits, result, started.elapsed())
             }
         };
         let mut candidates = candidates.into_iter().peekable();
@@ -1211,10 +1217,10 @@ impl Node {
         while !attempts.is_empty() {
             tokio::select! {
                 result = attempts.next() => {
-                    let Some((candidate, permits, result)) = result else { break };
+                    let Some((candidate, permits, result, elapsed)) = result else { break };
                     match result {
                         Ok(channel) => {
-                            successful = Some((candidate, channel, permits));
+                            successful = Some((candidate, channel, permits, elapsed));
                             break;
                         }
                         Err(error) => {
@@ -1233,7 +1239,7 @@ impl Node {
             }
         }
         drop(attempts);
-        let (addr, mut channel, permits) = successful.ok_or(last_error)?;
+        let (addr, mut channel, permits, elapsed) = successful.ok_or(last_error)?;
         channel.retain_connection_permits(permits);
         #[cfg(test)]
         timing.phase("dial-proof-validation");
@@ -1262,6 +1268,8 @@ impl Node {
             .expect("routes lock not poisoned")
             .insert(expected.user_id(), addr);
         self.guard_channel(&mut channel, generation);
+        self.sessions
+            .authentication_succeeded(expected, addr, elapsed);
         #[cfg(test)]
         timing.finish();
         Ok(channel)

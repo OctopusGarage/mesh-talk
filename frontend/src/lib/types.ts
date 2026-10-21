@@ -181,6 +181,8 @@ export interface PresenceInfo {
   /** Person has fresh eligible device evidence; groups use member counts instead. */
   online: boolean;
   devices?: PresenceDevice[];
+  /** Remaining nonrenewing grace, never fresh Online evidence. */
+  reconnect_expires_in_secs?: number;
   member_count?: number;
   online_count?: number;
   unbound_member_count?: number;

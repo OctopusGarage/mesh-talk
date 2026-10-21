@@ -24,7 +24,7 @@ import { useAuth } from "@/store/auth";
 import { chat, diag } from "@/lib/api";
 import { useChat } from "@/store/chat";
 import { usePrivacy } from "@/store/privacy";
-import { usePresence } from "@/store/presence";
+import { hasReconnectingPresence, usePresence } from "@/store/presence";
 import {
   conversationList,
   sidebarPeopleCounts,
@@ -127,11 +127,13 @@ export function Sidebar() {
   // Whether this device has no usable (non-loopback) network interface at all — the strongest
   // "you're stranded" signal, which sharpens the offline-connect prompt's wording.
   const [noNetwork, setNoNetwork] = useState(false);
+  const reconnecting = hasReconnectingPresence(presenceMap, myAccountId);
   const connection = connectionState({
     bootFailed,
     ready,
     noNetwork,
     onlinePeople,
+    reconnecting,
   });
   // Share the same non-overlapping polling lifecycle as other live views.
   useSerialPoll(
@@ -161,7 +163,11 @@ export function Sidebar() {
     return () => clearTimeout(id);
   }, [ready]);
   const stranded =
-    ready && graceElapsed && networkPeople === 0 && !strandedDismissed;
+    ready &&
+    graceElapsed &&
+    networkPeople === 0 &&
+    !reconnecting &&
+    !strandedDismissed;
 
   // A channel I own: renaming it changes the shared (synced) name for everyone. A contact —
   // or a channel I don't own (the core would reject the change) — gets a personal alias
@@ -432,7 +438,13 @@ export function Sidebar() {
             />
           ) : (
             <PresenceDot
-              status={connection === "ready" ? "online" : "offline"}
+              status={
+                connection === "ready"
+                  ? "online"
+                  : connection === "reconnecting"
+                    ? "reconnecting"
+                    : "offline"
+              }
               size="sm"
             />
           )}

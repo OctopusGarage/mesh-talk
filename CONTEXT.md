@@ -133,6 +133,10 @@ _Avoid_: authorization, delivery, presence as an interchangeable operation.
 **Presence**:
 This client's unexpired eligible public evidence of a participant's availability.
 Offline means absent eligible evidence here, not a global sign-out claim.
+The UI may show **Reconnecting** for an expired public observation until thirty
+seconds total from its origin observation. This bounded recovery presentation
+is not fresh presence, does not count as known online, and ends immediately on
+an authoritative withdrawal.
 _Avoid_: global online state, guaranteed connectivity.
 
 **Roster**:

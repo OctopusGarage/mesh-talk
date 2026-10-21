@@ -73,6 +73,7 @@ pub(crate) mod received_log;
 pub(crate) mod recovered_sent_ids;
 pub(crate) mod recovery;
 mod relay_policy;
+mod route_timing;
 pub(crate) mod runtime;
 mod runtime_work;
 mod search;

@@ -230,6 +230,37 @@
           }
         ]
       }
+    },
+    {
+      "id": "frontend-presence-recovery",
+      "paths": [
+        "frontend/src/store/presence.ts",
+        "frontend/src/store/presence.test.ts",
+        "frontend/src/lib/presence.ts",
+        "frontend/src/components/identity/PresenceDot.tsx",
+        "frontend/src/features/chat/connectionState.ts",
+        "frontend/src/features/chat/connectionState.test.ts",
+        "frontend/e2e/person-presence.spec.ts",
+        "frontend/src/components/identity/IdentityCrest.tsx"
+      ],
+      "frontend": [
+        "src/store/presence.test.ts",
+        "src/lib/presenceLabels.test.ts",
+        "src/features/chat/connectionState.test.ts"
+      ],
+      "capability": {
+        "summary": "Age public observations into bounded reconnect presentation without retaining expired Online evidence.",
+        "guide": "docs/network-design-reference.md#person-presence-contract",
+        "invariants": [
+          {
+            "name": "Recovery ends by thirty seconds from the origin observation and authoritative withdrawal bypasses grace",
+            "reference": "docs/network-design-reference.md#person-presence-contract"
+          }
+        ]
+      },
+      "escalation": [
+        "Changed presence IPC and visible status require browser presence/recovery and native lifecycle evidence."
+      ]
     }
   ],
   "prScenarios": [
@@ -328,6 +359,22 @@
         "crates/mesh-talk-core/src/node/delivery_runtime.rs"
       ],
       "browser": ["e2e/unread-badge.spec.ts"]
+    },
+    {
+      "id": "frontend-presence-recovery-acceptance",
+      "paths": [
+        "frontend/src/store/presence.ts",
+        "frontend/src/lib/presence.ts",
+        "frontend/src/components/identity/PresenceDot.tsx",
+        "frontend/src/features/chat/connectionState.ts",
+        "src-tauri/src/chat_commands/presence.rs",
+        "frontend/e2e/person-presence.spec.ts"
+      ],
+      "browser": [
+        "e2e/person-presence.spec.ts",
+        "e2e/connection-recovery.spec.ts"
+      ],
+      "native": ["host"]
     }
   ]
 }

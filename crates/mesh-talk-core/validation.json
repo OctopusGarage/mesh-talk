@@ -252,6 +252,10 @@
           {
             "name": "Cached addresses share one probe per device and slow authentication does not append another refresh delay",
             "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Authenticated route timing is bounded and a completed winning route can serve a verified alternate hint without weakening endpoint or identity isolation",
+            "reference": "docs/network-design-reference.md"
           }
         ]
       },

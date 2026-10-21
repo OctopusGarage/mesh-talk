@@ -115,3 +115,61 @@ test("failed refresh announces unavailability, expires evidence, and recovers", 
       .filter({ hasText: "Presence updates are unavailable" }),
   ).toBeHidden();
 });
+
+test("expired presence reconnects without green status or an offline prompt, then reaches its fixed bound", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate((account) => {
+    (
+      window as unknown as { __mockSetPresence: (map: PresenceMap) => void }
+    ).__mockSetPresence({
+      [account]: {
+        online: false,
+        last_seen_secs: 20,
+        reconnect_expires_in_secs: 10,
+        devices: [],
+      },
+    });
+  }, BOB);
+  await expect(page.getByTestId("conversation-member-profile")).toContainText(
+    "Reconnecting",
+  );
+  await expect(page.getByTestId("connection-status")).toContainText(
+    "Reconnecting",
+  );
+  await expect(
+    page.getByTestId(`contact-profile-${BOB}`).getByRole("status"),
+  ).toHaveAttribute("aria-label", "Reconnecting…");
+  await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
+  await page.evaluate(() => {
+    (
+      window as unknown as { __mockPresenceFailure: (failed: boolean) => void }
+    ).__mockPresenceFailure(true);
+  });
+  await expect(page.getByTestId("conversation-member-profile")).toContainText(
+    "Offline",
+    { timeout: 12000 },
+  );
+  await page.evaluate((account) => {
+    const mock = window as unknown as {
+      __mockSetPresence: (map: PresenceMap) => void;
+      __mockPresenceFailure: (failed: boolean) => void;
+    };
+    mock.__mockSetPresence({
+      [account]: {
+        online: true,
+        last_seen_secs: 0,
+        reconnect_expires_in_secs: 30,
+      },
+    });
+    mock.__mockPresenceFailure(false);
+  }, BOB);
+  await expect(page.getByTestId("conversation-member-profile")).toContainText(
+    "Online",
+  );
+  await expect(page.getByTestId("connection-status")).toContainText(
+    "Ready to find people",
+  );
+});

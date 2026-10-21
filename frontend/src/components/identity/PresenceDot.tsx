@@ -5,6 +5,7 @@ export type { PresenceStatus } from "@/lib/presence";
 
 const COLOR: Record<PresenceStatus, string> = {
   online: "hsl(var(--presence-online))",
+  reconnecting: "hsl(var(--presence-recent))",
   away: "hsl(var(--presence-recent))",
   recent: "hsl(var(--presence-recent))",
   offline: "hsl(var(--muted-foreground))",

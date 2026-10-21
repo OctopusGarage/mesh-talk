@@ -42,6 +42,7 @@ pub(in crate::node) struct SessionPool {
     outbound: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
     idle: Arc<Mutex<Vec<Idle>>>,
+    timings: Mutex<super::route_timing::RouteTimings>,
 }
 
 impl Default for SessionPool {
@@ -51,6 +52,7 @@ impl Default for SessionPool {
             outbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             inbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             idle: Arc::new(Mutex::new(Vec::new())),
+            timings: Mutex::new(super::route_timing::RouteTimings::default()),
         }
     }
 }
@@ -65,6 +67,45 @@ impl SessionPool {
 
     pub(in crate::node) fn clear(&self) {
         self.idle.lock().unwrap().clear();
+    }
+
+    pub(in crate::node) fn network_changed(&self) {
+        self.clear();
+        self.timings.lock().unwrap().clear();
+    }
+
+    pub(in crate::node) fn authentication_timeout(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+    ) -> Duration {
+        self.timings
+            .lock()
+            .unwrap()
+            .deadline(&peer.user_id(), address)
+    }
+
+    pub(in crate::node) fn authentication_succeeded(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+        elapsed: Duration,
+    ) {
+        self.timings
+            .lock()
+            .unwrap()
+            .succeeded(&peer.user_id(), address, elapsed);
+    }
+
+    pub(in crate::node) fn authentication_timed_out(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+    ) {
+        self.timings
+            .lock()
+            .unwrap()
+            .timed_out(&peer.user_id(), address);
     }
 
     fn prepare_capacity(&self, direction: &Arc<Semaphore>) {
@@ -190,9 +231,36 @@ impl Node {
                 .privacy
                 .generation
                 .load(std::sync::atomic::Ordering::SeqCst);
-            if let Some(channel) = self.sessions.checkout(addr, expected, generation)
-                && self.pooled_presence_current(&channel)
-            {
+            // A route race can authenticate an endpoint other than the caller's
+            // roster snapshot. Reuse that winner only when both exact endpoints
+            // remain routes of this verified device. An unadvertised one-off
+            // endpoint still gets its own connection, including pairing ports.
+            let preferred = self
+                .preferred_routes
+                .lock()
+                .expect("routes lock not poisoned")
+                .get(&expected.user_id())
+                .copied()
+                .filter(|preferred| *preferred != addr);
+            let preferred = preferred.filter(|preferred| {
+                let roster = self.roster.lock().expect("roster mutex not poisoned");
+                roster.get(&expected.user_id()).is_some_and(|peer| {
+                    let direct = |endpoint| {
+                        peer.routes.iter().any(|route| {
+                            route.addr == endpoint
+                                && route.source != crate::discovery::roster::RouteSource::PostOffice
+                        })
+                    };
+                    peer.public == *expected && direct(addr) && direct(*preferred)
+                })
+            });
+            for endpoint in std::iter::once(addr).chain(preferred) {
+                let Some(channel) = self.sessions.checkout(endpoint, expected, generation) else {
+                    continue;
+                };
+                if !self.pooled_presence_current(&channel) {
+                    continue;
+                }
                 if !self.account_allowed(expected, channel.peer_announcement())
                     && !self.group_member(expected)
                     && !self.group_departure_peer(expected)
