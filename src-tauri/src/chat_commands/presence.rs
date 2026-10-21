@@ -248,10 +248,11 @@ mod tests {
         let peer = roster.get(&proof.user_id).unwrap();
         let observed = peer.routes[0].last_seen;
         for (age, online, remaining) in [
-            (0, true, 30),
-            (15, false, 15),
-            (29, false, 1),
-            (30, false, 0),
+            (0, true, 60),
+            (15, false, 45),
+            (30, false, 30),
+            (59, false, 1),
+            (60, false, 0),
         ] {
             let mut out = HashMap::new();
             add_peer(

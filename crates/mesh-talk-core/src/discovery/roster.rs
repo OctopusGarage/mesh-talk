@@ -50,8 +50,8 @@ impl PeerEndpoint {
 const MAX_ROUTES_PER_PEER: usize = 8;
 /// Public observations expire promptly after logout, independently of dial-route retention.
 pub const PUBLIC_PRESENCE_TTL: Duration = Duration::from_secs(15);
-/// Presentation recovery ends thirty seconds from the original public observation.
-pub const PUBLIC_RECONNECT_TTL: Duration = Duration::from_secs(30);
+/// Presentation recovery ends sixty seconds from the original public observation.
+pub const PUBLIC_RECONNECT_TTL: Duration = Duration::from_secs(60);
 
 /// Keep a directly discovered endpoint ahead of a bridge gateway, even when
 /// the gateway refreshes its directory more recently. Routes within each tier
@@ -802,24 +802,28 @@ mod routed_tests {
         roster.update_authenticated(&proof, "127.0.0.1".parse().unwrap(), "self");
         let peer = roster.get(&proof.user_id).unwrap();
         let origin = peer.routes[0].presence_expires_at.unwrap() - PUBLIC_PRESENCE_TTL;
-        assert_eq!(peer.reconnect_remaining(origin), Duration::from_secs(30));
+        assert_eq!(peer.reconnect_remaining(origin), Duration::from_secs(60));
         assert!(
             peer.presence_evidence(origin + Duration::from_secs(15))
                 .is_empty()
         );
         assert_eq!(
             peer.reconnect_remaining(origin + Duration::from_secs(15)),
-            Duration::from_secs(15)
+            Duration::from_secs(45)
         );
         assert_eq!(
-            peer.reconnect_remaining(origin + Duration::from_secs(30)),
+            peer.reconnect_remaining(origin + Duration::from_secs(60)),
             Duration::ZERO
         );
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(59)),
+            Duration::from_secs(1)
+        );
         let mut copy = peer.clone();
-        copy.routes[0].last_seen = origin + Duration::from_secs(29);
+        copy.routes[0].last_seen = origin + Duration::from_secs(59);
         copy.routes[0].last_authenticated = Some(copy.routes[0].last_seen);
         assert_eq!(
-            copy.reconnect_remaining(origin + Duration::from_secs(30)),
+            copy.reconnect_remaining(origin + Duration::from_secs(60)),
             Duration::ZERO
         );
         copy.routes[0].presence_expires_at = None;

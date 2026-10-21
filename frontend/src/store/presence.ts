@@ -7,6 +7,7 @@ import { captureRuntimeOwner } from "./ownership";
 
 const POLL_MS = 2000;
 const MAX_HISTORY = 1024;
+const RECOVERY_STABLE_MS = 5000;
 let epoch = 0;
 interface PresenceState {
   map: PresenceMap;
@@ -61,7 +62,7 @@ export function agePresence(
             ),
           }),
       // Compatibility snapshots also have a bounded lease; no frozen green dots.
-      online: devices ? devices.length > 0 : value.online && elapsed < 15,
+      online: value.online && (devices ? devices.length > 0 : elapsed < 15),
       last_seen_secs:
         value.last_seen_secs == null
           ? null
@@ -96,6 +97,11 @@ export const usePresence = create<PresenceState>((set, get) => ({
     let lastApplied = 0;
     let inFlight = 0;
     let baseline: PresenceMap = {};
+    // Presentation hysteresis only: delivery continues independently.
+    const recoveryConfirmations = new Map<
+      string,
+      { since: number; deadlineAt: number }
+    >();
     let baselineAt = performance.now();
     let expiryTimer: ReturnType<typeof setTimeout> | undefined;
     const current = () => !cancelled && epoch === session && lease.current();
@@ -143,6 +149,7 @@ export const usePresence = create<PresenceState>((set, get) => ({
       const fail = () => {
         if (current() && pollId > lastApplied) {
           lastApplied = pollId;
+          recoveryConfirmations.clear();
           set({ unavailable: true });
           publishAge();
         }
@@ -187,8 +194,47 @@ export const usePresence = create<PresenceState>((set, get) => ({
                 : value,
             ]),
           );
+          // A single successful refresh must not flash green between losses.
+          // Initial discovery and explicit withdrawal retain their immediate behavior.
+          const confirmedAt = performance.now();
+          for (const key of recoveryConfirmations.keys()) {
+            if (!(key in withHistory)) recoveryConfirmations.delete(key);
+          }
+          for (const [key, value] of Object.entries(withHistory)) {
+            if (value.member_keys) continue;
+            if (!value.online || (value.reconnect_expires_in_secs ?? 0) <= 0) {
+              recoveryConfirmations.delete(key);
+              continue;
+            }
+            const recovering =
+              old[key] && presenceStatus(old[key]) === "reconnecting";
+            if (!recovering && !recoveryConfirmations.has(key)) continue;
+            if (
+              !recoveryConfirmations.has(key) &&
+              recoveryConfirmations.size >= MAX_HISTORY
+            )
+              continue;
+            const deadlineAt =
+              confirmedAt + (value.reconnect_expires_in_secs ?? 0) * 1000;
+            const confirmation = recoveryConfirmations.get(key) ?? {
+              since: confirmedAt,
+              deadlineAt,
+            };
+            // Allow one second for integer observation-age rounding. Re-querying
+            // one unchanged origin must not count as renewed public evidence.
+            const renewed = deadlineAt - confirmation.deadlineAt > 1000;
+            if (
+              confirmedAt - confirmation.since < RECOVERY_STABLE_MS ||
+              !renewed
+            ) {
+              recoveryConfirmations.set(key, confirmation);
+              withHistory[key] = { ...value, online: false };
+            } else {
+              recoveryConfirmations.delete(key);
+            }
+          }
           lastApplied = pollId;
-          baseline = { ...history, ...withHistory };
+          baseline = agePresence({ ...history, ...withHistory }, 0);
           baselineAt = performance.now();
           set({ map: reconcile(get().map, baseline), unavailable: false });
           scheduleExpiry();

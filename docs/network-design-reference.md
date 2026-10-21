@@ -184,11 +184,15 @@ When one machine runs both the app and a relay, their names, keys, TCP listeners
 one currently valid device bound to the person's verified account. **Offline**
 means this client has no such evidence; the person may have exited or may simply
 be undiscoverable from this client's network. It is not a global sign-out claim.
-Expired eligible public observations may show **Reconnecting** until thirty
+Expired eligible public observations may show **Reconnecting** until sixty
 seconds total from their original observation. This is a bounded recovery
 presentation, not fresh Online evidence. It does not count as known online or
-claim message/call readiness. Fresh evidence restores Online immediately;
-authoritative withdrawal ends recovery immediately. Private routes and
+claim message/call readiness. Initial fresh discovery displays Online immediately.
+After reconnecting, the desktop requires five seconds of successful fresh
+observations, including a newer public observation, before displaying Online
+again. Failed refreshes or expired evidence reset this confirmation. Delivery
+does not wait for this presentation confirmation. Authoritative withdrawal ends
+recovery immediately. Private routes and
 never-observed peers cannot create recovery. Recent history enriches Offline
 (for example, “Offline · Seen by this client 3m ago”) without inventing last-seen times.
 
@@ -269,7 +273,7 @@ pacing is 20 ms (at most 256 candidates per sweep). Bridge registration refreshe
 five seconds after each exchange. Existing admission and per-source response limits
 remain unchanged. Packet loss or long exchanges can show a still-running peer Offline;
 expired evidence never remains Online. The separate reconnect deadline is
-fifteen seconds after the original public expiry, capped at thirty seconds total
+forty-five seconds after the original public expiry, capped at sixty seconds total
 from the origin observation. Repeated metadata, private transport activity, failed
 IPC and failed probes cannot renew that deadline. The frontend schedules expiry
 independently of the two-second poll and suppresses the stranded prompt while

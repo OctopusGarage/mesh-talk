@@ -253,7 +253,7 @@
         "guide": "docs/network-design-reference.md#person-presence-contract",
         "invariants": [
           {
-            "name": "Recovery ends by thirty seconds from the origin observation and authoritative withdrawal bypasses grace",
+            "name": "Recovery ends by sixty seconds from the origin observation, stable recovery needs five seconds, and authoritative withdrawal bypasses grace",
             "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]

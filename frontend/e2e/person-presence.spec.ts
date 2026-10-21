@@ -173,3 +173,54 @@ test("expired presence reconnects without green status or an offline prompt, the
     "Ready to find people",
   );
 });
+
+test("poor-network recovery stays visible for sixty seconds without restarting network search", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate((account) => {
+    (
+      window as unknown as { __mockSetPresence: (map: PresenceMap) => void }
+    ).__mockSetPresence({
+      [account]: {
+        online: true,
+        last_seen_secs: 0,
+        reconnect_expires_in_secs: 60,
+        devices: [
+          {
+            user_id: "device_bob_2222",
+            evidence: [
+              { source: "routed", last_seen_secs: 0, expires_in_secs: 15 },
+            ],
+          },
+        ],
+      },
+    });
+  }, BOB);
+  await page.clock.runFor(2100);
+  await page.evaluate(() => {
+    (
+      window as unknown as { __mockPresenceFailure: (failed: boolean) => void }
+    ).__mockPresenceFailure(true);
+  });
+  await page.clock.runFor(31_000);
+  await expect(page.getByTestId("conversation-member-profile")).toContainText(
+    "Reconnecting",
+  );
+  await expect(page.getByTestId("connection-status")).toContainText(
+    "Reconnecting",
+  );
+  await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
+  await page.clock.runFor(26_000);
+  await expect(page.getByTestId("conversation-member-profile")).toContainText(
+    "Reconnecting",
+  );
+  await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
+  await page.screenshot({ path: "test-results/recovery-sixty-seconds.png" });
+  await page.clock.runFor(4000);
+  await expect(page.getByTestId("conversation-member-profile")).toContainText(
+    "Offline",
+  );
+});

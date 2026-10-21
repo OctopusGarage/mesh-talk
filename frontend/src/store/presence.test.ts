@@ -235,12 +235,12 @@ it("expires compatibility snapshots within the twenty-second logout budget", () 
   ).toBe(false);
 });
 
-it("shows reconnecting after fresh evidence expires and offline at the fixed 30-second bound", () => {
+it("shows reconnecting after fresh evidence expires and offline at the fixed 60-second bound", () => {
   const snapshot: PresenceMap = {
     bob: {
       online: true,
       last_seen_secs: 0,
-      reconnect_expires_in_secs: 30,
+      reconnect_expires_in_secs: 60,
       devices: [
         {
           user_id: "bob-device",
@@ -255,9 +255,9 @@ it("shows reconnecting after fresh evidence expires and offline at the fixed 30-
   const expired = agePresence(snapshot, 15).bob;
   expect(expired.online).toBe(false);
   expect(presenceStatus(expired)).toBe("reconnecting");
-  expect(presenceStatus(agePresence(snapshot, 29).bob)).toBe("reconnecting");
-  expect(presenceStatus(agePresence(snapshot, 30).bob)).toBe("offline");
-  expect(presenceStatus(agePresence({ bob: expired }, 15).bob)).toBe("offline");
+  expect(presenceStatus(agePresence(snapshot, 59).bob)).toBe("reconnecting");
+  expect(presenceStatus(agePresence(snapshot, 60).bob)).toBe("offline");
+  expect(presenceStatus(agePresence({ bob: expired }, 45).bob)).toBe("offline");
 });
 
 it("ends reconnecting immediately on an authoritative withdrawal and restores online on fresh evidence", async () => {
@@ -353,6 +353,107 @@ it("does not add subsecond IPC latency to the reconnect deadline", async () => {
     expect(presenceStatus(usePresence.getState().map.bob)).toBe("reconnecting");
     await vi.advanceTimersByTimeAsync(200);
     expect(presenceStatus(usePresence.getState().map.bob)).toBe("offline");
+  } finally {
+    stop();
+  }
+});
+
+it("waits for five seconds of sustained fresh presence after a reconnect without delaying first discovery", async () => {
+  getPresence.mockResolvedValue({
+    bob: { online: false, last_seen_secs: 35, reconnect_expires_in_secs: 25 },
+  });
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(presenceStatus(usePresence.getState().map.bob)).toBe("reconnecting");
+    getPresence.mockResolvedValue({
+      bob: {
+        online: true,
+        last_seen_secs: 0,
+        reconnect_expires_in_secs: 60,
+        devices: [
+          {
+            user_id: "bob-device",
+            evidence: [
+              { source: "routed", last_seen_secs: 0, expires_in_secs: 15 },
+            ],
+          },
+        ],
+      },
+      group: {
+        online: false,
+        last_seen_secs: null,
+        member_keys: ["bob"],
+        member_count: 1,
+        online_count: 1,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(presenceStatus(usePresence.getState().map.bob)).toBe("reconnecting");
+    expect(usePresence.getState().map.group.online_count).toBe(0);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(presenceStatus(usePresence.getState().map.bob)).toBe("reconnecting");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(presenceStatus(usePresence.getState().map.bob)).toBe("online");
+    expect(usePresence.getState().map.group.online_count).toBe(1);
+  } finally {
+    stop();
+  }
+});
+
+it("does not count failed refreshes as a stable recovery and still honors withdrawal", async () => {
+  const recovering = {
+    bob: { online: false, last_seen_secs: 35, reconnect_expires_in_secs: 25 },
+  };
+  getPresence.mockResolvedValue(recovering);
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    getPresence.mockResolvedValue({
+      bob: { online: true, last_seen_secs: 0, reconnect_expires_in_secs: 60 },
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(presenceStatus(usePresence.getState().map.bob)).toBe("reconnecting");
+    getPresence.mockRejectedValue(new Error("IPC unavailable"));
+    await vi.advanceTimersByTimeAsync(6000);
+    getPresence.mockResolvedValue({
+      bob: { online: true, last_seen_secs: 0, reconnect_expires_in_secs: 60 },
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(presenceStatus(usePresence.getState().map.bob)).toBe("reconnecting");
+    getPresence.mockResolvedValue({});
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(presenceStatus(usePresence.getState().map.bob)).toBe("offline");
+  } finally {
+    stop();
+  }
+});
+
+it("does not treat repeated polls of one old public observation as a stable recovery", async () => {
+  getPresence.mockResolvedValue({
+    bob: { online: false, last_seen_secs: 35, reconnect_expires_in_secs: 25 },
+  });
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    const observedAt = performance.now() + 2000;
+    getPresence.mockImplementation(async () => {
+      const age = Math.max(0, (performance.now() - observedAt) / 1000);
+      return {
+        bob: {
+          online: true,
+          last_seen_secs: age,
+          reconnect_expires_in_secs: 60 - age,
+        },
+      };
+    });
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(presenceStatus(usePresence.getState().map.bob)).toBe("reconnecting");
+    getPresence.mockResolvedValue({
+      bob: { online: true, last_seen_secs: 0, reconnect_expires_in_secs: 60 },
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(presenceStatus(usePresence.getState().map.bob)).toBe("online");
   } finally {
     stop();
   }
