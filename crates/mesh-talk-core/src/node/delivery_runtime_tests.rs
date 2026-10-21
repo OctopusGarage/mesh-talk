@@ -3335,6 +3335,23 @@ async fn automatic_worker_stalled_fanout_does_not_starve_other_messages_and_drop
         .enqueue_to_account(&b.account_id(), b"second fair", None)
         .await
         .unwrap();
+    // Prime each message's destination cursor so both first turns target the
+    // stalled sibling. Random event IDs must not hide same-peer lane starvation.
+    {
+        let mut store = a.delivery.lock().unwrap();
+        for (id, predecessor) in [(first, second), (second, first)] {
+            let mut recipient_selected = false;
+            for _ in 0..2 {
+                let (selected, destination) = store.next_destination(Some(predecessor)).unwrap();
+                assert_eq!(selected, id);
+                if destination.device == b.identity.public() {
+                    recipient_selected = true;
+                    break;
+                }
+            }
+            assert!(recipient_selected);
+        }
+    }
     let at = tokio::spawn(a.clone().run_accept_loop(al));
     let bt = tokio::spawn(b.clone().run_accept_loop(bl));
     tokio::time::timeout(std::time::Duration::from_secs(8), async {
@@ -7040,16 +7057,22 @@ async fn delayed_route_delivery(
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let old = TcpListener::bind("[::1]:0").await.unwrap();
     let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", proxy.local_addr().unwrap().port());
-    let old_bp = Announce::new_with_account(&bob, &ba, "Bob", old.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        proxy.local_addr().unwrap().port(),
+    );
+    let old_bp =
+        Announce::new_with_account(&bob, &bob_account, "Bob", old.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut incoming) = node(bd.path(), bob, ba, &ap);
+    let (b, mut incoming) = node(bd.path(), bob, bob_account, &ap);
     a.configure_privacy(
         ad.path(),
         "pw",
@@ -7143,13 +7166,13 @@ async fn automatic_send_collects_receipt_when_recipient_can_only_serve_inbound_c
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
     let (a, _) = node(ad.path(), alice, aa, &bp);
-    let (b, mut incoming) = node(bd.path(), bob, ba, &ap);
+    let (b, mut incoming) = node(bd.path(), bob, bob_account, &ap);
     let recipient = b.account_id();
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(a.clone().run_accept_loop(al));

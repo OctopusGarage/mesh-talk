@@ -453,8 +453,8 @@ the message delivery WAL; portable recovery snapshots currently omit reactions.
     not acquire the disclosure gate's writer or repeat policy/proof persistence;
     new grants and binding changes retain the serialized commit path and host
     authorization. Slow local text acceptance, route authentication and delivery
-    attempts emit elapsed-time diagnostics with stage/outcome and route/identity
-    metadata, excluding message bodies. Shared discovery observes interface names,
+    attempts emit elapsed-time diagnostics with stage/outcome and route endpoint
+    metadata, excluding message bodies and identity identifiers. Shared discovery observes interface names,
     addresses and indexes every two seconds; changes rejoin multicast and wake
     privacy-gated LAN/routed producers without restarting the participant. A
     30-second multicast retry remains as a fallback. See [routed network discovery](routed-network-discovery.md)
@@ -722,7 +722,9 @@ wakes, selects one destination and one receipt per iteration, and rotates logica
 messages and their independent destination cursors. It takes owned bounded
 snapshots after local recovery on the blocking pool, releases store locks before
 network awaits. Control exchanges run in a worker-owned task set with at most
-two destination retries, one receipt retry and one peer reconciliation in flight.
+two destination retries to distinct devices, one receipt retry and one peer
+reconciliation in flight. Multiple messages for the same stalled device share
+one destination lane, leaving the other lane available to a reachable device.
 Each complete direct or relay exchange has a 15-second deadline so routed
 round trips can finish without blocking another lane or file scheduling. Active
 immutable event IDs prevent duplicate scheduling within a lane. Busy lanes leave

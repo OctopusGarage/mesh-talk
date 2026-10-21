@@ -1601,6 +1601,10 @@ impl Node {
                     .count()
                     < 2
                     && !active.contains_key(&key)
+                    && !active.iter().any(|(key, routes)| {
+                        matches!(key, ControlWork::Destination(_))
+                            && routes.peer == destination.device
+                    })
                 {
                     let Some(work) = self.runtime_work.admit() else {
                         return;
@@ -1850,8 +1854,7 @@ impl Node {
         if started.elapsed() >= std::time::Duration::from_secs(10) {
             log::warn!(
                 target: "mesh_talk::delivery",
-                "slow delivery attempt peer={} event={} direct_ms={} relay_ms={} direct_held={} relay_held={}",
-                destination.device.user_id(), hex::encode(destination.event.id.as_bytes()),
+                "slow delivery attempt direct_ms={} relay_ms={} direct_held={} relay_held={}",
                 direct_elapsed.as_millis(), started.elapsed().saturating_sub(direct_elapsed).as_millis(),
                 held, relay_held,
             );

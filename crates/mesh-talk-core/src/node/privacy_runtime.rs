@@ -1191,9 +1191,8 @@ impl Node {
                 if started.elapsed() >= Duration::from_secs(2) {
                     log::warn!(
                         target: "mesh_talk::delivery",
-                        "slow peer authentication peer={} endpoint={} elapsed_ms={} outcome={}",
-                        expected.user_id(), candidate, started.elapsed().as_millis(),
-                        result.as_ref().err().map_or_else(|| "authenticated".to_string(), ToString::to_string),
+                        "slow peer authentication endpoint={} elapsed_ms={} authenticated={}",
+                        candidate, started.elapsed().as_millis(), result.is_ok(),
                     );
                 }
                 (candidate, permits, result)
