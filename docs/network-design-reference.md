@@ -220,8 +220,11 @@ an old relay can first introduce a listing after that bound. Private authenticat
 presence. Cached routes, membership, stored contacts, historical messages,
 receipts, relay reachability, and mailbox custody never establish presence.
 
-The frontend ages observations even when refreshes fail, shows a global presence
-availability explanation, and retries its normal shared poll. It does not infer
+The frontend ages observations even when refreshes fail, shows a compact presence
+availability disclosure in the sidebar connection footer, and retries its normal
+shared poll. Its expandable explanation includes the latest refresh rejection,
+timeout or unreadable response; diagnostics clear on successful refresh and
+session retirement, and never accept a superseded response. It does not infer
 loss of LAN connectivity from Internet availability or claim everyone signed out.
 A stopped discovery producer is reported as unavailable; silent packet loss is
 not proof of a local network outage. Normal discovery/runtime recovery restores

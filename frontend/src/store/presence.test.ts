@@ -135,6 +135,10 @@ it("expires each source during failed refreshes, updates group counts, and recov
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(4000);
     expect(usePresence.getState().unavailable).toBe(true);
+    expect(usePresence.getState().failure).toEqual({
+      kind: "request",
+      message: "IPC offline",
+    });
     expect(usePresence.getState().map.bob.online).toBe(true);
     expect(usePresence.getState().map.bob.devices?.[0].evidence).toHaveLength(
       1,
@@ -146,6 +150,7 @@ it("expires each source during failed refreshes, updates group counts, and recov
     getPresence.mockResolvedValue(snapshot);
     await vi.advanceTimersByTimeAsync(2000);
     expect(usePresence.getState().unavailable).toBe(false);
+    expect(usePresence.getState().failure).toBeNull();
     expect(usePresence.getState().map.bob.online).toBe(true);
     expect(usePresence.getState().map.group.online_count).toBe(1);
   } finally {
@@ -162,6 +167,7 @@ it("does not treat a failed or malformed refresh as a successful empty snapshot"
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(2000);
     expect(usePresence.getState().unavailable).toBe(true);
+    expect(usePresence.getState().failure).toEqual({ kind: "invalid" });
     expect(usePresence.getState().map.bob.online).toBe(true);
     expect(usePresence.getState().map.bob.last_seen_secs).toBe(4);
   } finally {
@@ -195,6 +201,7 @@ it("bounds stalled overlapping polls and marks timeout without freezing evidence
     await vi.advanceTimersByTimeAsync(32000);
     expect(getPresence).toHaveBeenCalledTimes(3);
     expect(usePresence.getState().unavailable).toBe(true);
+    expect(usePresence.getState().failure).toEqual({ kind: "timeout" });
     expect(usePresence.getState().map.bob.online).toBe(false);
   } finally {
     stop();
@@ -217,6 +224,10 @@ it("keeps a newer failure authoritative over an older successful response", asyn
     pending[0].resolve({ bob: { online: true, last_seen_secs: 0 } });
     await Promise.resolve();
     expect(usePresence.getState().unavailable).toBe(true);
+    expect(usePresence.getState().failure).toEqual({
+      kind: "request",
+      message: "failed",
+    });
     expect(usePresence.getState().map).toEqual({});
   } finally {
     stop();
@@ -227,4 +238,57 @@ it("expires compatibility snapshots within the twenty-second logout budget", () 
   expect(
     agePresence({ bob: { online: true, last_seen_secs: 0 } }, 20).bob.online,
   ).toBe(false);
+});
+
+it.each([
+  [new Error("snapshot read failed"), "snapshot read failed"],
+  [
+    { kind: "internal", message: "discovery unavailable" },
+    "discovery unavailable",
+  ],
+  ["IPC disconnected", "IPC disconnected"],
+])(
+  "retains the actual refresh rejection for diagnostics: %s",
+  async (error, message) => {
+    getPresence.mockRejectedValue(error);
+    const stop = usePresence.getState().start();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(usePresence.getState().failure).toEqual({
+        kind: "request",
+        message,
+      });
+    } finally {
+      stop();
+    }
+    expect(usePresence.getState().failure).toBeNull();
+  },
+);
+
+it("clears diagnostic failures on replacement and ignores a retired owner's rejection", async () => {
+  let rejectOld!: (error: Error) => void;
+  getPresence
+    .mockRejectedValueOnce(new Error("discovery stopped"))
+    .mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectOld = reject;
+        }),
+    )
+    .mockResolvedValue({});
+  const stopOld = usePresence.getState().start();
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(usePresence.getState().failure).not.toBeNull();
+  useAuth.setState({ generation: 2 });
+  const stopNew = usePresence.getState().start();
+  try {
+    expect(usePresence.getState().failure).toBeNull();
+    rejectOld(new Error("retired failure"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(usePresence.getState().failure).toBeNull();
+    expect(usePresence.getState().unavailable).toBe(false);
+  } finally {
+    stopOld();
+    stopNew();
+  }
 });
