@@ -87,6 +87,22 @@ test("Enter confirms IME composition before it can send", async ({ page }) => {
     page.getByTestId("message-bubble").getByText("composing a message"),
   ).toHaveCount(0);
 
+  // macOS WebKit can end composition before dispatching the confirming Enter.
+  await input.dispatchEvent("compositionend", { data: "composing a message" });
+  await input.dispatchEvent("keydown", {
+    key: "Enter",
+    code: "Enter",
+    bubbles: true,
+    isComposing: false,
+    keyCode: 229,
+  });
+  await expect(input).toHaveValue("composing a message");
+  await expect(
+    page.getByTestId("message-bubble").getByText("composing a message"),
+  ).toHaveCount(0);
+
+  await input.press("Shift+Enter");
+  await expect(input).toHaveValue("composing a message\n");
   await input.press("Enter");
   await expect(
     page.getByTestId("message-bubble").getByText("composing a message"),

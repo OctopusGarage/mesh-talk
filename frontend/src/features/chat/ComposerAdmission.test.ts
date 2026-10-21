@@ -152,3 +152,47 @@ it("does not apply an external clear after its draft guard becomes stale", async
   );
   expect(host.querySelector("textarea")!.value).toBe("Replacement draft");
 });
+
+it.each([
+  { isComposing: true, keyCode: 13 },
+  { isComposing: false, keyCode: 229 },
+])(
+  "retains IME-confirmed text for $isComposing/$keyCode until a separate Enter",
+  async (ime) => {
+    await render();
+    await edit("你好");
+    const input = host.querySelector("textarea")!;
+    await act(async () => {
+      input.dispatchEvent(
+        new CompositionEvent("compositionend", { bubbles: true, data: "你好" }),
+      );
+    });
+    const confirm = new KeyboardEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      bubbles: true,
+      cancelable: true,
+      ...ime,
+    });
+    await act(async () => {
+      input.dispatchEvent(confirm);
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(input.value).toBe("你好");
+    expect(confirm.defaultPrevented).toBe(false);
+
+    await act(async () => {
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          code: "Enter",
+          keyCode: 13,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(send).toHaveBeenCalledExactlyOnceWith("你好");
+    expect(input.value).toBe("");
+  },
+);
