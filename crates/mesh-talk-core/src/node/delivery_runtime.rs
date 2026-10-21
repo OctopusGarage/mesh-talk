@@ -31,6 +31,31 @@ enum ControlWork {
 struct ControlRoutes {
     peer: PublicIdentity,
     endpoints: std::collections::BTreeSet<(String, std::net::SocketAddr)>,
+    publicly_observed: bool,
+}
+
+impl ControlWork {
+    fn retry_key(&self, peer: &PublicIdentity) -> (u8, String) {
+        (
+            match self {
+                Self::Destination(_) => 0,
+                Self::Receipt(_) => 1,
+                Self::Pull(_) => 2,
+            },
+            peer.user_id(),
+        )
+    }
+}
+
+impl ControlRoutes {
+    fn retry_routes(
+        &self,
+    ) -> (
+        std::collections::BTreeSet<(String, std::net::SocketAddr)>,
+        bool,
+    ) {
+        (self.endpoints.clone(), self.publicly_observed)
+    }
 }
 
 // Test-only timing: a dropped span records cancellation/early return, not success.
@@ -1325,6 +1350,7 @@ impl Node {
         destination: &DeliveryDestination,
         conversation: ConversationId,
     ) -> bool {
+        let started = std::time::Instant::now();
         let Ok(mut channel) = self.privacy_sync_dial(peer.addr, &destination.device).await else {
             return false;
         };
@@ -1348,6 +1374,8 @@ impl Node {
             return false;
         }
         if conversation != destination.event.conversation_id {
+            self.observe_delivery_exchange(&channel, started);
+            self.recycle_sync_channel(channel);
             return false;
         }
         let held =
@@ -1355,6 +1383,7 @@ impl Node {
                 .await
                 .unwrap_or(false);
         if held {
+            self.observe_delivery_exchange(&channel, started);
             self.recycle_sync_channel(channel);
         }
         held && self.delivery_destination_allowed(destination)
@@ -1380,59 +1409,76 @@ impl Node {
             let roster = self.roster.lock().expect("roster lock not poisoned");
             self.post_office_candidates_for(&roster, &destination.device)
         };
-        for po in candidates {
-            if po.public == self.identity.public() || !self.relay_send_allowed(&po.public) {
-                continue;
-            }
-            let Ok(mut channel) = self.privacy_sync_dial(po.addr, &po.public).await else {
-                continue;
-            };
-            if !self.delivery_destination_allowed(destination)
-                || !self.relay_send_allowed(&po.public)
-                || channel
-                    .peer_announcement()
-                    .is_some_and(|p| po.account_id.is_some() && p.account_id() != po.account_id)
-                || !self
-                    .delivery
-                    .lock()
-                    .expect("delivery lock not poisoned")
-                    .contains_work_event(destination.event.id)
-            {
-                continue;
-            }
-            let Ok(uploaded) = self
-                .opaque_relay_round(
-                    &mut channel,
-                    &destination.device,
-                    Some(destination.event.conversation_id),
-                )
+        use futures_util::StreamExt;
+        let attempts = futures_util::stream::iter(candidates)
+            .map(|po| async move {
+                self.adaptive_control_timeout(&po.public, async {
+                    let started = std::time::Instant::now();
+                    if po.public == self.identity.public() || !self.relay_send_allowed(&po.public) {
+                        return false;
+                    }
+                    let Ok(mut channel) = self.privacy_sync_dial(po.addr, &po.public).await else {
+                        return false;
+                    };
+                    if !self.delivery_destination_allowed(destination)
+                        || !self.relay_send_allowed(&po.public)
+                        || channel.peer_announcement().is_some_and(|p| {
+                            po.account_id.is_some() && p.account_id() != po.account_id
+                        })
+                        || !self
+                            .delivery
+                            .lock()
+                            .expect("delivery lock not poisoned")
+                            .contains_work_event(destination.event.id)
+                    {
+                        return false;
+                    }
+                    let Ok(uploaded) = self
+                        .opaque_relay_round(
+                            &mut channel,
+                            &destination.device,
+                            Some(destination.event.conversation_id),
+                        )
+                        .await
+                    else {
+                        return false;
+                    };
+                    let Some((_, outer_id)) = uploaded
+                        .iter()
+                        .find(|(inner_id, _)| *inner_id == destination.event.id)
+                    else {
+                        return false;
+                    };
+                    let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
+                        &self.identity,
+                        &destination.device,
+                        &po.public,
+                    ) else {
+                        return false;
+                    };
+                    let held =
+                        super::session::request_durable_have(&mut channel, mailbox.id(), *outer_id)
+                            .await
+                            .unwrap_or(false);
+                    if held {
+                        self.observe_delivery_exchange(&channel, started);
+                        self.recycle_sync_channel(channel);
+                    }
+                    if held
+                        && self.delivery_destination_allowed(destination)
+                        && self.relay_send_allowed(&po.public)
+                    {
+                        return true;
+                    }
+                    false
+                })
                 .await
-            else {
-                continue;
-            };
-            let Some((_, outer_id)) = uploaded
-                .iter()
-                .find(|(inner_id, _)| *inner_id == destination.event.id)
-            else {
-                continue;
-            };
-            let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
-                &self.identity,
-                &destination.device,
-                &po.public,
-            ) else {
-                continue;
-            };
-            let held = super::session::request_durable_have(&mut channel, mailbox.id(), *outer_id)
-                .await
-                .unwrap_or(false);
+                .unwrap_or(false)
+            })
+            .buffer_unordered(2);
+        tokio::pin!(attempts);
+        while let Some(held) = attempts.next().await {
             if held {
-                self.recycle_sync_channel(channel);
-            }
-            if held
-                && self.delivery_destination_allowed(destination)
-                && self.relay_send_allowed(&po.public)
-            {
                 return true;
             }
         }
@@ -1442,10 +1488,14 @@ impl Node {
     fn control_routes(&self, peer: &PublicIdentity) -> ControlRoutes {
         let roster = self.roster.lock().expect("roster mutex not poisoned");
         let mut endpoints = std::collections::BTreeSet::new();
+        let mut publicly_observed = false;
         if let Some(record) = roster
             .get(&peer.user_id())
             .filter(|record| record.public == *peer)
         {
+            publicly_observed = !record
+                .presence_evidence(std::time::Instant::now())
+                .is_empty();
             endpoints.extend(
                 record
                     .routes
@@ -1467,6 +1517,62 @@ impl Node {
         ControlRoutes {
             peer: peer.clone(),
             endpoints,
+            publicly_observed,
+        }
+    }
+
+    fn control_budget(&self, peer: &PublicIdentity) -> std::time::Duration {
+        self.routing_peer(&peer.user_id())
+            .filter(|p| p.public == *peer)
+            .map_or(CONTROL_EXCHANGE_TIMEOUT, |record| {
+                record
+                    .routes
+                    .iter()
+                    .filter(|route| {
+                        route.source != crate::discovery::roster::RouteSource::PostOffice
+                    })
+                    .map(|route| self.sessions.control_timeout(peer, route.addr))
+                    .chain(std::iter::once(
+                        self.sessions.control_timeout(peer, record.addr),
+                    ))
+                    .max()
+                    .unwrap_or(CONTROL_EXCHANGE_TIMEOUT)
+            })
+    }
+
+    pub(super) async fn adaptive_control_timeout<T>(
+        &self,
+        peer: &PublicIdentity,
+        operation: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        let started = tokio::time::Instant::now();
+        let mut budget = self.control_budget(peer);
+        tokio::pin!(operation);
+        loop {
+            tokio::select! {
+                result = &mut operation => return Some(result),
+                _ = tokio::time::sleep_until(started + budget) => {
+                    // Authentication completed during this exchange may have
+                    // taught us that its remaining round trips need more time.
+                    budget = budget.max(self.control_budget(peer));
+                    if tokio::time::Instant::now() < started + budget { continue; }
+                    let preferred = self.preferred_routes.lock().expect("routes lock not poisoned").get(&peer.user_id()).copied();
+                    let address = preferred.or_else(|| self.routing_peer(&peer.user_id()).filter(|p| p.public == *peer).map(|p| p.addr));
+                    if let Some(address) = address { self.sessions.control_timed_out(peer, address); }
+                    return None;
+                }
+            }
+        }
+    }
+
+    fn observe_delivery_exchange(
+        &self,
+        channel: &crate::transport::SecureChannel<tokio::net::TcpStream>,
+        started: std::time::Instant,
+    ) {
+        if let Ok(address) = channel.tcp_peer_addr() {
+            self.sessions
+                .control_succeeded(channel.peer_identity(), address, started.elapsed());
         }
     }
 
@@ -1486,6 +1592,7 @@ impl Node {
         let mut controls = tokio::task::JoinSet::new();
         let mut active: std::collections::HashMap<ControlWork, ControlRoutes> =
             std::collections::HashMap::new();
+        let mut retries = super::delivery_retry::RetrySchedule::default();
         let mut network = self.network_changes.subscribe();
         loop {
             tokio::select! {
@@ -1495,6 +1602,7 @@ impl Node {
                     self.sessions.network_changed();
                     controls.shutdown().await;
                     active.clear();
+                    retries.clear();
                     self.channel_recovery_notify.notify_one();
                     self.account_sync_notify.notify_one();
                     self.bridge_notify.notify_one();
@@ -1502,8 +1610,10 @@ impl Node {
                 },
                 result = controls.join_next(), if !controls.is_empty() => {
                     match result {
-                        Some(Ok((key, persistence_failed))) => {
-                            active.remove(&key);
+                        Some(Ok((key, persistence_failed, progress))) => {
+                            if let Some(routes) = active.remove(&key) {
+                                retries.finished(key.retry_key(&routes.peer), routes.retry_routes(), progress, std::time::Instant::now());
+                            }
                             if persistence_failed {
                                 diagnostic.warn_if_due();
                             }
@@ -1595,6 +1705,7 @@ impl Node {
             if let Some((id, destination)) = destination {
                 destination_cursor = Some(id);
                 let key = ControlWork::Destination(destination.event.id);
+                let routes = self.control_routes(&destination.device);
                 if active
                     .keys()
                     .filter(|key| matches!(key, ControlWork::Destination(_)))
@@ -1605,19 +1716,25 @@ impl Node {
                         matches!(key, ControlWork::Destination(_))
                             && routes.peer == destination.device
                     })
+                    && retries.ready(
+                        &key.retry_key(&destination.device),
+                        &routes.retry_routes(),
+                        std::time::Instant::now(),
+                    )
                 {
                     let Some(work) = self.runtime_work.admit() else {
                         return;
                     };
                     let node = self.clone();
-                    active.insert(key.clone(), self.control_routes(&destination.device));
+                    active.insert(key.clone(), routes);
                     controls.spawn(work.track(async move {
                         let live = node
                             .delivery
                             .lock()
                             .expect("delivery lock not poisoned")
                             .contains_destination(id, destination.event.id);
-                        let failed = if live && node.retry_one_destination(&destination).await {
+                        let progress = live && node.retry_one_destination(&destination).await;
+                        let failed = if progress {
                             let mut store =
                                 node.delivery.lock().expect("delivery lock not poisoned");
                             store.completed_work(id).is_some()
@@ -1625,35 +1742,39 @@ impl Node {
                         } else {
                             false
                         };
-                        (key, failed)
+                        (key, failed, progress)
                     }));
                 }
             }
             if let Some(receipt) = receipt {
                 receipt_cursor = Some(receipt.destination.event.id);
                 let key = ControlWork::Receipt(receipt.destination.event.id);
+                let routes = self.control_routes(&receipt.destination.device);
                 if !active
                     .keys()
                     .any(|key| matches!(key, ControlWork::Receipt(_)))
                     && !active.contains_key(&key)
+                    && retries.ready(
+                        &key.retry_key(&receipt.destination.device),
+                        &routes.retry_routes(),
+                        std::time::Instant::now(),
+                    )
                 {
                     let Some(work) = self.runtime_work.admit() else {
                         return;
                     };
                     let node = self.clone();
-                    active.insert(
-                        key.clone(),
-                        self.control_routes(&receipt.destination.device),
-                    );
+                    active.insert(key.clone(), routes);
                     controls.spawn(work.track(async move {
-                        let failed = node.retry_one_destination(&receipt.destination).await
+                        let progress = node.retry_one_destination(&receipt.destination).await;
+                        let failed = progress
                             && node
                                 .delivery
                                 .lock()
                                 .expect("delivery lock not poisoned")
                                 .finish_receipt(receipt.conversation, receipt.original_event_id)
                                 .is_err();
-                        (key, failed)
+                        (key, failed, progress)
                     }));
                 }
             }
@@ -1688,56 +1809,55 @@ impl Node {
                     continue;
                 }
                 let key = ControlWork::Pull(peer.user_id.clone());
+                let routes = self.control_routes(&peer.public());
                 if !active.keys().any(|key| matches!(key, ControlWork::Pull(_)))
                     && !active.contains_key(&key)
+                    && retries.ready(
+                        &key.retry_key(&peer.public()),
+                        &routes.retry_routes(),
+                        std::time::Instant::now(),
+                    )
                 {
                     let Some(work) = self.runtime_work.admit() else {
                         return;
                     };
                     let node = self.clone();
-                    active.insert(key.clone(), self.control_routes(&peer.public()));
+                    active.insert(key.clone(), routes);
                     controls.spawn(work.track(async move {
-                        node.reconcile_delivery_peer(&peer).await;
-                        (key, false)
+                        let progress = node.reconcile_delivery_peer(&peer).await;
+                        (key, false, progress)
                     }));
                 }
             }
         }
     }
 
-    async fn reconcile_delivery_peer(&self, peer: &crate::discovery::Announce) {
-        // Scheduling captured a proof, not lasting recovery permission.
+    async fn reconcile_delivery_peer(&self, peer: &crate::discovery::Announce) -> bool {
         if !self.verified_dm_pull_peer(&peer.user_id) {
-            return;
+            return false;
         }
         let conv = super::delivery_receipt::delivery_conversation_id(
             &self.identity.public(),
             &peer.public(),
         );
         let dm = super::conversation::dm_conversation_id(&self.identity.public(), &peer.public());
-        let direct_dm = tokio::time::timeout(
-            CONTROL_EXCHANGE_TIMEOUT,
-            self.pull_delivery_scope(peer, dm, false),
-        )
+        tokio::time::timeout(super::route_timing::MAX_CONTROL_DEADLINE, async {
+            let (direct, relay) = tokio::join!(
+                async {
+                    let messages = Box::pin(self.pull_delivery_scope(peer, dm, false)).await;
+                    let receipts = Box::pin(self.pull_delivery_scope(peer, conv, false)).await;
+                    messages || receipts
+                },
+                async {
+                    let messages = Box::pin(self.pull_delivery_scope(peer, dm, true)).await;
+                    let receipts = Box::pin(self.pull_delivery_scope(peer, conv, true)).await;
+                    messages || receipts
+                }
+            );
+            direct || relay
+        })
         .await
-        .unwrap_or(false);
-        if !direct_dm {
-            let _ = tokio::time::timeout(
-                CONTROL_EXCHANGE_TIMEOUT,
-                self.pull_delivery_scope(peer, dm, true),
-            )
-            .await;
-        }
-        self.emit_new_messages(dm);
-        self.process_file_events(dm);
-        for relay in [true, false] {
-            let _ = tokio::time::timeout(
-                CONTROL_EXCHANGE_TIMEOUT,
-                self.pull_delivery_scope(peer, conv, relay),
-            )
-            .await;
-        }
-        self.emit_new_messages(conv);
+        .unwrap_or(false)
     }
 
     async fn pull_delivery_scope(
@@ -1768,36 +1888,47 @@ impl Node {
         };
         let mut completed = false;
         for peer in peers {
+            let started = std::time::Instant::now();
             if relay && !self.relay_receive_allowed(&peer.public) {
                 continue;
             }
             if !relay && (peer.public != proof.public() || peer.account_id != proof.account_id()) {
                 continue;
             }
-            let Ok(mut channel) = self.privacy_sync_dial(peer.addr, &peer.public).await else {
-                continue;
-            };
-            if !current()
-                || (relay && !self.relay_receive_allowed(&peer.public))
-                || channel
-                    .peer_announcement()
-                    .is_some_and(|p| p.account_id() != peer.account_id)
-            {
-                continue;
-            }
-            let success = if relay {
-                self.opaque_relay_round(&mut channel, &proof.public(), None)
-                    .await
-                    .is_ok()
-            } else {
-                let store = self.pull_sync_store(channel.peer_identity());
-                super::session::request_round(&mut channel, &store, conv)
-                    .await
-                    .is_ok()
-            };
-            if success {
-                self.recycle_sync_channel(channel);
-            }
+            let success = self
+                .adaptive_control_timeout(&peer.public, async {
+                    let Ok(mut channel) = self.privacy_sync_dial(peer.addr, &peer.public).await
+                    else {
+                        return false;
+                    };
+                    if !current()
+                        || (relay && !self.relay_receive_allowed(&peer.public))
+                        || channel
+                            .peer_announcement()
+                            .is_some_and(|p| p.account_id() != peer.account_id)
+                    {
+                        return false;
+                    }
+                    let success = if relay {
+                        self.opaque_relay_round(&mut channel, &proof.public(), None)
+                            .await
+                            .is_ok()
+                    } else {
+                        let store = self.pull_sync_store(channel.peer_identity());
+                        super::session::request_round(&mut channel, &store, conv)
+                            .await
+                            .is_ok()
+                    };
+                    if success {
+                        self.observe_delivery_exchange(&channel, started);
+                        self.recycle_sync_channel(channel);
+                        self.emit_new_messages(conv);
+                        self.process_file_events(conv);
+                    }
+                    success
+                })
+                .await
+                .unwrap_or(false);
             completed |= success;
         }
         completed
@@ -1808,56 +1939,66 @@ impl Node {
             return false;
         }
         let started = std::time::Instant::now();
-        let mut held = false;
-        if let Some(peer) = self
-            .routing_peer(&destination.device.user_id())
-            .filter(|p| {
-                p.public == destination.device
-                    && p.account_id == destination.account
-                    && self.known_account_allowed(&p.public)
-            })
-        {
-            held = tokio::time::timeout(CONTROL_EXCHANGE_TIMEOUT, async {
-                let held = self
-                    .transfer_delivery_destination(
-                        &peer,
-                        destination,
-                        destination.event.conversation_id,
-                    )
-                    .await;
-                self.emit_new_messages(destination.event.conversation_id);
-                if held {
-                    // Receipt delivery must not require the recipient to
-                    // establish a reverse connection after a network handoff.
-                    // Use the same exact-peer control scope as flush_delivery,
-                    // within this attempt's existing total deadline.
-                    let control = super::delivery_receipt::delivery_conversation_id(
-                        &self.identity.public(),
-                        &peer.public,
-                    );
-                    self.transfer_delivery_destination(&peer, destination, control)
-                        .await;
-                    self.emit_new_messages(control);
-                }
-                held
-            })
-            .await
-            .unwrap_or(false);
-        }
-        let direct_elapsed = started.elapsed();
-        let relay_held = tokio::time::timeout(
-            CONTROL_EXCHANGE_TIMEOUT,
-            self.replicate_delivery_destination(destination),
-        )
-        .await
-        .unwrap_or(false);
+        let budget = super::route_timing::MAX_CONTROL_DEADLINE;
+        let direct = async {
+            let mut held = false;
+            if let Some(peer) = self
+                .routing_peer(&destination.device.user_id())
+                .filter(|p| {
+                    p.public == destination.device
+                        && p.account_id == destination.account
+                        && self.known_account_allowed(&p.public)
+                })
+            {
+                held = self
+                    .adaptive_control_timeout(&peer.public, async {
+                        let held = self
+                            .transfer_delivery_destination(
+                                &peer,
+                                destination,
+                                destination.event.conversation_id,
+                            )
+                            .await;
+                        self.emit_new_messages(destination.event.conversation_id);
+                        if held {
+                            let control = super::delivery_receipt::delivery_conversation_id(
+                                &self.identity.public(),
+                                &peer.public,
+                            );
+                            self.transfer_delivery_destination(&peer, destination, control)
+                                .await;
+                            self.emit_new_messages(control);
+                        }
+                        held
+                    })
+                    .await
+                    .unwrap_or(false);
+            }
+            (held, started.elapsed())
+        };
+        let relay = async {
+            let held =
+                tokio::time::timeout(budget, self.replicate_delivery_destination(destination))
+                    .await
+                    .unwrap_or(false);
+            (held, started.elapsed())
+        };
+        tokio::pin!(direct, relay);
+        // Both alternatives share the same bounded wall-clock window. Custody
+        // cannot cancel recipient progress; exact recipient confirmation can.
+        let ((held, direct_elapsed), (relay_held, relay_elapsed)) = tokio::select! {
+            result = &mut direct => {
+                let still_pending = self.delivery.lock().expect("delivery lock not poisoned")
+                    .contains_work_event(destination.event.id);
+                if still_pending { (result, relay.await) }
+                else { (result, (false, started.elapsed())) }
+            },
+            result = &mut relay => (direct.await, result),
+        };
         if started.elapsed() >= std::time::Duration::from_secs(10) {
-            log::warn!(
-                target: "mesh_talk::delivery",
-                "slow delivery attempt direct_ms={} relay_ms={} direct_held={} relay_held={}",
-                direct_elapsed.as_millis(), started.elapsed().saturating_sub(direct_elapsed).as_millis(),
-                held, relay_held,
-            );
+            log::warn!(target: "mesh_talk::delivery",
+                "slow delivery attempt direct_ms={} relay_ms={} direct_held={} relay_held={} budget_ms={}",
+                direct_elapsed.as_millis(), relay_elapsed.as_millis(), held, relay_held, budget.as_millis());
         }
         held || relay_held
     }

@@ -1306,7 +1306,7 @@ impl Node {
         timing.phase("accept-noise-presence");
         let generation = self.privacy.generation.load(Ordering::SeqCst);
         let mut channel = tokio::time::timeout(
-            super::transport::HANDSHAKE_TIMEOUT,
+            super::route_timing::MAX_AUTHENTICATION_DEADLINE,
             SecureChannel::accept_with_visibility(
                 stream,
                 &self.identity,

@@ -6,6 +6,76 @@ use crate::identity::device::DeviceIdentity;
 use tokio::net::TcpListener;
 
 #[tokio::test]
+async fn completed_receipt_scope_keeps_the_authenticated_connection_for_the_next_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let public = bob.identity.public();
+    let account = bob.account_id();
+    let (addr, count, server) = counted_sync_peer(bob.clone()).await;
+    let proof = bob.signed_announce("Bob", addr.port());
+    bob.configure_privacy(
+        &dir.path().join("bob"),
+        "pw",
+        &proof,
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    alice
+        .configure_privacy(
+            &dir.path().join("alice"),
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, addr.ip(), &alice.user_id());
+    let peer = alice
+        .roster
+        .lock()
+        .unwrap()
+        .get(&public.user_id())
+        .unwrap()
+        .clone();
+    let id = alice
+        .enqueue_to_account(&account, b"one locally queued message", None)
+        .await
+        .unwrap();
+    let destination = alice
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations[0]
+        .clone();
+    assert!(
+        alice
+            .transfer_delivery_destination(&peer, &destination, destination.event.conversation_id)
+            .await
+    );
+    let control =
+        super::delivery_receipt::delivery_conversation_id(&alice.identity.public(), &public);
+    alice
+        .transfer_delivery_destination(&peer, &destination, control)
+        .await;
+    alice
+        .deliver_direct(&peer, destination.event.conversation_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "a completed receipt round must not force a new Noise handshake"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn successful_sync_rounds_reuse_one_authenticated_tcp_connection() {
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = node(&dir.path().join("alice"));

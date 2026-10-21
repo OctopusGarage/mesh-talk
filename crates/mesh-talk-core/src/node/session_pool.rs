@@ -108,6 +108,36 @@ impl SessionPool {
             .timed_out(&peer.user_id(), address);
     }
 
+    pub(in crate::node) fn control_timeout(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+    ) -> Duration {
+        self.timings
+            .lock()
+            .unwrap()
+            .control_deadline(&peer.user_id(), address)
+    }
+
+    pub(in crate::node) fn control_succeeded(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+        elapsed: Duration,
+    ) {
+        self.timings
+            .lock()
+            .unwrap()
+            .control_succeeded(&peer.user_id(), address, elapsed);
+    }
+
+    pub(in crate::node) fn control_timed_out(&self, peer: &PublicIdentity, address: SocketAddr) {
+        self.timings
+            .lock()
+            .unwrap()
+            .control_timed_out(&peer.user_id(), address);
+    }
+
     fn prepare_capacity(&self, direction: &Arc<Semaphore>) {
         self.prune();
         if direction.available_permits() == 0 || self.total.available_permits() == 0 {

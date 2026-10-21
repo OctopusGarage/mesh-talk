@@ -256,6 +256,10 @@
           {
             "name": "Authenticated route timing is bounded and a completed winning route can serve a verified alternate hint without weakening endpoint or identity isolation",
             "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Whole delivery exchanges adapt to route latency and independent bounded retry cooldowns preserve recovery and recipient-confirmation semantics",
+            "reference": "docs/network-design-reference.md"
           }
         ]
       },
@@ -377,7 +381,9 @@
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime.rs",
-        "crates/mesh-talk-core/src/node/session_pool.rs"
+        "crates/mesh-talk-core/src/node/session_pool.rs",
+        "crates/mesh-talk-core/src/node/route_timing.rs",
+        "crates/mesh-talk-core/src/node/delivery_retry.rs"
       ],
       "native": ["host"]
     }

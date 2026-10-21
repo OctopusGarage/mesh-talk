@@ -9,6 +9,116 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::mpsc};
 
+#[tokio::test(start_paused = true)]
+async fn adaptive_exchange_uses_latency_learned_after_the_attempt_started() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let remote = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&remote, &Account::generate(), "slow peer", 47479);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let address = sender
+        .roster
+        .lock()
+        .unwrap()
+        .get(&remote.user_id())
+        .unwrap()
+        .addr;
+    let started = tokio::time::Instant::now();
+    let result = sender
+        .adaptive_control_timeout(&remote.public(), async {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            sender.sessions.authentication_succeeded(
+                &remote.public(),
+                address,
+                Duration::from_secs(8),
+            );
+            tokio::time::sleep(Duration::from_secs(12)).await;
+            true
+        })
+        .await;
+    assert_eq!(
+        result,
+        Some(true),
+        "useful slow progress must survive the former fifteen-second deadline"
+    );
+    assert_eq!(started.elapsed(), Duration::from_secs(20));
+}
+
+#[tokio::test(start_paused = true)]
+async fn adaptive_exchange_times_out_without_a_sample_and_learns_the_next_control_budget() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let remote = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&remote, &Account::generate(), "stalled peer", 47479);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let address = sender
+        .roster
+        .lock()
+        .unwrap()
+        .get(&remote.user_id())
+        .unwrap()
+        .addr;
+    let started = tokio::time::Instant::now();
+    let result = sender
+        .adaptive_control_timeout(&remote.public(), std::future::pending::<()>())
+        .await;
+    assert_eq!(result, None);
+    assert_eq!(started.elapsed(), Duration::from_secs(15));
+    assert_eq!(
+        sender.sessions.control_timeout(&remote.public(), address),
+        Duration::from_secs(30)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn adaptive_exchange_has_one_non_sliding_hard_ceiling() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let remote = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&remote, &Account::generate(), "slow peer", 47479);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let address = sender
+        .roster
+        .lock()
+        .unwrap()
+        .get(&remote.user_id())
+        .unwrap()
+        .addr;
+    sender
+        .sessions
+        .authentication_succeeded(&remote.public(), address, Duration::from_secs(8));
+    let started = tokio::time::Instant::now();
+    let result = sender
+        .adaptive_control_timeout(&remote.public(), async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                sender.sessions.control_succeeded(
+                    &remote.public(),
+                    address,
+                    Duration::from_secs(20),
+                );
+            }
+        })
+        .await;
+    assert_eq!(result, None::<()>);
+    assert_eq!(started.elapsed(), Duration::from_secs(60));
+}
+
 #[tokio::test]
 async fn confirmed_destination_does_not_open_another_relay_connection() {
     let dir = tempfile::tempdir().unwrap();
@@ -7047,9 +7157,35 @@ async fn automatic_delivery_with_one_second_rtt_does_not_take_minutes() {
     .await;
 }
 
+#[tokio::test]
+async fn adaptive_delivery_at_two_second_rtt_preserves_progress_and_collects_the_exact_receipt() {
+    delayed_route_delivery_with_budget(
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(45),
+        true,
+    )
+    .await;
+}
+
 async fn delayed_route_delivery(
     initial_delay: std::time::Duration,
     frame_delay: std::time::Duration,
+) {
+    delayed_route_delivery_with_budget(
+        initial_delay,
+        frame_delay,
+        std::time::Duration::from_secs(25),
+        false,
+    )
+    .await;
+}
+
+async fn delayed_route_delivery_with_budget(
+    initial_delay: std::time::Duration,
+    frame_delay: std::time::Duration,
+    total_budget: std::time::Duration,
+    recipient_inbound_only: bool,
 ) {
     use std::time::{Duration, Instant};
     let ad = tempfile::tempdir().unwrap();
@@ -7088,7 +7224,30 @@ async fn delayed_route_delivery(
     let backend = bl.local_addr().unwrap();
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(a.clone().run_accept_loop(al));
-    tasks.spawn(b.clone().run_accept_loop(bl));
+    if recipient_inbound_only {
+        let recipient = b.clone();
+        tasks.spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    result = bl.accept() => {
+                        let (stream, _) = result.unwrap();
+                        let recipient = recipient.clone();
+                        connections.spawn(async move {
+                            if let Ok(channel) = recipient.privacy_accept(stream).await {
+                                recipient.serve_connection(channel).await;
+                            }
+                        });
+                    }
+                    _ = connections.join_next(), if !connections.is_empty() => {}
+                }
+            }
+        });
+    } else {
+        tasks.spawn(b.clone().run_accept_loop(bl));
+    }
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let accepted_by_proxy = accepted.clone();
     tasks.spawn(async move {
         let mut streams = Vec::new();
         loop {
@@ -7102,6 +7261,7 @@ async fn delayed_route_delivery(
             tokio::select! {
                 result = proxy.accept() => {
                     let (client, _) = result.unwrap();
+                    accepted_by_proxy.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     connections.spawn(async move {
                         // Routed authentication can legitimately exceed three seconds.
                         tokio::time::sleep(initial_delay).await;
@@ -7133,7 +7293,7 @@ async fn delayed_route_delivery(
     .await
     .expect("local enqueue remains independent of network latency")
     .unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(25), async {
+    let result = tokio::time::timeout(total_budget, async {
         let message = incoming.recv().await.unwrap();
         assert_eq!(message.text, b"hotspot handoff");
         assert_eq!(
@@ -7155,6 +7315,16 @@ async fn delayed_route_delivery(
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
     let (received, confirmed) = result.expect("automatic delivery and authenticated receipt must progress over the slow valid route without waiting for the stale route");
+    if recipient_inbound_only {
+        assert!(
+            confirmed > Duration::from_secs(15),
+            "fixture must exercise an exchange beyond the former fixed deadline"
+        );
+        assert!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "slow but progressing exchanges must not restart their authenticated connections"
+        );
+    }
     eprintln!("handoff received={received:?} confirmed={confirmed:?}");
 }
 
