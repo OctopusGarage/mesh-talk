@@ -5502,6 +5502,24 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
 
 #[tokio::test]
 async fn saved_channel_file_remains_downloadable_from_member_after_author_disconnects() {
+    // Drive recovery explicitly below so background anti-entropy cannot win
+    // the initial live push or fetch the deliberately missed second manifest.
+    // Use the same authenticated serving path as the controlled group rigs.
+    fn serve(node: Arc<Node>, listener: TcpListener) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let node = Arc::clone(&node);
+                connections.spawn(async move {
+                    if let Ok(channel) = node.privacy_accept(stream).await {
+                        node.serve_connection(channel).await;
+                    }
+                });
+                while connections.try_join_next().is_some() {}
+            }
+        })
+    }
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let carol = DeviceIdentity::generate();
@@ -5537,11 +5555,11 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
     let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
     let (bob_node, mut bob_rx) = open(bob, bob_roster, "bob");
     let (carol_node, mut carol_rx) = open(carol, carol_roster, "carol");
-    let alice_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
-    let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    let alice_task = serve(Arc::clone(&alice_node), alice_listener);
+    let bob_task = serve(Arc::clone(&bob_node), bob_listener);
     let carol_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let carol_port = carol_listener.local_addr().unwrap().port();
-    let carol_task = tokio::spawn(Arc::clone(&carol_node).run_accept_loop(carol_listener));
+    let carol_task = serve(Arc::clone(&carol_node), carol_listener);
     add_peer(
         &alice_node.roster,
         &carol_node.identity,
