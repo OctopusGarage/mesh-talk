@@ -275,7 +275,7 @@ identities rather than invented account associations.
 | Public authenticated contact                               | 15 seconds                                 | No inferred LAN scope or continuing connection. Private route knowledge remains excluded.                               |
 | Directory/federation introduction                          | Original origin expiry, at most 15 seconds | v4 client response preserves expiry; forwarding and re-querying cannot renew it. Legacy responses provide routing only. |
 
-The frontend's shared two-second poll ages freshness and source-specific
+Push invalidations refresh the desktop snapshot; a two-second clock ages freshness and source-specific
 presentation deadlines locally, even when IPC fails. LAN-only observations lose
 Online at their 15-second deadline; cross-network observations at 120 seconds
 without a new valid public observation. Explicit withdrawal remains immediate. Route retention is independent: authenticated
@@ -288,9 +288,25 @@ sleep after slow authentication. A cached address must not allocate a separate
 probe lane for the same device. Only permitted fresh public authentication can
 renew presence; the fifteen-second observation lease is unchanged.
 Routed probes and the local fallback scan run every five seconds; routed candidate
-pacing is 20 ms (at most 256 candidates per sweep). Bridge registration refreshes
-five seconds after each exchange. Existing admission and per-source response limits
-remain unchanged. The frontend schedules exact presentation expiry independently
+pacing is 20 ms (at most 256 candidates per sweep). Bridge registration starts
+refresh waves every five seconds, independently of an earlier stalled relay.
+At most eight exact identity/endpoint queries are active across all waves;
+known healthy relays are visited first and duplicate active queries are skipped.
+Activity slots are released on completion, cancellation, policy withdrawal and
+runtime retirement. A network change cancels obsolete waves and starts fresh.
+Directory exchanges use the existing authenticated adaptive 15–60 second budget;
+failed relays wait at most the five-second refresh interval before eligibility.
+A slow relay cannot hold the refresh metadata lock while doing network or disk I/O.
+Existing origin authority and per-source response limits remain unchanged.
+
+The directory's fifteen-second recovery-membership expiry is separate from
+presentation history. Expiry revokes recovery admission but does not impersonate
+explicit withdrawal by deleting the bounded public-origin history. Roster cleanup
+preserves that history until its original 120-second deadline; it never renews it.
+Explicit bridge disable clears both active and expired mailbox introductions.
+Committed origin renewal emits a presence-only watch notification, not an
+expensive mesh recovery wake; the desktop's thirty-second fallback is not the
+normal heartbeat delivery path. The frontend schedules exact presentation expiry independently
 of polling and suppresses the stranded prompt while a recently observed
 cross-network peer remains Online under the bounded tolerance. Shell, group
 counts, member headers and diagnostics consume the same account projection.
@@ -1301,7 +1317,7 @@ A deleted local record or recalled event does not recall already copied data fro
 | Roster and routes                    | Up to 1,024 known peers and eight route observations per peer.                                                                                                | Identity deduplication and route expiry are independent of the managed connection budget.                                                                                                                 |
 | Modern directory snapshot            | Up to 1,024 entries.                                                                                                                                          | Only eligible fresh registrations; not a guarantee of all Internet users or a 1,024-member group benchmark.                                                                                               |
 | Legacy directory/federation snapshot | 128 entries.                                                                                                                                                  | Explicit version negotiation/fallback retains legacy limits on compatible fresh sessions.                                                                                                                 |
-| Client directory scheduling          | At most eight concurrent queries; overlapping refresh suppressed.                                                                                             | Later eligible relays are visited, not permanently skipped after the first eight. Successful results publish without waiting for every stalled candidate.                                                 |
+| Client directory scheduling          | At most eight concurrent queries across five-second refresh waves; duplicate exact-relay queries suppressed.                                                                                             | Later eligible relays are visited, not permanently skipped after the first eight. Successful results publish without waiting for every stalled candidate.                                                 |
 | Directory presence                   | At most 15 seconds.                                                                                                                                           | Origin freshness is not renewed by forwarding. Refresh and network delays can still affect observed liveness.                                                                                             |
 | Relay seed probes / reconciliation   | Eight concurrent probes and eight relay sync operations, separately. Coalesced durable/directory/route wakes; immediate bounded-batch continuation; adaptive jittered idle fallback.             | Not a fixed five-second end-to-end convergence promise or a global eight-socket cap for the relay process.                                                                                 |
 | Relay storage                        | Soft limits of 100,000 events and 512 MiB, with 5,000-event / 16 MiB compaction slack.                                                                        | Storage can temporarily exceed soft limits; capacity may evict younger copies before their age limit.                                                                                                     |

@@ -191,6 +191,10 @@
         ".github/workflows/e2e-backend.yml",
         ".github/workflows/sanitizers.yml",
         ".github/workflows/mutants.yml",
+        ".config/nextest.toml",
+        "scripts/release/run-mutants.mjs",
+        "scripts/release/run-mutants.test.mjs",
+        "scripts/diagnostics/mutants-workflow.test.mjs",
         ".github/workflows/codeql.yml",
         ".github/workflows/gitleaks.yml",
         ".github/workflows/dependency-review.yml",
@@ -202,6 +206,7 @@
         "scripts/diagnostics/ci-latency.test.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
         "scripts/diagnostics/merge-queue.test.mjs",
+        "scripts/diagnostics/mutants-workflow.test.mjs",
         "scripts/diagnostics/health-workflow.test.mjs"
       ],
       "escalation": [

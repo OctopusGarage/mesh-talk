@@ -383,6 +383,10 @@
           {
             "name": "Completed protocol-specific sessions reuse authenticated sockets; stale sockets retry once while malformed frames never trigger capability downgrade and legacy peers retain bounded fallback.",
             "reference": "docs/network-design-reference.md#session-reuse-contract"
+          },
+          {
+            "name": "Directory freshness, recovery membership and presentation lifetimes are distinct; healthy five-second refresh waves progress beside stalled queries with eight global slots and cancellation ownership",
+            "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ],
         "guide": "docs/ARCHITECTURE.md"

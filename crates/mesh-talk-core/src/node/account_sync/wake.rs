@@ -40,11 +40,19 @@ impl Node {
     pub(in crate::node) fn note_account_local_change(&self) {
         // Saturation keeps the periodic repair path available without sending an
         // invalid wrapped revision; exhaustion cannot occur in a practical runtime.
-        let _ = self.account_wake.revision.fetch_update(
-            Ordering::Release,
-            Ordering::Relaxed,
-            |value| value.checked_add(1),
-        );
+        let revision = &self.account_wake.revision;
+        let mut current = revision.load(Ordering::Relaxed);
+        while let Some(next) = current.checked_add(1) {
+            match revision.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
         self.account_wake.changed.notify_one();
     }
 
@@ -281,4 +289,36 @@ fn wake_routes(peer: &PeerRecord) -> Vec<std::net::SocketAddr> {
     routes.sort();
     routes.dedup();
     routes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_wake_revisions_are_concurrent_and_saturate_without_wrapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = crate::identity::device::DeviceIdentity::generate();
+        let account = crate::identity::account::Account::generate();
+        let proof = crate::discovery::Announce::new_with_account(&identity, &account, "local", 1);
+        let (node, _, _) =
+            crate::node::test_support::node_with_files(dir.path(), identity, account, &proof);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let node = &node;
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        node.note_account_local_change();
+                    }
+                });
+            }
+        });
+        assert_eq!(node.account_wake.revision.load(Ordering::Acquire), 401);
+        node.account_wake
+            .revision
+            .store(u64::MAX - 1, Ordering::Release);
+        node.note_account_local_change();
+        node.note_account_local_change();
+        assert_eq!(node.account_wake.revision.load(Ordering::Acquire), u64::MAX);
+    }
 }

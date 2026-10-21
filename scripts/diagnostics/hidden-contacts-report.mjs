@@ -77,7 +77,7 @@ export function validateObservations(name, observations, platform) {
   if (name === "group-message") require(nonempty(observations?.channelId), "missing real channel");
   if (name === "incoming-attachment") {
     require(nonempty(observations?.fileName), "missing attachment identity");
-    require(observations?.downloadVerified === false && nonempty(observations?.limitation), "UI-only attachment coverage must disclose unverified OS download");
+    require(observations?.downloadVerified === true && nonempty(observations?.limitation), "native attachment requires exact automatic export bytes and disclosed OS picker limit");
   }
   if (name === "settings-theme-persistence") require(observations?.selected === "light", "unexpected persisted theme");
   if (name === "local-user-isolation") require(observations?.secondUserPrivacy?.invisible === false && Array.isArray(observations?.secondUserPrivacy?.allowed_accounts) && observations.secondUserPrivacy.allowed_accounts.length === 0, "privacy leaked between local users");

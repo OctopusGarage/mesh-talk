@@ -168,15 +168,7 @@ impl PreparedParticipant {
         }
         {
             let node = Arc::clone(&node);
-            tasks.push(tokio::spawn(async move {
-                loop {
-                    node.refresh_bridge_directory().await;
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(5)) => {},
-                        _ = node.bridge_notify.notified() => {},
-                    }
-                }
-            }));
+            tasks.push(tokio::spawn(node.run_bridge_directory()));
         }
         {
             let node = Arc::clone(&node);

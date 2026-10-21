@@ -67,7 +67,7 @@ for (const variant of [
       .getByTestId("presence-availability");
     await expect(notice).toBeVisible();
     await expect(notice.getByRole("status")).toHaveText(
-      "Online status unavailable. Retrying automatically.",
+      "Presence updates unavailable",
     );
     const summary = notice.locator("summary");
     const detail = notice.getByTestId("presence-failure-detail");

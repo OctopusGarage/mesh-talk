@@ -16,13 +16,13 @@ async fn production_node_tcp_sockets_enable_keepalive() {
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", addr.port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", addr.port());
     let (sender, _) = node(ad.path(), alice, aa, &bp);
-    let (recipient, _) = node(bd.path(), bob, ba, &ap);
+    let (recipient, _) = node(bd.path(), bob, bob_account, &ap);
     let accept = async {
         let (stream, _) = listener.accept().await.unwrap();
         recipient.privacy_accept(stream).await.unwrap()
@@ -1125,13 +1125,13 @@ async fn completed_file_custody_recycles_a_usable_sync_channel() {
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", addr.port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", addr.port());
     let (sender, _) = node(ad.path(), alice, aa, &bp);
-    let (recipient, _) = node(bd.path(), bob, ba, &ap);
+    let (recipient, _) = node(bd.path(), bob, bob_account, &ap);
     for (node, dir, own) in [(&sender, ad.path(), &ap), (&recipient, bd.path(), &bp)] {
         node.configure_privacy(
             dir,
@@ -7256,11 +7256,11 @@ async fn approving_an_attachment_wakes_recovery_immediately() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(source.path(), alice, aa, &bp);
-    let (b, _) = node(target.path(), bob, ba, &ap);
+    let (b, _) = node(target.path(), bob, bob_account, &ap);
     let path = source.path().join("approved.bin");
     std::fs::write(&path, b"consented bytes").unwrap();
     let (id, file) = a
@@ -7298,11 +7298,11 @@ async fn authenticated_silent_preferred_relay_does_not_block_upload_or_drain_fal
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let aa = Account::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (a, _) = node(source.path(), alice, aa, &bp);
-    let (b, mut inbox) = node(target.path(), bob, ba, &ap);
+    let (b, mut inbox) = node(target.path(), bob, bob_account, &ap);
     b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
     let silent = DeviceIdentity::generate();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

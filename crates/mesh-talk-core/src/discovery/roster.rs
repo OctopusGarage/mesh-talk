@@ -46,6 +46,19 @@ impl PeerEndpoint {
             RouteSource::Gateway => None,
         }
     }
+    fn public_presentation_deadline(&self, physical_lan: bool) -> Option<Instant> {
+        let deadline = self.public_presence_deadline()?;
+        Some(match self.source {
+            RouteSource::RoutedQuery => self.last_seen + CROSS_NETWORK_PRESENCE_TTL,
+            RouteSource::PostOffice => {
+                deadline + (CROSS_NETWORK_PRESENCE_TTL - PUBLIC_PRESENCE_TTL)
+            }
+            RouteSource::Authenticated if !physical_lan => {
+                deadline + (CROSS_NETWORK_PRESENCE_TTL - PUBLIC_PRESENCE_TTL)
+            }
+            _ => deadline,
+        })
+    }
 }
 
 const MAX_ROUTES_PER_PEER: usize = 8;
@@ -120,21 +133,9 @@ impl PeerRecord {
         self.routes
             .iter()
             .filter_map(|route| {
-                let deadline = route.public_presence_deadline()?;
-                Some(match route.source {
-                    RouteSource::RoutedQuery => route.last_seen + CROSS_NETWORK_PRESENCE_TTL,
-                    RouteSource::PostOffice => {
-                        deadline + (CROSS_NETWORK_PRESENCE_TTL - PUBLIC_PRESENCE_TTL)
-                    }
-                    RouteSource::Authenticated
-                        if !self.routes.iter().any(|other| {
-                            other.source == RouteSource::Lan && other.addr.ip() == route.addr.ip()
-                        }) =>
-                    {
-                        deadline + (CROSS_NETWORK_PRESENCE_TTL - PUBLIC_PRESENCE_TTL)
-                    }
-                    _ => deadline,
-                })
+                route.public_presentation_deadline(self.routes.iter().any(|other| {
+                    other.source == RouteSource::Lan && other.addr.ip() == route.addr.ip()
+                }))
             })
             .map(|deadline| deadline.saturating_duration_since(now))
             .max()
@@ -869,6 +870,10 @@ impl Roster {
                     RouteSource::PostOffice => ttl.max(Duration::from_secs(45)),
                 };
                 now.saturating_duration_since(route.last_seen) < lifespan
+                    || (route.source == RouteSource::PostOffice
+                        && route
+                            .public_presentation_deadline(false)
+                            .is_some_and(|deadline| deadline > now))
             });
             if let Some(last) = preferred_route(&r.routes) {
                 r.addr = last.addr;
@@ -917,6 +922,76 @@ impl Roster {
 
 #[cfg(test)]
 mod routed_tests {
+    #[test]
+    fn directory_commit_notifies_presence_after_staging_without_recovery_storms() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "member", 1);
+        let mut roster = Roster::default();
+        let relay = "127.0.0.1:47479".parse().unwrap();
+        roster.update_relayed(&proof, relay, "self");
+        let mut observer = roster.subscribe_changes();
+        let _ = futures_util::FutureExt::now_or_never(roster.changes().notified());
+        let now = Instant::now();
+        roster.set_directory_expiry(&proof.user_id, relay, now + Duration::from_secs(10), 10);
+        assert!(
+            observer.has_changed().unwrap(),
+            "committed public evidence must notify the UI"
+        );
+        observer.borrow_and_update();
+        roster.set_directory_expiry(&proof.user_id, relay, now + Duration::from_secs(10), 10);
+        assert!(
+            !observer.has_changed().unwrap(),
+            "identical origin is quiet"
+        );
+        roster.set_directory_expiry(&proof.user_id, relay, now + Duration::from_secs(14), 14);
+        assert!(
+            observer.has_changed().unwrap(),
+            "renewed origin must not wait for the desktop fallback"
+        );
+        assert!(
+            futures_util::FutureExt::now_or_never(roster.changes().notified()).is_none(),
+            "presentation renewal must not launch expensive recovery"
+        );
+    }
+
+    #[test]
+    fn directory_history_survives_route_cleanup_until_its_original_presentation_deadline() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "member", 1);
+        let mut roster = Roster::default();
+        let relay = "127.0.0.1:47479".parse().unwrap();
+        roster.update_relayed(&proof, relay, "self");
+        let now = Instant::now();
+        let origin = now - Duration::from_secs(46);
+        {
+            let peer = roster.peers.get_mut(&proof.user_id).unwrap();
+            peer.last_seen = origin;
+            peer.routes[0].last_seen = origin;
+            peer.routes[0].presence_expires_at = Some(origin + PUBLIC_PRESENCE_TTL);
+        }
+        roster.evict_stale(Duration::from_secs(30));
+        let peer = roster
+            .get(&proof.user_id)
+            .expect("routing cleanup must retain bounded public history");
+        assert!(peer.presence_evidence(now).is_empty());
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(119)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(120)),
+            Duration::ZERO
+        );
+        {
+            let peer = roster.peers.get_mut(&proof.user_id).unwrap();
+            peer.last_seen = now - Duration::from_secs(121);
+            peer.routes[0].last_seen = peer.last_seen;
+            peer.routes[0].presence_expires_at = Some(peer.last_seen + PUBLIC_PRESENCE_TTL);
+        }
+        roster.evict_stale(Duration::from_secs(30));
+        assert!(roster.get(&proof.user_id).is_none());
+    }
+
     #[test]
     fn roster_watch_broadcasts_renewals_without_consuming_recovery_notifications() {
         let mut roster = Roster::default();

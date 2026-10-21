@@ -27,6 +27,7 @@ export function requiredBrowserPaths(tier) {
     ["automatic-delivery.spec.ts", "text, sticker and file card stay Awaiting until explicit authoritative mock projection"],
     ["automatic-delivery.spec.ts", "a native picker completed after conversation navigation cannot send to the new conversation"],
     ["automatic-delivery.spec.ts", "a pending local text acceptance moves the submitted text out of the composer"],
+    ["automatic-delivery.spec.ts", "a scoped native delivery invalidation refreshes status without a polling response"],
     ["automatic-delivery.spec.ts", "submitted text stays in its bubble after acceptance and navigation"],
     ["automatic-delivery.spec.ts", "submitted text stays in its bubble after rejection and navigation"],
     ["media-recovery.spec.ts", "received media recovers when bytes become available with stable fileConv"],

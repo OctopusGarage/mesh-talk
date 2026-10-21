@@ -1466,7 +1466,7 @@ impl Node {
             .await;
             match exchange {
                 Ok(held) => {
-                    self.observe_delivery_exchange(&channel, started);
+                    self.observe_control_exchange(&channel, started);
                     if held || conversation != destination.event.conversation_id {
                         self.recycle_sync_channel(channel);
                     }
@@ -1568,7 +1568,7 @@ impl Node {
                             .await;
                             match exchange {
                                 Ok(held) => {
-                                    self.observe_delivery_exchange(&channel, started);
+                                    self.observe_control_exchange(&channel, started);
                                     if held {
                                         self.recycle_sync_channel(channel);
                                     }
@@ -1736,7 +1736,7 @@ impl Node {
         }
     }
 
-    fn observe_delivery_exchange(
+    pub(super) fn observe_control_exchange(
         &self,
         channel: &crate::transport::SecureChannel<tokio::net::TcpStream>,
         started: std::time::Instant,
@@ -2111,7 +2111,7 @@ impl Node {
                             .is_ok()
                     };
                     if success {
-                        self.observe_delivery_exchange(&channel, started);
+                        self.observe_control_exchange(&channel, started);
                         self.recycle_sync_channel(channel);
                         self.emit_new_messages(conv);
                         self.process_file_events(conv);
