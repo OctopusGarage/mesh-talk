@@ -1,3 +1,4 @@
+import { TrustCardPanel } from "./TrustCardPanel";
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
@@ -80,11 +81,11 @@ export function VerifyContactDialog({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Load the trust state as soon as the contact's device fingerprint is known (and refresh
+  // Load persisted trust history even when the contact has no current device (and refresh
   // when the dialog opens), so the header shield reflects an already-verified contact
   // WITHOUT having to open the dialog first. (`open` is a dep only to refresh on open.)
   useEffect(() => {
-    if (!fingerprint || !owner) return;
+    if (!owner) return;
     let active = true;
     void chat
       .getTrust(owner, accountId, fingerprint)
@@ -174,7 +175,10 @@ export function VerifyContactDialog({
           </span>
         </Button>
       </DialogTrigger>
-      <DialogContent data-testid="verify-dialog">
+      <DialogContent
+        className="max-h-[85dvh] overflow-y-auto"
+        data-testid="verify-dialog"
+      >
         <DialogHeader>
           <DialogTitle>{t("verify.title")}</DialogTitle>
           <DialogDescription>
@@ -252,6 +256,50 @@ export function VerifyContactDialog({
             <p className="text-sm text-destructive [overflow-wrap:anywhere]">
               {err}
             </p>
+          )}
+
+          {trust && (
+            <details className="text-sm">
+              <summary className="cursor-pointer py-1 font-medium">
+                {t("trustCard.privateHistory")}
+              </summary>
+              <div className="mt-2 space-y-2 text-xs text-muted-foreground">
+                <p>{t("trustCard.privateHistoryHint")}</p>
+                <p>
+                  {t("trustCard.firstSeen", {
+                    date:
+                      trust.first_seen_at_ms == null
+                        ? t("trustCard.unknown")
+                        : new Date(trust.first_seen_at_ms).toLocaleString(),
+                  })}
+                </p>
+                {trust.device_changes?.map((change, index) => (
+                  <div key={index} className="space-y-1 border-t pt-2">
+                    <p>{new Date(change.observed_at_ms).toLocaleString()}</p>
+                    <p className="break-all font-mono">
+                      {t("trustCard.previousFingerprint", {
+                        fingerprint: change.previous_fingerprint,
+                      })}
+                    </p>
+                    <p className="break-all font-mono">
+                      {t("trustCard.currentFingerprint", {
+                        fingerprint: change.current_fingerprint,
+                      })}
+                    </p>
+                  </div>
+                ))}
+                {!trust.device_changes?.length && (
+                  <p>{t("trustCard.noDeviceChanges")}</p>
+                )}
+              </div>
+            </details>
+          )}
+
+          {open && (
+            <TrustCardPanel
+              key={`${owner}:${accountId}`}
+              accountId={accountId}
+            />
           )}
 
           <div className="flex justify-end">

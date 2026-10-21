@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use zeroize::Zeroize;
 
-pub const SNAPSHOT_SCHEMA_VERSION: u16 = 2;
+pub const SNAPSHOT_SCHEMA_VERSION: u16 = 3;
 const MAGIC: &[u8; 8] = b"MTSNAP1\0";
 const MAX_RECORDS: u64 = 10_000_000;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
@@ -113,6 +113,10 @@ pub enum SnapshotRecordV1 {
     DmLanguageDecision {
         id: [u8; 32],
         hidden: bool,
+    },
+    /// Schema 3 appends this tag; earlier positional tags stay unchanged.
+    PeerTrustCard {
+        card: crate::node::TrustCard,
     },
 }
 
@@ -290,6 +294,8 @@ pub struct SnapshotValidator {
     received_ids: HashSet<[u8; 32]>,
     recalls: HashSet<([u8; 32], [u8; 32])>,
     profiles: HashSet<String>,
+    trust_cards: HashSet<String>,
+    trust_card_bytes: usize,
     account_contacts: HashSet<String>,
     event_ids: HashMap<[u8; 32], SignedEventInfo>,
     file_cards: HashMap<[u8; 32], FileCardInfo>,
@@ -356,6 +362,8 @@ impl SnapshotValidator {
             received_ids: HashSet::new(),
             recalls: HashSet::new(),
             profiles: HashSet::new(),
+            trust_cards: HashSet::new(),
+            trust_card_bytes: 0,
             account_contacts: HashSet::new(),
             event_ids: HashMap::new(),
             file_cards: HashMap::new(),
@@ -416,6 +424,21 @@ impl SnapshotValidator {
                 }
                 if !self.profiles.insert(account_id.clone()) {
                     return Err(SnapshotError::DuplicateRecord);
+                }
+            }
+            SnapshotRecordV1::PeerTrustCard { card } => {
+                if self.schema_version < 3 {
+                    return Err(SnapshotError::UnsupportedVersion);
+                }
+                if !card.verify() {
+                    return Err(SnapshotError::InvalidEncoding);
+                }
+                if !self.trust_cards.insert(card.account_id()) {
+                    return Err(SnapshotError::DuplicateRecord);
+                }
+                self.trust_card_bytes = self.trust_card_bytes.saturating_add(card.encode().len());
+                if self.trust_cards.len() > 1024 || self.trust_card_bytes > 32 * 1024 * 1024 {
+                    return Err(SnapshotError::SizeLimit);
                 }
             }
             SnapshotRecordV1::DmLanguageProfile { payload } => {

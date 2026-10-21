@@ -271,6 +271,12 @@ export interface DownloadedUpdate {
 // --- Contact trust / safety numbers (src-tauri/src/trust.rs + chat_commands.rs) ---
 
 export interface TrustInfo {
+  first_seen_at_ms?: number | null;
+  device_changes?: Array<{
+    previous_fingerprint: string;
+    current_fingerprint: string;
+    observed_at_ms: number;
+  }>;
   account_id: string;
   /** The fingerprint pinned on first contact (the one to verify out-of-band). */
   first_seen_fingerprint: string;

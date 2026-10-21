@@ -377,3 +377,13 @@ reading-to-settings navigation. `tools/help/` owns shared search, restricted
 Markdown rendering, static publication and read-only documentation MCP. These
 modules consume no private messaging state and introduce no core protocol
 responsibility. See [help system maintenance](help-system.md).
+
+### Peer trust evidence
+
+`core/node/trust_card.rs` owns signed public card and proof validation; its node
+I/O owner owns authenticated publication and encrypted current-card persistence.
+`src-tauri/src/trust_cards.rs` adapts admitted commands and bounded versioned JSON.
+`src-tauri/src/trust.rs` owns private first-observed time, device-change history
+and manual verification. Profile renderers must not derive verification from a
+valid public signature. The [peer trust guide](peer-trust.md) owns claim meanings
+and evidence limits.

@@ -32,6 +32,10 @@ pub struct ProfileStore {
 }
 
 impl ProfileStore {
+    #[cfg(test)]
+    pub(super) fn fail_appends_for_test(&mut self, enabled: bool) {
+        self.file.fail_appends_for_test(enabled).unwrap();
+    }
     /// Open (or create) the store at `path`, collapsing stored records to the newest
     /// per account.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {

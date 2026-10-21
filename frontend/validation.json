@@ -265,6 +265,42 @@
       "escalation": [
         "Changed presence IPC and visible status require browser presence/recovery and native lifecycle evidence."
       ]
+    },
+    {
+      "id": "frontend-trust-cards",
+      "paths": [
+        "frontend/src/features/chat/TrustCardPanel.tsx",
+        "frontend/src/lib/api/trustCards.ts",
+        "frontend/src/lib/trustCard.ts",
+        "frontend/src/lib/trustCard.test.ts",
+        "frontend/e2e/trust-cards.spec.ts",
+        "frontend/src/features/chat/TrustCardPanel.test.ts",
+        "frontend/src/locales/en.json",
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png"
+      ],
+      "frontend": [
+        "src/lib/trustCard.test.ts",
+        "src/features/chat/VerifyContactDialog.test.ts",
+        "src/features/chat/TrustCardPanel.test.ts"
+      ],
+      "consumers": ["frontend-chat"],
+      "capability": {
+        "summary": "Present signed public profiles and explicit proofs separately from device-local verification and observation history.",
+        "guide": "docs/ARCHITECTURE.md",
+        "invariants": [
+          {
+            "name": "Signed statements do not automatically verify people or export local trust",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Creation dates remain unknown until explicitly declared",
+            "reference": "docs/ARCHITECTURE.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/trust-cards.spec.ts for publish/import/export/proof controls. Native signatures, persistence and transport require owning Rust evidence."
+      ]
     }
   ],
   "prScenarios": [
@@ -388,6 +424,20 @@
         "e2e/connection-recovery.spec.ts"
       ],
       "native": ["host"]
+    },
+    {
+      "id": "frontend-trust-cards-acceptance",
+      "paths": [
+        "frontend/src/features/chat/TrustCardPanel.tsx",
+        "frontend/src/lib/api/trustCards.ts",
+        "frontend/src/lib/trustCard.ts",
+        "frontend/src/lib/trustCard.test.ts",
+        "frontend/e2e/trust-cards.spec.ts",
+        "frontend/src/features/chat/ProfileDialog.tsx",
+        "frontend/src/features/chat/VerifyContactDialog.tsx",
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png"
+      ],
+      "browser": ["e2e/trust-cards.spec.ts", "e2e/ui-audit-dialogs.spec.ts"]
     }
   ]
 }

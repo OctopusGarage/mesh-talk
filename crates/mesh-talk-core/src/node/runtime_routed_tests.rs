@@ -355,6 +355,10 @@ async fn start_opens_a_node_and_exposes_its_identity() {
     assert_eq!(runtime.user_id().len(), 32); // user_id is 32 hex chars
     assert!(runtime.peers().is_empty());
     assert!(runtime.peer_public("nobody").is_none());
+    let card = runtime.handle().trust_card(runtime.account_id()).unwrap();
+    assert_eq!(card.display_name, "Alice");
+    assert!(card.created_at_ms.is_some());
+    assert!(card.verify());
     assert!(
         !runtime
             .handle()
@@ -389,6 +393,32 @@ async fn start_opens_a_node_and_exposes_its_identity() {
     assert_eq!(runtime.host_account_id(), Some("alice-user-id"));
     assert!(node_dir.join("account.keystore").exists());
     assert_eq!(runtime.account_id(), runtime2.account_id());
+}
+
+#[tokio::test]
+async fn existing_account_without_creation_evidence_stays_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("accounts").join("legacy");
+    std::fs::create_dir_all(&profile).unwrap();
+    let account = crate::identity::account::Account::generate();
+    crate::identity::account_keystore::save(&profile.join("account.keystore"), "pw", &account)
+        .unwrap();
+    let runtime = NodeRuntime::start(
+        dir.path(),
+        "legacy",
+        "Legacy",
+        "pw",
+        0,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert!(runtime.handle().trust_card(&account.account_id()).is_none());
+    runtime.stop().await;
 }
 
 #[tokio::test]

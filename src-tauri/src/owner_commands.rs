@@ -422,6 +422,12 @@ mod tests {
                     crate::chat_commands::read_file,
                     crate::chat_commands::read_media,
                     crate::trust::mark_verified,
+                    crate::trust::get_trust,
+                    crate::trust_cards::get_trust_card,
+                    crate::trust_cards::publish_trust_card,
+                    crate::trust_cards::import_trust_artifact,
+                    crate::trust_cards::create_trust_introduction,
+                    crate::trust_cards::witness_trust_creation,
                     crate::chat_commands::send_file_to_account,
                     crate::chat_commands::send_to_account,
                     crate::chat_commands::send_sticker,
@@ -1164,6 +1170,233 @@ mod tests {
         }
     }
 
+    fn trust_card_command_cases(owner: &str) -> Vec<(&'static str, serde_json::Value)> {
+        let account = mesh_talk_core::identity::account::Account::generate();
+        let card = mesh_talk_core::node::TrustCard::new(
+            &account,
+            1,
+            "Imported peer".into(),
+            String::new(),
+            None,
+            None,
+        );
+        let artifact = serde_json::json!({"schema":1,"kind":"card","payload":card}).to_string();
+        vec![
+            (
+                "get_trust_card",
+                serde_json::json!({"owner":owner,"accountId":"00".repeat(16)}),
+            ),
+            (
+                "publish_trust_card",
+                serde_json::json!({"owner":owner,"displayName":"Alice","bio":"Hello","createdAtMs":null}),
+            ),
+            (
+                "import_trust_artifact",
+                serde_json::json!({"owner":owner,"json":artifact}),
+            ),
+            (
+                "create_trust_introduction",
+                serde_json::json!({"owner":owner,"accountId":"00".repeat(16),"note":"Met in person"}),
+            ),
+            (
+                "witness_trust_creation",
+                serde_json::json!({"owner":owner,"accountId":"00".repeat(16)}),
+            ),
+        ]
+    }
+
+    #[test]
+    fn registered_trust_card_commands_reject_wrong_owner_and_locked_app() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        for (command, body) in trust_card_command_cases("bob") {
+            assert_eq!(
+                fixture.invoke(command, body).unwrap_err()["kind"],
+                "authorization",
+                "{command} must reject another owner before parsing or reading artifacts"
+            );
+        }
+        crate::app_lock::lock_app(
+            fixture.webview.state::<AppState>(),
+            fixture.webview.state::<crate::app_lock::AppLock>(),
+        )
+        .unwrap();
+        for (command, body) in trust_card_command_cases("alice") {
+            assert_eq!(
+                fixture.invoke(command, body).unwrap_err()["kind"],
+                "authorization",
+                "{command} must reject a locked app before reading or mutating artifacts"
+            );
+        }
+    }
+
+    #[test]
+    fn registered_trust_card_commands_round_trip_public_evidence_without_verifying() {
+        use mesh_talk_core::{
+            identity::account::Account,
+            node::{Introduction, TimestampWitness, TrustCard},
+        };
+        let fixture = Fixture::new();
+        let own_id = fixture
+            .node
+            .0
+            .blocking_lock()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let get = |account: &str| {
+            fixture
+                .invoke(
+                    "get_trust_card",
+                    serde_json::json!({"owner":"alice","accountId":account}),
+                )
+                .unwrap()
+        };
+        let initial = get(&own_id);
+        let created = initial["created_at_ms"].as_u64().unwrap();
+        fixture.invoke("publish_trust_card", serde_json::json!({"owner":"alice","displayName":"Alice signed","bio":"Public bio","createdAtMs":created})).unwrap();
+        assert_eq!(get(&own_id)["display_name"], "Alice signed");
+
+        let peer = Account::generate();
+        let peer_id = peer.account_id();
+        let import = |kind: &str, payload: serde_json::Value| {
+            fixture.invoke("import_trust_artifact", serde_json::json!({"owner":"alice","json":serde_json::json!({"schema":1,"kind":kind,"payload":payload}).to_string()}))
+        };
+        let card = TrustCard::new(&peer, 1, "Bob".into(), "Peer bio".into(), Some(42), None);
+        import("card", serde_json::to_value(card).unwrap()).unwrap();
+        assert_eq!(get(&peer_id)["display_name"], "Bob");
+        let trust = fixture
+            .invoke(
+                "get_trust",
+                serde_json::json!({"owner":"alice","accountId":peer_id,"currentFingerprint":""}),
+            )
+            .unwrap();
+        assert_eq!(trust["verified"], false);
+        assert_eq!(trust["known"], false);
+
+        let intro = fixture
+            .invoke(
+                "create_trust_introduction",
+                serde_json::json!({"owner":"alice","accountId":peer_id,"note":"Met independently"}),
+            )
+            .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(intro.as_str().unwrap()).unwrap();
+        let intro: Introduction = serde_json::from_value(envelope["payload"].clone()).unwrap();
+        assert!(intro.verify());
+        assert_eq!(intro.subject_account_id, peer_id);
+        let witness = fixture
+            .invoke(
+                "witness_trust_creation",
+                serde_json::json!({"owner":"alice","accountId":peer_id}),
+            )
+            .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(witness.as_str().unwrap()).unwrap();
+        let witness: TimestampWitness =
+            serde_json::from_value(envelope["payload"].clone()).unwrap();
+        assert!(witness.verify());
+
+        import(
+            "introduction",
+            serde_json::to_value(Introduction::new(
+                &peer,
+                own_id.clone(),
+                "Known colleague".into(),
+                created,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        import(
+            "witness",
+            serde_json::to_value(TimestampWitness::new(
+                &peer,
+                own_id.clone(),
+                created,
+                created + 1,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let own = get(&own_id);
+        assert_eq!(own["introductions"][0]["issuer_account_id"], peer_id);
+        assert_eq!(own["witnesses"][0]["issuer_verified"], false);
+        let json = own["signed_json"].as_str().unwrap();
+        assert!(!json.contains("issuer_verified"));
+        assert!(!json.contains("first_seen"));
+        assert!(!json.contains("device_changes"));
+    }
+
+    #[test]
+    fn registered_trust_card_commands_reject_replaced_queued_authority() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        for change in ["relogin", "logout", "lock"] {
+            for (command, body) in trust_card_command_cases("alice") {
+                fixture.app_state.app_lock().clear();
+                fixture
+                    .app_state
+                    .session()
+                    .set("entry".into(), user("alice"), "pw".into());
+                let (entered, captured) = std::sync::mpsc::channel();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+                let lifecycle = fixture.node.0.blocking_lock();
+                let webview = fixture.webview.clone();
+                let pending = std::thread::spawn(move || invoke(&webview, command, body));
+                let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
+                match change {
+                    "logout" => fixture.app_state.session().clear(),
+                    "relogin" => fixture.app_state.session().set(
+                        "replacement".into(),
+                        user("alice"),
+                        "pw".into(),
+                    ),
+                    _ => crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap(),
+                }
+                drop(lifecycle);
+                let result = pending.join().unwrap();
+                assert!(
+                    captured.is_ok(),
+                    "{command} must capture authority before waiting"
+                );
+                assert_eq!(
+                    result.unwrap_err()["kind"],
+                    "authorization",
+                    "{command}: {change}"
+                );
+                *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+            }
+        }
+    }
+
+    #[test]
+    fn private_trust_commands_reject_uncertified_device_without_rewriting_history() {
+        let fixture = Fixture::new();
+        let trust_path =
+            crate::config_store::account_path(&crate::data_dir(), "alice", "trust.json").unwrap();
+        let before = std::fs::read(&trust_path).ok();
+        for (command, body) in [
+            (
+                "get_trust",
+                serde_json::json!({"owner":"alice","accountId":"claimed-account","currentFingerprint":"claimed-device"}),
+            ),
+            (
+                "mark_verified",
+                serde_json::json!({"owner":"alice","accountId":"claimed-account","fingerprint":"claimed-device"}),
+            ),
+        ] {
+            assert_eq!(
+                fixture.invoke(command, body).unwrap_err()["kind"],
+                "authorization"
+            );
+            assert_eq!(std::fs::read(&trust_path).ok(), before);
+        }
+    }
+
     #[test]
     fn registered_plaintext_and_trust_commands_reject_replaced_entry_authority() {
         use tauri::Manager;
@@ -1182,6 +1415,10 @@ mod tests {
                 (
                     "mark_verified",
                     serde_json::json!({"owner":"alice","accountId":"contact","fingerprint":"fp"}),
+                ),
+                (
+                    "get_trust",
+                    serde_json::json!({"owner":"alice","accountId":"contact","currentFingerprint":"fp"}),
                 ),
             ] {
                 fixture.app_state.app_lock().clear();
@@ -1504,7 +1741,32 @@ mod tests {
         };
         let before = metadata();
         let policy = node.privacy_snapshot();
-        let before_log = std::fs::read(directory.join("messages.log")).unwrap();
+        // Discovery may publish our signed profile while this probe waits. Check
+        // every other event kind without mistaking those independent public
+        // profile writes for work accepted from the rejected owner command.
+        let event_ids = || {
+            let snapshot = tempfile::tempdir().unwrap();
+            let path = snapshot.path().join("messages.log");
+            std::fs::copy(directory.join("messages.log"), &path).unwrap();
+            let log = mesh_talk_core::eventlog::persist::PersistentEventLog::open(
+                &path,
+                "password-owner",
+            )
+            .unwrap();
+            let mut profiles = 0;
+            let other = log
+                .all_event_ids()
+                .into_iter()
+                .filter(|id| {
+                    let profile = log.get(id).unwrap().kind
+                        == mesh_talk_core::eventlog::event::EventKind::Profile;
+                    profiles += usize::from(profile);
+                    !profile
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            (other, profiles)
+        };
+        let (before_log, before_profiles) = event_ids();
         let work = || {
             [
                 "sent.log",
@@ -1627,7 +1889,8 @@ mod tests {
         *fixture.app_state.owner_command_captured.lock().unwrap() = None;
         let metadata_unchanged = metadata() == before;
         let policy_unchanged = node.privacy_snapshot() == policy;
-        let log_unchanged = std::fs::read(directory.join("messages.log")).unwrap() == before_log;
+        let (after_log, after_profiles) = event_ids();
+        let non_profile_log_unchanged = after_log == before_log;
         let staged = staged.load(Ordering::SeqCst);
         let history_empty = node.account_history(&account, 10).is_empty();
         let work_unchanged = work() == before_work;
@@ -1651,7 +1914,7 @@ mod tests {
         let reopened_empty = reopened.account_history(&account, 10).is_empty();
         tauri::async_runtime::block_on(reopened.stop());
         eprintln!(
-            "{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, log_unchanged={log_unchanged}"
+            "{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, non_profile_log_unchanged={non_profile_log_unchanged}, profiles_before={before_profiles}, profiles_after={after_profiles}"
         );
         assert!(authorized && published && logged_out && replaced);
         assert_eq!(
@@ -1676,7 +1939,7 @@ mod tests {
             "rejected registered {command} must not persist a grant after logout publication"
         );
         assert_eq!(staged, 0);
-        assert!(log_unchanged);
+        assert!(non_profile_log_unchanged);
     }
 
     #[test]

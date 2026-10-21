@@ -397,7 +397,11 @@ impl PersistentEventLog {
     /// safe regardless of history or peer version. New profile events are kept out of the
     /// head frontier (see [`EventLog::index_trusted`]) so they're unreferenced; any profile
     /// a message DID reference (legacy / an older peer's) stays. Deterministic (highest
-    /// `(lamport, id)` wins per author) so peers converge. Rewrites only when at least
+    /// `(lamport, id)` order per author) so peers converge. Preserve the latest two
+    /// unreferenced leaves per author. Compatibility avatars name their paired signed
+    /// cards as parents, which stay until superseded children have been removed.
+    /// The event log cannot classify ciphertext.
+    /// Rewrites only when at least
     /// `COMPACT_PROFILE_MIN` are droppable, to amortize the rebuild. Returns the count dropped.
     pub fn compact_superseded_profiles(
         &mut self,
@@ -409,10 +413,14 @@ impl PersistentEventLog {
                 .iter()
                 .flat_map(|e| e.parents.iter().copied())
                 .collect();
-            let mut newest: HashMap<Author, EventId> = HashMap::new();
+            let mut newest: HashMap<Author, Vec<EventId>> = HashMap::new();
             for e in &events {
                 if e.kind == EventKind::Profile && !referenced.contains(&e.id) {
-                    newest.insert(e.author, e.id); // (lamport, id) order ⇒ last is newest
+                    let pair = newest.entry(e.author).or_default();
+                    if pair.len() == 2 {
+                        pair.remove(0);
+                    }
+                    pair.push(e.id); // (lamport, id) order ⇒ last pair is newest
                 }
             }
             events
@@ -420,7 +428,9 @@ impl PersistentEventLog {
                 .filter(|e| {
                     e.kind == EventKind::Profile
                         && !referenced.contains(&e.id)
-                        && newest.get(&e.author) != Some(&e.id)
+                        && !newest
+                            .get(&e.author)
+                            .is_some_and(|pair| pair.contains(&e.id))
                 })
                 .map(|e| e.id)
                 .collect()
@@ -856,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn compacts_superseded_unreferenced_profiles_keeping_newest_and_referenced() {
+    fn compacts_superseded_unreferenced_profiles_keeping_latest_pair_and_referenced() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log");
         let mut log = PersistentEventLog::open(&path, "pw").unwrap();
@@ -888,13 +898,13 @@ mod tests {
         assert_eq!(log.events(&conv).len(), 11); // 1 message + 10 profiles
 
         let dropped = log.compact_superseded_profiles(&conv).unwrap();
-        assert_eq!(dropped, 9); // 10 profiles − the newest = 9 (≥ COMPACT_PROFILE_MIN)
+        assert_eq!(dropped, 8); // Preserve the latest legacy-avatar / signed-card pair.
 
         let remaining = log.events(&conv);
         assert_eq!(
             remaining.len(),
-            2,
-            "only the message + newest profile remain"
+            3,
+            "the message and latest profile pair remain"
         );
         assert!(
             remaining.iter().any(|e| e.id == msg_id),
@@ -904,11 +914,15 @@ mod tests {
             remaining.iter().any(|e| e.id == newest_id),
             "the newest profile is kept (deterministic: highest lamport)"
         );
+        assert!(
+            remaining.iter().any(|e| e.ciphertext == b"avatar8"),
+            "the other leaf of the latest publication pair is kept"
+        );
 
         // The on-disk log was rewritten too — survives a reopen.
         drop(log);
         let log2 = PersistentEventLog::open(&path, "pw").unwrap();
-        assert_eq!(log2.events(&conv).len(), 2);
+        assert_eq!(log2.events(&conv).len(), 3);
     }
 
     #[test]
@@ -951,7 +965,7 @@ mod tests {
         );
         log.append(m2).unwrap();
 
-        // 10 newer, unreferenced profiles (current shape) → 9 droppable, 1 newest kept.
+        // 10 newer, unreferenced profiles → 8 droppable, latest pair kept.
         let mut newest_id = p0_id;
         for i in 0..10u64 {
             let p = Event::new(
@@ -970,8 +984,8 @@ mod tests {
 
         let dropped = log.compact_superseded_profiles(&conv).unwrap();
         assert_eq!(
-            dropped, 9,
-            "only the 9 superseded UNREFERENCED profiles drop"
+            dropped, 8,
+            "only the 8 superseded UNREFERENCED profiles drop"
         );
         let ids: Vec<_> = log.events(&conv).iter().map(|e| e.id).collect();
         assert!(
@@ -1003,7 +1017,7 @@ mod tests {
         let msg = mk(&id, 1, 1, b"hi");
         let msg_id = msg.id;
         log.append(msg).unwrap();
-        // Only 3 profiles → 2 droppable < COMPACT_PROFILE_MIN → left as-is (amortization).
+        // Only 3 profiles → 1 droppable < COMPACT_PROFILE_MIN → left as-is (amortization).
         for i in 0..3u64 {
             let p = Event::new(
                 &id,

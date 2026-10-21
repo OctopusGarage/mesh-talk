@@ -237,7 +237,20 @@ test("shared Cargo configuration selects every workspace crate via owning contra
   }
   const profile = buildAffectedPlan(["crates/mesh-talk-core/src/node/account_profile.rs"], { contracts: registered });
   assert(!profile.owners.some(owner => owner.id === "core-node"), "established focused ownership must not widen through the catch-all Node prefix");
-  assert.equal(profile.rust.find(item => item.package === "mesh-talk-core").filters.length, 5);
+  assert.deepEqual(profile.rust.find(item => item.package === "mesh-talk-core").filters, [
+    "node::account_profile::tests::",
+    "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
+    "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
+    "node::node::tests::trust_card_exhausted_avatar_revision_rejects_before_either_store_mutates",
+    "node::node::tests::trust_card_linked_device_pair_preserves_metadata_and_requires_card_parent",
+    "node::node::tests::trust_card_projection_retry_and_restart_preserve_avatar_and_identity_lifetime",
+    "node::node::tests::trust_card_propagates_signed_claims_over_loopback",
+    "node::node::tests::trust_card_reconciles_newer_sibling_legacy_avatar",
+    "node::node::tests::trust_card_terminal_legacy_avatar_reconciles_on_restart",
+    "node::profile::tests::",
+    "node::profile_store::tests::",
+    "node::trust_card::tests::",
+  ]);
   const consentFixture = buildAffectedPlan(["crates/mesh-talk-core/src/node/file_consent_tests.rs"], {contracts:registered});
   assert.deepEqual(consentFixture.owners.map(owner => owner.id), ["core-file-consent-tests"]);
   assert.deepEqual(consentFixture.rust, [{package:"mesh-talk-core",filters:["node::file_consent_tests::"]}]);
