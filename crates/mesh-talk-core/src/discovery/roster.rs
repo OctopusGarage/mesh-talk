@@ -109,20 +109,25 @@ impl PeerRecord {
     /// Fresh public observations, independently of preferred route or TCP success.
     /// The third value is the remaining monotonic lifetime in seconds.
     pub fn presence_evidence(&self, now: Instant) -> Vec<(RouteSource, u64, u64)> {
-        self.routes
-            .iter()
-            .filter_map(|route| {
-                let age = now.saturating_duration_since(route.last_seen).as_secs();
-                let deadline = route.public_presence_deadline()?;
-                (deadline > now).then(|| {
-                    (
-                        route.source,
-                        age,
-                        deadline.saturating_duration_since(now).as_secs(),
-                    )
-                })
-            })
+        self.presence_routes(now)
+            .map(|(route, age, remaining)| (route.source, age, remaining))
             .collect()
+    }
+
+    /// Fresh observations with their exact introducing endpoint retained.
+    /// A post-office endpoint identifies the introducer, not the member's location.
+    pub fn presence_routes(&self, now: Instant) -> impl Iterator<Item = (&PeerEndpoint, u64, u64)> {
+        self.routes.iter().filter_map(move |route| {
+            let age = now.saturating_duration_since(route.last_seen).as_secs();
+            let deadline = route.public_presence_deadline()?;
+            (deadline > now).then(|| {
+                (
+                    route,
+                    age,
+                    deadline.saturating_duration_since(now).as_secs(),
+                )
+            })
+        })
     }
 
     /// Bounded presentation tolerance, independent of fresh device evidence.
@@ -1203,6 +1208,37 @@ mod routed_tests {
         let peer = roster.get(&proof.user_id).unwrap();
         assert!(peer.has_direct_route());
         assert!(peer.presence_evidence(Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn fresh_presence_routes_keep_introducing_endpoints_until_each_deadline() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
+        let mut roster = Roster::default();
+        roster.update(&proof, "192.168.1.2".parse().unwrap(), "self");
+        let mut peer = roster.get(&proof.user_id).unwrap().clone();
+        let now = peer.routes[0].last_seen;
+        for (endpoint, lifetime) in [("127.0.0.2:47479", 5), ("127.0.0.3:47479", 10)] {
+            let mut route = peer.routes[0].clone();
+            route.source = RouteSource::PostOffice;
+            route.addr = endpoint.parse().unwrap();
+            route.presence_expires_at = Some(now + Duration::from_secs(lifetime));
+            peer.routes.push(route);
+        }
+        let project = |at| {
+            peer.presence_routes(at)
+                .map(|(route, _, _)| (route.source, route.addr.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(project(now).len(), 3);
+        assert_eq!(
+            project(now + Duration::from_secs(5)),
+            vec![
+                (RouteSource::Lan, "192.168.1.2:1".into()),
+                (RouteSource::PostOffice, "127.0.0.3:47479".into()),
+            ]
+        );
+        assert_eq!(project(now + Duration::from_secs(15)), vec![]);
     }
 
     #[test]

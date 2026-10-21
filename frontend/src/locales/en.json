@@ -925,6 +925,12 @@
     "idConflict": "A different library type already uses this pack ID."
   },
   "memberProfile": {
+    "discoveredVia": "Discovered via",
+    "discoveryLocal": "Local LAN · UDP multicast",
+    "discoveryPostOffice": "Post office · {{name}}",
+    "discoveryUnnamedOffice": "Post office · name unavailable",
+    "discoveryUnavailable": "No current discovery information",
+    "discoveryHint": "How this client discovered the member; message routes may differ.",
     "originalName": "Original name",
     "remark": "Remark",
     "title": "Member profile",

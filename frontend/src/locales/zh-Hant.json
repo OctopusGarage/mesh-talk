@@ -925,6 +925,12 @@
     "idConflict": "其他類型的資源庫已使用這個資源包 ID。"
   },
   "memberProfile": {
+    "discoveredVia": "發現來源",
+    "discoveryLocal": "本地區域網路 · UDP 群播",
+    "discoveryPostOffice": "郵局 · {{name}}",
+    "discoveryUnnamedOffice": "郵局 · 名稱未知",
+    "discoveryUnavailable": "暫無有效的發現來源資訊",
+    "discoveryHint": "此用戶端發現成員的途徑；訊息的實際傳輸路徑可能不同。",
     "originalName": "原始名稱",
     "remark": "備註",
     "title": "成員資料",

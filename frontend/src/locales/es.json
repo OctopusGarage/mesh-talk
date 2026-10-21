@@ -925,6 +925,12 @@
     "idConflict": "Otro tipo de biblioteca ya usa este ID de paquete."
   },
   "memberProfile": {
+    "discoveredVia": "Descubierto mediante",
+    "discoveryLocal": "Red local · multidifusión UDP",
+    "discoveryPostOffice": "Oficina postal · {{name}}",
+    "discoveryUnnamedOffice": "Oficina postal · nombre no disponible",
+    "discoveryUnavailable": "Sin información de descubrimiento vigente",
+    "discoveryHint": "Cómo este cliente descubrió al miembro; la ruta de los mensajes puede variar.",
     "originalName": "Nombre original",
     "remark": "Alias personal",
     "title": "Perfil del miembro",

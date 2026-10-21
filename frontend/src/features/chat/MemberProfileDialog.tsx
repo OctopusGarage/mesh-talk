@@ -17,7 +17,10 @@ import {
   usePresenceFor,
 } from "@/store/presence";
 import type { MemberProfileTarget } from "./memberProfileDetails";
-import { memberProfileDevices } from "./memberProfileDetails";
+import {
+  memberDiscoverySources,
+  memberProfileDevices,
+} from "./memberProfileDetails";
 
 export function MemberProfileDialog({
   target,
@@ -76,6 +79,7 @@ function MemberProfileContent({
     { ...target, accountId: identity.accountId },
     peers,
   );
+  const discoverySources = memberDiscoverySources(presence);
   const name = identity.name;
   const accountId = identity.accountId;
 
@@ -101,6 +105,48 @@ function MemberProfileContent({
             {presenceLabel(presence, t)}
           </p>
         </div>
+
+        <section
+          aria-label={t("memberProfile.discoveredVia")}
+          data-testid="member-discovery-sources"
+          className="min-w-0 space-y-2"
+        >
+          <h3 className="text-sm font-medium">
+            {t("memberProfile.discoveredVia")}
+          </h3>
+          {discoverySources.length ? (
+            <ul className="space-y-2 text-sm">
+              {discoverySources.map((entry) => (
+                <li
+                  key={JSON.stringify(entry)}
+                  className="min-w-0 [overflow-wrap:anywhere]"
+                >
+                  {entry.source === "local"
+                    ? t("memberProfile.discoveryLocal")
+                    : entry.source === "directory"
+                      ? entry.postOffice?.name
+                        ? t("memberProfile.discoveryPostOffice", {
+                            name: entry.postOffice.name,
+                          })
+                        : t("memberProfile.discoveryUnnamedOffice")
+                      : t(`presence.source_${entry.source}`)}
+                  {entry.postOffice && (
+                    <code className="block select-text text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                      {entry.postOffice.endpoint}
+                    </code>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {t("memberProfile.discoveryUnavailable")}
+            </p>
+          )}
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("memberProfile.discoveryHint")}
+          </p>
+        </section>
 
         <p className="text-xs text-muted-foreground">
           {t("presence.offlineHint")}

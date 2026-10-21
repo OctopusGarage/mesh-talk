@@ -273,12 +273,16 @@
         "frontend/src/features/chat/connectionState.test.ts",
         "frontend/DESIGN.md",
         "frontend/e2e/person-presence.spec.ts",
-        "frontend/src/components/identity/IdentityCrest.tsx"
+        "frontend/src/components/identity/IdentityCrest.tsx",
+        "frontend/src/features/chat/MemberProfileDialog.tsx",
+        "frontend/src/features/chat/memberProfileDetails.ts",
+        "frontend/src/features/chat/memberProfileDetails.test.ts"
       ],
       "frontend": [
         "src/store/presence.test.ts",
         "src/lib/presenceLabels.test.ts",
-        "src/features/chat/connectionState.test.ts"
+        "src/features/chat/connectionState.test.ts",
+        "src/features/chat/memberProfileDetails.test.ts"
       ],
       "capability": {
         "summary": "Age source-specific presence presentation independently of fresh device evidence.",
@@ -286,6 +290,10 @@
         "invariants": [
           {
             "name": "LAN-only presence expires at fifteen seconds; cross-network Online tolerance expires at 120 seconds from the original public observation without manufacturing fresh evidence; concise quality labels are shared; routed quality clears after thirty healthy seconds while fresh LAN clears inherited routed hints immediately; adaptive tolerance alone never establishes slow connection; fresh current-device evidence carries a real local lease for group counts and clears inherited routed quality; authoritative withdrawal bypasses tolerance",
+            "reference": "docs/network-design-reference.md#person-presence-contract"
+          },
+          {
+            "name": "Member discovery sources retain overlapping local UDP multicast and distinct named introducing post offices only while their own evidence is fresh; discovery is not a delivery path or location.",
             "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]
@@ -552,7 +560,9 @@
         "frontend/src/components/identity/PresenceDot.tsx",
         "frontend/src/features/chat/connectionState.ts",
         "src-tauri/src/chat_commands/presence.rs",
-        "frontend/e2e/person-presence.spec.ts"
+        "frontend/e2e/person-presence.spec.ts",
+        "frontend/src/features/chat/MemberProfileDialog.tsx",
+        "frontend/src/features/chat/memberProfileDetails.ts"
       ],
       "browser": [
         "e2e/person-presence.spec.ts",

@@ -161,6 +161,72 @@ test("profile deduplicates a device with overlapping discovery sources", async (
   );
 });
 
+test("profile names introducing offices alongside local multicast and expires sources during refresh failure", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 520 });
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate((account) => {
+    (
+      window as unknown as { __mockSetPresence: (map: PresenceMap) => void }
+    ).__mockSetPresence({
+      [account]: {
+        online: true,
+        last_seen_secs: 0,
+        devices: [
+          {
+            user_id: "device_bob_2222",
+            evidence: [
+              { source: "local", last_seen_secs: 0, expires_in_secs: 4 },
+              {
+                source: "directory",
+                last_seen_secs: 0,
+                expires_in_secs: 30,
+                post_office: {
+                  user_id: "office-mini",
+                  name: "mac-mini-post-office",
+                  endpoint: "100.109.255.49:47479",
+                },
+              },
+              {
+                source: "directory",
+                last_seen_secs: 0,
+                expires_in_secs: 30,
+                post_office: {
+                  user_id: "office-2015",
+                  name: "mac2015-post-office",
+                  endpoint: "192.168.3.72:47479",
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+  }, BOB);
+  await page.getByTestId("conversation-member-profile").click();
+  const sources = page.getByTestId("member-discovery-sources");
+  await expect(sources).toContainText("Local LAN · UDP multicast");
+  await expect(sources).toContainText("Post office · mac-mini-post-office");
+  await expect(sources).toContainText("Post office · mac2015-post-office");
+  await expect(sources.getByRole("listitem")).toHaveCount(3);
+  await sources.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: testInfo.outputPath("member-discovery-sources.png"),
+  });
+  await page.evaluate(() => {
+    (
+      window as unknown as { __mockPresenceFailure: (failed: boolean) => void }
+    ).__mockPresenceFailure(true);
+  });
+  await expect(sources).not.toContainText("Local LAN · UDP multicast", {
+    timeout: 10000,
+  });
+  await expect(sources.getByRole("listitem")).toHaveCount(2);
+  await expect(sources).toContainText("mac-mini-post-office");
+});
+
 test("failed refresh announces unavailability, expires evidence, and recovers", async ({
   page,
 }) => {

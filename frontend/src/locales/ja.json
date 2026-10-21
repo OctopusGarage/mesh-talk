@@ -925,6 +925,12 @@
     "idConflict": "別の種類のライブラリがこのパックIDを使用しています。"
   },
   "memberProfile": {
+    "discoveredVia": "検出元",
+    "discoveryLocal": "ローカルLAN · UDPマルチキャスト",
+    "discoveryPostOffice": "ポストオフィス · {{name}}",
+    "discoveryUnnamedOffice": "ポストオフィス · 名前不明",
+    "discoveryUnavailable": "現在の検出元情報はありません",
+    "discoveryHint": "このクライアントがメンバーを検出した経路です。メッセージの経路は異なる場合があります。",
     "originalName": "元の名前",
     "remark": "メモ名",
     "title": "メンバープロフィール",

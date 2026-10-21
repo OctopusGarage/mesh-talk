@@ -206,7 +206,19 @@ public authenticated contact with unspecified network scope. Ordinary signed UDP
 observations outside the established interface scope show signed discovery with
 unspecified scope; they are not labeled local merely because of an address prefix.
 Sources can overlap
-on one device. Neither a source nor an endpoint establishes physical location.
+on one device. The profile's **Discovered via** summary deduplicates devices while
+retaining each fresh introducing post office and local **UDP multicast** source.
+The host resolves an office name and device identity only when its exact introducing
+endpoint uniquely matches an infrastructure device in the verified snapshot. If
+that match is absent or ambiguous, show the endpoint with an unavailable name;
+never infer an office from an IP prefix or a person's preferred route. The named
+office is the immediate directory introducer, not necessarily the originating site
+or an onward federation hop. Unknown-scope observations remain explicitly unscoped.
+Each source disappears at its own evidence deadline, including during failed IPC;
+Online tolerance never extends a discovery-source label. Discovery metadata is
+additive desktop IPC and does not change wire formats, trust or route selection.
+Neither a source nor an endpoint establishes physical location or the path of any
+particular message.
 A direct application path means no intermediate Mesh Talk post office; it says
 nothing about Tailscale's underlying transport. Online does not guarantee TCP,
 message delivery, file transfer, or calls. UDP discovery can succeed while TCP

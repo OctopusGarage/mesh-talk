@@ -4,6 +4,7 @@ use crate::commands::CommandError;
 use mesh_talk_core::discovery::roster::{PeerRecord, RouteSource};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::time::Instant;
 
 #[derive(Serialize, Clone)]
@@ -11,6 +12,18 @@ pub struct PresenceEvidence {
     source: &'static str,
     last_seen_secs: u64,
     expires_in_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    post_office: Option<PresencePostOffice>,
+}
+
+/// Immediate directory introducer, not a geographic origin or delivery receipt.
+#[derive(Serialize, Clone)]
+pub struct PresencePostOffice {
+    endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -40,7 +53,37 @@ pub struct PresenceInfo {
     member_keys: Option<Vec<String>>,
 }
 
+fn post_office_sources(peers: &[PeerRecord]) -> HashMap<SocketAddr, PresencePostOffice> {
+    let mut sources: HashMap<SocketAddr, PresencePostOffice> = HashMap::new();
+    for peer in peers.iter().filter(|peer| peer.post_office) {
+        for addr in std::iter::once(peer.addr).chain(peer.routes.iter().map(|route| route.addr)) {
+            let id = peer.public.user_id();
+            let source = sources.entry(addr).or_insert_with(|| PresencePostOffice {
+                endpoint: addr.to_string(),
+                user_id: Some(id.clone()),
+                name: Some(peer.name.clone()),
+            });
+            if source.user_id.as_deref() != Some(id.as_str()) {
+                // Shared gateway endpoints cannot uniquely identify an office.
+                source.user_id = None;
+                source.name = None;
+            }
+        }
+    }
+    sources
+}
+
+#[cfg(test)]
 fn add_peer(out: &mut HashMap<String, PresenceInfo>, peer: &PeerRecord, now: Instant) {
+    add_peer_with_sources(out, peer, now, &HashMap::new());
+}
+
+fn add_peer_with_sources(
+    out: &mut HashMap<String, PresenceInfo>,
+    peer: &PeerRecord,
+    now: Instant,
+    offices: &HashMap<SocketAddr, PresencePostOffice>,
+) {
     if peer.post_office {
         return;
     }
@@ -49,10 +92,9 @@ fn add_peer(out: &mut HashMap<String, PresenceInfo>, peer: &PeerRecord, now: Ins
         .clone()
         .unwrap_or_else(|| format!("device:{}", peer.public.user_id()));
     let evidence: Vec<_> = peer
-        .presence_evidence(now)
-        .into_iter()
-        .filter_map(|(source, age, remaining)| {
-            let source = match source {
+        .presence_routes(now)
+        .filter_map(|(route, age, remaining)| {
+            let source = match route.source {
                 RouteSource::Lan => "local",
                 RouteSource::Discovery => "unscoped",
                 RouteSource::RoutedQuery => "routed",
@@ -64,6 +106,16 @@ fn add_peer(out: &mut HashMap<String, PresenceInfo>, peer: &PeerRecord, now: Ins
                 source,
                 last_seen_secs: age,
                 expires_in_secs: remaining,
+                post_office: (route.source == RouteSource::PostOffice).then(|| {
+                    offices
+                        .get(&route.addr)
+                        .cloned()
+                        .unwrap_or_else(|| PresencePostOffice {
+                            endpoint: route.addr.to_string(),
+                            user_id: None,
+                            name: None,
+                        })
+                }),
             })
         })
         .collect();
@@ -100,13 +152,14 @@ fn add_current_peer(
     peer: &PeerRecord,
     current_binding: Option<&str>,
     now: Instant,
+    offices: &HashMap<SocketAddr, PresencePostOffice>,
 ) {
     // Certification can arrive while an unbound cached snapshot is in flight.
     // Only project evidence when the entire optional binding is still current.
     if current_binding != peer.account_id.as_deref() {
         return;
     }
-    add_peer(out, peer, now);
+    add_peer_with_sources(out, peer, now, offices);
 }
 
 fn add_group(
@@ -147,6 +200,7 @@ fn add_self(out: &mut HashMap<String, PresenceInfo>, account_id: String, user_id
             source: "self",
             last_seen_secs: 0,
             expires_in_secs: lease,
+            post_office: None,
         }],
     });
 }
@@ -175,6 +229,7 @@ pub async fn get_presence(
     }
     let now = Instant::now();
     let mut out = HashMap::new();
+    let offices = post_office_sources(&peers);
     for peer in &peers {
         // Cached snapshots already reject invalid/retired certificates. Resolve the
         // current binding again rather than assigning evidence to an obsolete account.
@@ -183,6 +238,7 @@ pub async fn get_presence(
             peer,
             rt.account_id_for_device(&peer.public).as_deref(),
             now,
+            &offices,
         );
     }
     add_self(
@@ -193,9 +249,16 @@ pub async fn get_presence(
     for person in out.values_mut() {
         person.devices.sort_by(|a, b| a.user_id.cmp(&b.user_id));
         for device in &mut person.devices {
-            device
-                .evidence
-                .sort_by_key(|e| (e.source, e.last_seen_secs, e.expires_in_secs));
+            device.evidence.sort_by(|a, b| {
+                (
+                    a.source,
+                    a.post_office.as_ref().map(|office| &office.endpoint),
+                )
+                    .cmp(&(
+                        b.source,
+                        b.post_office.as_ref().map(|office| &office.endpoint),
+                    ))
+            });
         }
     }
     for channel in rt.list_channels() {
@@ -257,6 +320,73 @@ mod tests {
             HashSet::new(),
         );
         assert_eq!(out["group"].online_count, Some(1));
+    }
+
+    #[test]
+    fn directory_sources_keep_exact_office_names_and_expire_independently() {
+        let account = Account::generate();
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &account, "Peer", 1);
+        let mut roster = Roster::default();
+        roster.update(&proof, "192.168.1.2".parse().unwrap(), "self");
+        let mut peer = roster.get(&proof.user_id).unwrap().clone();
+        let now = peer.routes[0].last_seen;
+        let mut offices = Vec::new();
+        for (index, name, lifetime) in [
+            (3, "mac-mini-post-office", 5),
+            (4, "mac2015-post-office", 10),
+        ] {
+            let office = DeviceIdentity::generate();
+            let announce =
+                Announce::new_post_office_with_account(&office, &Account::generate(), name, 47479);
+            roster.update(
+                &announce,
+                format!("192.168.1.{index}").parse().unwrap(),
+                "self",
+            );
+            let office = roster.get(&announce.user_id).unwrap().clone();
+            let mut route = peer.routes[0].clone();
+            route.source = RouteSource::PostOffice;
+            route.addr = office.addr;
+            route.presence_expires_at = Some(now + std::time::Duration::from_secs(lifetime));
+            peer.routes.push(route);
+            offices.push(office);
+        }
+        let mut out = HashMap::new();
+        add_peer_with_sources(&mut out, &peer, now, &post_office_sources(&offices));
+        let json = serde_json::to_value(&out[&account.account_id()]).unwrap();
+        let evidence = json["devices"][0]["evidence"].as_array().unwrap();
+        assert_eq!(evidence.len(), 3);
+        assert!(evidence[0].get("post_office").is_none());
+        assert_eq!(evidence[1]["post_office"]["name"], "mac-mini-post-office");
+        assert_eq!(
+            evidence[2]["post_office"]["user_id"],
+            offices[1].public.user_id()
+        );
+
+        let mut out = HashMap::new();
+        add_peer_with_sources(
+            &mut out,
+            &peer,
+            now + std::time::Duration::from_secs(5),
+            &post_office_sources(&offices),
+        );
+        assert_eq!(out[&account.account_id()].devices[0].evidence.len(), 2);
+        // A shared/gateway address is insufficient to choose between identities.
+        offices[1].addr = offices[0].addr;
+        offices[1].routes = offices[0].routes.clone();
+        let mut out = HashMap::new();
+        add_peer_with_sources(&mut out, &peer, now, &post_office_sources(&offices));
+        let json = serde_json::to_value(&out[&account.account_id()]).unwrap();
+        assert_eq!(
+            json["devices"][0]["evidence"][1]["post_office"]["endpoint"],
+            "192.168.1.3:47479"
+        );
+        assert!(
+            json["devices"][0]["evidence"][1]["post_office"]
+                .get("name")
+                .is_none()
+        );
     }
 
     #[test]
@@ -343,14 +473,20 @@ mod tests {
         let fallback = format!("device:{}", device.user_id());
 
         let mut unchanged = HashMap::new();
-        add_current_peer(&mut unchanged, &cached, None, now);
+        add_current_peer(&mut unchanged, &cached, None, now, &HashMap::new());
         assert!(
             unchanged[&fallback].online,
             "unbound devices remain visible while their binding is unchanged"
         );
 
         let mut raced = HashMap::new();
-        add_current_peer(&mut raced, &cached, Some("newly-certified-account"), now);
+        add_current_peer(
+            &mut raced,
+            &cached,
+            Some("newly-certified-account"),
+            now,
+            &HashMap::new(),
+        );
         assert!(
             raced.is_empty(),
             "a stale unbound snapshot must not publish a fallback after certification"

@@ -180,6 +180,12 @@ export interface PresenceEvidence {
     "local" | "routed" | "directory" | "authenticated" | "unscoped" | "self";
   last_seen_secs: number;
   expires_in_secs: number;
+  /** Immediate introducing office, not the member's location or a delivery path. */
+  post_office?: {
+    endpoint: string;
+    user_id?: string;
+    name?: string;
+  };
 }
 export interface PresenceDevice {
   user_id: string;
