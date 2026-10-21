@@ -207,7 +207,9 @@ export const usePresence = create<PresenceState>((set, get) => ({
               continue;
             }
             const recovering =
-              old[key] && presenceStatus(old[key]) === "reconnecting";
+              old[key] &&
+              !old[key].online &&
+              presenceStatus(old[key]) === "reconnecting";
             if (!recovering && !recoveryConfirmations.has(key)) continue;
             if (
               !recoveryConfirmations.has(key) &&
@@ -262,14 +264,17 @@ export const usePresence = create<PresenceState>((set, get) => ({
 
 export function presenceStatus(p: PresenceInfo): PresenceStatus {
   return p.online
-    ? "online"
+    ? p.connection_weak
+      ? "reconnecting"
+      : "online"
     : (p.reconnect_expires_in_secs ?? 0) > 0
       ? "reconnecting"
       : "offline";
 }
 
 export function presenceLabel(p: PresenceInfo, t: TFunction): string {
-  if (p.online) return t("presence.online");
+  if (p.online)
+    return t(p.connection_weak ? "presence.onlineWeak" : "presence.online");
   if (presenceStatus(p) === "reconnecting") return t("presence.reconnecting");
   const s = p.last_seen_secs;
   if (s == null) return t("presence.offline");
@@ -308,6 +313,7 @@ export function hasReconnectingPresence(
     ([key, p]) =>
       key !== ownAccount &&
       !p.member_keys &&
+      !p.online &&
       presenceStatus(p) === "reconnecting",
   );
 }

@@ -184,7 +184,7 @@ When one machine runs both the app and a relay, their names, keys, TCP listeners
 one currently valid device bound to the person's verified account. **Offline**
 means this client has no such evidence; the person may have exited or may simply
 be undiscoverable from this client's network. It is not a global sign-out claim.
-Expired eligible public observations may show **Reconnecting** until sixty
+Expired eligible public observations may show **Weak connection** until sixty
 seconds total from their original observation. This is a bounded recovery
 presentation, not fresh Online evidence. It does not count as known online or
 claim message/call readiness. Initial fresh discovery displays Online immediately.
@@ -217,7 +217,17 @@ when a device's account cannot be verified, the UI explicitly adds “unbound de
 members” separately rather than counting them as people. Those rows remain
 inspectable and use their device-scoped observations without inventing an account.
 
-Local, routed, and permitted public authenticated observations last 15 seconds.
+Local and permitted public authenticated observations last 15 seconds. Routed
+query observations adapt from 15 to 60 seconds using the measured round trip of
+the exact nonce-bound, signature-verified response. RTT up to 100 ms keeps the
+15-second lease; additional RTT adds 150 times its duration, capped at 60 seconds
+(400 ms reaches the cap). A healthy sample reduces a previous longer lease by
+at most five seconds per new observation. Tolerated routed observations display
+**Online · weak connection** and remain online for the learned lease; they do
+not enter the weak-only recovery presentation at a fixed fifteen-second mark.
+The total loss/expiry boundary remains sixty seconds from the original public
+observation. Only a new valid public observation can move it. This changes local
+routed liveness tolerance, not the directory origin's authority or lifetime.
 Directory presence lasts at most 15 seconds from its origin observation, retaining the original expiry through
 federation and the versioned v4 client directory response. Legacy directory
 responses still provide route hints but cannot establish fresh presence because

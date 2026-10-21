@@ -248,7 +248,8 @@
     "moreUnread": "Más mensajes sin leer"
   },
   "presence": {
-    "reconnecting": "Reconectando…",
+    "onlineWeak": "En línea · conexión inestable",
+    "reconnecting": "Conexión inestable",
     "online": "En línea",
     "lastSeenJustNow": "Observado por este cliente ahora",
     "lastSeenSecs": "Observado por este cliente hace {{count}} s",

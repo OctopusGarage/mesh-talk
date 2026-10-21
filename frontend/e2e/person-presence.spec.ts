@@ -134,14 +134,14 @@ test("expired presence reconnects without green status or an offline prompt, the
     });
   }, BOB);
   await expect(page.getByTestId("conversation-member-profile")).toContainText(
-    "Reconnecting",
+    "Weak connection",
   );
   await expect(page.getByTestId("connection-status")).toContainText(
-    "Reconnecting",
+    "Weak connection",
   );
   await expect(
     page.getByTestId(`contact-profile-${BOB}`).getByRole("status"),
-  ).toHaveAttribute("aria-label", "Reconnecting…");
+  ).toHaveAttribute("aria-label", "Weak connection");
   await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
   await page.evaluate(() => {
     (
@@ -186,13 +186,14 @@ test("poor-network recovery stays visible for sixty seconds without restarting n
     ).__mockSetPresence({
       [account]: {
         online: true,
+        connection_weak: true,
         last_seen_secs: 0,
         reconnect_expires_in_secs: 60,
         devices: [
           {
             user_id: "device_bob_2222",
             evidence: [
-              { source: "routed", last_seen_secs: 0, expires_in_secs: 15 },
+              { source: "routed", last_seen_secs: 0, expires_in_secs: 60 },
             ],
           },
         ],
@@ -207,15 +208,15 @@ test("poor-network recovery stays visible for sixty seconds without restarting n
   });
   await page.clock.runFor(31_000);
   await expect(page.getByTestId("conversation-member-profile")).toContainText(
-    "Reconnecting",
+    "Online · weak connection",
   );
-  await expect(page.getByTestId("connection-status")).toContainText(
-    "Reconnecting",
+  await expect(page.getByTestId("connection-status")).not.toContainText(
+    "Searching",
   );
   await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
   await page.clock.runFor(26_000);
   await expect(page.getByTestId("conversation-member-profile")).toContainText(
-    "Reconnecting",
+    "Online · weak connection",
   );
   await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
   await page.screenshot({ path: "test-results/recovery-sixty-seconds.png" });

@@ -255,12 +255,17 @@ async fn run_listen_with_routed(
                             .pending
                             .lock()
                             .expect("query lock not poisoned")
-                            .accept(source.ip(), &buf[..n], Instant::now());
-                        if let Some(announce) = answer {
+                            .accept_with_latency(source.ip(), &buf[..n], Instant::now());
+                        if let Some((announce, rtt)) = answer {
                             let outcome = roster
                                 .lock()
                                 .expect("roster mutex not poisoned")
-                                .update_routed(&announce, source.ip(), &self_user_id);
+                                .update_routed_with_latency(
+                                    &announce,
+                                    source.ip(),
+                                    &self_user_id,
+                                    rtt,
+                                );
                             if outcome == UpdateOutcome::New {
                                 let bytes = current_announce(&self_announce);
                                 let _ = visibility.send_announce(&socket, &bytes, source).await;
@@ -888,6 +893,15 @@ mod tests {
 
     #[tokio::test]
     async fn routed_query_discovers_a_peer_without_sending_our_identity_first() {
+        routed_query_roundtrip(Duration::ZERO, Duration::from_secs(15)).await;
+    }
+
+    #[tokio::test]
+    async fn slow_signed_udp_roundtrip_adapts_online_lease_to_sixty_seconds() {
+        routed_query_roundtrip(Duration::from_millis(500), Duration::from_secs(60)).await;
+    }
+
+    async fn routed_query_roundtrip(delay: Duration, expected_lease: Duration) {
         let alice = Arc::new(DeviceIdentity::generate());
         let bob = Arc::new(DeviceIdentity::generate());
         let a_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
@@ -900,7 +914,10 @@ mod tests {
         }));
         let b_queries = Arc::new(RoutedDiscovery::new({
             let bob = Arc::clone(&bob);
-            Arc::new(move |nonce, announce| query::encode_response(nonce, announce, &bob))
+            Arc::new(move |nonce, announce| {
+                std::thread::sleep(delay);
+                query::encode_response(nonce, announce, &bob)
+            })
         }));
         let a_task = tokio::spawn(run_listen_with_routed(
             Arc::clone(&a_socket),
@@ -931,6 +948,19 @@ mod tests {
         })
         .await
         .expect("query discovered Bob");
+        {
+            let roster = a_roster.lock().unwrap();
+            let peer = roster.get(&bob.user_id()).unwrap();
+            let route = peer
+                .routes
+                .iter()
+                .find(|r| r.source == crate::discovery::roster::RouteSource::RoutedQuery)
+                .unwrap();
+            assert_eq!(
+                route.presence_expires_at.unwrap() - route.last_seen,
+                expected_lease
+            );
+        }
         a_task.abort();
         b_task.abort();
     }

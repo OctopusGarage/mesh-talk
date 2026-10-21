@@ -9,6 +9,7 @@ import {
   agePresence,
   hasReconnectingPresence,
   presenceStatus,
+  presenceLabel,
   usePresence,
 } from "./presence";
 
@@ -454,6 +455,40 @@ it("does not treat repeated polls of one old public observation as a stable reco
     });
     await vi.advanceTimersByTimeAsync(2000);
     expect(presenceStatus(usePresence.getState().map.bob)).toBe("online");
+  } finally {
+    stop();
+  }
+});
+
+it("keeps a latency-tolerant peer online with a weak label instead of re-entering recovery", async () => {
+  getPresence.mockResolvedValue({
+    bob: {
+      online: true,
+      connection_weak: true,
+      last_seen_secs: 20,
+      reconnect_expires_in_secs: 40,
+      devices: [
+        {
+          user_id: "bob",
+          evidence: [
+            { source: "routed", last_seen_secs: 20, expires_in_secs: 40 },
+          ],
+        },
+      ],
+    },
+  });
+  const stop = usePresence.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(usePresence.getState().map.bob.online).toBe(true);
+    expect(hasReconnectingPresence(usePresence.getState().map)).toBe(false);
+    expect(
+      presenceLabel(
+        usePresence.getState().map.bob,
+        ((key: string) => key) as never,
+      ),
+    ).toBe("presence.onlineWeak");
   } finally {
     stop();
   }

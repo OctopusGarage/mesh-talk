@@ -35,7 +35,8 @@ The composer is a stable bottom dock. Attachment, media, expression and send con
 
 Empty conversation and no-selection states have a quiet concentric motif, a clear explanation and the existing next action. Loading, connection, offline and error states say what is happening and offer retry or diagnostics when available. Technical values remain selectable and easy to compare. Text and controls must wrap or truncate within their pane, including long names, identifiers, messages and filenames.
 
-People use Online, Reconnecting and Offline. A lost public observation has a
+People use Online, Online · weak connection, Weak connection and Offline.
+Slow signed routed discovery adapts its online lease up to sixty seconds. A lost public observation has a
 sixty-second total recovery window; returning presence must stay fresh for five
 seconds before the desktop returns to Online. Message transport progresses
 independently of this display confirmation. Recent local observation

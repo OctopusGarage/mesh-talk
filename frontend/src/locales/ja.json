@@ -248,7 +248,8 @@
     "moreUnread": "他にも未読メッセージがあります"
   },
   "presence": {
-    "reconnecting": "再接続中…",
+    "onlineWeak": "オンライン · 接続が不安定",
+    "reconnecting": "接続が不安定",
     "online": "オンライン",
     "lastSeenJustNow": "このクライアントでたった今確認",
     "lastSeenSecs": "このクライアントで {{count}} 秒前に確認",

@@ -22,6 +22,7 @@ pub struct PresenceDevice {
 #[derive(Serialize, Default)]
 pub struct PresenceInfo {
     pub online: bool,
+    pub connection_weak: bool,
     pub last_seen_secs: Option<u64>,
     /// Nonrenewing presentation hint; does not count as fresh presence.
     pub reconnect_expires_in_secs: u64,
@@ -76,6 +77,12 @@ fn add_peer(out: &mut HashMap<String, PresenceInfo>, peer: &PeerRecord, now: Ins
     }
     if let Some(age) = evidence.iter().map(|e| e.last_seen_secs).min() {
         entry.last_seen_secs = Some(entry.last_seen_secs.map_or(age, |old| old.min(age)));
+        let weak = evidence.iter().all(|e| {
+            e.source == "routed"
+                && e.last_seen_secs.saturating_add(e.expires_in_secs)
+                    > mesh_talk_core::discovery::roster::PUBLIC_PRESENCE_TTL.as_secs()
+        });
+        entry.connection_weak = weak && (!entry.online || entry.connection_weak);
         entry.online = true;
         entry.devices.push(PresenceDevice {
             user_id: peer.public.user_id(),
@@ -212,6 +219,24 @@ mod tests {
         discovery::{Announce, Roster},
         identity::{account::Account, device::DeviceIdentity},
     };
+    #[test]
+    fn adaptive_online_lease_is_presented_as_online_with_a_weak_connection() {
+        let account = Account::generate();
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &account, "Peer", 1);
+        let mut roster = Roster::default();
+        roster.update_routed(&proof, "127.0.0.1".parse().unwrap(), "self");
+        let mut peer = roster.get(&proof.user_id).unwrap().clone();
+        let origin = peer.routes[0].last_seen;
+        peer.routes[0].presence_expires_at = Some(origin + std::time::Duration::from_secs(60));
+        let mut out = HashMap::new();
+        add_peer(&mut out, &peer, origin + std::time::Duration::from_secs(45));
+        let p = &out[&account.account_id()];
+        assert!(p.online);
+        assert!(p.connection_weak);
+        assert_eq!(p.reconnect_expires_in_secs, 15);
+    }
+
     #[test]
     fn presence_rejects_a_cached_unbound_device_after_account_binding_arrives() {
         let device = DeviceIdentity::generate();

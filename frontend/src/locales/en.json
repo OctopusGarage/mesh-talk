@@ -248,7 +248,8 @@
     "moreUnread": "More unread messages"
   },
   "presence": {
-    "reconnecting": "Reconnecting…",
+    "onlineWeak": "Online · weak connection",
+    "reconnecting": "Weak connection",
     "online": "Online",
     "lastSeenJustNow": "Seen by this client just now",
     "lastSeenSecs": "Seen by this client {{count}}s ago",

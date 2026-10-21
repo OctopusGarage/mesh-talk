@@ -248,7 +248,8 @@
     "moreUnread": "还有更多未读消息"
   },
   "presence": {
-    "reconnecting": "正在重新连接…",
+    "onlineWeak": "在线 · 连接较弱",
+    "reconnecting": "连接较弱",
     "online": "在线",
     "lastSeenJustNow": "本机刚刚发现",
     "lastSeenSecs": "本机 {{count}} 秒前发现",

@@ -248,7 +248,8 @@
     "moreUnread": "還有更多未讀訊息"
   },
   "presence": {
-    "reconnecting": "正在重新連線…",
+    "onlineWeak": "在線 · 連線較弱",
+    "reconnecting": "連線較弱",
     "online": "上線",
     "lastSeenJustNow": "本機剛剛發現",
     "lastSeenSecs": "本機 {{count}} 秒前發現",
