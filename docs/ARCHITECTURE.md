@@ -476,7 +476,8 @@ the message delivery WAL; portable recovery snapshots currently omit reactions.
   post office or the original author online. Each peer attempt is time-bounded;
   normal sync membership projection and event validation still apply.
   Discovery of a new or relocated peer wakes a bounded recovery batch immediately;
-  the three-second tick remains a fallback for missed announcements and old routes.
+  an adaptive jittered three-to-sixty-second recovery fallback repairs missed
+  announcements and old routes; custody checks retain their independent tick.
   Every TCP-serving node runs this bidirectional anti-entropy loop. For channels
   with more than five members, a text sender seeds at most two routed members;
   recipients' rounds then forward the signed log to other members. Smaller
@@ -493,8 +494,10 @@ the message delivery WAL; portable recovery snapshots currently omit reactions.
   eight-slot TCP budget covers both directions, handshakes and idle sessions;
   seven-slot direction limits preserve opposite-direction progress. Idle sessions
   expire after 15 seconds. Full identity, endpoint, account/role and policy checks
-  prevent cross-principal or stale-policy reuse. One-shot protocols dial fresh;
-  errors and cancellation discard sessions. One idle entry per identity/route
+  prevent cross-principal or stale-policy reuse. Negotiated V2 sibling history,
+  attachment and wake requests share a separate reusable protocol class;
+  older peers retain fresh exchanges. Call, pairing and directory protocols
+  dial fresh; errors and cancellation discard sessions. One idle entry per identity/route/protocol
   does not imply one busy connection per peer. OS backlog, discovery UDP, call
   media and separate relay processes are outside the Node budget.
   Each channel send emits a debug metric with member count, seeded peer count,
@@ -732,14 +735,14 @@ network awaits. Control exchanges run in a worker-owned task set with at most
 two destination retries to distinct devices, one receipt retry and one peer
 reconciliation in flight. Multiple messages for the same stalled device share
 one destination lane, leaving the other lane available to a reachable device.
-Each complete direct or relay exchange has a 15-second deadline so routed
+Each complete direct or relay exchange adapts within a 15–60 second deadline so routed
 round trips can finish without blocking another lane or file scheduling. Active
 immutable event IDs prevent duplicate scheduling within a lane. Busy lanes leave
 their pending cursors unchanged so waiting destinations, receipts and peers retain
 their next scheduling turn. Dropping the
 accept loop cancels its worker and aborts the worker's control tasks, releasing
-channels and their admission permits. File phases retain their separate 400 ms
-budgets below.
+channels and their admission permits. File phases run in independently owned
+workers with separate network deadlines below.
 Historical DM and control pulls for manually verified contacts use a
 receive-only reconciliation projection; DM bodies prefer the direct sender
 route and fall back to the relay, while controls can be pulled directly or
@@ -748,13 +751,14 @@ through the relay when the original sender is offline.
 Immutable file retries use eight scheduling slots and retain at most six
 authenticated connections across complete protocol exchanges, with a ten-second
 idle limit. One outbound connection permit remains available for control work. A rotating admission
-cursor fills available slots; each worker pass runs at most eight round-robin
-file steps before continuing ordinary control work. Clean progress still retained
-at pass end schedules another pass. Fresh work tries the direct recipient first;
+cursor fills available slots; at most eight independent workers advance file
+steps while ordinary control work continues. Clean progress schedules the next
+step; waiting consent releases its socket and slot until a coalesced wake or
+bounded retry becomes due. Fresh work tries the direct recipient first;
 failed routes discard their wire state before advancing to another eligible
 candidate. Exhausted candidates free the slot rather than busy retrying.
 Dialing, fingerprinting, reconciliation and custody checking each have their
-own clean exchange boundary under the same 400 ms operation budget. Each step
+own clean exchange boundary under a 15-second network operation deadline. Each step
 rechecks the current private authorization and exact destination binding; a
 timeout discards the connection and any partial frame, resuming from durable
 remote state on a fresh connection. Only final, target-qualified chunk custody
@@ -899,13 +903,13 @@ recent history remains secondary to Offline. A global notice reports failed
 presence refresh or terminated discovery producers without asserting an Internet
 or LAN outage. Public device observations have a 15-second presence lease, separate
 from retained dial routes. Local and routed refreshes and directory registration
-run often enough for the shared two-second UI poll to show a stopped device
-Offline within 20 seconds. Private authenticated routing does not contribute.
+run often enough for pushed snapshots and shared two-second local evidence aging
+to show a stopped device Offline within 20 seconds. Older hosts retain polling. Private authenticated routing does not contribute.
 Directory v4 preserves the
 origin expiry across the final relay-to-client boundary; older directory replies
 remain route hints without eligible freshness. Routed inventories refresh every
-five seconds with 20 ms candidate pacing; local fallback scans and bridge
-registration also refresh every five seconds. Wire layouts and admission limits
+five seconds with 20 ms candidate pacing; local fallback scans use paced rotating
+slices with capped jittered backoff, while bridge registration retains lease refresh. Wire layouts and admission limits
 remain unchanged.
 
 Conversation headers show accepted distinct account counts and known-online

@@ -43,6 +43,103 @@ pub(super) struct HistoryCursor {
     pub id: [u8; 32],
 }
 
+/// Request-only payloads keep optional session envelopes nonrecursive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) enum AccountSessionRequest {
+    History {
+        version: u16,
+        account_id: String,
+        cursor: Option<HistoryCursor>,
+        known_digest: [u8; 32],
+        wanted: DeviceSyncPolicy,
+    },
+    Attachment {
+        version: u16,
+        account_id: String,
+        file_conv: [u8; 32],
+    },
+    Wake {
+        account_id: String,
+        epoch: [u8; 16],
+        revision: u64,
+    },
+}
+
+impl AccountSessionRequest {
+    pub(super) fn from_frame(frame: &AccountHistoryFrame) -> Option<Self> {
+        match frame {
+            AccountHistoryFrame::Request {
+                version,
+                account_id,
+                cursor,
+                known_digest,
+                wanted,
+            } => Some(Self::History {
+                version: *version,
+                account_id: account_id.clone(),
+                cursor: *cursor,
+                known_digest: *known_digest,
+                wanted: *wanted,
+            }),
+            AccountHistoryFrame::AttachmentRequest {
+                version,
+                account_id,
+                file_conv,
+            } => Some(Self::Attachment {
+                version: *version,
+                account_id: account_id.clone(),
+                file_conv: *file_conv,
+            }),
+            AccountHistoryFrame::Wake {
+                account_id,
+                epoch,
+                revision,
+            } => Some(Self::Wake {
+                account_id: account_id.clone(),
+                epoch: *epoch,
+                revision: *revision,
+            }),
+            _ => None,
+        }
+    }
+
+    pub(super) fn into_frame(self) -> AccountHistoryFrame {
+        match self {
+            Self::History {
+                version,
+                account_id,
+                cursor,
+                known_digest,
+                wanted,
+            } => AccountHistoryFrame::Request {
+                version,
+                account_id,
+                cursor,
+                known_digest,
+                wanted,
+            },
+            Self::Attachment {
+                version,
+                account_id,
+                file_conv,
+            } => AccountHistoryFrame::AttachmentRequest {
+                version,
+                account_id,
+                file_conv,
+            },
+            Self::Wake {
+                account_id,
+                epoch,
+                revision,
+            } => AccountHistoryFrame::Wake {
+                account_id,
+                epoch,
+                revision,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum AccountHistoryFrame {
     Request {
@@ -102,6 +199,24 @@ pub(super) enum AccountHistoryFrame {
         bytes: Vec<u8>,
     },
     AttachmentComplete,
+    /// Optional V2-only invalidation. Append tags preserve all existing encodings.
+    Wake {
+        account_id: String,
+        epoch: [u8; 16],
+        revision: u64,
+    },
+    WakeAck {
+        epoch: [u8; 16],
+        revision: u64,
+    },
+    /// Optional V2-only exchange boundary. Existing tags 0 through 13 are frozen.
+    SessionRequest {
+        request_id: [u8; 16],
+        request: AccountSessionRequest,
+    },
+    SessionReady {
+        request_id: [u8; 16],
+    },
 }
 
 impl AccountHistoryFrame {
@@ -143,6 +258,14 @@ impl AccountHistoryFrame {
 
     fn valid_for(&self, codec: AccountSyncVersion) -> bool {
         match self {
+            Self::Wake { .. }
+            | Self::WakeAck { .. }
+            | Self::SessionRequest { .. }
+            | Self::SessionReady { .. }
+                if codec != AccountSyncVersion::V2 =>
+            {
+                return false;
+            }
             Self::Request { version, .. } | Self::AttachmentRequest { version, .. }
                 if *version != codec.number() =>
             {
@@ -205,6 +328,23 @@ impl AccountHistoryFrame {
             }
             Self::AttachmentChunk { bytes } => !bytes.is_empty() && bytes.len() <= MAX_CHUNK,
             Self::AttachmentComplete => true,
+            Self::Wake {
+                account_id: id,
+                epoch,
+                revision,
+            } => account_id(id) && *epoch != [0; 16] && *revision > 0,
+            Self::WakeAck { epoch, revision } => *epoch != [0; 16] && *revision > 0,
+            Self::SessionRequest {
+                request_id,
+                request,
+            } => {
+                *request_id != [0; 16]
+                    && request
+                        .clone()
+                        .into_frame()
+                        .valid_for(AccountSyncVersion::V2)
+            }
+            Self::SessionReady { request_id } => *request_id != [0; 16],
             Self::RecordChunk { bytes } => !bytes.is_empty() && bytes.len() <= MAX_CHUNK,
             Self::Complete { next_cursor, .. } => {
                 next_cursor.is_none_or(|position| position.tag <= 2)
@@ -216,6 +356,144 @@ impl AccountHistoryFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_extension_accepts_appended_v2_tags_and_rejects_v1_envelopes() {
+        // Frozen nested tag 0 is History, carrying the existing Request payload.
+        let mut request = b"MTAHS2".to_vec();
+        request.extend_from_slice(&14u32.to_le_bytes());
+        request.extend_from_slice(&[9; 16]);
+        request.extend_from_slice(&0u32.to_le_bytes());
+        request.extend_from_slice(&2u16.to_le_bytes());
+        request.extend_from_slice(&32u64.to_le_bytes());
+        request.extend_from_slice(&[b'a'; 32]);
+        request.push(0);
+        request.extend_from_slice(&[0; 32]);
+        request.extend_from_slice(&[1, 0, 1, 0, 0]);
+        let mut ready = b"MTAHS2".to_vec();
+        ready.extend_from_slice(&15u32.to_le_bytes());
+        ready.extend_from_slice(&[9; 16]);
+        for bytes in [request, ready] {
+            let (version, frame) = AccountHistoryFrame::decode_versioned(&bytes)
+                .expect("optional session frames must decode in V2");
+            assert_eq!(version, AccountSyncVersion::V2);
+            assert_eq!(frame.encode_version(version), Some(bytes.clone()));
+            assert!(frame.encode_version(AccountSyncVersion::V1).is_none());
+            let mut legacy = bytes;
+            legacy[..6].copy_from_slice(MAGIC);
+            assert!(AccountHistoryFrame::decode_versioned(&legacy).is_none());
+        }
+    }
+
+    #[test]
+    fn session_extension_rejects_zero_request_ids_and_invalid_nested_requests() {
+        let mut ready = b"MTAHS2".to_vec();
+        ready.extend_from_slice(&15u32.to_le_bytes());
+        ready.extend_from_slice(&[0; 16]);
+        assert!(AccountHistoryFrame::decode_versioned(&ready).is_none());
+        for (version, id, cursor, policy) in [
+            (1u16, [b'a'; 32], None, [1, 0, 1, 0, 0]),
+            (2, [b'A'; 32], None, [1, 0, 1, 0, 0]),
+            (2, [b'a'; 32], Some(3), [1, 0, 1, 0, 0]),
+            (2, [b'a'; 32], Some(0), [0, 0, 1, 0, 0]),
+        ] {
+            let mut request = b"MTAHS2".to_vec();
+            request.extend_from_slice(&14u32.to_le_bytes());
+            request.extend_from_slice(&[9; 16]);
+            request.extend_from_slice(&0u32.to_le_bytes());
+            request.extend_from_slice(&version.to_le_bytes());
+            request.extend_from_slice(&32u64.to_le_bytes());
+            request.extend_from_slice(&id);
+            if let Some(tag) = cursor {
+                request.extend_from_slice(&[1, tag]);
+                request.extend_from_slice(&[4; 32]);
+            } else {
+                request.push(0);
+            }
+            request.extend_from_slice(&[0; 32]);
+            request.extend_from_slice(&policy);
+            assert!(AccountHistoryFrame::decode_versioned(&request).is_none());
+        }
+    }
+
+    #[test]
+    fn session_request_conversions_preserve_payloads_and_validate_nested_frames() {
+        for frame in [
+            AccountHistoryFrame::Request {
+                version: 2,
+                account_id: "ab".repeat(16),
+                cursor: Some(HistoryCursor {
+                    tag: 2,
+                    id: [6; 32],
+                }),
+                known_digest: [4; 32],
+                wanted: DeviceSyncPolicy::default(),
+            },
+            AccountHistoryFrame::AttachmentRequest {
+                version: 2,
+                account_id: "ab".repeat(16),
+                file_conv: [3; 32],
+            },
+            AccountHistoryFrame::Wake {
+                account_id: "ab".repeat(16),
+                epoch: [7; 16],
+                revision: 5,
+            },
+        ] {
+            let request = AccountSessionRequest::from_frame(&frame).unwrap();
+            assert_eq!(request.clone().into_frame(), frame);
+            let envelope = AccountHistoryFrame::SessionRequest {
+                request_id: [8; 16],
+                request: request.clone(),
+            };
+            let encoded = envelope.encode_version(AccountSyncVersion::V2).unwrap();
+            assert_eq!(AccountHistoryFrame::decode(&encoded), Some(envelope));
+            let zero_id = AccountHistoryFrame::SessionRequest {
+                request_id: [0; 16],
+                request,
+            };
+            assert!(zero_id.encode_version(AccountSyncVersion::V2).is_none());
+            let unchecked = super::super::wire::frame(b"MTAHS2", &zero_id);
+            assert!(AccountHistoryFrame::decode(&unchecked).is_none());
+        }
+        let ready = AccountHistoryFrame::SessionReady {
+            request_id: [8; 16],
+        };
+        assert!(AccountSessionRequest::from_frame(&ready).is_none());
+        assert!(
+            AccountSessionRequest::from_frame(&AccountHistoryFrame::AttachmentComplete).is_none()
+        );
+        for request in [
+            AccountSessionRequest::Attachment {
+                version: 1,
+                account_id: "ab".repeat(16),
+                file_conv: [3; 32],
+            },
+            AccountSessionRequest::Attachment {
+                version: 2,
+                account_id: "bad".into(),
+                file_conv: [3; 32],
+            },
+            AccountSessionRequest::Wake {
+                account_id: "ab".repeat(16),
+                epoch: [0; 16],
+                revision: 5,
+            },
+            AccountSessionRequest::Wake {
+                account_id: "ab".repeat(16),
+                epoch: [7; 16],
+                revision: 0,
+            },
+        ] {
+            let envelope = AccountHistoryFrame::SessionRequest {
+                request_id: [8; 16],
+                request,
+            };
+            assert!(envelope.encode_version(AccountSyncVersion::V2).is_none());
+            let unchecked = super::super::wire::frame(b"MTAHS2", &envelope);
+            assert!(AccountHistoryFrame::decode(&unchecked).is_none());
+        }
+    }
 
     #[test]
     fn versioned_codec_preserves_v1_and_binds_request_version_to_magic() {
@@ -271,7 +549,7 @@ mod tests {
     fn valid_frames_round_trip() {
         let account = crate::identity::account::Account::generate();
         let public = crate::identity::device::DeviceIdentity::generate().public();
-        for frame in [
+        for (tag, frame) in [
             AccountHistoryFrame::Request {
                 version: VERSION,
                 account_id: "ab".repeat(16),
@@ -344,9 +622,13 @@ mod tests {
                 bytes: vec![8; MAX_CHUNK],
             },
             AccountHistoryFrame::AttachmentComplete,
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let encoded = frame.encode().expect("valid frame encodes");
             assert!(encoded.starts_with(MAGIC));
+            assert_eq!(&encoded[6..10], &(tag as u32).to_le_bytes());
             assert_eq!(AccountHistoryFrame::decode(&encoded), Some(frame));
         }
     }
@@ -393,6 +675,68 @@ mod tests {
             .encode()
             .is_none()
         );
+    }
+
+    #[test]
+    fn optional_wake_appends_v2_tags_without_changing_frozen_legacy_frames() {
+        let wake = AccountHistoryFrame::Wake {
+            account_id: "ab".repeat(16),
+            epoch: [7; 16],
+            revision: 3,
+        };
+        assert!(wake.encode_version(AccountSyncVersion::V1).is_none());
+        let encoded = wake.encode_version(AccountSyncVersion::V2).unwrap();
+        let mut wake_fixture = b"MTAHS2".to_vec();
+        wake_fixture.extend_from_slice(&12u32.to_le_bytes());
+        wake_fixture.extend_from_slice(&32u64.to_le_bytes());
+        wake_fixture.extend_from_slice("ab".repeat(16).as_bytes());
+        wake_fixture.extend_from_slice(&[7; 16]);
+        wake_fixture.extend_from_slice(&3u64.to_le_bytes());
+        assert_eq!(encoded, wake_fixture);
+        let ack = AccountHistoryFrame::WakeAck {
+            epoch: [7; 16],
+            revision: 3,
+        };
+        let mut ack_fixture = b"MTAHS2".to_vec();
+        ack_fixture.extend_from_slice(&13u32.to_le_bytes());
+        ack_fixture.extend_from_slice(&[7; 16]);
+        ack_fixture.extend_from_slice(&3u64.to_le_bytes());
+        assert_eq!(
+            ack.encode_version(AccountSyncVersion::V2),
+            Some(ack_fixture)
+        );
+        assert_eq!(
+            &encoded[6..10],
+            &12u32.to_le_bytes(),
+            "wake appends after frozen tags0..11"
+        );
+        assert_eq!(
+            AccountHistoryFrame::decode_versioned(&encoded),
+            Some((AccountSyncVersion::V2, wake.clone()))
+        );
+        // A V1 magic cannot smuggle an optional V2 request through the legacy codec.
+        let mut legacy = encoded.clone();
+        legacy[..6].copy_from_slice(MAGIC);
+        assert!(AccountHistoryFrame::decode_versioned(&legacy).is_none());
+        let complete = AccountHistoryFrame::Complete {
+            next_cursor: None,
+            digest: [9; 32],
+        };
+        assert_eq!(&complete.encode().unwrap()[6..10], &4u32.to_le_bytes());
+        for invalid in [
+            AccountHistoryFrame::Wake {
+                account_id: "ab".repeat(16),
+                epoch: [0; 16],
+                revision: 3,
+            },
+            AccountHistoryFrame::Wake {
+                account_id: "ab".repeat(16),
+                epoch: [7; 16],
+                revision: 0,
+            },
+        ] {
+            assert!(invalid.encode_version(AccountSyncVersion::V2).is_none());
+        }
     }
 
     #[test]

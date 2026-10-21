@@ -189,6 +189,7 @@ impl Node {
             .file_convs();
         for file in files {
             if self.attachment_consent_status(file) == Some(ReceiveDecision::Accepted)
+                && !(self.media.contains(file) && self.has_verified_file_completion(file))
                 && matches!(self.file_progress(file), Some(progress) if progress.done < progress.total)
             {
                 self.pending_files
@@ -197,6 +198,8 @@ impl Node {
                     .insert(file);
             }
         }
+        self.file_pull_notify.notify_one();
+        self.note_file_change();
     }
 
     pub(in crate::node) fn incoming_offer(
@@ -393,6 +396,8 @@ impl Node {
                 .expect("pending files lock not poisoned")
                 .remove(&file);
         }
+        self.file_pull_notify.notify_one();
+        self.note_file_change();
         Ok(())
     }
 

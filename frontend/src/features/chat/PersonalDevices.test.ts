@@ -164,3 +164,8 @@ it("removes account device details immediately on logout", async () => {
   ).toBeNull();
   expect(document.querySelector('[data-testid="personal-devices"]')).toBeNull();
 });
+
+it("scopes linked-device status reads to the originating desktop owner", async () => {
+  await render();
+  expect(chat.getDeviceSyncStatus).toHaveBeenCalledWith("owner");
+});

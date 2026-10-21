@@ -3,53 +3,79 @@
   "contracts": [
     {
       "id": "core-channel",
-      "paths": ["crates/mesh-talk-core/src/channel/"],
+      "paths": [
+        "crates/mesh-talk-core/src/channel/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["channel::"]
+          "filters": [
+            "channel::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
-      "consumers": ["core-node"]
+      "consumers": [
+        "core-node"
+      ]
     },
     {
       "id": "core-discovery",
-      "paths": ["crates/mesh-talk-core/src/discovery/"],
+      "paths": [
+        "crates/mesh-talk-core/src/discovery/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["discovery::"]
+          "filters": [
+            "discovery::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
-      "consumers": ["core-node", "core-postoffice", "core-transport"]
+      "consumers": [
+        "core-node",
+        "core-postoffice",
+        "core-transport"
+      ]
     },
     {
       "id": "core-dm",
-      "paths": ["crates/mesh-talk-core/src/dm.rs"],
+      "paths": [
+        "crates/mesh-talk-core/src/dm.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["dm::"]
+          "filters": [
+            "dm::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
-      "consumers": ["core-node", "core-channel", "core-postoffice"]
+      "consumers": [
+        "core-node",
+        "core-channel",
+        "core-postoffice"
+      ]
     },
     {
       "id": "core-eventlog",
-      "paths": ["crates/mesh-talk-core/src/eventlog/"],
+      "paths": [
+        "crates/mesh-talk-core/src/eventlog/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["eventlog::"]
+          "filters": [
+            "eventlog::"
+          ]
         }
       ],
       "escalation": [
@@ -67,25 +93,37 @@
     },
     {
       "id": "core-file",
-      "paths": ["crates/mesh-talk-core/src/file/"],
+      "paths": [
+        "crates/mesh-talk-core/src/file/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["file::"]
+          "filters": [
+            "file::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
-      "consumers": ["core-node", "core-eventlog", "core-recovery"]
+      "consumers": [
+        "core-node",
+        "core-eventlog",
+        "core-recovery"
+      ]
     },
     {
       "id": "core-identity",
-      "paths": ["crates/mesh-talk-core/src/identity/"],
+      "paths": [
+        "crates/mesh-talk-core/src/identity/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["identity::"]
+          "filters": [
+            "identity::"
+          ]
         }
       ],
       "escalation": [
@@ -107,17 +145,23 @@
     },
     {
       "id": "core-postoffice",
-      "paths": ["crates/mesh-talk-core/src/postoffice/"],
+      "paths": [
+        "crates/mesh-talk-core/src/postoffice/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["postoffice::"]
+          "filters": [
+            "postoffice::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance. Network trust changes also require cargo test -p mesh-talk-core --test relay_network --test relay_network_cli --test federation_config_cli and the mesh-talk-node federation_runtime:: binary tests. Membership exchanges must reject forged, copied, expired, revoked and foreign-network credentials before bulk metadata disclosure."
       ],
-      "consumers": ["core-node"],
+      "consumers": [
+        "core-node"
+      ],
       "capability": {
         "summary": "Authorize equal relay reconciliation through explicit pins or mutually verified operator-approved network memberships.",
         "guide": "docs/post-office-federation.md",
@@ -135,40 +179,58 @@
     },
     {
       "id": "core-ratchet",
-      "paths": ["crates/mesh-talk-core/src/ratchet/"],
+      "paths": [
+        "crates/mesh-talk-core/src/ratchet/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["ratchet::"]
+          "filters": [
+            "ratchet::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
-      "consumers": ["core-node", "core-channel"]
+      "consumers": [
+        "core-node",
+        "core-channel"
+      ]
     },
     {
       "id": "core-recovery",
-      "paths": ["crates/mesh-talk-core/src/recovery/"],
+      "paths": [
+        "crates/mesh-talk-core/src/recovery/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::"]
+          "filters": [
+            "node::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
         "Recovery has no local library tests: use conservative Node coverage and explicitly run affected recovery_key, recovery_archive and recovery_snapshot integration targets for crypto/archive/storage changes."
       ],
-      "consumers": ["core-node", "desktop-recovery"]
+      "consumers": [
+        "core-node",
+        "desktop-recovery"
+      ]
     },
     {
       "id": "core-storage",
-      "paths": ["crates/mesh-talk-core/src/storage/"],
+      "paths": [
+        "crates/mesh-talk-core/src/storage/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["storage::"]
+          "filters": [
+            "storage::"
+          ]
         }
       ],
       "escalation": [
@@ -185,11 +247,15 @@
     },
     {
       "id": "core-transport",
-      "paths": ["crates/mesh-talk-core/src/transport/"],
+      "paths": [
+        "crates/mesh-talk-core/src/transport/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["transport::"]
+          "filters": [
+            "transport::"
+          ]
         }
       ],
       "escalation": [
@@ -204,17 +270,24 @@
     },
     {
       "id": "core-util",
-      "paths": ["crates/mesh-talk-core/src/util/"],
+      "paths": [
+        "crates/mesh-talk-core/src/util/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["util::"]
+          "filters": [
+            "util::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
-      "consumers": ["core-node", "core-file"]
+      "consumers": [
+        "core-node",
+        "core-file"
+      ]
     },
     {
       "id": "core-account-profile",
@@ -248,7 +321,9 @@
       "escalation": [
         "Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
       ],
-      "consumers": ["desktop-chat"],
+      "consumers": [
+        "desktop-chat"
+      ],
       "capability": {
         "summary": "Authenticate bounded self-declared account cards, introductions and independent observation statements without assigning identity or time authority.",
         "guide": "docs/peer-trust.md",
@@ -266,17 +341,8 @@
     },
     {
       "id": "core-node",
-      "paths": ["crates/mesh-talk-core/src/node/"],
-      "rust": [
-        {
-          "package": "mesh-talk-core",
-          "filters": ["node::"]
-        }
-      ],
-      "consumers": ["desktop-session", "integration-service"],
       "capability": {
         "summary": "Retry immutable delivery work across routed latency with bounded independent control lanes and cancellation-owned tasks.",
-        "guide": "docs/ARCHITECTURE.md",
         "invariants": [
           {
             "name": "Slow destinations cannot monopolize receipt or file scheduling",
@@ -297,11 +363,39 @@
           {
             "name": "Whole delivery exchanges adapt to route latency and independent bounded retry cooldowns preserve recovery and recipient-confirmation semantics",
             "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Signed accepted membership and per-member sharing preferences select automatic history sources while control fallback learns preference changes",
+            "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Only projected group info changes emit bounded invalidations; targeted coalesced recovery and capped jittered fallback retain independent custody timing",
+            "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Failed file-consent persistence defers each wrapper until the next mailbox operation without adding it to the node-wide seen cache or blocking unrelated messages",
+            "reference": "docs/network-design-reference.md"
+          },
+          {
+            "name": "Fair bounded per-peer exchanges, mutation-safe sibling continuation and coalesced host invalidations preserve progress under partial failure.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          },
+          {
+            "name": "Completed protocol-specific sessions reuse authenticated sockets; stale sockets retry once while malformed frames never trigger capability downgrade and legacy peers retain bounded fallback.",
+            "reference": "docs/network-design-reference.md#session-reuse-contract"
           }
-        ]
+        ],
+        "guide": "docs/ARCHITECTURE.md"
       },
       "escalation": [
         "Node wiring has broad shared state and dynamic consumers: retain conservative Node library coverage; crypto/wire/storage changes need loopback, restart and protocol integration evidence. Runtime/discovery lifecycle changes require focused native acceptance."
+      ],
+      "consumers": [
+        "desktop-session",
+        "integration-service"
+      ],
+      "paths": [
+        "crates/mesh-talk-core/src/node/"
       ],
       "excludePaths": [
         "crates/mesh-talk-core/src/node/account_profile.rs",
@@ -311,6 +405,14 @@
         "crates/mesh-talk-core/src/node/file_consent_tests.rs",
         "crates/mesh-talk-core/src/node/trust_card.rs",
         "crates/mesh-talk-core/src/node/trust_card_io.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::"
+          ]
+        }
       ]
     },
     {
@@ -335,7 +437,10 @@
           ]
         }
       ],
-      "consumers": ["core-node", "core-file"],
+      "consumers": [
+        "core-node",
+        "core-file"
+      ],
       "escalation": [
         "Deadline framing is a wire/storage boundary; verify legacy compatibility and affected message delivery consumers."
       ],
@@ -390,7 +495,9 @@
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::"]
+          "filters": [
+            "node::"
+          ]
         }
       ],
       "escalation": [
@@ -399,11 +506,15 @@
     },
     {
       "id": "core-file-consent-tests",
-      "paths": ["crates/mesh-talk-core/src/node/file_consent_tests.rs"],
+      "paths": [
+        "crates/mesh-talk-core/src/node/file_consent_tests.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::file_consent_tests::"]
+          "filters": [
+            "node::file_consent_tests::"
+          ]
         }
       ],
       "escalation": [
@@ -424,7 +535,9 @@
         "crates/mesh-talk-core/src/node/route_timing.rs",
         "crates/mesh-talk-core/src/node/delivery_retry.rs"
       ],
-      "native": ["host"]
+      "native": [
+        "host"
+      ]
     }
   ]
 }

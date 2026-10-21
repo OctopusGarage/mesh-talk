@@ -1199,38 +1199,65 @@ impl HiddenContactsState {
         name: &str,
         own_account: Option<&str>,
     ) -> Result<HiddenContactsSnapshot, String> {
-        if !valid_account(account) {
-            return Err("Invalid hidden contact".into());
+        self.update_batch_unlocked(
+            owner,
+            &[HiddenContactChange {
+                account: account.into(),
+                hidden,
+                name: name.into(),
+            }],
+            own_account,
+            None,
+        )
+    }
+    fn update_batch_unlocked(
+        &self,
+        owner: &str,
+        records: &[HiddenContactChange],
+        own_account: Option<&str>,
+        expected: Option<&std::collections::HashMap<String, Option<String>>>,
+    ) -> Result<HiddenContactsSnapshot, String> {
+        if records.len() > 2048 || records.iter().any(|row| !valid_account(&row.account)) {
+            return Err("Invalid hidden contacts batch".into());
         }
-        if hidden {
+        for row in records.iter().filter(|row| row.hidden) {
             let own = own_account.ok_or("Hiding a contact requires a running node")?;
-            if own == account {
+            if own == row.account {
                 return Err("Cannot hide your own account".into());
             }
         }
         let mut snapshot = self.load(owner)?;
-        snapshot.deleted.retain(|id| id != account);
-        if hidden {
-            let name = normalized_name(name, account);
-            if let Some(contact) = snapshot
-                .contacts
-                .iter_mut()
-                .find(|contact| contact.account_id == account)
-            {
-                contact.name = name;
-            } else {
-                if snapshot.contacts.len() + snapshot.deleted.len() >= MAX_CONTACTS {
-                    return Err("Too many hidden contacts".into());
-                }
-                snapshot.contacts.push(HiddenContact {
-                    account_id: account.into(),
-                    name,
-                });
-            }
-        } else {
+        if let Some(expected) = expected
+            && records.iter().any(|row| {
+                // Linked preferences cannot clear local deletion suppression.
+                // Explicit local restore uses the non-CAS setter; rediscovery
+                // separately owns clearing a deletion for an online contact.
+                snapshot.deleted.contains(&row.account)
+                    || !expected.contains_key(&row.account)
+                    || snapshot
+                        .contacts
+                        .iter()
+                        .find(|contact| contact.account_id == row.account)
+                        .map(|contact| &contact.name)
+                        != expected.get(&row.account).and_then(|name| name.as_ref())
+            })
+        {
+            return Err("Local hidden contacts changed during linked import".into());
+        }
+        for row in records {
+            snapshot.deleted.retain(|id| id != &row.account);
             snapshot
                 .contacts
-                .retain(|contact| contact.account_id != account);
+                .retain(|contact| contact.account_id != row.account);
+            if row.hidden {
+                snapshot.contacts.push(HiddenContact {
+                    account_id: row.account.clone(),
+                    name: normalized_name(&row.name, &row.account),
+                });
+            }
+        }
+        if snapshot.contacts.len() + snapshot.deleted.len() > MAX_CONTACTS {
+            return Err("Too many hidden contacts".into());
         }
         snapshot
             .contacts
@@ -1303,4 +1330,158 @@ pub async fn set_contact_hidden(
     })
     .await
     .map_err(|_| "Hidden contacts task failed")?
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HiddenContactChange {
+    pub account: String,
+    pub hidden: bool,
+    pub name: String,
+}
+
+#[tauri::command]
+pub async fn set_contact_hidden_batch(
+    owner: String,
+    records: Vec<HiddenContactChange>,
+    expected: std::collections::HashMap<String, Option<String>>,
+    app: tauri::State<'_, crate::state::AppState>,
+    node: tauri::State<'_, crate::chat_commands::NodeState>,
+    policy: tauri::State<'_, HiddenContactsState>,
+) -> Result<HiddenContactsSnapshot, String> {
+    let admission = crate::runtime_admission::RuntimeAdmission::capture(&app, &node, &owner)
+        .map_err(|e| e.to_string())?;
+    let lease = admission.lease().clone();
+    let node = node.inner().clone();
+    let app = app.inner().clone();
+    let policy = policy.inner().clone();
+    // Bound awaiting the runtime before entering the synchronous persistence transaction.
+    let runtime = if records.iter().any(|row| row.hidden) {
+        Some(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                node.0.clone().lock_owned(),
+            )
+            .await
+            .map_err(|_| "Runtime observation timed out")?,
+        )
+    } else {
+        None
+    };
+    tokio::task::spawn_blocking(move || {
+        policy.transaction_for_lease(&app, &lease, || {
+            let own = runtime.as_ref().and_then(|guard| guard.as_ref());
+            if records.iter().any(|row| row.hidden) {
+                node.check_installation(&lease).map_err(|e| e.to_string())?;
+                if own.and_then(|rt| rt.host_account_id()) != Some(owner.as_str()) {
+                    return Err("Hiding a contact requires this account's running node".into());
+                }
+            }
+            policy.update_batch_unlocked(
+                &owner,
+                &records,
+                own.map(|rt| rt.account_id()),
+                Some(&expected),
+            )
+        })
+    })
+    .await
+    .map_err(|_| "Hidden contacts task failed")?
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    #[test]
+    fn linked_hidden_batch_cannot_restore_a_contact_deleted_after_its_snapshot() {
+        for hidden in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = HiddenContactsState::new(dir.path().to_owned());
+            let own = "a".repeat(32);
+            let account = "b".repeat(32);
+            // A visible contact and a deleted contact both have no hidden-name
+            // entry. The import must also honor the local deletion tombstone.
+            let expected = std::collections::HashMap::from([(account.clone(), None)]);
+            store
+                .delete_unlocked("owner", &account, &own, false, || Ok(()))
+                .unwrap();
+            let rows = [HiddenContactChange {
+                account: account.clone(),
+                hidden,
+                name: "Remote".into(),
+            }];
+            assert!(
+                store
+                    .update_batch_unlocked("owner", &rows, Some(&own), Some(&expected))
+                    .is_err()
+            );
+            let local = store.load("owner").unwrap();
+            assert!(local.deleted.contains(&account));
+            assert!(local.contacts.is_empty());
+            // An explicit local restore still has its established semantics.
+            store
+                .update_unlocked("owner", &account, false, "Local", Some(&own))
+                .unwrap();
+            assert!(!store.load("owner").unwrap().deleted.contains(&account));
+        }
+    }
+
+    #[test]
+    fn hidden_batch_rejects_self_before_persisting_other_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HiddenContactsState::new(dir.path().to_owned());
+        let own = "a".repeat(32);
+        let rows = vec![
+            HiddenContactChange {
+                account: "b".repeat(32),
+                hidden: true,
+                name: "Bob".into(),
+            },
+            HiddenContactChange {
+                account: own.clone(),
+                hidden: true,
+                name: "Me".into(),
+            },
+        ];
+        assert!(
+            store
+                .update_batch_unlocked("owner", &rows, Some(&own), None)
+                .is_err()
+        );
+        assert!(!store.path("owner").exists());
+        let result = store
+            .update_batch_unlocked("owner", &rows[..1], Some(&own), None)
+            .unwrap();
+        assert_eq!(result.contacts.len(), 1);
+    }
+    #[test]
+    fn linked_hidden_batch_preserves_a_newer_local_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HiddenContactsState::new(dir.path().to_owned());
+        let own = "a".repeat(32);
+        let account = "b".repeat(32);
+        let rows = [HiddenContactChange {
+            account: account.clone(),
+            hidden: true,
+            name: "Local".into(),
+        }];
+        store
+            .update_batch_unlocked("owner", &rows, Some(&own), None)
+            .unwrap();
+        let expected = std::collections::HashMap::from([(account.clone(), None)]);
+        assert!(
+            store
+                .update_batch_unlocked(
+                    "owner",
+                    &[HiddenContactChange {
+                        name: "Remote".into(),
+                        ..rows[0].clone()
+                    }],
+                    Some(&own),
+                    Some(&expected)
+                )
+                .is_err()
+        );
+        assert_eq!(store.load("owner").unwrap().contacts[0].name, "Local");
+    }
 }

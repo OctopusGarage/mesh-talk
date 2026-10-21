@@ -1,3 +1,4 @@
+import { readWithDeadline } from "@/lib/readDeadline";
 import { chat } from "@/lib/api/chat";
 import { errorMessage, sendFailReason } from "@/lib/error";
 import { captureChatOwner } from "./ownership";
@@ -32,7 +33,10 @@ export interface OutgoingIntentContext extends OutgoingIntentState {
   active: Conversation | null;
   myId: string;
   reload: () => Promise<boolean>;
-  refreshStatuses: (conversation?: Conversation) => Promise<void>;
+  refreshStatuses: (
+    conversation?: Conversation,
+    invalidate?: boolean,
+  ) => Promise<void>;
   setError: (message: string) => void;
 }
 
@@ -78,18 +82,39 @@ function sendStickerFor(
   );
 }
 
+type StatusRefreshRun = {
+  current(): boolean;
+  dirty: Map<string, Conversation>;
+};
+// One lane per aggregate store; old owner/runtime work cannot mark a new run dirty.
+const statusRefreshRuns = new WeakMap<Get, StatusRefreshRun>();
+const MAX_DIRTY_STATUS_CONVERSATIONS = 50;
+
 export async function refreshDeliveryStatuses(
   rawSet: Set,
   get: Get,
   conversation?: Conversation,
+  invalidate = false,
 ) {
   const lease = captureChatOwner(get);
   const set: Set = (partial) => {
     if (lease.current()) rawSet(partial);
   };
   const c = conversation ?? get().active;
-  if (!lease.current() || !c || get().statusBusy) return;
+  if (!lease.current() || !c) return;
   const key = convKey(c);
+  if (get().statusBusy) {
+    const run = statusRefreshRuns.get(get);
+    if (invalidate && run?.current()) {
+      run.dirty.delete(key);
+      run.dirty.set(key, c);
+      if (run.dirty.size > MAX_DIRTY_STATUS_CONVERSATIONS)
+        run.dirty.delete(run.dirty.keys().next().value!);
+    }
+    return;
+  }
+  const run: StatusRefreshRun = { current: lease.current, dirty: new Map() };
+  statusRefreshRuns.set(get, run);
   set({ statusBusy: true });
   try {
     if (c.kind === "channel") {
@@ -102,9 +127,8 @@ export async function refreshDeliveryStatuses(
       ];
       const replicas = new Map<string, number>();
       for (let i = 0; i < ids.length; i += 256) {
-        const rows = await chat.channelCustodyStatuses(
-          c.id,
-          ids.slice(i, i + 256),
+        const rows = await readWithDeadline(() =>
+          chat.channelCustodyStatuses(c.id, ids.slice(i, i + 256)),
         );
         if (!lease.current()) return;
         for (const row of rows) replicas.set(row.id, row.replicas);
@@ -146,7 +170,7 @@ export async function refreshDeliveryStatuses(
             .filter((i) => convKey(i.conversation) === key)
             .map((i) => i.message),
         ]
-          .filter((m) => m.fromMe && m.id)
+          .filter((m) => m.fromMe && m.id && m.delivery !== "delivered")
           .map((m) => m.id!),
       ),
     ];
@@ -163,10 +187,8 @@ export async function refreshDeliveryStatuses(
     const projection = new Map<string, "awaiting" | "delivered">();
     for (let i = 0; i < ids.length; i += 256) {
       if (!lease.current()) return;
-      const rows = await chat.deliveryStatuses(
-        lease.owner!,
-        c.id,
-        ids.slice(i, i + 256),
+      const rows = await readWithDeadline(() =>
+        chat.deliveryStatuses(lease.owner!, c.id, ids.slice(i, i + 256)),
       );
       if (!lease.current()) return;
       for (const row of rows) {
@@ -210,7 +232,17 @@ export async function refreshDeliveryStatuses(
   } catch {
     /* A missing projection response is not a delivery claim or send failure. */
   } finally {
+    const ownsRun = statusRefreshRuns.get(get) === run;
+    if (ownsRun) statusRefreshRuns.delete(get);
     set({ statusBusy: false });
+    if (ownsRun) {
+      for (const pending of run.dirty.values()) {
+        if (!lease.current()) break;
+        // Retain this pending hint if a different current read acquired the
+        // lane first. Ordinary reload/ticker requests never set this bit.
+        await refreshDeliveryStatuses(rawSet, get, pending, true);
+      }
+    }
   }
 }
 

@@ -9,114 +9,120 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::mpsc};
 
-#[tokio::test(start_paused = true)]
-async fn adaptive_exchange_uses_latency_learned_after_the_attempt_started() {
-    use std::time::Duration;
-    let dir = tempfile::tempdir().unwrap();
-    let remote = DeviceIdentity::generate();
-    let proof = Announce::new_with_account(&remote, &Account::generate(), "slow peer", 47479);
-    let (sender, _) = node(
-        dir.path(),
-        DeviceIdentity::generate(),
-        Account::generate(),
-        &proof,
-    );
-    let address = sender
-        .roster
-        .lock()
-        .unwrap()
-        .get(&remote.user_id())
-        .unwrap()
-        .addr;
-    let started = tokio::time::Instant::now();
-    let result = sender
-        .adaptive_control_timeout(&remote.public(), async {
-            tokio::time::sleep(Duration::from_secs(8)).await;
-            sender.sessions.authentication_succeeded(
-                &remote.public(),
-                address,
-                Duration::from_secs(8),
-            );
-            tokio::time::sleep(Duration::from_secs(12)).await;
-            true
-        })
-        .await;
-    assert_eq!(
-        result,
-        Some(true),
-        "useful slow progress must survive the former fifteen-second deadline"
-    );
-    assert_eq!(started.elapsed(), Duration::from_secs(20));
+#[tokio::test]
+async fn production_node_tcp_sockets_enable_keepalive() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", addr.port());
+    let (sender, _) = node(ad.path(), alice, aa, &bp);
+    let (recipient, _) = node(bd.path(), bob, ba, &ap);
+    let accept = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        recipient.privacy_accept(stream).await.unwrap()
+    };
+    let expected = bp.public();
+    let (outbound, inbound) = tokio::join!(sender.privacy_dial(addr, &expected), accept);
+    assert!(outbound.unwrap().tcp_keepalive_enabled());
+    assert!(inbound.tcp_keepalive_enabled());
 }
 
-#[tokio::test(start_paused = true)]
-async fn adaptive_exchange_times_out_without_a_sample_and_learns_the_next_control_budget() {
-    use std::time::Duration;
-    let dir = tempfile::tempdir().unwrap();
-    let remote = DeviceIdentity::generate();
-    let proof = Announce::new_with_account(&remote, &Account::generate(), "stalled peer", 47479);
-    let (sender, _) = node(
-        dir.path(),
-        DeviceIdentity::generate(),
-        Account::generate(),
-        &proof,
-    );
-    let address = sender
+#[tokio::test]
+async fn durable_dm_retries_a_reused_socket_closed_after_checkout() {
+    let sender_dir = tempfile::tempdir().unwrap();
+    let recipient_dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let alice_account = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ap = Announce::new_with_account(&alice, &alice_account, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", addr.port());
+    let (sender, _) = node(sender_dir.path(), alice, alice_account, &bp);
+    let (recipient, _) = node(recipient_dir.path(), bob, bob_account, &ap);
+    for (node, dir, own) in [
+        (&sender, sender_dir.path(), &ap),
+        (&recipient, recipient_dir.path(), &bp),
+    ] {
+        node.configure_privacy(
+            dir,
+            "pw",
+            own,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    }
+    let id = sender
+        .enqueue_to_account(
+            &bp.account_id().unwrap(),
+            b"recover without worker backoff",
+            None,
+        )
+        .await
+        .unwrap();
+    let destination = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations[0]
+        .clone();
+    let peer = sender
         .roster
         .lock()
         .unwrap()
-        .get(&remote.user_id())
+        .get(&recipient.user_id())
         .unwrap()
-        .addr;
-    let started = tokio::time::Instant::now();
-    let result = sender
-        .adaptive_control_timeout(&remote.public(), std::future::pending::<()>())
-        .await;
-    assert_eq!(result, None);
-    assert_eq!(started.elapsed(), Duration::from_secs(15));
-    assert_eq!(
-        sender.sessions.control_timeout(&remote.public(), address),
-        Duration::from_secs(30)
+        .clone();
+    let responder = recipient.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut channel = responder.privacy_accept(stream).await.unwrap();
+        let store = responder.sync_store(channel.peer_identity());
+        // A matched empty fingerprint completes the warm-up exchange. Close
+        // only after the next request arrives, beyond the checkout probe.
+        super::session::serve_one(&mut channel, &store)
+            .await
+            .unwrap();
+        channel.recv().await.unwrap();
+        drop(channel);
+        let (stream, _) = listener.accept().await.unwrap();
+        let channel = responder.privacy_accept(stream).await.unwrap();
+        responder.serve_connection(channel).await;
+    });
+    let mut warm = sender.privacy_sync_dial(addr, &bp.public()).await.unwrap();
+    super::session::request_round(
+        &mut warm,
+        &sender.sync_store(&bp.public()),
+        ConversationId::new([219; 32]),
+    )
+    .await
+    .unwrap();
+    sender.recycle_sync_channel(warm);
+    let held = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        sender.transfer_delivery_destination(
+            &peer,
+            &destination,
+            destination.event.conversation_id,
+        ),
+    )
+    .await
+    .unwrap();
+    server.abort();
+    assert!(
+        held,
+        "stale pooled socket must recover in this delivery attempt"
     );
-}
-
-#[tokio::test(start_paused = true)]
-async fn adaptive_exchange_has_one_non_sliding_hard_ceiling() {
-    use std::time::Duration;
-    let dir = tempfile::tempdir().unwrap();
-    let remote = DeviceIdentity::generate();
-    let proof = Announce::new_with_account(&remote, &Account::generate(), "slow peer", 47479);
-    let (sender, _) = node(
-        dir.path(),
-        DeviceIdentity::generate(),
-        Account::generate(),
-        &proof,
-    );
-    let address = sender
-        .roster
-        .lock()
-        .unwrap()
-        .get(&remote.user_id())
-        .unwrap()
-        .addr;
-    sender
-        .sessions
-        .authentication_succeeded(&remote.public(), address, Duration::from_secs(8));
-    let started = tokio::time::Instant::now();
-    let result = sender
-        .adaptive_control_timeout(&remote.public(), async {
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                sender.sessions.control_succeeded(
-                    &remote.public(),
-                    address,
-                    Duration::from_secs(20),
-                );
-            }
-        })
-        .await;
-    assert_eq!(result, None::<()>);
-    assert_eq!(started.elapsed(), Duration::from_secs(60));
+    assert!(recipient.log.lock().unwrap().has(&destination.event.id));
 }
 
 #[tokio::test]
@@ -1112,6 +1118,99 @@ async fn retained_file_transfer_rechecks_permission_and_exact_account_binding() 
     }
 }
 
+#[tokio::test]
+async fn completed_file_custody_recycles_a_usable_sync_channel() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let ba = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", addr.port());
+    let (sender, _) = node(ad.path(), alice, aa, &bp);
+    let (recipient, _) = node(bd.path(), bob, ba, &ap);
+    for (node, dir, own) in [(&sender, ad.path(), &ap), (&recipient, bd.path(), &bp)] {
+        node.configure_privacy(
+            dir,
+            "pw",
+            own,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    }
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server_accepted = accepted.clone();
+    let responder = recipient.clone();
+    let server = tokio::spawn(async move {
+        let mut sessions = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            server_accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let responder = responder.clone();
+            sessions.spawn(async move {
+                let channel = responder.privacy_accept(stream).await.unwrap();
+                responder.serve_connection(channel).await;
+            });
+        }
+    });
+    for (name, contents) in [
+        ("first.bin", b"first exact durable file custody".as_slice()),
+        (
+            "second.bin",
+            b"second exact durable file custody".as_slice(),
+        ),
+    ] {
+        let path = ad.path().join(name);
+        std::fs::write(&path, contents).unwrap();
+        let (id, file) = sender
+            .enqueue_file_to_account(&recipient.account_id(), &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let card = sender
+            .delivery
+            .lock()
+            .unwrap()
+            .file_card(id)
+            .unwrap()
+            .clone();
+        let destination = card.destinations[0].clone();
+        let mut transfers = std::collections::HashMap::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !sender
+                .retry_file_step(&card, &destination, &mut transfers)
+                .await
+            {}
+        })
+        .await
+        .expect("file reaches exact durable custody");
+        assert_eq!(recipient.read_file(file).unwrap(), contents);
+    }
+    assert_eq!(
+        accepted.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "sequential files should share the completed authenticated session"
+    );
+    let (mut channel, reused) = sender
+        .privacy_sync_dial_with_reuse(addr, &bp.public())
+        .await
+        .unwrap();
+    assert!(
+        reused,
+        "completed file should return its authenticated channel"
+    );
+    super::session::request_round(
+        &mut channel,
+        &sender.sync_store(&bp.public()),
+        ConversationId::new([218; 32]),
+    )
+    .await
+    .unwrap();
+    server.abort();
+}
+
 async fn private_file_restart(delay: FilePeerDelay) {
     private_file_restart_batch(delay, 1).await;
 }
@@ -1346,7 +1445,13 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         // This observes full file and receipt convergence, including a retry
         // after the last chunk. Windows CI can take over five seconds here
         // even after the receiver has verified every byte.
-        std::time::Duration::from_secs(if count == 1 { 10 } else { 60 }),
+        std::time::Duration::from_secs(if delay == FilePeerDelay::PartialChunk {
+            30
+        } else if count == 1 {
+            10
+        } else {
+            60
+        }),
         async {
             if !first_progress {
                 return;
@@ -1607,7 +1712,8 @@ async fn delayed_private_file_peer(
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    } else if super::session::is_followup(&bytes, file)
+                    } else if delay == FilePeerDelay::PartialChunk
+                        && super::session::is_followup(&bytes, file)
                         && node
                             .file_progress(file)
                             .is_some_and(|progress| progress.done == 1)
@@ -1620,8 +1726,12 @@ async fn delayed_private_file_peer(
                             .store(connection, std::sync::atomic::Ordering::SeqCst);
                         // One original chunk is already admitted. A burst's next
                         // Followup now arrives in the same reconciliation; stall it
-                        // past 400ms so retries must abandon this socket.
-                        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+                        // past the exchange deadline so retries abandon this socket.
+                        tokio::time::sleep(
+                            super::delivery_runtime::FILE_EXCHANGE_TIMEOUT
+                                + std::time::Duration::from_millis(50),
+                        )
+                        .await;
                     }
                     timing.phase("delayed-peer-serve-exchange");
                     match super::session::serve_wire_bytes(&mut channel, &store, &bytes).await {
@@ -7137,6 +7247,310 @@ async fn relocated_recipient_cancels_stalled_old_route_before_exchange_deadline(
         result.is_ok(),
         "fresh recipient route must preempt a stalled old exchange without reducing the routed exchange budget"
     );
+}
+
+#[tokio::test]
+async fn approving_an_attachment_wakes_recovery_immediately() {
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let (a, _) = node(source.path(), alice, aa, &bp);
+    let (b, _) = node(target.path(), bob, ba, &ap);
+    let path = source.path().join("approved.bin");
+    std::fs::write(&path, b"consented bytes").unwrap();
+    let (id, file) = a
+        .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let event = a.delivery.lock().unwrap().message(id).unwrap().destinations[0]
+        .event
+        .clone();
+    b.log.lock().unwrap().append_durable(event.clone()).unwrap();
+    b.process_file_events(event.conversation_id);
+    // Clear any initial metadata wake; the decision must cause its own wake.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(10),
+        b.file_pull_notify.notified(),
+    )
+    .await;
+    b.decide_attachment(file, true).unwrap();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            b.file_pull_notify.notified()
+        )
+        .await
+        .is_ok(),
+        "local acceptance must wake recovery without waiting for the timer"
+    );
+}
+
+#[tokio::test]
+async fn authenticated_silent_preferred_relay_does_not_block_upload_or_drain_fallback() {
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let relay_dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let ba = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let (a, _) = node(source.path(), alice, aa, &bp);
+    let (b, mut inbox) = node(target.path(), bob, ba, &ap);
+    b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+    let silent = DeviceIdentity::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent_proof =
+        Announce::new_post_office(&silent, "Silent", listener.local_addr().unwrap().port());
+    let silent_task = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let Ok((stream, _)) = accepted else { break; };
+                    let keys = silent.secret_bytes();
+                    connections.spawn(async move {
+                        let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                        if let Ok(_channel) = super::transport::secure_accept(stream, &identity).await {
+                            std::future::pending::<()>().await;
+                        }
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    let live = DeviceIdentity::generate();
+    let keys = live.secret_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let live_proof =
+        Announce::new_post_office(&live, "Fallback", listener.local_addr().unwrap().port());
+    let relay = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(&relay_dir.path().join("relay"), "pw", live).unwrap(),
+    ));
+    let live_task = tokio::spawn(super::postbox::run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        listener,
+        relay,
+    ));
+    for participant in [&a, &b] {
+        for proof in [&silent_proof, &live_proof] {
+            participant.roster.lock().unwrap().update(
+                proof,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &participant.user_id(),
+            );
+        }
+        participant
+            .set_bridge_hub_id(Some(&silent_proof.user_id))
+            .unwrap();
+    }
+    let id = a
+        .enqueue_to_account(
+            &b.account_id(),
+            b"fallback survives a silent authenticated relay",
+            None,
+        )
+        .await
+        .unwrap();
+    let destination = a.delivery.lock().unwrap().message(id).unwrap().destinations[0].clone();
+    let uploaded = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        a.replicate_delivery_destination(&destination),
+    )
+    .await;
+    assert!(
+        matches!(uploaded, Ok(true)),
+        "a silent preferred relay must yield to healthy custody"
+    );
+    let drained = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        b.drain_from_post_office(),
+    )
+    .await;
+    silent_task.abort();
+    live_task.abort();
+    let _ = silent_task.await;
+    let _ = live_task.await;
+    assert!(
+        drained.is_ok(),
+        "one stalled relay must not pin all recipient drains"
+    );
+    let received = tokio::time::timeout(std::time::Duration::from_secs(1), inbox.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        received.text,
+        b"fallback survives a silent authenticated relay"
+    );
+    assert_eq!(
+        a.delivery_status(id),
+        Some(DeliveryStatus::Awaiting),
+        "relay custody is not recipient confirmation"
+    );
+}
+
+#[tokio::test]
+async fn failed_media_persistence_remains_pending_until_storage_recovers() {
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let (_, b, _, _, _, file, _, bytes) =
+        completed_file_fixture(source.path(), target.path(), crate::file::FileKind::Media).await;
+    b.decide_attachment(file, true).unwrap();
+    let destination = b.media.path_for(file, "completion.bin");
+    std::fs::create_dir(&destination).unwrap();
+    b.pull_pending_files().await;
+    assert!(
+        b.pending_files.lock().unwrap().contains(&file),
+        "completed chunks do not erase a failed durable media write from recovery"
+    );
+    assert!(!b.media.contains(file));
+    std::fs::remove_dir(&destination).unwrap();
+    b.pull_pending_files().await;
+    assert!(b.media.contains(file));
+    assert!(!b.pending_files.lock().unwrap().contains(&file));
+    assert_eq!(b.read_media(file).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn failed_media_completion_metadata_keeps_durable_bytes_pending() {
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let (_, b, _, _, _, file, _, bytes) =
+        completed_file_fixture(source.path(), target.path(), crate::file::FileKind::Media).await;
+    b.decide_attachment(file, true).unwrap();
+    let outbox = target.path().join("events.log.delivery-outbox");
+    let held = target.path().join("held-outbox");
+    std::fs::rename(&outbox, &held).unwrap();
+    b.pull_pending_files().await;
+    assert!(b.media.contains(file));
+    assert!(!b.has_verified_file_completion(file));
+    assert!(
+        b.pending_files.lock().unwrap().contains(&file),
+        "bytes alone cannot retire pending durable completion metadata"
+    );
+    std::fs::rename(&held, &outbox).unwrap();
+    b.pull_pending_files().await;
+    assert!(b.has_verified_file_completion(file));
+    assert!(!b.pending_files.lock().unwrap().contains(&file));
+    assert_eq!(b.read_media(file).unwrap(), bytes);
+}
+
+#[tokio::test(start_paused = true)]
+async fn adaptive_exchange_uses_latency_learned_after_the_attempt_started() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let remote = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&remote, &Account::generate(), "slow peer", 47479);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let address = sender
+        .roster
+        .lock()
+        .unwrap()
+        .get(&remote.user_id())
+        .unwrap()
+        .addr;
+    let started = tokio::time::Instant::now();
+    let result = sender
+        .adaptive_control_timeout(&remote.public(), async {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            sender.sessions.authentication_succeeded(
+                &remote.public(),
+                address,
+                Duration::from_secs(8),
+            );
+            tokio::time::sleep(Duration::from_secs(12)).await;
+            true
+        })
+        .await;
+    assert_eq!(
+        result,
+        Some(true),
+        "useful slow progress must survive the former fifteen-second deadline"
+    );
+    assert_eq!(started.elapsed(), Duration::from_secs(20));
+}
+
+#[tokio::test(start_paused = true)]
+async fn adaptive_exchange_times_out_without_a_sample_and_learns_the_next_control_budget() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let remote = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&remote, &Account::generate(), "stalled peer", 47479);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let address = sender
+        .roster
+        .lock()
+        .unwrap()
+        .get(&remote.user_id())
+        .unwrap()
+        .addr;
+    let started = tokio::time::Instant::now();
+    let result = sender
+        .adaptive_control_timeout(&remote.public(), std::future::pending::<()>())
+        .await;
+    assert_eq!(result, None);
+    assert_eq!(started.elapsed(), Duration::from_secs(15));
+    assert_eq!(
+        sender.sessions.control_timeout(&remote.public(), address),
+        Duration::from_secs(30)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn adaptive_exchange_has_one_non_sliding_hard_ceiling() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let remote = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&remote, &Account::generate(), "slow peer", 47479);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let address = sender
+        .roster
+        .lock()
+        .unwrap()
+        .get(&remote.user_id())
+        .unwrap()
+        .addr;
+    sender
+        .sessions
+        .authentication_succeeded(&remote.public(), address, Duration::from_secs(8));
+    let started = tokio::time::Instant::now();
+    let result = sender
+        .adaptive_control_timeout(&remote.public(), async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                sender.sessions.control_succeeded(
+                    &remote.public(),
+                    address,
+                    Duration::from_secs(20),
+                );
+            }
+        })
+        .await;
+    assert_eq!(result, None::<()>);
+    assert_eq!(started.elapsed(), Duration::from_secs(60));
 }
 
 #[tokio::test]

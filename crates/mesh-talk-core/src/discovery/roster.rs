@@ -217,7 +217,6 @@ pub(crate) struct RelayedRollback {
 }
 
 /// The known-peers map.
-#[derive(Default)]
 pub struct Roster {
     peers: HashMap<UserId, PeerRecord>,
     announcements: HashMap<UserId, Announce>,
@@ -225,9 +224,39 @@ pub struct Roster {
     conflicting_history: HashSet<UserId>,
     linked_bindings: HashMap<UserId, (PublicIdentity, crate::identity::account::DeviceCertificate)>,
     changes: std::sync::Arc<Notify>,
+    observations: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for Roster {
+    fn default() -> Self {
+        Self {
+            peers: HashMap::new(),
+            announcements: HashMap::new(),
+            historical: BTreeMap::new(),
+            conflicting_history: HashSet::new(),
+            linked_bindings: HashMap::new(),
+            changes: std::sync::Arc::new(Notify::new()),
+            observations: tokio::sync::watch::channel(0).0,
+        }
+    }
 }
 
 impl Roster {
+    /// Independent subscribers do not consume recovery's coalesced notification.
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.observations.subscribe()
+    }
+
+    fn publish_observation(&self) {
+        self.observations
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    fn notify_changes(&self) {
+        self.changes.notify_one();
+        self.publish_observation();
+    }
+
     /// Install a locally authorized own-account device transition. Callers derive
     /// this from the durable account-device registry, never discovery traffic.
     pub(crate) fn authorize_linked_account(
@@ -345,6 +374,7 @@ impl Roster {
         expiry: Instant,
         origin_secs: u64,
     ) {
+        let mut changed = false;
         if let Some(peer) = self.peers.get_mut(id) {
             for route in &mut peer.routes {
                 if route.addr == relay && route.source == RouteSource::PostOffice {
@@ -355,16 +385,21 @@ impl Roster {
                     let newer = route
                         .presence_origin_expires_at
                         .is_none_or(|old| origin_secs > old);
+                    let previous = route.presence_expires_at;
                     route.presence_expires_at = Some(if newer {
                         capped
                     } else {
                         route.presence_expires_at.unwrap_or(capped).min(capped)
                     });
+                    changed |= previous != route.presence_expires_at;
                     if newer {
                         route.presence_origin_expires_at = Some(origin_secs);
                     }
                 }
             }
+        }
+        if changed {
+            self.publish_observation();
         }
     }
 
@@ -528,7 +563,7 @@ impl Roster {
             },
         );
         if route_changed {
-            self.changes.notify_one();
+            self.notify_changes();
         }
         if existed {
             UpdateOutcome::Refreshed
@@ -637,7 +672,7 @@ impl Roster {
             self.peers.remove(&undo.user_id);
             self.announcements.remove(&undo.user_id);
         }
-        self.changes.notify_one();
+        self.notify_changes();
     }
 
     fn update_from(
@@ -727,6 +762,7 @@ impl Roster {
         if route_changed {
             self.changes.notify_one();
         }
+        self.publish_observation();
         if existed {
             UpdateOutcome::Refreshed
         } else {
@@ -748,6 +784,7 @@ impl Roster {
             return;
         };
         let now = Instant::now();
+        let mut new_route = false;
         if let Some(route) = peer.routes.iter_mut().find(|route| route.addr == addr) {
             route.last_authenticated = Some(now);
             if route.source == RouteSource::Authenticated {
@@ -765,10 +802,13 @@ impl Roster {
             if peer.routes.len() > MAX_ROUTES_PER_PEER {
                 peer.routes.remove(0);
             }
-            self.changes.notify_one();
+            new_route = true;
         }
         peer.addr = addr;
         peer.last_seen = now;
+        if new_route {
+            self.notify_changes();
+        }
     }
 
     /// Signed source proof retained only while the corresponding roster entry is live.
@@ -817,6 +857,7 @@ impl Roster {
 
     /// Drop peers not seen within `ttl`.
     pub fn evict_stale(&mut self, ttl: Duration) {
+        let before: usize = self.peers.values().map(|peer| peer.routes.len() + 1).sum();
         let now = Instant::now();
         self.peers.retain(|_, r| {
             r.routes.retain(|route| {
@@ -839,6 +880,10 @@ impl Roster {
         });
         self.announcements
             .retain(|id, _| self.peers.contains_key(id));
+        let after: usize = self.peers.values().map(|peer| peer.routes.len() + 1).sum();
+        if before != after {
+            self.notify_changes();
+        }
     }
 
     /// Authenticated private presence supersedes an earlier public sighting.
@@ -847,6 +892,7 @@ impl Roster {
         if self.peers.get(&id).is_some_and(|p| p.public == *public) {
             self.peers.remove(&id);
             self.announcements.remove(&id);
+            self.notify_changes();
         }
     }
 
@@ -865,12 +911,42 @@ impl Roster {
             self.peers.remove(user_id);
             self.announcements.remove(user_id);
         }
-        self.changes.notify_one();
+        self.notify_changes();
     }
 }
 
 #[cfg(test)]
 mod routed_tests {
+    #[test]
+    fn roster_watch_broadcasts_renewals_without_consuming_recovery_notifications() {
+        let mut roster = Roster::default();
+        let mut first = roster.subscribe_changes();
+        let second = roster.subscribe_changes();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "member",
+            1,
+        );
+        roster.update(&proof, "127.0.0.1".parse().unwrap(), "self");
+        assert!(first.has_changed().unwrap());
+        assert!(second.has_changed().unwrap());
+        assert!(futures_util::FutureExt::now_or_never(roster.changes().notified()).is_some());
+        first.borrow_and_update();
+        roster.update(&proof, "127.0.0.1".parse().unwrap(), "self");
+        assert!(
+            first.has_changed().unwrap(),
+            "fresh public leases must reach presentation subscribers"
+        );
+        assert!(
+            futures_util::FutureExt::now_or_never(roster.changes().notified()).is_none(),
+            "lease renewals do not schedule expensive recovery"
+        );
+        first.borrow_and_update();
+        roster.forget(&proof.public());
+        assert!(first.has_changed().unwrap());
+    }
+
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;

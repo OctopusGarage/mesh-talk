@@ -10,8 +10,9 @@ use mesh_talk_core::node::{AccountPreference, DeviceSyncPolicy, DeviceSyncStatus
 pub async fn get_device_sync_policy(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
+    owner: String,
 ) -> Result<DeviceSyncPolicy, CommandError> {
-    RuntimeAdmission::capture_current(&app, &state)?
+    RuntimeAdmission::capture(&app, &state, &owner)?
         .with_runtime(|runtime| Ok(runtime.handle().device_sync_policy()))
         .await
 }
@@ -21,8 +22,9 @@ pub async fn get_device_sync_policy(
 pub async fn get_device_sync_status(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
+    owner: String,
 ) -> Result<Vec<DeviceSyncStatus>, CommandError> {
-    RuntimeAdmission::capture_current(&app, &state)?
+    RuntimeAdmission::capture(&app, &state, &owner)?
         .with_runtime(|runtime| Ok(runtime.handle().device_sync_status()))
         .await
 }
@@ -34,8 +36,9 @@ pub async fn set_device_sync_category(
     state: tauri::State<'_, NodeState>,
     category: SyncCategory,
     enabled: bool,
+    owner: String,
 ) -> Result<DeviceSyncPolicy, CommandError> {
-    RuntimeAdmission::capture_current(&app, &state)?
+    RuntimeAdmission::capture(&app, &state, &owner)?
         .with_runtime(|runtime| {
             let node = runtime.handle();
             node.set_device_sync_category(category, enabled)
@@ -51,8 +54,9 @@ pub async fn get_account_preferences(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     category: SyncCategory,
+    owner: String,
 ) -> Result<Vec<AccountPreference>, CommandError> {
-    RuntimeAdmission::capture_current(&app, &state)?
+    RuntimeAdmission::capture(&app, &state, &owner)?
         .with_runtime(|runtime| Ok(runtime.handle().account_preferences(category)))
         .await
 }
@@ -65,8 +69,9 @@ pub async fn set_account_preference(
     category: SyncCategory,
     key: String,
     value: Option<String>,
+    owner: String,
 ) -> Result<AccountPreference, CommandError> {
-    RuntimeAdmission::capture_current(&app, &state)?
+    RuntimeAdmission::capture(&app, &state, &owner)?
         .with_runtime(|runtime| {
             runtime
                 .handle()
@@ -111,12 +116,12 @@ mod tests {
         let state = app.state::<NodeState>();
 
         assert!(
-            get_device_sync_policy(app.state::<AppState>(), state.clone())
+            get_device_sync_policy(app.state::<AppState>(), state.clone(), "sync-test".into())
                 .await
                 .is_err()
         );
         assert!(
-            get_device_sync_status(app.state::<AppState>(), state.clone())
+            get_device_sync_status(app.state::<AppState>(), state.clone(), "sync-test".into())
                 .await
                 .is_err()
         );
@@ -125,7 +130,8 @@ mod tests {
                 app.state::<AppState>(),
                 state.clone(),
                 SyncCategory::History,
-                false
+                false,
+                "sync-test".into()
             )
             .await
             .is_err()
@@ -134,7 +140,8 @@ mod tests {
             get_account_preferences(
                 app.state::<AppState>(),
                 state.clone(),
-                SyncCategory::Contacts
+                SyncCategory::Contacts,
+                "sync-test".into()
             )
             .await
             .is_err()
@@ -146,6 +153,7 @@ mod tests {
                 SyncCategory::Contacts,
                 "alias".into(),
                 Some("Alice".into()),
+                "sync-test".into()
             )
             .await
             .is_err()
@@ -167,12 +175,37 @@ mod tests {
         .unwrap();
         *managed.0.lock().await = Some(runtime);
 
-        let original = get_device_sync_policy(app.state::<AppState>(), state.clone())
-            .await
-            .unwrap();
+        // A webview command queued by a previous login must not borrow the
+        // replacement account's runtime, even when it starts after the switch.
+        assert!(matches!(
+            get_device_sync_policy(
+                app.state::<AppState>(),
+                state.clone(),
+                "previous-owner".into()
+            )
+            .await,
+            Err(CommandError::Authorization(_))
+        ));
+        assert!(matches!(
+            set_account_preference(
+                app.state::<AppState>(),
+                state.clone(),
+                SyncCategory::Appearance,
+                "theme".into(),
+                Some("previous-owner-value".into()),
+                "previous-owner".into()
+            )
+            .await,
+            Err(CommandError::Authorization(_))
+        ));
+
+        let original =
+            get_device_sync_policy(app.state::<AppState>(), state.clone(), "sync-test".into())
+                .await
+                .unwrap();
         assert!(original.history);
         assert!(
-            get_device_sync_status(app.state::<AppState>(), state.clone())
+            get_device_sync_status(app.state::<AppState>(), state.clone(), "sync-test".into())
                 .await
                 .unwrap()
                 .is_empty()
@@ -182,12 +215,13 @@ mod tests {
             state.clone(),
             SyncCategory::History,
             false,
+            "sync-test".into(),
         )
         .await
         .unwrap();
         assert!(!changed.history);
         assert_eq!(
-            get_device_sync_policy(app.state::<AppState>(), state.clone())
+            get_device_sync_policy(app.state::<AppState>(), state.clone(), "sync-test".into())
                 .await
                 .unwrap(),
             changed
@@ -197,7 +231,8 @@ mod tests {
             get_account_preferences(
                 app.state::<AppState>(),
                 state.clone(),
-                SyncCategory::Appearance
+                SyncCategory::Appearance,
+                "sync-test".into()
             )
             .await
             .unwrap()
@@ -209,6 +244,7 @@ mod tests {
             SyncCategory::Appearance,
             "theme".into(),
             Some("dark".into()),
+            "sync-test".into(),
         )
         .await
         .unwrap();
@@ -217,7 +253,8 @@ mod tests {
             get_account_preferences(
                 app.state::<AppState>(),
                 state.clone(),
-                SyncCategory::Appearance
+                SyncCategory::Appearance,
+                "sync-test".into()
             )
             .await
             .unwrap(),
@@ -230,6 +267,7 @@ mod tests {
                 SyncCategory::Appearance,
                 "invalid key".into(),
                 Some("dark".into()),
+                "sync-test".into()
             )
             .await
             .is_err()
@@ -241,6 +279,7 @@ mod tests {
                 SyncCategory::History,
                 "history".into(),
                 Some("enabled".into()),
+                "sync-test".into()
             )
             .await
             .is_err()

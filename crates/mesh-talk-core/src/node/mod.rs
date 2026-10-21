@@ -10,6 +10,7 @@ pub(crate) mod account_devices;
 pub(crate) mod account_file_proofs;
 pub(crate) mod account_preferences;
 mod account_profile;
+mod account_session;
 pub(crate) mod account_suppression;
 pub(crate) mod account_sync;
 pub(crate) mod account_sync_policy;
@@ -85,6 +86,7 @@ mod session_pool;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod transport;
+mod ui_state;
 #[cfg(test)]
 mod unrestricted_messages_tests;
 pub(crate) mod wire;

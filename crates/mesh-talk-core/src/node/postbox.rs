@@ -220,25 +220,34 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
         {
             return;
         }
-        let Ok(session_store) = federation::send_inventory(
-            &mut channel,
-            &store,
-            directory.as_ref(),
-            federation::presence_limit(&first),
-        )
-        .await
-        else {
-            return;
-        };
-        let session_store = Mutex::new(session_store);
-        for _ in 0..MAX_RELAY_ROUNDS {
-            match tokio::time::timeout(RELAY_IDLE_TIMEOUT, serve_one(&mut channel, &session_store))
+        // One absolute session budget includes inventory writes, page reads
+        // and subsequent mailbox rounds; a slow authenticated relay cannot
+        // renew its reservation indefinitely by sending one more frame.
+        let _ = tokio::time::timeout(RELAY_IDLE_TIMEOUT, async {
+            let Ok(session_store) = federation::send_inventory(
+                &mut channel,
+                &store,
+                directory.as_ref(),
+                federation::presence_limit(&first),
+            )
+            .await
+            else {
+                return;
+            };
+            let session_store = Mutex::new(session_store);
+            for _ in 0..MAX_RELAY_ROUNDS {
+                match tokio::time::timeout(
+                    RELAY_IDLE_TIMEOUT,
+                    serve_one(&mut channel, &session_store),
+                )
                 .await
-            {
-                Ok(Ok(Served::Handled(_))) => continue,
-                _ => break,
+                {
+                    Ok(Ok(Served::Handled(_))) => continue,
+                    _ => break,
+                }
             }
-        }
+        })
+        .await;
         return;
     }
     if let Err(error) = store

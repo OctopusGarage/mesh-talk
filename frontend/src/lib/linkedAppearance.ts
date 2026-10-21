@@ -1,3 +1,5 @@
+import { readWithDeadline } from "./readDeadline";
+import { subscribeSyncInvalidation } from "./syncInvalidation";
 import { chat } from "@/lib/api/chat";
 import {
   appearanceValues,
@@ -8,25 +10,28 @@ import {
 import { createLinkedPreferencePublisher } from "./linkedPreferencePublisher";
 
 /** Preserve the existing device's saved look before it issues a pairing code. */
-export async function publishAppearanceBeforeLink(): Promise<void> {
+export async function publishAppearanceBeforeLink(
+  owner: string,
+): Promise<void> {
   const existing = new Set(
-    (await chat.getAccountPreferences("appearance")).map(
+    (await chat.getAccountPreferences("appearance", owner)).map(
       (record) => record.key,
     ),
   );
   for (const [key, value] of Object.entries(savedAppearanceValues())) {
     if (!existing.has(key))
-      await chat.setAccountPreference("appearance", key, value);
+      await chat.setAccountPreference("appearance", key, value, owner);
   }
 }
 
 /** Reconcile the signed-in account's appearance with the local theme store. */
-export function startLinkedAppearance(): () => void {
+export function startLinkedAppearance(owner: string): () => void {
   let active = true;
   let polling = false;
+  let dirty = false;
   let applying = false;
   const publisher = createLinkedPreferencePublisher(
-    (key, value) => chat.setAccountPreference("appearance", key, value),
+    (key, value) => chat.setAccountPreference("appearance", key, value, owner),
     (error) => console.warn("Could not save linked appearance", error),
   );
   let previous = appearanceValues();
@@ -40,12 +45,16 @@ export function startLinkedAppearance(): () => void {
     previous = next;
   });
   const reconcile = async () => {
-    if (polling || !active) return;
+    if (!active) return;
+    if (polling) {
+      dirty = true;
+      return;
+    }
     polling = true;
     try {
       const [policy, records] = await Promise.all([
-        chat.getDeviceSyncPolicy(),
-        chat.getAccountPreferences("appearance"),
+        readWithDeadline(() => chat.getDeviceSyncPolicy(owner)),
+        readWithDeadline(() => chat.getAccountPreferences("appearance", owner)),
       ]);
       if (!active) return;
       publisher.setEnabled(policy.appearance);
@@ -53,9 +62,19 @@ export function startLinkedAppearance(): () => void {
         applying = true;
         try {
           for (const record of records) {
-            if (publisher.shouldApply(record.key, record.revision)) {
+            if (
+              publisher.shouldApply(
+                record.key,
+                record.revision,
+                record.device_id,
+              )
+            ) {
               applyLinkedAppearance(record.key, record.value);
-              publisher.markApplied(record.key, record.revision);
+              publisher.markApplied(
+                record.key,
+                record.revision,
+                record.device_id,
+              );
             }
           }
         } finally {
@@ -69,14 +88,22 @@ export function startLinkedAppearance(): () => void {
         console.warn("Could not reconcile linked appearance", error);
     } finally {
       polling = false;
+      if (active && dirty) {
+        dirty = false;
+        queueMicrotask(() => void reconcile());
+      }
     }
   };
+  const unlisten = subscribeSyncInvalidation((change) => {
+    if (change.owner === owner && change.kind === "state") void reconcile();
+  });
   void reconcile();
   const timer = window.setInterval(() => void reconcile(), 10_000);
   return () => {
     active = false;
     publisher.stop();
     unsubscribe();
+    unlisten();
     window.clearInterval(timer);
   };
 }

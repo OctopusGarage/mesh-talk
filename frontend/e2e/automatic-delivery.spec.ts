@@ -206,3 +206,72 @@ for (const accepted of [true, false]) {
     await expect(bubble).toHaveCount(1);
   });
 }
+
+test("a scoped native delivery invalidation refreshes status without a polling response", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate(() => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      __mockEmit(event: string, payload: unknown): void;
+      __mockSetDelivery(account: string, id: string, status: string): void;
+      __pushDelivery: { id: string; allowed: boolean; reads: number };
+    };
+    const original = host.__TAURI_INTERNALS__.invoke.bind(
+      host.__TAURI_INTERNALS__,
+    );
+    host.__pushDelivery = { id: "", allowed: false, reads: 0 };
+    host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "owner_delivery_statuses") {
+        if (!host.__pushDelivery.allowed)
+          return (args.ids as string[])
+            .filter((id) => id === host.__pushDelivery.id)
+            .map((id) => ({ id, status: "awaiting" }));
+        host.__pushDelivery.reads++;
+      }
+      const result = await original(command, args);
+      if (command === "owner_enqueue_text")
+        host.__pushDelivery.id = result as string;
+      return result;
+    };
+  });
+  await page.getByTestId("composer-input").fill("push driven status");
+  await page.getByTestId("composer-send").click();
+  await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(1);
+  await page.evaluate(async (account) => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      __mockEmit(event: string, payload: unknown): void;
+      __mockSetDelivery(account: string, id: string, status: string): void;
+      __pushDelivery: { id: string; allowed: boolean; reads: number };
+    };
+    const identity = (await host.__TAURI_INTERNALS__.invoke(
+      "owner_node_identity",
+      { owner: "u_self" },
+    )) as Record<string, string>;
+    host.__mockSetDelivery(account, host.__pushDelivery.id, "delivered");
+    host.__pushDelivery.allowed = true;
+    host.__mockEmit("node-state-changed", { ...identity, kind: "delivery" });
+    host.__pushDelivery.allowed = false;
+  }, BOB.account);
+  await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(1);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __pushDelivery: { reads: number } })
+          .__pushDelivery.reads,
+    ),
+  ).toBe(1);
+});

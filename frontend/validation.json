@@ -51,7 +51,8 @@
       "paths": [
         "frontend/src/store/chat.ts",
         "frontend/src/store/chat.test.ts",
-        "frontend/src/store/chatRuntimeEffects.ts"
+        "frontend/src/store/chatRuntimeEffects.ts",
+        "frontend/src/store/rosterRefresh.ts"
       ],
       "frontend": ["src/store/chat.test.ts"],
       "escalation": [
@@ -301,6 +302,102 @@
       "escalation": [
         "Run e2e/trust-cards.spec.ts for publish/import/export/proof controls. Native signatures, persistence and transport require owning Rust evidence."
       ]
+    },
+    {
+      "id": "frontend-channel-refresh",
+      "paths": [
+        "frontend/src/store/channelRefresh.ts",
+        "frontend/src/store/channelRefresh.test.ts",
+        "frontend/e2e/group-sync.spec.ts"
+      ],
+      "frontend": [
+        "src/store/channelRefresh.test.ts",
+        "src/store/chat.test.ts",
+        "src/lib/events.test.ts"
+      ],
+      "consumers": ["frontend-chat"],
+      "capability": {
+        "summary": "Coalesce scoped group invalidations and keep group details consistent with bounded fallback queries.",
+        "guide": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery",
+        "invariants": [
+          {
+            "name": "Group metadata refresh preserves session ownership and last successful members on transient failure",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          }
+        ]
+      },
+      "escalation": [
+        "Native group invalidations require the desktop session bridge and focused loopback evidence; browser mocks only verify webview event consumption."
+      ]
+    },
+    {
+      "id": "frontend-sync-reconciliation",
+      "paths": [
+        "frontend/src/lib/readDeadline.ts",
+        "frontend/src/lib/readDeadline.test.ts",
+        "frontend/src/lib/syncInvalidation.ts",
+        "frontend/src/lib/linkedContacts.ts",
+        "frontend/src/lib/linkedContacts.test.ts",
+        "frontend/src/lib/linkedAppearance.ts",
+        "frontend/src/lib/linkedAppearance.test.ts",
+        "frontend/src/lib/linkedPreferencePublisher.ts",
+        "frontend/src/lib/linkedPreferencePublisher.test.ts",
+        "frontend/src/lib/events.ts",
+        "frontend/src/lib/events.test.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/api/contacts.ts",
+        "frontend/src/store/fileAvailability.ts",
+        "frontend/src/store/fileAvailability.test.ts",
+        "frontend/src/store/presence.ts",
+        "frontend/src/store/presence.test.ts",
+        "frontend/src/store/contactPolicy.ts",
+        "frontend/src/store/contactPolicy.test.ts",
+        "frontend/src/features/chat/useSerialPoll.ts",
+        "frontend/src/features/chat/useSerialPoll.test.ts",
+        "frontend/src/features/chat/PersonalDevices.tsx",
+        "frontend/src/features/chat/PersonalDevices.test.ts",
+        "frontend/e2e/automatic-delivery.spec.ts",
+        "frontend/src/lib/api.test.ts",
+        "frontend/src/features/chat/LinkDeviceDialog.tsx",
+        "frontend/src/features/chat/LinkDeviceDialog.test.ts"
+      ],
+      "frontend": [
+        "src/lib/readDeadline.test.ts",
+        "src/lib/events.test.ts",
+        "src/lib/linkedContacts.test.ts",
+        "src/lib/linkedAppearance.test.ts",
+        "src/lib/linkedPreferencePublisher.test.ts",
+        "src/store/fileAvailability.test.ts",
+        "src/store/presence.test.ts",
+        "src/store/contactPolicy.test.ts",
+        "src/features/chat/useSerialPoll.test.ts",
+        "src/features/chat/PersonalDevices.test.ts",
+        "src/lib/api.test.ts",
+        "src/features/chat/LinkDeviceDialog.test.ts"
+      ],
+      "consumers": [
+        "frontend-chat",
+        "frontend-outgoing",
+        "frontend-channel-refresh"
+      ],
+      "capability": {
+        "summary": "Consume scoped push invalidations with bounded read recovery, fair snapshot publication and batched preference convergence.",
+        "guide": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery",
+        "invariants": [
+          {
+            "name": "Read timeouts preserve native admission bounds; stale owners cannot apply snapshots and missed pushes reconcile through fallback.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          },
+          {
+            "name": "Preference projection uses the same revision and author ordering as the core; imported complete contact records publish after bounded batch persistence.",
+            "reference": "docs/network-design-reference.md#push-driven-reconciliation-and-recovery"
+          }
+        ]
+      },
+      "escalation": [
+        "Native state invalidations require session/installation authority tests and focused browser consumers. Legacy hosts keep polling compatibility; browser mocks do not prove native network liveness."
+      ]
     }
   ],
   "prScenarios": [
@@ -438,6 +535,53 @@
         "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png"
       ],
       "browser": ["e2e/trust-cards.spec.ts", "e2e/ui-audit-dialogs.spec.ts"]
+    },
+    {
+      "id": "group-sync",
+      "paths": [
+        "frontend/src/store/channelRefresh.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/lib/events.ts",
+        "frontend/e2e/group-sync.spec.ts"
+      ],
+      "browser": ["e2e/group-sync.spec.ts", "e2e/channel-lifecycle.spec.ts"]
+    },
+    {
+      "id": "frontend-state-push",
+      "paths": [
+        "frontend/src/lib/readDeadline.ts",
+        "frontend/src/lib/readDeadline.test.ts",
+        "frontend/src/lib/syncInvalidation.ts",
+        "frontend/src/lib/linkedContacts.ts",
+        "frontend/src/lib/linkedContacts.test.ts",
+        "frontend/src/lib/linkedAppearance.ts",
+        "frontend/src/lib/linkedAppearance.test.ts",
+        "frontend/src/lib/linkedPreferencePublisher.ts",
+        "frontend/src/lib/linkedPreferencePublisher.test.ts",
+        "frontend/src/lib/events.ts",
+        "frontend/src/lib/events.test.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/api/contacts.ts",
+        "frontend/src/store/fileAvailability.ts",
+        "frontend/src/store/fileAvailability.test.ts",
+        "frontend/src/store/presence.ts",
+        "frontend/src/store/presence.test.ts",
+        "frontend/src/store/contactPolicy.ts",
+        "frontend/src/store/contactPolicy.test.ts",
+        "frontend/src/features/chat/useSerialPoll.ts",
+        "frontend/src/features/chat/useSerialPoll.test.ts",
+        "frontend/src/features/chat/PersonalDevices.tsx",
+        "frontend/src/features/chat/PersonalDevices.test.ts",
+        "frontend/e2e/automatic-delivery.spec.ts",
+        "frontend/src/store/rosterRefresh.ts",
+        "frontend/src/store/chat.ts"
+      ],
+      "browser": [
+        "e2e/automatic-delivery.spec.ts",
+        "e2e/group-sync.spec.ts",
+        "e2e/personal-messages.spec.ts"
+      ]
     }
   ]
 }

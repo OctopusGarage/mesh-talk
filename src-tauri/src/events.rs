@@ -151,6 +151,8 @@ fn preview(text: &str) -> String {
 pub const EVENT_DM_RECEIVED: &str = "dm-received";
 /// A received channel message.
 pub const EVENT_CHANNEL_MESSAGE: &str = "channel-message";
+/// Group metadata changed; the UI should refresh its authorized projection.
+pub const EVENT_CHANNEL_CHANGED: &str = "channel-changed";
 /// A received file (DM or channel).
 pub const EVENT_FILE_RECEIVED: &str = "file-received";
 /// Progress of local file preparation or saving (throttled).
@@ -159,6 +161,29 @@ pub const EVENT_FILE_PROGRESS: &str = "file-progress";
 pub const EVENT_PROFILE_RECEIVED: &str = "profile-received";
 /// An inbound call signal (WebRTC SDP / "bye") from an authenticated peer. Ephemeral.
 pub const EVENT_CALL_SIGNAL: &str = "call-signal";
+
+#[derive(serde::Serialize, Clone)]
+pub(crate) struct ChannelChangedEvent {
+    /// Host login namespace; independent of the cryptographic account.
+    pub owner: String,
+    pub account_id: String,
+    /// Device user ID, including after adopting a linked account.
+    pub device_id: String,
+    /// None requests a full group refresh after the bounded receiver lagged.
+    pub channel_id: Option<String>,
+}
+
+pub(crate) fn emit_channel_changed<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    event: ChannelChangedEvent,
+) {
+    if crate::app_lock::app_locked(app_handle) {
+        return;
+    }
+    if let Err(error) = app_handle.emit(EVENT_CHANNEL_CHANGED, event) {
+        log::warn!("Failed to emit channel metadata change: {error}");
+    }
+}
 
 #[derive(serde::Serialize, Clone)]
 pub struct ProfileReceivedEvent {
@@ -605,5 +630,25 @@ mod notification_policy_tests {
             )
             .is_none()
         );
+    }
+}
+
+#[derive(serde::Serialize, Clone)]
+pub(crate) struct NodeStateChangedEvent {
+    pub owner: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub kind: &'static str,
+}
+
+pub(crate) fn emit_node_state_changed<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    event: NodeStateChangedEvent,
+) {
+    if crate::app_lock::app_locked(app) {
+        return;
+    }
+    if let Err(error) = app.emit("node-state-changed", event) {
+        log::warn!("Failed to emit node state invalidation: {error}");
     }
 }

@@ -52,25 +52,33 @@ function mediaBytes(bytes: ArrayBuffer | number[]): ArrayBuffer {
 }
 
 export const chat = {
-  getDeviceSyncPolicy: () => invoke<DeviceSyncPolicy>("get_device_sync_policy"),
-  getDeviceSyncStatus: () =>
-    invoke<DeviceSyncStatus[]>("get_device_sync_status"),
-  setDeviceSyncCategory: (category: SyncCategory, enabled: boolean) =>
+  getDeviceSyncPolicy: (owner: string) =>
+    invoke<DeviceSyncPolicy>("get_device_sync_policy", { owner }),
+  getDeviceSyncStatus: (owner: string) =>
+    invoke<DeviceSyncStatus[]>("get_device_sync_status", { owner }),
+  setDeviceSyncCategory: (
+    category: SyncCategory,
+    enabled: boolean,
+    owner: string,
+  ) =>
     invoke<DeviceSyncPolicy>("set_device_sync_category", {
       category,
       enabled,
+      owner,
     }),
-  getAccountPreferences: (category: "appearance" | "contacts") =>
-    invoke<AccountPreference[]>("get_account_preferences", { category }),
+  getAccountPreferences: (category: "appearance" | "contacts", owner: string) =>
+    invoke<AccountPreference[]>("get_account_preferences", { category, owner }),
   setAccountPreference: (
     category: "appearance" | "contacts",
     key: string,
     value: string | null,
+    owner: string,
   ) =>
     invoke<AccountPreference>("set_account_preference", {
       category,
       key,
       value,
+      owner,
     }),
   ownerIdentity: (owner: string) =>
     invoke<{
@@ -78,6 +86,7 @@ export const chat = {
       device_id: string;
       account_id: string;
       history_revision?: number;
+      supports_push_state?: boolean;
     }>("owner_node_identity", { owner }),
   enqueueText: (
     owner: string,
