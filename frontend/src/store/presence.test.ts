@@ -800,3 +800,36 @@ it("a fresh local path outranks a weak routed hint but only while local evidence
   expect(agePresence(snapshot, 14).bob.connection_weak).toBe(false);
   expect(agePresence(snapshot, 15).bob.connection_weak).toBe(true);
 });
+
+it("fresh current-device evidence keeps the local account in group counts without a routed weak hint", () => {
+  const snapshot: PresenceMap = {
+    self: {
+      online: true,
+      connection_weak: true,
+      last_seen_secs: 0,
+      online_expires_in_secs: 15,
+      reconnect_expires_in_secs: 15,
+      devices: [
+        {
+          user_id: "current-device",
+          evidence: [
+            { source: "self", last_seen_secs: 0, expires_in_secs: 15 },
+          ],
+        },
+      ],
+    },
+    group: {
+      online: false,
+      last_seen_secs: null,
+      member_keys: ["self"],
+      member_count: 1,
+      online_count: 1,
+    },
+  };
+  const fresh = agePresence(snapshot, 0);
+  expect(fresh.self.online).toBe(true);
+  expect(fresh.self.connection_weak).toBe(false);
+  expect(fresh.group.online_count).toBe(1);
+  expect(agePresence(snapshot, 14).group.online_count).toBe(1);
+  expect(agePresence(snapshot, 15).group.online_count).toBe(0);
+});

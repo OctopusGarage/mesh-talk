@@ -188,7 +188,9 @@ endpoint address retain Online until 120 seconds from their original public obse
 When their fresh evidence expires, show **Online · slow connection**. The
 presentation tolerance does not manufacture fresh device evidence or prove
 transport, delivery or read state. Group known-online counts use this same
-presentation consistently. **Offline** means the bounded observation has expired
+presentation consistently. The running local account contributes a fifteen-second
+current-device lease; it must not serialize a zero presentation expiry or inherit
+an older routed quality hint. This self observation ages normally if IPC stops. **Offline** means the bounded observation has expired
 here, not a global sign-out claim.
 
 Initial discovery displays Online immediately. After a loss, fresh observations

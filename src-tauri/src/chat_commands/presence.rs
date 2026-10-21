@@ -133,6 +133,24 @@ fn add_group(
     );
 }
 
+fn add_self(out: &mut HashMap<String, PresenceInfo>, account_id: String, user_id: String) {
+    let lease = mesh_talk_core::discovery::roster::PUBLIC_PRESENCE_TTL.as_secs();
+    let own = out.entry(account_id).or_default();
+    own.online = true;
+    own.connection_weak = false;
+    own.online_expires_in_secs = own.online_expires_in_secs.max(lease);
+    own.reconnect_expires_in_secs = own.reconnect_expires_in_secs.max(lease);
+    own.last_seen_secs = Some(0);
+    own.devices.push(PresenceDevice {
+        user_id,
+        evidence: vec![PresenceEvidence {
+            source: "self",
+            last_seen_secs: 0,
+            expires_in_secs: lease,
+        }],
+    });
+}
+
 /// One shared snapshot. No per-member dials, retained connections or transitive gossip.
 #[tauri::command]
 pub async fn get_presence(
@@ -167,17 +185,11 @@ pub async fn get_presence(
             now,
         );
     }
-    let own = out.entry(rt.account_id().to_owned()).or_default();
-    own.online = true;
-    own.last_seen_secs = Some(0);
-    own.devices.push(PresenceDevice {
-        user_id: rt.user_id().to_owned(),
-        evidence: vec![PresenceEvidence {
-            source: "self",
-            last_seen_secs: 0,
-            expires_in_secs: mesh_talk_core::discovery::roster::PUBLIC_PRESENCE_TTL.as_secs(),
-        }],
-    });
+    add_self(
+        &mut out,
+        rt.account_id().to_owned(),
+        rt.user_id().to_owned(),
+    );
     for person in out.values_mut() {
         person.devices.sort_by(|a, b| a.user_id.cmp(&b.user_id));
         for device in &mut person.devices {
@@ -223,6 +235,30 @@ mod tests {
         discovery::{Announce, Roster},
         identity::{account::Account, device::DeviceIdentity},
     };
+    #[test]
+    fn local_account_has_a_real_presentation_lease_for_frontend_group_aging() {
+        let mut out = HashMap::new();
+        add_self(
+            &mut out,
+            "self-account".to_owned(),
+            "self-device".to_owned(),
+        );
+        let own = &out["self-account"];
+        assert!(own.online);
+        assert!(!own.connection_weak);
+        assert_eq!(own.online_expires_in_secs, 15);
+        assert_eq!(own.reconnect_expires_in_secs, 15);
+        assert_eq!(own.devices[0].evidence[0].source, "self");
+        assert_eq!(own.devices[0].evidence[0].expires_in_secs, 15);
+        add_group(
+            &mut out,
+            "group".to_owned(),
+            HashSet::from(["self-account".to_owned()]),
+            HashSet::new(),
+        );
+        assert_eq!(out["group"].online_count, Some(1));
+    }
+
     #[test]
     fn cross_lan_presence_tolerates_two_minutes_but_local_expires_at_fifteen_seconds() {
         let account = Account::generate();

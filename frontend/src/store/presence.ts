@@ -44,10 +44,13 @@ function reconcile(prev: PresenceMap, next: PresenceMap): PresenceMap {
   return changed ? merged : prev;
 }
 
-/** Direct local evidence outranks a quality hint inherited from another path. */
+/** Local/current-device evidence outranks a quality hint inherited from another path. */
 function hasFreshLocalEvidence(devices: PresenceInfo["devices"]): boolean {
   return !!devices?.some((device) =>
-    device.evidence.some((e) => e.source === "local" && e.expires_in_secs > 0),
+    device.evidence.some(
+      (e) =>
+        (e.source === "local" || e.source === "self") && e.expires_in_secs > 0,
+    ),
   );
 }
 
