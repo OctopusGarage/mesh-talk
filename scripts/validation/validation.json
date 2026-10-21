@@ -239,6 +239,17 @@
       ]
     },
     {
+      "id": "portable-browser-reporting",
+      "paths": [
+        "scripts/evals/browser-report.mjs",
+        "scripts/diagnostics/browser-eval-report.test.mjs"
+      ],
+      "node": ["scripts/diagnostics/browser-eval-report.test.mjs"],
+      "escalation": [
+        "Portable browser reporting requires exact scenario identities, unique trace and screenshot evidence, and zero skipped or flaky cases from the configured browser matrix. Diagnostic tests do not establish browser acceptance; see docs/testing-feedback-loop.md."
+      ]
+    },
+    {
       "id": "native-acceptance-harness",
       "paths": [
         "scripts/diagnostics/hidden-contacts.mjs",
