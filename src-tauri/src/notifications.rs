@@ -50,16 +50,23 @@ fn settings_url() -> Option<&'static str> {
 }
 
 #[tauri::command]
-pub async fn notification_permission(app: tauri::AppHandle) -> NotificationPermission {
+pub async fn notification_permission<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> NotificationPermission {
     observe(app, false).await
 }
 
 #[tauri::command]
-pub async fn request_notification_permission(app: tauri::AppHandle) -> NotificationPermission {
+pub async fn request_notification_permission<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> NotificationPermission {
     observe(app, true).await
 }
 
-async fn observe(app: tauri::AppHandle, request: bool) -> NotificationPermission {
+async fn observe<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    request: bool,
+) -> NotificationPermission {
     let status = tauri::async_runtime::spawn_blocking(move || platform_permission(&app, request))
         .await
         .unwrap_or(PermissionStatus::Unknown);
@@ -68,7 +75,9 @@ async fn observe(app: tauri::AppHandle, request: bool) -> NotificationPermission
 
 /// Only fixed OS destinations are accepted; opening them is an explicit UI action.
 #[tauri::command]
-pub async fn open_notification_settings(app: tauri::AppHandle) -> Result<(), CommandError> {
+pub async fn open_notification_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), CommandError> {
     let url = settings_url().ok_or_else(|| {
         CommandError::Internal("Open your desktop notification settings manually".into())
     })?;
@@ -89,7 +98,10 @@ fn mac_status(authorization: isize, alerts: isize) -> PermissionStatus {
 }
 
 #[cfg(target_os = "macos")]
-fn platform_permission(app: &tauri::AppHandle, request: bool) -> PermissionStatus {
+fn platform_permission<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    request: bool,
+) -> PermissionStatus {
     use block2::RcBlock;
     use objc2::runtime::Bool;
     use objc2_foundation::{NSBundle, NSError};
@@ -146,7 +158,10 @@ fn platform_permission(app: &tauri::AppHandle, request: bool) -> PermissionStatu
 }
 
 #[cfg(target_os = "windows")]
-fn platform_permission(app: &tauri::AppHandle, _request: bool) -> PermissionStatus {
+fn platform_permission<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    _request: bool,
+) -> PermissionStatus {
     use windows::{
         UI::Notifications::{NotificationSetting, ToastNotificationManager},
         core::HSTRING,
@@ -179,7 +194,10 @@ fn platform_permission(app: &tauri::AppHandle, _request: bool) -> PermissionStat
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn platform_permission(_app: &tauri::AppHandle, _request: bool) -> PermissionStatus {
+fn platform_permission<R: tauri::Runtime>(
+    _app: &tauri::AppHandle<R>,
+    _request: bool,
+) -> PermissionStatus {
     // Linux notification daemons have no portable per-app permission query or
     // settings URI. A successful DBus connection cannot prove alerts are enabled.
     PermissionStatus::Unknown
@@ -218,5 +236,61 @@ mod tests {
         assert_eq!(mac_status(2, 1), PermissionStatus::Limited);
         assert_eq!(mac_status(3, 2), PermissionStatus::Limited);
         assert_eq!(mac_status(99, 2), PermissionStatus::Unknown);
+    }
+
+    #[test]
+    fn registered_permission_commands_report_unavailable_identity_without_prompting() {
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![
+                notification_permission,
+                request_notification_permission,
+                open_notification_settings
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let invoke = |command: &str| {
+            tauri::test::get_ipc_response(
+                &webview,
+                tauri::webview::InvokeRequest {
+                    cmd: command.into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: if cfg!(windows) {
+                        "http://tauri.localhost"
+                    } else {
+                        "tauri://localhost"
+                    }
+                    .parse()
+                    .unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(serde_json::json!({})),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.into(),
+                },
+            )
+            .map(|body| body.deserialize::<serde_json::Value>().unwrap())
+        };
+        for command in ["notification_permission", "request_notification_permission"] {
+            let value = invoke(command).unwrap();
+            assert_eq!(
+                value["status"], "unknown",
+                "a headless/uninstalled host must never claim a grant"
+            );
+            assert_eq!(
+                value,
+                serde_json::to_value(snapshot(PermissionStatus::Unknown)).unwrap()
+            );
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let error = invoke("open_notification_settings").unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Open your desktop notification settings manually")
+            );
+        }
     }
 }
