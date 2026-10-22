@@ -804,12 +804,14 @@ export const test = base.extend({
             success: true,
             user: { id: "u_self", username: "tester", display_name: "tester" },
           }),
+          retry_saved_session: () => "saved",
           login: (a) => {
             contactOwner = a.username === "other_user" ? "u_other" : "u_self";
             for (const account of erasedHistory())
               clearConversation(`acc:${account}`);
             return {
               success: true,
+              saved_session: appSettings.stay_signed_in ? "saved" : "disabled",
               user: {
                 id: contactOwner,
                 username: String(a.username ?? "tester"),

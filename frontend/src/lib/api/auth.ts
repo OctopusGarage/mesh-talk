@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   LoginResult,
+  SavedSessionStatus,
   LogoutResult,
   RegisterResult,
   UserInfo,
@@ -11,6 +12,8 @@ export const auth = {
     invoke<LoginResult>("login", { username, password }),
   register: (username: string, password: string) =>
     invoke<RegisterResult>("register", { username, password }),
+  retrySavedSession: (owner: string) =>
+    invoke<SavedSessionStatus>("retry_saved_session", { owner }),
   /** Change the editable display name (nickname); returns the updated user. */
   renameAccount: (newDisplayName: string) =>
     invoke<UserInfo>("rename_account", { newDisplayName }),

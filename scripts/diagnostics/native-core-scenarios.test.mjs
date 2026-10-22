@@ -318,3 +318,24 @@ test("public restoration rechecks an early empty CLI roster despite stale pre-pr
   assert.equal(found, rawPeer);
   assert.equal(queries, 2, "old stdout and one early empty query cannot prove current public discovery");
 });
+
+test("native account entry submits once and defers the optional backup reminder", async () => {
+  const { enterNativeAccount } = await import("./native-core-scenarios.mjs");
+  for (const register of [false, true]) {
+    const calls = [];
+    const ui = {
+      click: async id => calls.push(["click", id]),
+      fill: async (id, value) => calls.push(["fill", id, value]),
+      element: async id => calls.push(["element", id]),
+    };
+    await enterNativeAccount(ui, "alice", "password123", register);
+    assert.deepEqual(calls, [
+      ...(register ? [["click", "login-tab-register"]] : []),
+      ["fill", "login-username", "alice"],
+      ["fill", "login-password", "password123"],
+      ["click", "login-submit"],
+      ["element", "chat-shell"],
+      ...(register ? [["click", "account-protection-later"]] : []),
+    ]);
+  }
+});

@@ -237,6 +237,12 @@ describe("auth command mapping", () => {
     await auth.adoptLinkedAccount();
     expect(invoke).toHaveBeenCalledWith("adopt_linked_account");
   });
+  it("saved-login retry carries an explicit owner and no password", async () => {
+    await auth.retrySavedSession("owner-1");
+    expect(invoke).toHaveBeenCalledWith("retry_saved_session", {
+      owner: "owner-1",
+    });
+  });
   it("auto_login / clear_saved_session take no args", async () => {
     await auth.autoLogin();
     expect(invoke).toHaveBeenCalledWith("auto_login");

@@ -448,16 +448,26 @@ pub fn record_last_user<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &SettingsState,
     last_user: Option<String>,
-) {
+) -> bool {
     let mut inner = state.0.lock().unwrap();
     inner.global.last_user = last_user.clone();
     inner.current.last_user = last_user;
     #[cfg(test)]
-    if let Some(path) = state.2.as_ref() {
-        std::fs::write(path, serde_json::to_vec(&inner.global).unwrap()).unwrap();
-        return;
+    let path = state
+        .2
+        .clone()
+        .or_else(|| config_store::config_path(app, SETTINGS_FILE));
+    #[cfg(not(test))]
+    let path = config_store::config_path(app, SETTINGS_FILE);
+    let Some(path) = path else {
+        log::warn!("No config directory: saved-login metadata not persisted");
+        return false;
+    };
+    if let Err(error) = config_store::write_account(&path, &inner.global) {
+        log::warn!("Failed to persist saved-login metadata: {error}");
+        return false;
     }
-    save(app, &inner.global);
+    true
 }
 
 /// Read the current two non-autostart toggles. (Launch-at-login is queried via

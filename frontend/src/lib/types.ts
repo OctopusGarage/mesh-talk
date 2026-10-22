@@ -9,7 +9,10 @@ export interface UserInfo {
   display_name: string;
 }
 
+export type SavedSessionStatus = "saved" | "failed" | "disabled";
+
 export interface LoginResult {
+  saved_session?: SavedSessionStatus;
   success: boolean;
   token?: string;
   user?: UserInfo;

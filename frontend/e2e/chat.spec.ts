@@ -22,13 +22,6 @@ async function register(page: Page, user = "tester", path = "/") {
   await page.getByTestId("login-submit").click();
 }
 
-async function signIn(page: Page, user = "tester") {
-  await page.getByTestId("login-tab-signin").click();
-  await page.getByTestId("login-username").fill(user);
-  await page.getByTestId("login-password").fill("password123");
-  await page.getByTestId("login-submit").click();
-}
-
 /** Open Bob's DM and wait for its (seeded) history to render. */
 async function openBobDm(page: Page) {
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
@@ -39,11 +32,12 @@ async function openBobDm(page: Page) {
 }
 
 test.describe("Mesh-Talk UI flow", () => {
-  test("register → sign in → chat shell renders", async ({ page }) => {
+  test("creating an account enters the chat shell directly", async ({
+    page,
+  }) => {
     await register(page);
-    // Registration succeeds and flips back to sign-in with a notice.
-    await expect(page.getByText("Account created")).toBeVisible();
-    await signIn(page);
+    await expect(page.getByTestId("account-protection")).toBeVisible();
+    await expect(page.getByTestId("login-form")).toBeHidden();
 
     await waitForChatShell(page);
     // Identity is present (the glyph + own name), and no blank/black screen regression.

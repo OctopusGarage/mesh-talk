@@ -498,3 +498,14 @@ export async function restartedCoreScenarios(c, state) {
   await c.passed("settings-theme-persistence", { selected: state.selectedTheme, visibleSelection: true, persistedAfterRestart: true });
   await c.key("\uE00C");
 }
+
+/** Exercise the real creation/sign-in form once, then dismiss only the optional
+ * recovery reminder so subsequent native scenarios retain their normal layout. */
+export async function enterNativeAccount(ui, username, password, register = false) {
+  if (register) await ui.click("login-tab-register");
+  await ui.fill("login-username", username);
+  await ui.fill("login-password", password);
+  await ui.click("login-submit");
+  await ui.element("chat-shell");
+  if (register) await ui.click("account-protection-later");
+}

@@ -23,12 +23,10 @@ export async function waitForChatShell(page: Page) {
 
 export async function enterChatShell(page: Page, user = "tester", path = "/") {
   await page.goto(path);
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill(user);
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill(user);
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await waitForChatShell(page);
 }
 
