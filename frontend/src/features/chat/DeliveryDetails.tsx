@@ -1,10 +1,11 @@
-import { useId, useState } from "react";
+import { useId, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { useDeliveryRecovery } from "./deliveryRecovery";
 import type { ChatMessage } from "@/store/conversationModel";
 
 /** Past local runtime evidence, independent of the sender's wall clock and receipt. */
@@ -41,53 +42,99 @@ function observationAge(
 export function DeliveryDetails({ message }: { message: ChatMessage }) {
   const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
+  const recover = useDeliveryRecovery();
+  const origin = useRef<HTMLButtonElement>(null);
+  const navigating = useRef(false);
   const title = useId();
   const description = useId();
   const age = open
     ? observationAge(message.deliveryObservation, i18n.language)
     : undefined;
+  const reason = age ? message.deliveryObservation?.reason : undefined;
+  const reasonKey =
+    reason === "post_office_disabled"
+      ? "postOfficeDisabled"
+      : reason === "no_known_route"
+        ? "noKnownRoute"
+        : reason === "attempt_timed_out"
+          ? "attemptTimedOut"
+          : undefined;
   return (
-    <Popover open={open} onOpenChange={setOpen} modal={false}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          data-testid="delivery-details-trigger"
-          data-delivery="awaiting"
-          className="inline-flex min-h-6 items-center gap-1 rounded-sm text-left underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <span aria-hidden="true">◷</span>
-          {t("message.delivery.awaiting")}
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        data-testid="delivery-details"
-        align="end"
-        aria-labelledby={title}
-        aria-describedby={description}
-        className="w-72 max-w-[calc(100vw-16px)] overflow-y-auto break-words p-3 text-sm"
-        style={{ maxHeight: "var(--radix-popover-content-available-height)" }}
+    <>
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          if (next) navigating.current = false;
+          setOpen(next);
+        }}
+        modal={false}
       >
-        <h3 id={title} className="font-semibold">
-          {t("message.delivery.detailsTitle")}
-        </h3>
-        <div id={description} className="mt-2 space-y-2">
-          <p>{t("message.delivery.awaiting")}</p>
-          <p>
-            {age
-              ? t(
-                  `message.delivery.${message.deliveryObservation?.kind === "attempting" ? "attempted" : "retryScheduled"}`,
-                  { age },
-                )
-              : t("message.delivery.noDetails")}
-          </p>
-          <p>{t("message.delivery.automaticRetry")}</p>
-          <p className="text-xs text-muted-foreground">
-            {t(
-              `message.delivery.${message.file ? "awaitingFileHelp" : "help"}`,
-            )}
-          </p>
-        </div>
-      </PopoverContent>
-    </Popover>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            ref={origin}
+            data-testid="delivery-details-trigger"
+            data-delivery="awaiting"
+            className="inline-flex min-h-6 items-center gap-1 rounded-sm text-left underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <span aria-hidden="true">◷</span>
+            {t("message.delivery.awaiting")}
+          </button>
+        </PopoverTrigger>
+        <PopoverContent
+          data-testid="delivery-details"
+          onCloseAutoFocus={(event) => {
+            if (navigating.current) event.preventDefault();
+          }}
+          align="end"
+          aria-labelledby={title}
+          aria-describedby={description}
+          className="w-72 max-w-[calc(100vw-16px)] overflow-y-auto break-words p-3 text-sm"
+          style={{ maxHeight: "var(--radix-popover-content-available-height)" }}
+        >
+          <h3 id={title} className="font-semibold">
+            {t("message.delivery.detailsTitle")}
+          </h3>
+          <div id={description} className="mt-2 space-y-2">
+            <p>{t("message.delivery.awaiting")}</p>
+            <p>
+              {age
+                ? t(
+                    `message.delivery.${message.deliveryObservation?.kind === "attempting" ? "attempted" : "retryScheduled"}`,
+                    { age },
+                  )
+                : t("message.delivery.noDetails")}
+            </p>
+            {reasonKey && <p>{t(`message.delivery.${reasonKey}`)}</p>}
+            <p>{t("message.delivery.automaticRetry")}</p>
+            <p className="text-xs text-muted-foreground">
+              {t(
+                `message.delivery.${message.file ? "awaitingFileHelp" : "help"}`,
+              )}
+            </p>
+          </div>
+          {recover && (
+            <button
+              type="button"
+              className="mt-3 rounded-sm text-left font-medium text-foreground underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => {
+                navigating.current = true;
+                setOpen(false);
+                recover(
+                  reason === "post_office_disabled"
+                    ? "settings"
+                    : "diagnostics",
+                  origin.current,
+                );
+              }}
+            >
+              {t(
+                `message.delivery.${reason === "post_office_disabled" ? "reviewSettings" : "openDiagnostics"}`,
+              )}
+            </button>
+          )}
+        </PopoverContent>
+      </Popover>
+    </>
   );
 }

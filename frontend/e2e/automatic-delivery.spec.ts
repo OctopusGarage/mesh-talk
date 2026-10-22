@@ -19,7 +19,7 @@ async function observeLocalDelivery(page: Page) {
         ) => Promise<unknown>;
       };
       __deliveryDetailsFixture: {
-        observation: { kind: string; age_ms: number } | null;
+        observation: { kind: string; age_ms: number; reason?: string } | null;
         hold: boolean;
         entered: boolean;
         seenKind: string | null;
@@ -27,9 +27,14 @@ async function observeLocalDelivery(page: Page) {
       };
     };
     const state = {
-      observation: { kind: "retry_scheduled", age_ms: 180000 } as {
+      observation: {
+        kind: "retry_scheduled",
+        age_ms: 180000,
+        reason: "post_office_disabled",
+      } as {
         kind: string;
         age_ms: number;
+        reason?: string;
       } | null,
       hold: false,
       entered: false,
@@ -87,6 +92,12 @@ for (const viewport of [
     await expect(details).toBeVisible();
     await expect(details).toHaveAccessibleName("Delivery details");
     await expect(details).toContainText(/Retry was scheduled .*minutes ago\./);
+    await expect(details).toContainText(
+      "Post-office sending was disabled on this device",
+    );
+    await expect(
+      details.getByRole("button", { name: "Review delivery settings" }),
+    ).toBeVisible();
     await expect(details.locator("[aria-live]")).toHaveCount(0);
     await expect(bubble.getByRole("button", { name: /resend/i })).toHaveCount(
       0,
@@ -110,6 +121,43 @@ for (const viewport of [
     await expect(trigger).toBeFocused();
     await trigger.press("Space");
     await expect(details).toBeVisible();
+    await details
+      .getByRole("button", { name: "Review delivery settings" })
+      .click();
+    const settings = page
+      .getByRole("dialog")
+      .filter({ has: page.locator("#setting-post-office") });
+    await expect(settings).toBeVisible();
+    await expect(page.locator("#setting-post-office")).toBeFocused();
+    await settings.press("Escape");
+    await expect(settings).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await page.evaluate(() => {
+      (
+        window as unknown as {
+          __deliveryDetailsFixture: { observation: unknown };
+        }
+      ).__deliveryDetailsFixture.observation = {
+        kind: "retry_scheduled",
+        age_ms: 0,
+        reason: "no_known_route",
+      };
+    });
+    await trigger.focus();
+    await trigger.press("Enter");
+    await expect(details).toContainText(
+      "No eligible route was known to this device",
+    );
+    await details
+      .getByRole("button", { name: "Open connection diagnostics" })
+      .click();
+    const diagnostics = page.getByRole("dialog");
+    await expect(diagnostics).toBeVisible();
+    await diagnostics.press("Escape");
+    await expect(diagnostics).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await trigger.focus();
+    await trigger.press("Enter");
     await page.evaluate(() => {
       (
         window as unknown as {
@@ -517,4 +565,69 @@ test("a scoped native delivery invalidation refreshes status without a polling r
           .__pushDelivery.reads,
     ),
   ).toBe(1);
+});
+
+test("delivery recovery survives its receipt and returns focus safely, then retires on logout", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await observeLocalDelivery(page);
+  await page
+    .getByTestId("composer-input")
+    .fill("Keep recovery open through receipt");
+  await page.getByTestId("composer-send").click();
+  const bubble = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "Keep recovery open through receipt" });
+  const trigger = bubble.getByTestId("delivery-details-trigger");
+  await trigger.focus();
+  await trigger.press("Enter");
+  await page
+    .getByTestId("delivery-details")
+    .getByRole("button", { name: "Review delivery settings" })
+    .click();
+  const settings = page.getByTestId("settings-dialog");
+  await expect(settings).toBeVisible();
+  await page.evaluate(async (account) => {
+    const scope = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<{ id: string }[]>;
+      };
+      __mockSetDelivery(account: string, id: string, status: string): void;
+    };
+    const rows = await scope.__TAURI_INTERNALS__.invoke(
+      "owner_account_history",
+      { owner: "u_self", account, limit: 500 },
+    );
+    scope.__mockSetDelivery(account, rows[rows.length - 1].id, "delivered");
+  }, BOB.account);
+  await expect(trigger).toHaveCount(0);
+  await expect(settings).toBeVisible();
+  await settings.press("Escape");
+  await expect(settings).toBeHidden();
+  await expect(page.getByTestId("chat-shell")).toBeFocused();
+  await page.getByTestId("composer-input").fill("Retire recovery on logout");
+  await page.getByTestId("composer-send").click();
+  const next = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "Retire recovery on logout" })
+    .getByTestId("delivery-details-trigger");
+  await next.focus();
+  await next.press("Enter");
+  await page
+    .getByTestId("delivery-details")
+    .getByRole("button", { name: "Review delivery settings" })
+    .click();
+  await expect(settings).toBeVisible();
+  await page.evaluate(async () => {
+    const modulePath = "/src/store/auth.ts";
+    const { useAuth } = await import(/* @vite-ignore */ modulePath);
+    await useAuth.getState().logout();
+  });
+  await expect(settings).toBeHidden();
+  await expect(page.getByTestId("chat-shell")).toHaveCount(0);
 });

@@ -8,11 +8,17 @@ export interface Conversation {
   name: string;
 }
 
-export interface SearchTarget {
-  wallClock: number;
-  text: string;
-  fromMe: boolean;
-}
+export type SearchTarget =
+  | {
+      reference: import("@/lib/api/chat").SearchReference;
+      /** Read-only context presentation, separate from canonical history and unread evidence. */
+      context: ChatMessage[];
+    }
+  | {
+      wallClock: number;
+      text: string;
+      fromMe: boolean;
+    };
 
 export interface ChatMessage {
   /** Authenticated absolute send-time deadline; null/absent means keep. */
@@ -25,6 +31,7 @@ export interface ChatMessage {
     kind: "attempting" | "retry_scheduled";
     ageMs: number;
     sampledAt: number;
+    reason?: "post_office_disabled" | "no_known_route" | "attempt_timed_out";
   };
   replicas?: number;
   metadataPending?: boolean;

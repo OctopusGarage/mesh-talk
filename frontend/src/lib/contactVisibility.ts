@@ -13,8 +13,8 @@ export function visiblePeers(
   return peers.filter((p) => isContactPeer(p) && !hidden[peerAccountKey(p)]);
 }
 
-export function visibleSearchHits(
-  hits: SearchHitInfo[],
+export function visibleSearchHits<T extends SearchHitInfo>(
+  hits: T[],
   peers: PeerInfo[],
   hidden: Record<string, unknown>,
   loaded: boolean,

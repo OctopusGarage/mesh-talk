@@ -6,6 +6,13 @@ Search available local conversations and choose how long this device keeps histo
 
 Use the sidebar search for messages across available conversations, or open the history control in a conversation header to search that conversation. Results reflect the locally available history and the app's visibility and expiry rules.
 
+Sidebar search shows its recent-message window and tells you when more matches
+exist. Selecting a result opens that exact message, including a bounded context
+view when it is outside the current live history window. Use the return-to-latest
+control to resume the live conversation. A message that has expired, been
+recalled or become unavailable shows an explanation; matching text elsewhere
+does not substitute for the selected message.
+
 ## Read delayed messages
 
 Group messages can arrive after reconnecting through another authorized member or a post office. Their position follows retained conversation history rather than download time. While you read older content, the view keeps your place; use **New messages** or **Earlier messages received** to move to unread content.

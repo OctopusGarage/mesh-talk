@@ -1001,9 +1001,10 @@ case-insensitively. Accepted pending transactions and sibling-copy deduplication
 follow the owning history projection. Returned matches sort newest wall-clock
 first; ties within a conversation retain reverse canonical history order.
 Missing matches do not establish absence from all retained or remote history.
-Canonical history currently materializes retained rows before truncation, so the
-window bounds result projection, not input memory or execution time. This is not
-a paged or complete retained-history search.
+Canonical history scans borrowed retained metadata and copies message content
+only for the selected window. Identity deduplication and channel causal ordering
+still require metadata proportional to retention; this is not a constant-cost,
+paged or complete retained-history search.
 
 `Node::search_context` resolves an exact reference through the same conversation
 eligibility and canonical history owners. Missing, zero, expired or recalled
@@ -1011,8 +1012,8 @@ targets are unavailable. A found context contains the target and up to 25
 neighbors on each side in canonical order, plus the number of entries after the
 target. Recalled neighbors retain only their tombstone; their re-edit plaintext
 is omitted. Context reads do not change cache coverage, unread state or delivery.
-The output window is bounded; retained input materialization has the same cost
-limitation as recent search.
+The output window contains at most 51 decoded history rows. Retained identity
+selection and ordering have the same metadata traversal cost as recent search.
 
 Desktop `owner_search_recent` and `owner_search_context` capture explicit session
 ownership before queued work and recheck it before publication. References are
@@ -1020,17 +1021,48 @@ validated at the host boundary: account/device targets are 32 hex characters,
 channel and message IDs are 64; invalid shapes have structured input errors.
 Queries accept at most 4,096 UTF-8 bytes. Search returns a newest-first prefix
 with at most 200 hits and 1 MiB of serialized output, setting `truncated` when
-either result budget omits matches. Context returns at most 51 rows and 1 MiB;
+either result budget omits matches. The desktop uses
+`Node::search_recent_limited` with a 201-hit budget so one extra match establishes
+truncation without accumulating every conversation's matching plaintext. The
+current conversation's 2,000-entry projection is processed separately; retained
+metadata scans still cover eligible conversations. Context returns at most 51 rows and 1 MiB;
 a response exceeding its byte budget becomes unavailable with no rows. Limits
 do not establish complete retained-history coverage. Keys, raw errors and
 message content do not enter diagnostics.
 
-The new owner-scoped commands provide a query surface for future desktop
-adoption. The current SearchDialog and legacy desktop `search` command retain
-their existing behavior. Frontend adoption requires typed adapters, exact-ID
-selection, explicit unavailable outcomes, and read-only bounded context that
-does not replace the live cache or commit reception/unread coverage. A failed
-exact reference must never fall back to matching text and timestamps.
+The desktop SearchDialog uses these owner-scoped commands through typed adapters.
+Each selected result retains its namespace and canonical message ID. Exact
+context has a separate presentation lifetime; it does not replace the live
+conversation cache or commit reception/unread coverage. Returning to the latest
+messages restores the live view. Unavailable or unresolved references produce an
+explicit explanation rather than matching text and timestamps. A legacy-device
+reference needs an explicit account association before opening an account view;
+the raw device ID is never substituted for an account ID. Search results expose
+their recent-window coverage and truncation. Owner/runtime replacement and
+superseded requests invalidate pending results and context.
+
+### Storage replay and query budgets
+
+Encrypted record logs replay one framed record at a time instead of retaining a
+second buffer containing the complete encrypted file. The loader validates a
+declared frame length against the remaining file bytes before allocating that
+frame. It preserves the existing encrypted format, authenticated decode errors,
+valid-prefix crash-tail recovery and Windows repair-handle ownership. This bounds
+the temporary ciphertext buffer by one record; decoded retained records and
+their indexes still consume memory proportional to retained data.
+
+Canonical history queries select lightweight retained metadata before copying
+the chosen message content. Ordering, logical-ID deduplication, pending accepted
+records, expiry and recall remain owned by the existing history projection.
+Recent search and exact context reuse this projection instead of defining a
+second set of history rules. Small result windows do not imply constant-time
+queries: metadata selection and channel causal ordering can still traverse
+retained records. Account recall authorization also scans borrowed rows and
+envelope identities instead of cloning retained message bodies. Durable source
+rows retain their established sorted-before-dedup precedence even when arrival
+order differs from authored time; pending accepted rows follow durable rows.
+Signed DAG ancestry is not pruned to satisfy a local memory
+limit; authenticated checkpoint compaction remains a separate protocol decision.
 
 
 ### Manual encrypted backup and recovery

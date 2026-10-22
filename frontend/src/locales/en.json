@@ -281,6 +281,11 @@
   "message": {
     "expiresIn": "Expires in {{time}} after sending; removed on both sides",
     "delivery": {
+      "postOfficeDisabled": "Post-office sending was disabled on this device when no direct route was known. Review connection settings if you want to use a trusted post office.",
+      "noKnownRoute": "No eligible route was known to this device at the last attempt. Check connection diagnostics and the networks or trusted post offices you use.",
+      "attemptTimedOut": "The local attempt timed out without recipient confirmation. Check connection diagnostics; automatic retry remains active.",
+      "reviewSettings": "Review delivery settings",
+      "openDiagnostics": "Open connection diagnostics",
       "awaiting": "Awaiting receipt",
       "delivered": "Delivered",
       "help": "Automatic receipt from the target account. Not a read receipt.",
@@ -540,7 +545,11 @@
     "noMatches": "No matches.",
     "failed": "Search could not finish. Try again.",
     "outsideRecent": "This match is outside recent messages. Open Chat history above to find it.",
-    "empty": "Type to search your conversations."
+    "empty": "Type to search your conversations.",
+    "recentCoverage": "Searches the most recent {{count}} messages per conversation.",
+    "truncated": "More matches exist. Refine your search.",
+    "contextUnavailable": "This message is no longer available.",
+    "legacyUnavailable": "This legacy conversation cannot be opened from the current contact list."
   },
   "history": {
     "trigger": "Chat history",

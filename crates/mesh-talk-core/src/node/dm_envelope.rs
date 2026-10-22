@@ -36,6 +36,23 @@ pub struct DmEnvelope {
     pub body: Vec<u8>,
 }
 
+/// Validated envelope view for history metadata scans. Borrow the body instead
+/// of allocating a plaintext copy for each retained row.
+#[derive(Deserialize)]
+pub(super) struct DmEnvelopeRef<'a> {
+    #[serde(borrow)]
+    _route: DmRouteRef<'a>,
+    pub msg_id: [u8; 32],
+    #[serde(borrow)]
+    pub body: &'a [u8],
+}
+
+#[derive(Deserialize)]
+struct DmRouteRef<'a> {
+    _sender_account: &'a str,
+    _recipient_account: &'a str,
+}
+
 impl DmEnvelope {
     pub fn new(
         sender_account: String,
@@ -64,6 +81,19 @@ impl DmEnvelope {
                 .expect("dm envelope serializes"),
         );
         out
+    }
+
+    pub(super) fn decode_ref(bytes: &[u8]) -> Option<DmEnvelopeRef<'_>> {
+        if bytes.len() > 256 * 1024 {
+            return None;
+        }
+        let rest = bytes.strip_prefix(DM_ENV_MAGIC)?;
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(256 * 1024)
+            .reject_trailing_bytes()
+            .deserialize(rest)
+            .ok()
     }
 
     /// Recover an envelope from opened plaintext, or `None` if the bytes are not a

@@ -50,6 +50,15 @@ export function boundedConversationMap<T>(
   ]);
 }
 
+export function sameSearchReference(
+  a: import("@/lib/api/chat").SearchReference,
+  b: import("@/lib/api/chat").SearchReference,
+): boolean {
+  return (
+    a.kind === b.kind && a.target === b.target && a.message_id === b.message_id
+  );
+}
+
 export const convKey = (c: Conversation) => `${c.kind}:${c.id}`;
 
 export function fromHistoryItem(h: HistoryItem): ChatMessage {

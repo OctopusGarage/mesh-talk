@@ -19,6 +19,19 @@ connection changes. Missing details mean no current observation is available,
 including after restart or eviction; they do not establish a delivery failure.
 Automatic delivery continues without creating another copy of your message.
 
+When the client has supporting local evidence, details also explain that
+post-office sending was disabled with no known direct route, no eligible route
+was known, or an exchange timed out. These observations describe the last local
+attempt and do not establish that the recipient is offline. **Review delivery
+settings** opens the relevant connection control; **Open diagnostics** opens
+the existing connection checks. Neither action resends the message or changes
+your settings automatically.
+
+An open recovery dialog stays open when recipient confirmation arrives or its
+message scrolls out of view. Dismissing it returns keyboard focus to the delivery
+label if it is still present, or to the conversation shell. Leaving the
+conversation, locking the app or changing the signed-in session closes it.
+
 Recipient confirmation replaces the awaiting disclosure. For files, confirmation
 applies to the file card; downloading the bytes and reading the file remain
 separate. Group copy information and Saved Messages retain their own meanings.

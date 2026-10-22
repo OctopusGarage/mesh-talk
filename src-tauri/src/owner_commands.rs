@@ -1100,7 +1100,19 @@ mod tests {
         for item in statuses.as_array().unwrap() {
             assert!(ids.contains(&item["id"]));
             if let Some(observation) = item.get("observation") {
-                assert_eq!(observation.as_object().unwrap().len(), 2);
+                assert!(
+                    observation
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .all(|key| matches!(key.as_str(), "kind" | "age_ms" | "reason"))
+                );
+                if let Some(reason) = observation.get("reason") {
+                    assert!(matches!(
+                        reason.as_str(),
+                        Some("post_office_disabled" | "no_known_route" | "attempt_timed_out")
+                    ));
+                }
                 assert!(matches!(
                     observation["kind"].as_str(),
                     Some("attempting" | "retry_scheduled")
@@ -2464,12 +2476,25 @@ mod tests {
             observation: Some(mesh_talk_core::node::DeliveryObservation {
                 kind: mesh_talk_core::node::DeliveryObservationKind::RetryScheduled,
                 age_ms: 42,
+                reason: None,
             }),
             ..base
         };
         assert_eq!(
             serde_json::to_value(&observed).unwrap(),
             serde_json::json!({"id":"message", "status":"awaiting", "observation":{"kind":"retry_scheduled", "age_ms":42}})
+        );
+        let explained = super::MessageStatus {
+            observation: Some(mesh_talk_core::node::DeliveryObservation {
+                kind: mesh_talk_core::node::DeliveryObservationKind::RetryScheduled,
+                age_ms: 42,
+                reason: Some(mesh_talk_core::node::DeliveryRecoveryReason::NoKnownRoute),
+            }),
+            ..observed
+        };
+        assert_eq!(
+            serde_json::to_value(&explained).unwrap()["observation"]["reason"],
+            "no_known_route"
         );
     }
 }

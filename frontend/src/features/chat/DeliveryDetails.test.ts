@@ -1,12 +1,22 @@
 // @vitest-environment jsdom
-import { act, createElement } from "react";
-import { createRoot } from "react-dom/client";
+import { act, createElement, type ReactNode } from "react";
+import { createRoot as createReactRoot } from "react-dom/client";
+import { DeliveryRecoveryProvider } from "./DeliveryRecoveryProvider";
 import { expect, it, vi } from "vitest";
 import i18n from "@/lib/i18n";
 import { DeliveryFooter } from "./DeliveryFooter";
 import { useAuth } from "@/store/auth";
 import { useChat } from "@/store/chat";
 import type { ChatMessage } from "@/store/conversationModel";
+
+function createRoot(host: HTMLElement) {
+  const root = createReactRoot(host);
+  return {
+    render: (children: ReactNode) =>
+      root.render(createElement(DeliveryRecoveryProvider, { children })),
+    unmount: () => root.unmount(),
+  };
+}
 
 const base: ChatMessage = {
   id: "accepted",
@@ -210,4 +220,205 @@ it("discloses retry history and file-card receipt meaning without changing attac
   await act(async () => root.unmount());
   host.remove();
   clock.mockRestore();
+});
+
+vi.mock("./SettingsDialog", () => ({
+  SettingsDialog: ({
+    open,
+    initialTarget,
+    onOpenChange,
+    onCloseAutoFocus,
+  }: {
+    open: boolean;
+    initialTarget: { category: string; controlId: string };
+    onOpenChange: (open: boolean) => void;
+    onCloseAutoFocus: (event: Event) => void;
+  }) =>
+    open
+      ? createElement(
+          "div",
+          { "data-testid": "recovery-settings" },
+          `${initialTarget.category}:${initialTarget.controlId}`,
+          createElement(
+            "button",
+            {
+              onClick: () => {
+                onCloseAutoFocus(new Event("close", { cancelable: true }));
+                onOpenChange(false);
+              },
+            },
+            "Close recovery",
+          ),
+        )
+      : null,
+}));
+vi.mock("./DiagnosticsDialog", () => ({
+  DiagnosticsDialog: ({
+    open,
+    onOpenChange,
+    onCloseAutoFocus,
+  }: {
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+    onCloseAutoFocus: (event: Event) => void;
+  }) =>
+    open
+      ? createElement(
+          "div",
+          { "data-testid": "recovery-diagnostics" },
+          createElement(
+            "button",
+            {
+              onClick: () => {
+                onCloseAutoFocus(new Event("close", { cancelable: true }));
+                onOpenChange(false);
+              },
+            },
+            "Close recovery",
+          ),
+        )
+      : null,
+}));
+
+it("offers evidence-specific recovery guidance and safe connection navigation", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  await i18n.changeLanguage("en");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  for (const [reason, text, action, target] of [
+    [
+      "post_office_disabled",
+      "Post-office sending was disabled",
+      "Review delivery settings",
+      "recovery-settings",
+    ],
+    [
+      "no_known_route",
+      "No eligible route was known",
+      "Open connection diagnostics",
+      "recovery-diagnostics",
+    ],
+    [
+      "attempt_timed_out",
+      "The local attempt timed out",
+      "Open connection diagnostics",
+      "recovery-diagnostics",
+    ],
+  ]) {
+    await act(async () =>
+      root.render(
+        createElement(DeliveryFooter, {
+          message: {
+            ...base,
+            id: reason,
+            deliveryObservation: {
+              kind: "retry_scheduled",
+              ageMs: 0,
+              sampledAt: performance.now(),
+              reason: reason as NonNullable<
+                ChatMessage["deliveryObservation"]
+              >["reason"],
+            },
+          },
+          isChannel: false,
+        }),
+      ),
+    );
+    await act(async () =>
+      host
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="delivery-details-trigger"]',
+        )!
+        .click(),
+    );
+    const popup = document.querySelector('[data-testid="delivery-details"]')!;
+    expect(popup.textContent).toContain(text);
+    expect(popup.textContent).not.toMatch(
+      /recipient is offline|delivery failed/i,
+    );
+    const button = Array.from(popup.querySelectorAll("button")).find(
+      (b) => b.textContent === action,
+    )!;
+    expect(button).toBeTruthy();
+    await act(async () => button.click());
+    expect(
+      document.querySelector('[data-testid="delivery-details"]'),
+    ).toBeNull();
+    expect(document.querySelector(`[data-testid="${target}"]`)).not.toBeNull();
+    if (target === "recovery-settings")
+      expect(
+        document.querySelector(`[data-testid="${target}"]`)?.textContent,
+      ).toContain("connection:setting-post-office");
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>(`[data-testid="${target}"] button`)!
+        .click(),
+    );
+    expect(document.activeElement).toBe(
+      host.querySelector('[data-testid="delivery-details-trigger"]'),
+    );
+  }
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+it("keeps recovery settings open after recipient confirmation removes the disclosure", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  await i18n.changeLanguage("en");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const message = {
+    ...base,
+    deliveryObservation: {
+      ...base.deliveryObservation!,
+      reason: "post_office_disabled" as const,
+    },
+  };
+  await act(async () =>
+    root.render(createElement(DeliveryFooter, { message, isChannel: false })),
+  );
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="delivery-details-trigger"]',
+      )!
+      .click(),
+  );
+  await act(async () =>
+    Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="delivery-details"] button',
+      ),
+    )
+      .find((b) => b.textContent === "Review delivery settings")!
+      .click(),
+  );
+  expect(
+    document.querySelector('[data-testid="recovery-settings"]'),
+  ).not.toBeNull();
+  await act(async () =>
+    root.render(
+      createElement(DeliveryFooter, {
+        message: { ...message, delivery: "delivered" },
+        isChannel: false,
+      }),
+    ),
+  );
+  expect(
+    document.querySelector('[data-testid="recovery-settings"]'),
+  ).not.toBeNull();
+  await act(async () => root.render(null));
+  expect(
+    document.querySelector('[data-testid="recovery-settings"]'),
+  ).not.toBeNull();
+  await act(async () =>
+    useAuth.setState((state) => ({ generation: state.generation + 1 })),
+  );
+  expect(
+    document.querySelector('[data-testid="recovery-settings"]'),
+  ).toBeNull();
+  await act(async () => root.unmount());
+  host.remove();
 });

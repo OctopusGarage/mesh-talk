@@ -312,7 +312,10 @@ it("reports an unavailable unread target rather than pretending navigation succe
   await render("channel:group");
   expect(viewport.jumpToMessage("outside-loaded-history")).toBe(false);
   const scrollToIndex = vi.fn();
-  viewport.virtuosoRef.current = { scrollToIndex } as unknown as VirtuosoHandle;
+  viewport.virtuosoRef.current = {
+    scrollToIndex,
+    scrollTo: vi.fn(),
+  } as unknown as VirtuosoHandle;
   await act(async () => expect(viewport.jumpToMessage("target")).toBe(true));
   expect(scrollToIndex).toHaveBeenCalledWith({
     index: 1,
@@ -590,4 +593,80 @@ it("reveals a measured content-growth gap without giving up live-edge following"
   expect(scrollTo).toHaveBeenCalled();
   expect(scroller.scrollTop).toBe(2165);
   expect(viewport.showJump).toBe(false);
+});
+
+it("distinguishes identical search hits by canonical identity and never falls back", async () => {
+  const rows = [messages[1], { ...messages[1], id: "duplicate" }];
+  await act(async () =>
+    root.render(
+      createElement(Harness, { conversation: "account:alice", rows }),
+    ),
+  );
+  const scrollToIndex = vi.fn();
+  viewport.virtuosoRef.current = {
+    scrollToIndex,
+    scrollTo: vi.fn(),
+  } as unknown as VirtuosoHandle;
+  await act(async () =>
+    root.render(
+      createElement(Harness, {
+        conversation: "account:alice",
+        rows,
+        search: {
+          key: "account:alice",
+          request: 10,
+          reference: {
+            kind: "account",
+            target: "alice",
+            message_id: "duplicate",
+          },
+          context: [],
+        },
+      }),
+    ),
+  );
+  await nextAnimationFrame();
+  expect(scrollToIndex).toHaveBeenCalledWith({
+    index: 1,
+    align: "center",
+    behavior: "auto",
+  });
+  expect(viewport.highlightedKey).toBe("duplicate");
+  await act(async () =>
+    root.render(
+      createElement(Harness, {
+        conversation: "account:alice",
+        rows,
+        search: {
+          key: "account:alice",
+          request: 11,
+          reference: {
+            kind: "account",
+            target: "alice",
+            message_id: "missing",
+          },
+          context: [],
+        },
+      }),
+    ),
+  );
+  expect(viewport.searchMiss).toBe(true);
+  expect(scrollToIndex).toHaveBeenCalledTimes(1);
+});
+
+it("initializes the virtual list at the selected canonical search identity", async () => {
+  await render("account:alice", {
+    key: "account:alice",
+    request: 1,
+    reference: { kind: "account", target: "alice", message_id: "target" },
+    context: messages,
+  });
+  expect(viewport.initialIndex).toBe(1);
+  await render("account:alice", {
+    key: "account:alice",
+    request: 2,
+    reference: { kind: "account", target: "alice", message_id: "first" },
+    context: messages,
+  });
+  expect(viewport.initialIndex).toBe(0);
 });

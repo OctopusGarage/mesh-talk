@@ -779,3 +779,322 @@ fn recent_search_preserves_expiry_deadline_from_canonical_history() {
         Some(deadline)
     );
 }
+
+#[test]
+fn canonical_projection_decodes_only_selected_rows_for_recent_and_exact_context() {
+    use crate::node::DmEnvelope;
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let own = node.account_id();
+    let contact = "a".repeat(32);
+    let conversation = account_conversation_id(&own, &contact);
+    for index in 1..=128u64 {
+        let mut id = [1; 32];
+        id[..8].copy_from_slice(&index.to_be_bytes());
+        let envelope = DmEnvelope::new(
+            own.clone(),
+            contact.clone(),
+            id,
+            MessageBody::new(vec![b'x'; 8192], None).encode(),
+        );
+        node.sentlog
+            .lock()
+            .unwrap()
+            .record(conversation, index, index, &envelope.encode())
+            .unwrap();
+    }
+    super::super::queries::reset_projection_decodes();
+    let recent = node.account_history(&contact, 3);
+    assert_eq!(recent.len(), 3);
+    assert_eq!(super::super::queries::projection_decodes(), 3);
+    let mut middle = [1; 32];
+    middle[..8].copy_from_slice(&64u64.to_be_bytes());
+    super::super::queries::reset_projection_decodes();
+    let context = node
+        .search_context(&SearchReference::Account {
+            account_id: contact,
+            message_id: Some(EventId::new(middle)),
+        })
+        .unwrap();
+    assert_eq!(context.messages.len(), 51);
+    assert_eq!(context.newer_entries, 64);
+    assert_eq!(super::super::queries::projection_decodes(), 51);
+}
+
+#[test]
+fn recent_search_global_limit_matches_full_order_across_conversations() {
+    use crate::node::DmEnvelope;
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let own = node.account_id();
+    for (peer, times) in [("a".repeat(32), [9, 1, 5]), ("b".repeat(32), [7, 10, 5])] {
+        for (index, time) in times.into_iter().enumerate() {
+            let envelope = DmEnvelope::new(
+                own.clone(),
+                peer.clone(),
+                [index as u8 + 1; 32],
+                MessageBody::new(b"bounded token".to_vec(), None).encode(),
+            );
+            node.sentlog
+                .lock()
+                .unwrap()
+                .record(
+                    account_conversation_id(&own, &peer),
+                    index as u64,
+                    time,
+                    &envelope.encode(),
+                )
+                .unwrap();
+        }
+    }
+    let all = node.search_recent("token");
+    let limited = node.search_recent_limited("token", 4);
+    assert_eq!(
+        limited
+            .hits
+            .iter()
+            .map(|hit| (&hit.reference, hit.hit.wall_clock))
+            .collect::<Vec<_>>(),
+        all.hits[..4]
+            .iter()
+            .map(|hit| (&hit.reference, hit.hit.wall_clock))
+            .collect::<Vec<_>>()
+    );
+    assert!(node.search_recent_limited("token", 0).hits.is_empty());
+}
+
+#[tokio::test]
+async fn channel_projection_decodes_only_selected_rows_and_preserves_exact_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let channel = node.create_channel("retained", vec![]).await.unwrap();
+    let body = MessageBody::new(vec![b'x'; 8192], None).encode();
+    for index in 1..=128u64 {
+        let mut id = [1; 32];
+        id[..8].copy_from_slice(&index.to_be_bytes());
+        node.received
+            .lock()
+            .unwrap()
+            .record(channel, "peer".to_string(), index, &body, EventId::new(id))
+            .unwrap();
+    }
+    super::super::queries::reset_projection_decodes();
+    let recent = node.channel_history(channel, 3);
+    assert_eq!(recent.len(), 3);
+    assert_eq!(super::super::queries::projection_decodes(), 3);
+    let mut middle = [1; 32];
+    middle[..8].copy_from_slice(&64u64.to_be_bytes());
+    super::super::queries::reset_projection_decodes();
+    let context = node
+        .search_context(&SearchReference::Channel {
+            channel_id: channel,
+            message_id: Some(EventId::new(middle)),
+        })
+        .unwrap();
+    assert_eq!(context.messages.len(), 51);
+    assert_eq!(context.newer_entries, 64);
+    assert_eq!(super::super::queries::projection_decodes(), 51);
+}
+
+#[test]
+fn borrowed_account_envelope_validation_matches_owned_decoder() {
+    let envelope = crate::node::DmEnvelope::new(
+        "sender".to_string(),
+        "recipient".to_string(),
+        [9; 32],
+        vec![0, 255, 127, 42],
+    );
+    let encoded = envelope.encode();
+    let mut variants = (0..=encoded.len())
+        .map(|len| encoded[..len].to_vec())
+        .collect::<Vec<_>>();
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    variants.push(trailing);
+    for index in 0..encoded.len() {
+        let mut changed = encoded.clone();
+        changed[index] ^= 0xff;
+        variants.push(changed);
+    }
+    variants.push(vec![0; 256 * 1024 + 1]);
+    for wire in variants {
+        let owned = crate::node::DmEnvelope::decode(&wire);
+        let borrowed = crate::node::DmEnvelope::decode_ref(&wire);
+        assert_eq!(owned.is_some(), borrowed.is_some());
+        if let (Some(owned), Some(borrowed)) = (owned, borrowed) {
+            assert_eq!(owned.msg_id, borrowed.msg_id);
+            assert_eq!(owned.body, borrowed.body);
+        }
+    }
+}
+
+#[test]
+fn device_history_keeps_envelope_deadline_metadata_for_legacy_stored_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let peer = DeviceIdentity::generate();
+    let conversation = dm_conversation_id(&node.identity.public(), &peer.public());
+    let deadline = crate::node::node::now_millis() + 60_000;
+    let envelope = crate::node::DmEnvelope::new(
+        "sender".into(),
+        "recipient".into(),
+        [9; 32],
+        crate::expiry::wrap(
+            &MessageBody::new(b"retained".to_vec(), None).encode(),
+            Some(deadline),
+        ),
+    );
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            peer.user_id(),
+            1,
+            &envelope.encode(),
+            EventId::new([9; 32]),
+        )
+        .unwrap();
+    let history = node.dm_history(&peer.public(), 1);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].expires_at_ms, Some(deadline));
+}
+
+#[test]
+fn bounded_history_with_authenticated_peer_recall_never_clones_retained_plaintext() {
+    use crate::eventlog::event::{Event, EventKind};
+    use crate::node::dm_envelope::{DmEnvelope, RecallEnvelope};
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let peer = DeviceIdentity::generate();
+    let peer_account = crate::identity::account::Account::generate();
+    let account_id = peer_account.account_id();
+    node.roster.lock().unwrap().update(
+        &Announce::new_with_account(&peer, &peer_account, "Peer", 1),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &node.user_id(),
+    );
+    let own = node.account_id();
+    let conversation = account_conversation_id(&own, &account_id);
+    for index in 1..=128u64 {
+        for incoming in [false, true] {
+            let mut id = [if incoming { 2 } else { 1 }; 32];
+            id[..8].copy_from_slice(&index.to_be_bytes());
+            let envelope = DmEnvelope::new(
+                if incoming {
+                    account_id.clone()
+                } else {
+                    own.clone()
+                },
+                if incoming {
+                    own.clone()
+                } else {
+                    account_id.clone()
+                },
+                id,
+                MessageBody::new(vec![b'x'; 8192], None).encode(),
+            )
+            .encode();
+            if incoming {
+                node.received
+                    .lock()
+                    .unwrap()
+                    .record(
+                        conversation,
+                        account_id.clone(),
+                        index,
+                        &envelope,
+                        EventId::new(id),
+                    )
+                    .unwrap();
+            } else {
+                node.sentlog
+                    .lock()
+                    .unwrap()
+                    .record(conversation, index, index, &envelope)
+                    .unwrap();
+            }
+        }
+    }
+    let mut target = [2; 32];
+    target[..8].copy_from_slice(&64u64.to_be_bytes());
+    let claim = RecallEnvelope::new(account_id.clone(), own, target).encode();
+    let sealed = crate::dm::seal(&peer, &node.identity.public().x25519_pub, &claim).unwrap();
+    let delete = Event::new(
+        &peer,
+        dm_conversation_id(&node.identity.public(), &peer.public()),
+        1,
+        vec![],
+        1,
+        129,
+        EventKind::Delete,
+        sealed,
+    );
+    node.log.lock().unwrap().append(delete).unwrap();
+    super::super::received_log::reset_history_clone_bytes();
+    let history = node.account_history(&account_id, 3);
+    assert_eq!(history.len(), 3);
+    assert_eq!(
+        super::super::received_log::history_clone_bytes(),
+        0,
+        "peer recall author verification must not clone retained sent/received bodies"
+    );
+    assert!(
+        node.recalled_targets_account(&account_id)
+            .contains(&EventId::new(target))
+    );
+    let mut neighbor = [2; 32];
+    neighbor[..8].copy_from_slice(&65u64.to_be_bytes());
+    super::super::received_log::reset_history_clone_bytes();
+    let context = node
+        .search_context(&SearchReference::Account {
+            account_id,
+            message_id: Some(EventId::new(neighbor)),
+        })
+        .unwrap();
+    assert_eq!(context.messages.len(), 51);
+    assert!(
+        context
+            .messages
+            .iter()
+            .any(|entry| entry.id == EventId::new(target)
+                && entry.recalled
+                && entry.text.is_empty())
+    );
+    assert_eq!(super::super::received_log::history_clone_bytes(), 0);
+}
+
+#[test]
+fn canonical_dedup_keeps_earliest_clock_copy_despite_reverse_insertion() {
+    use crate::node::DmEnvelope;
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let own = node.account_id();
+    let contact = "a".repeat(32);
+    let conversation = account_conversation_id(&own, &contact);
+    for (clock, text) in [
+        (100, b"later copy".as_slice()),
+        (1, b"first canonical copy".as_slice()),
+    ] {
+        let envelope = DmEnvelope::new(
+            contact.clone(),
+            own.clone(),
+            [7; 32],
+            MessageBody::new(text.to_vec(), None).encode(),
+        );
+        node.received
+            .lock()
+            .unwrap()
+            .record(
+                conversation,
+                contact.clone(),
+                clock,
+                &envelope.encode(),
+                EventId::new([clock as u8; 32]),
+            )
+            .unwrap();
+    }
+    let history = node.account_history(&contact, 1);
+    assert_eq!(history[0].wall_clock, 1);
+    assert_eq!(history[0].text, b"first canonical copy");
+}

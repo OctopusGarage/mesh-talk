@@ -25,10 +25,12 @@ import { HistorySettings } from "./settings/HistorySettings";
 export function SettingsDialog({
   open: controlledOpen,
   onOpenChange,
+  onCloseAutoFocus,
   initialTarget,
 }: {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  onCloseAutoFocus?: (event: Event) => void;
   initialTarget?: { category: SettingsCategory; controlId?: string };
 } = {}) {
   const { t } = useTranslation();
@@ -97,6 +99,7 @@ export function SettingsDialog({
         </DialogTrigger>
       )}
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         className="grid h-[min(44rem,calc(100vh-2rem))] supports-[height:100dvh]:h-[min(44rem,calc(100dvh-2rem))] max-w-[min(56rem,calc(100vw-2rem))] grid-rows-[auto_minmax(0,1fr)_auto] gap-4 overflow-hidden"
         data-testid="settings-dialog"
       >

@@ -463,28 +463,44 @@ impl Node {
 
         // Who authored each logical message in this account conversation (to authorise
         // peer recalls): our sends are ours, received entries carry the sender account.
+        let targets: HashSet<_> = claims.iter().map(|(target, _)| *target).collect();
         let mut author_of: HashMap<EventId, (String, u64)> = HashMap::new();
-        for e in self
-            .sentlog
-            .lock()
-            .expect("sentlog mutex not poisoned")
-            .entries(&acct_conv)
         {
-            author_of.insert(
-                decode_account_entry(&e.plaintext).0,
-                (my_account.clone(), e.wall_clock),
-            );
+            let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
+            let mut entries: Vec<_> = sentlog
+                .entries_ref(&acct_conv)
+                .iter()
+                .filter_map(|entry| {
+                    let id = super::DmEnvelope::decode_ref(&entry.plaintext)
+                        .map_or(EventId::new([0; 32]), |envelope| {
+                            EventId::new(envelope.msg_id)
+                        });
+                    targets.contains(&id).then_some((id, entry))
+                })
+                .collect();
+            // Keep the original entries() override order, using borrowed rows.
+            entries.sort_by_key(|(_, entry)| (entry.wall_clock, entry.seq));
+            for (id, entry) in entries {
+                author_of.insert(id, (my_account.clone(), entry.wall_clock));
+            }
         }
-        for e in self
-            .received
-            .lock()
-            .expect("received mutex not poisoned")
-            .entries(&acct_conv)
         {
-            author_of.insert(
-                decode_account_entry(&e.plaintext).0,
-                (e.from.clone(), e.wall_clock),
-            );
+            let received = self.received.lock().expect("received mutex not poisoned");
+            let mut entries: Vec<_> = received
+                .entries_ref(&acct_conv)
+                .iter()
+                .filter_map(|entry| {
+                    let id = super::DmEnvelope::decode_ref(&entry.plaintext)
+                        .map_or(EventId::new([0; 32]), |envelope| {
+                            EventId::new(envelope.msg_id)
+                        });
+                    targets.contains(&id).then_some((id, entry))
+                })
+                .collect();
+            entries.sort_by_key(|(_, entry)| entry.wall_clock);
+            for (id, entry) in entries {
+                author_of.insert(id, (entry.from.clone(), entry.wall_clock));
+            }
         }
         // Only the message's own author account may recall it.
         for (target, sender_account) in claims {

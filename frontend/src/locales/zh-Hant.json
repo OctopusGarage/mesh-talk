@@ -281,6 +281,11 @@
   "message": {
     "expiresIn": "傳送後倒數 {{time}}，到期雙方訊息均消失",
     "delivery": {
+      "postOfficeDisabled": "上次嘗試時，本機沒有已知的直接路由，且郵局傳送已關閉。如需使用可信郵局，請檢查連線設定。",
+      "noKnownRoute": "上次嘗試時，本機沒有已知的可用路由。請檢查連線診斷、使用的網路及可信郵局。",
+      "attemptTimedOut": "本機嘗試逾時，尚未取得收件確認。請檢查連線診斷；系統仍會自動重試。",
+      "reviewSettings": "檢查傳遞設定",
+      "openDiagnostics": "開啟連線診斷",
       "awaiting": "等待回執",
       "delivered": "已送達",
       "help": "目標帳戶的自動回執，不代表已讀。",
@@ -540,7 +545,11 @@
     "noMatches": "沒有符合的項目。",
     "failed": "搜尋未能完成，請重試。",
     "outsideRecent": "這項結果不在最近的訊息中。請開啟上方的聊天記錄尋找。",
-    "empty": "輸入關鍵字以搜尋你的對話。"
+    "empty": "輸入關鍵字以搜尋你的對話。",
+    "recentCoverage": "搜尋每段對話中最近的 {{count}} 則訊息。",
+    "truncated": "還有更多相符結果，請縮小搜尋範圍。",
+    "contextUnavailable": "這則訊息已無法使用。",
+    "legacyUnavailable": "無法從目前的聯絡人清單開啟這段舊格式對話。"
   },
   "history": {
     "trigger": "聊天記錄",

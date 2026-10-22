@@ -1267,6 +1267,7 @@ impl Node {
             .collect()
     }
 
+    #[cfg(test)]
     pub(in crate::node) fn sent_entries_for_history(
         &self,
         conversation: ConversationId,
@@ -1828,7 +1829,7 @@ impl Node {
                         Some(Ok((key, persistence_failed, progress, observation))) => {
                             if let Some(routes) = active.remove(&key) {
                                 retries.finished(key.retry_key(&routes.peer), routes.retry_routes(), progress, std::time::Instant::now());
-                                if let Some(token) = observation { self.finish_delivery_observation(token); }
+                                if let Some((token, reason)) = observation { self.finish_delivery_observation_with_reason(token, reason); }
                             }
                             if persistence_failed {
                                 diagnostic.warn_if_due();
@@ -1962,7 +1963,11 @@ impl Node {
                             .lock()
                             .expect("delivery lock not poisoned")
                             .contains_destination(id, destination.event.id);
-                        let progress = live && node.retry_one_destination(&destination).await;
+                        let (progress, reason) = if live {
+                            node.retry_one_destination_with_reason(&destination).await
+                        } else {
+                            (false, None)
+                        };
                         let failed = if progress {
                             let mut store =
                                 node.delivery.lock().expect("delivery lock not poisoned");
@@ -1971,7 +1976,7 @@ impl Node {
                         } else {
                             false
                         };
-                        let observation = attempt.token.take();
+                        let observation = attempt.token.take().map(|token| (token, reason));
                         (key, failed, progress, observation)
                     }));
                 }
@@ -2176,22 +2181,54 @@ impl Node {
     }
 
     async fn retry_one_destination(&self, destination: &DeliveryDestination) -> bool {
+        self.retry_one_destination_with_reason(destination).await.0
+    }
+
+    async fn retry_one_destination_with_reason(
+        &self,
+        destination: &DeliveryDestination,
+    ) -> (bool, Option<DeliveryRecoveryReason>) {
         if !self.delivery_destination_allowed(destination) {
-            return false;
+            return (false, None);
         }
+        let direct_peer = self
+            .routing_peer(&destination.device.user_id())
+            .filter(|p| {
+                p.public == destination.device
+                    && p.account_id == destination.account
+                    && self.known_account_allowed(&p.public)
+            });
+        // Snapshot only locally known and permitted alternatives. No remote
+        // presence conclusion follows from an empty eligible route set.
+        let reason = if direct_peer.is_none() {
+            if !self
+                .post_office_enabled
+                .load(std::sync::atomic::Ordering::Acquire)
+                || !self
+                    .post_office_send_enabled
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                Some(DeliveryRecoveryReason::PostOfficeDisabled)
+            } else {
+                let candidates = {
+                    let roster = self.roster.lock().expect("roster lock not poisoned");
+                    self.post_office_candidates_for(&roster, &destination.device)
+                };
+                (!candidates.iter().any(|p| {
+                    p.public != self.identity.public() && self.relay_send_allowed(&p.public)
+                }))
+                .then_some(DeliveryRecoveryReason::NoKnownRoute)
+            }
+        } else {
+            None
+        };
         let started = std::time::Instant::now();
         let budget = super::route_timing::MAX_CONTROL_DEADLINE;
         let direct = async {
             let mut held = false;
-            if let Some(peer) = self
-                .routing_peer(&destination.device.user_id())
-                .filter(|p| {
-                    p.public == destination.device
-                        && p.account_id == destination.account
-                        && self.known_account_allowed(&p.public)
-                })
-            {
-                held = self
+            let mut timed_out = false;
+            if let Some(peer) = direct_peer {
+                let outcome = self
                     .adaptive_control_timeout(&peer.public, async {
                         let held = self
                             .transfer_delivery_destination(
@@ -2212,27 +2249,28 @@ impl Node {
                         }
                         held
                     })
-                    .await
-                    .unwrap_or(false);
+                    .await;
+                timed_out = outcome.is_none();
+                held = outcome.unwrap_or(false);
             }
-            (held, started.elapsed())
+            (held, started.elapsed(), timed_out)
         };
         let relay = async {
-            let held =
+            let outcome =
                 tokio::time::timeout(budget, self.replicate_delivery_destination(destination))
-                    .await
-                    .unwrap_or(false);
-            (held, started.elapsed())
+                    .await;
+            let timed_out = outcome.is_err();
+            (outcome.unwrap_or(false), started.elapsed(), timed_out)
         };
         tokio::pin!(direct, relay);
         // Both alternatives share the same bounded wall-clock window. Custody
         // cannot cancel recipient progress; exact recipient confirmation can.
-        let ((held, direct_elapsed), (relay_held, relay_elapsed)) = tokio::select! {
+        let ((held, direct_elapsed, direct_timeout), (relay_held, relay_elapsed, relay_timeout)) = tokio::select! {
             result = &mut direct => {
                 let still_pending = self.delivery.lock().expect("delivery lock not poisoned")
                     .contains_work_event(destination.event.id);
                 if still_pending { (result, relay.await) }
-                else { (result, (false, started.elapsed())) }
+                else { (result, (false, started.elapsed(), false)) }
             },
             result = &mut relay => (direct.await, result),
         };
@@ -2241,7 +2279,17 @@ impl Node {
                 "slow delivery attempt direct_ms={} relay_ms={} direct_held={} relay_held={} budget_ms={}",
                 direct_elapsed.as_millis(), relay_elapsed.as_millis(), held, relay_held, budget.as_millis());
         }
-        held || relay_held
+        let progress = held || relay_held;
+        (
+            progress,
+            if progress {
+                None
+            } else if direct_timeout || relay_timeout {
+                Some(DeliveryRecoveryReason::AttemptTimedOut)
+            } else {
+                reason
+            },
+        )
     }
 
     pub(in crate::node) fn install_file_card_scopes(&self, store: &DeliveryStore) {

@@ -169,6 +169,10 @@ impl SentLog {
             .get(conversation)
             .cloned()
             .unwrap_or_default();
+        #[cfg(test)]
+        super::received_log::record_history_clone(
+            v.iter().map(|entry| entry.plaintext.len()).sum(),
+        );
         v.sort_by_key(|e| (e.wall_clock, e.seq));
         v
     }

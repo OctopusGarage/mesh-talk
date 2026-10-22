@@ -281,6 +281,11 @@
   "message": {
     "expiresIn": "发送后倒计时 {{time}}，到期双方消息均消失",
     "delivery": {
+      "postOfficeDisabled": "上次尝试时，本机没有已知的直接路由，且邮局发送已关闭。如需使用可信邮局，请检查连接设置。",
+      "noKnownRoute": "上次尝试时，本机没有已知的可用路由。请检查连接诊断、所用网络和可信邮局。",
+      "attemptTimedOut": "本地尝试超时，尚未获得收件确认。请检查连接诊断；系统仍会自动重试。",
+      "reviewSettings": "检查投递设置",
+      "openDiagnostics": "打开连接诊断",
       "awaiting": "等待回执",
       "delivered": "已送达",
       "help": "目标账户的自动回执，不代表已读。",
@@ -540,7 +545,11 @@
     "noMatches": "没有匹配项。",
     "failed": "搜索未能完成，请重试。",
     "outsideRecent": "这条结果不在最近的消息中。请打开上方的聊天记录查找。",
-    "empty": "输入关键字以搜索你的会话。"
+    "empty": "输入关键字以搜索你的会话。",
+    "recentCoverage": "搜索每段对话中最近的 {{count}} 条消息。",
+    "truncated": "还有更多匹配结果，请缩小搜索范围。",
+    "contextUnavailable": "这条消息已不可用。",
+    "legacyUnavailable": "无法从当前联系人列表打开这段旧格式对话。"
   },
   "history": {
     "trigger": "聊天记录",

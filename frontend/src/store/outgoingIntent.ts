@@ -210,6 +210,9 @@ export async function refreshDeliveryStatuses(
             kind: fact.kind,
             ageMs: fact.age_ms,
             sampledAt,
+            ...((fact.reason === "post_office_disabled" ||
+              fact.reason === "no_known_route" ||
+              fact.reason === "attempt_timed_out") && { reason: fact.reason }),
           });
         }
         if (fileIds.has(row.id)) {

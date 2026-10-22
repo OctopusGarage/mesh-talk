@@ -561,6 +561,74 @@ test.describe("Mesh-Talk UI flow", () => {
     );
   });
 
+  test("search opens the selected identical message in bounded older context", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await page.evaluate(() => {
+      const inject = (
+        window as unknown as {
+          __mockInject: (
+            conv: string,
+            text: string,
+            who: string,
+            metadata?: { id?: string; wall_clock?: number },
+          ) => void;
+        }
+      ).__mockInject;
+      for (const id of ["exact-one", "exact-two"])
+        inject("acc:acc_bob_bbbb2222", "identical search phrase", "bob", {
+          id,
+          wall_clock: 1_700_000_000_000,
+        });
+      for (let i = 0; i < 240; i++)
+        inject("acc:acc_bob_bbbb2222", `recent filler ${i}`, "bob");
+    });
+    await page.getByTestId("sidebar-action-search").click();
+    await page.getByTestId("search-input").fill("identical search phrase");
+    await expect(page.getByTestId("search-result")).toHaveCount(2);
+    await page.getByTestId("search-result").nth(1).click();
+    const selected = page.locator('[data-message-id="exact-two"]');
+    await expect(selected).toBeVisible();
+    await expect(selected).toHaveClass(/bg-signal/);
+    await expect(page.locator('[data-message-id="exact-one"]')).not.toHaveClass(
+      /bg-signal/,
+    );
+    await expect(page.getByRole("log")).not.toContainText("recent filler 239");
+    await page
+      .getByRole("button", { name: "Jump to latest messages", exact: true })
+      .first()
+      .click();
+    await expect(page.getByRole("log")).toContainText("recent filler 239");
+    // Search again while the same conversation already owns a mounted viewport.
+    await page.getByTestId("sidebar-action-search").click();
+    await expect(page.getByTestId("search-result")).toHaveCount(2);
+    await page.getByTestId("search-result").first().click();
+    await expect(page.locator('[data-message-id="exact-one"]')).toBeVisible();
+    await expect(page.locator('[data-message-id="exact-one"]')).toHaveClass(
+      /bg-signal/,
+    );
+  });
+
+  test("unavailable exact search context stays in the dialog with useful feedback", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await page.getByTestId("sidebar-action-search").click();
+    await page.getByTestId("search-input").fill("welcome");
+    await expect(page.getByTestId("search-result")).toHaveCount(1);
+    await page.evaluate(() =>
+      (
+        window as unknown as { __mockFailNext: (command: string) => void }
+      ).__mockFailNext("owner_search_context"),
+    );
+    await page.getByTestId("search-result").click();
+    await expect(page.getByTestId("search-dialog")).toBeVisible();
+    await expect(page.getByRole("alert")).toContainText(
+      "This message is no longer available",
+    );
+  });
+
   test("search failure offers retry and never exposes stale results", async ({
     page,
   }) => {
@@ -569,7 +637,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.evaluate(() => {
       (
         window as unknown as { __mockFailNext: (command: string) => void }
-      ).__mockFailNext("search");
+      ).__mockFailNext("owner_search_recent");
     });
     await page.getByTestId("search-input").fill("welcome");
     await expect(page.getByRole("alert")).toContainText(
