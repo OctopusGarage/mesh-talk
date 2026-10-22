@@ -82,6 +82,10 @@
           {
             "name": "Release preparation creates reviewed PRs and unpublished drafts only; explicit build dispatch and next-target PRs preserve the existing final Stable publication gate without direct main pushes.",
             "reference": "docs/updates.md#automated-release-preparation"
+          },
+          {
+            "name": "Absent release-please PR output is valid on idle and release-created runs. Drafts receive templated download, installation and source-verification notes before the exact tagged build dispatch.",
+            "reference": "docs/updates.md#automated-release-preparation"
           }
         ]
       }

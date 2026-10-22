@@ -52,7 +52,7 @@ jobs:
       - name: Synchronize the release PR's checked version projections
         if: steps.release.outputs.pr != ''
         env:
-          RELEASE_PR: ${{ fromJSON(steps.release.outputs.pr).number }}
+          RELEASE_PR: ${{ fromJSON(steps.release.outputs.pr || '{}').number }}
         run: node scripts/release/maintenance.mjs sync-pr "$RELEASE_PR"
       - name: Explicitly start the exact tagged draft build
         if: steps.release.outputs.release_created == 'true'

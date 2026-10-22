@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getReleaseByTag, getLatestPublishedStable } from "./release-api.mjs";
+import { renderReleaseNotes } from "./render-notes.mjs";
 import {
   readVersion,
   prepareVersion,
@@ -235,21 +242,40 @@ function syncPullRequest(repo, number) {
 
 function dispatchDraftBuild(repo, tag, sha) {
   assertDraftBuild(tag, sha, getReleaseByTag(repo, tag), tagSource(repo, tag));
-  // GITHUB_TOKEN-created tags do not trigger push workflows. Dispatch the
-  // existing verifier explicitly; this path never requests publication.
-  gh([
-    "workflow",
-    "run",
-    "release.yml",
-    "--repo",
-    repo,
-    "--ref",
-    tag,
-    "-f",
-    "publish_release=false",
-    "-f",
-    "publish_nightly=false",
-  ]);
+  const directory = mkdtempSync(join(tmpdir(), "mesh-draft-notes-"));
+  try {
+    const notes = renderReleaseNotes(
+      readFileSync(".github/release-notes.md", "utf8"),
+      {
+        tag,
+        repository: repo,
+        ref: `refs/tags/${tag}`,
+        sha,
+        runId: process.env.GITHUB_RUN_ID,
+        runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+      },
+    );
+    const notesPath = join(directory, "release-notes.md");
+    writeFileSync(notesPath, notes);
+    gh(["release", "edit", tag, "--repo", repo, "--notes-file", notesPath]);
+    // GITHUB_TOKEN-created tags do not trigger push workflows. Prepare useful
+    // draft notes first, then dispatch the verifier without publication intent.
+    gh([
+      "workflow",
+      "run",
+      "release.yml",
+      "--repo",
+      repo,
+      "--ref",
+      tag,
+      "-f",
+      "publish_release=false",
+      "-f",
+      "publish_nightly=false",
+    ]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 function prepareDevelopment(repo, tag) {

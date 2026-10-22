@@ -7,16 +7,16 @@ replies, @mentions, search, and multi-device.
 
 ### Release highlights
 
-- Recover authorized group history and retained attachments from sharing members,
-  with bounded larger-group fanout and per-member sharing controls.
-- Keep durable retry, exact recipient confirmation, file consent, byte integrity
-  and completion as separate recoverable states.
-- Exchange eligible signed presence and opaque encrypted mailboxes among equal,
-  explicitly trusted post offices; no global hub is required.
-- Separate per-device public discovery and relay send/receive controls, including
-  physical-LAN-only discovery and direct LAN/Tailscale relay preference/fallback.
-- Harden certified device linking and category-controlled sibling replay across
-  restarts without relaxing account or group authority.
+- Open the exact message selected in search, including older context and messages
+  with identical text; recover cleanly when a result is no longer available.
+- Inspect delivery details while messages await confirmation, with automatic retry
+  and authenticated recipient confirmation kept distinct.
+- Keep chat responsive during sends and profile updates, and improve account
+  creation, saved login, profile locking and device linking.
+- Improve profile synchronization, offline delivery recovery and retained-history
+  costs across peer-operated relays.
+- Choose Stable or Nightly updates with verified downloads that preserve your
+  platform, CPU architecture and default/lite edition.
 - Provide signed native relay packages.
 <!-- STABLE_ONLY_START -->
 - Provide a verified Linux container image.
@@ -24,7 +24,8 @@ replies, @mentions, search, and multi-device.
 
 ### Downloads
 
-Pick the zip for your platform. Each zip contains the installer(s) **plus** a `SHA256SUMS`
+Download the ZIP for your platform from **Assets** at the bottom of this release.
+Each ZIP contains the installer(s) **plus** a `SHA256SUMS`
 file, and ships alongside a cosign signature (`.zip.bundle`) and a SLSA build-provenance
 attestation. A CycloneDX SBOM (`mesh-talk.cdx.json`) is attached to the release.
 The macOS zip contains a DMG; the app is inside that DMG.
@@ -39,6 +40,20 @@ Each platform has a default edition with the current avatar and personal theme c
 | Windows (ARM64)       | `mesh-talk___TAG___windows_arm64.zip`  |
 | Linux (x64)           | `mesh-talk___TAG___linux_x86_64.zip`   |
 | Linux (ARM64)         | `mesh-talk___TAG___linux_aarch64.zip`  |
+
+### Installation
+
+Quit Mesh-Talk before installing an update. Your existing local account and data
+remain in `~/.mesh-talk`; default and lite editions replace the same application.
+
+- **macOS**: unzip the download, open the `.dmg`, then drag `mesh-talk.app` into
+  **Applications**. Replace the existing app when upgrading, then launch it from
+  Applications. See **First run** below if macOS blocks the unsigned app.
+- **Windows**: unzip the download and run the `.exe` installer. The included `.msi`
+  is an alternative for managed installations. Launch Mesh-Talk after installation.
+- **Linux**: unzip the download, then install the `.deb` or `.rpm` with your package
+  manager. Alternatively, make the `.AppImage` executable with `chmod +x *.AppImage`
+  and run it.
 
 ### Post-office relay downloads
 

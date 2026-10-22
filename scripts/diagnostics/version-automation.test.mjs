@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { buildAffectedPlan } from "../validation/affected.mjs";
 import {
   assertDraftBuild,
@@ -216,6 +217,104 @@ test(
   },
 );
 
+test(
+  "draft creation applies the release template before dispatch and stops if notes fail",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const directory = mkdtempSync(join(tmpdir(), "mesh-draft-notes-"));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const root = join(directory, "repo");
+    const bin = join(directory, "bin");
+    const trace = join(directory, "trace.jsonl");
+    mkdirSync(join(root, ".github"), { recursive: true });
+    mkdirSync(bin);
+    writeFileSync(
+      join(root, ".github/release-notes.md"),
+      readFileSync(new URL("../../.github/release-notes.md", import.meta.url)),
+    );
+    const git = (...args) =>
+      execFileSync("git", args, {
+        cwd: root,
+        encoding: "utf8",
+        stdio: "pipe",
+      }).trim();
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Fixture");
+    git("config", "user.email", "fixture@example.test");
+    git("config", "core.hooksPath", "/dev/null");
+    git("add", ".");
+    git("-c", "commit.gpgsign=false", "commit", "-m", "fixture main");
+    const sha = git("rev-parse", "HEAD");
+    git("update-ref", "refs/remotes/origin/main", sha);
+    writeFileSync(
+      join(bin, "gh"),
+      `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args[0] === 'api') {
+  if (args.some(arg => arg.includes('/commits/'))) process.stdout.write(JSON.stringify({sha:process.env.FIXTURE_SHA}));
+  else if (args.some(arg => arg.includes('/releases?'))) process.stdout.write(JSON.stringify({id:1,tag_name:'v0.4.4',draft:true,prerelease:false}));
+  else throw new Error('unexpected API');
+} else {
+  const notes = args[0] === 'release' ? fs.readFileSync(args[args.indexOf('--notes-file') + 1], 'utf8') : undefined;
+  fs.appendFileSync(process.env.FIXTURE_TRACE, JSON.stringify({args,notes}) + '\\n');
+  if (notes && process.env.FAIL_NOTES === '1') process.exit(43);
+}
+`,
+      { mode: 0o755 },
+    );
+    const env = {
+      ...process.env,
+      PATH: `${bin}${delimiter}${process.env.PATH}`,
+      FIXTURE_SHA: sha,
+      FIXTURE_TRACE: trace,
+      GITHUB_REPOSITORY: "owner/repo",
+      GITHUB_REF: "refs/heads/main",
+      GITHUB_RUN_ID: "123",
+      GITHUB_RUN_ATTEMPT: "1",
+    };
+    const run = (extra = {}) =>
+      execFileSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL("../release/maintenance.mjs", import.meta.url)),
+          "draft-build",
+          "v0.4.4",
+          sha,
+        ],
+        { cwd: root, env: { ...env, ...extra }, stdio: "pipe" },
+      );
+    const calls = () =>
+      readFileSync(trace, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+    run();
+    const result = calls();
+    assert.deepEqual(
+      result.map((call) => call.args.slice(0, 2)),
+      [
+        ["release", "edit"],
+        ["workflow", "run"],
+      ],
+    );
+    assert.match(result[0].notes, /### Downloads/);
+    assert.match(result[0].notes, /### Installation/);
+    assert.match(result[0].notes, /### Verifying your download/);
+    assert.ok(result[0].notes.includes(sha));
+    assert.doesNotMatch(result[0].notes, /__[A-Z_]+__/);
+    assert.ok(result[1].args.includes("publish_release=false"));
+    assert.ok(result[1].args.includes("publish_nightly=false"));
+    writeFileSync(trace, "");
+    assert.throws(() => run({ FAIL_NOTES: "1" }));
+    assert.deepEqual(
+      calls().map((call) => call.args.slice(0, 2)),
+      [["release", "edit"]],
+      "incomplete notes must stop the build dispatch",
+    );
+  },
+);
+
 test("release coordination uses the whole product, draft-only releases and scoped Cargo updates", () => {
   const config = JSON.parse(
     readFileSync(new URL("../../release-please-config.json", import.meta.url)),
@@ -267,6 +366,39 @@ test("release coordination uses the whole product, draft-only releases and scope
   assert.match(publisher, /id: maintenance\n        continue-on-error: true/);
   assert.match(publisher, /steps\.maintenance\.outcome == 'failure'/);
   assert.match(publisher, /Do not retry publication/);
+});
+
+test("optional release PR output is safe during workflow environment evaluation", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/release-maintenance.yml", import.meta.url),
+    "utf8",
+  );
+  const expression = workflow.match(
+    /^          RELEASE_PR: \$\{\{ (.+) \}\}$/m,
+  )?.[1];
+  assert.ok(
+    expression,
+    "evaluate the actual synchronization environment expression",
+  );
+  // GitHub evaluates step environments even when the step's if guard is false.
+  // This expression uses the shared JavaScript/Actions subset: || and properties.
+  const evaluate = (outputs) =>
+    runInNewContext(expression, {
+      steps: { release: { outputs } },
+      fromJSON: JSON.parse,
+    });
+  for (const outputs of [{}, { pr: "" }, { pr: "", release_created: "true" }]) {
+    assert.equal(
+      evaluate(outputs) ?? "",
+      "",
+      "no PR is expected on idle or release-created runs",
+    );
+  }
+  assert.equal(evaluate({ pr: JSON.stringify({ number: 257 }) }), 257);
+  assert.throws(
+    () => evaluate({ pr: "invalid JSON" }),
+    "malformed nonempty output must fail closed",
+  );
 });
 
 test("generated changelog changes retain the release validation owner", () => {
