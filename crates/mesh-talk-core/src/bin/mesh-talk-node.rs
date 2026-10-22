@@ -18,7 +18,8 @@ use mesh_talk_core::node::{
 };
 use mesh_talk_core::node::{
     run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway,
-    run_federated_relay_accept_loop_with_directory, run_relay_accept_loop,
+    run_federated_relay_accept_loop_with_directory, run_network_relay_accept_loop_with_directory,
+    run_relay_accept_loop,
 };
 use mesh_talk_core::postoffice::PostOffice;
 use mesh_talk_core::postoffice::federation::FederationDirectory;
@@ -36,6 +37,8 @@ mod federation_config;
 mod federation_runtime;
 #[path = "mesh-talk-node/file_saves.rs"]
 mod file_saves;
+#[path = "mesh-talk-node/network_config.rs"]
+mod network_config;
 use federation_config::{FederationSeed, parse_fingerprint};
 use federation_runtime::run_federation_loop;
 
@@ -104,6 +107,15 @@ struct Args {
     /// Public relay trust manifest. Changes take effect after restarting this relay.
     #[arg(long, requires_all = ["post_office", "bridge"], conflicts_with = "federation_peers")]
     federation_config: Option<std::path::PathBuf>,
+    /// Public operator-approved network policy. Enables automatic member discovery.
+    #[arg(long, requires_all = ["post_office", "relay_membership"], conflicts_with_all = ["federation_config", "federation_peers", "bridge_peer"])]
+    relay_network: Option<std::path::PathBuf>,
+    /// Authority-signed membership bound to this relay's persistent device identity.
+    #[arg(long, requires = "relay_network")]
+    relay_membership: Option<std::path::PathBuf>,
+    /// Optional routed discovery seed; membership, not this route, authorizes exchange.
+    #[arg(long = "relay-seed", requires = "relay_network")]
+    relay_seeds: Vec<FederationSeed>,
 }
 
 /// Account addressing is explicit: a full crypto account id, never a local
@@ -323,11 +335,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("federation")) {
         return federation_config::run_cli();
     }
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("network")) {
+        return network_config::run_cli();
+    }
     let mut args = Args::parse();
     args.apply_discovery_defaults();
     if let Some(path) = args.federation_config.as_deref() {
         args.federation_peers = federation_config::load(path)?;
     }
+    let network_configuration = if let Some(path) = args.relay_network.as_deref() {
+        let policy = network_config::load_policy(path)?;
+        let membership = network_config::load_membership(
+            args.relay_membership
+                .as_deref()
+                .expect("Clap requires membership"),
+        )?;
+        membership.verify_approval(&policy, mesh_talk_core::postoffice::network::unix_now())?;
+        args.bridge = true;
+        Some((policy, membership))
+    } else {
+        None
+    };
     if let Some(path) = args.password_file.as_deref() {
         args.password = Some(read_password_file(path)?);
     }
@@ -341,7 +369,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _data_dir_lock = DataDirLock::acquire(&data_dir)?;
 
     if args.post_office {
-        return run_post_office(args).await;
+        return run_post_office(args, network_configuration).await;
     }
     let password = args
         .password
@@ -633,7 +661,13 @@ fn spawn_relay_lan_discovery(
 /// (`load_or_create`) and the relay log (`PostOffice::open`) — so the startup
 /// line can take ~15s to appear on first run. Tooling that waits for a relay to
 /// come up should poll for the startup line, not fixed-sleep.
-async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_post_office(
+    args: Args,
+    network_configuration: Option<(
+        mesh_talk_core::postoffice::network::NetworkPolicy,
+        mesh_talk_core::postoffice::network::NetworkMembership,
+    )>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let password = args
         .password
         .as_deref()
@@ -643,6 +677,16 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         password,
     )?;
     let user_id = identity.public().user_id();
+    let network = network_configuration
+        .map(|(policy, membership)| {
+            mesh_talk_core::postoffice::network::RelayNetwork::new(
+                policy,
+                membership,
+                &identity.public(),
+                mesh_talk_core::postoffice::network::unix_now(),
+            )
+        })
+        .transpose()?;
 
     // Persistent cross-device account key (sibling of the device keystore).
     let account_path = std::path::Path::new(&args.keystore)
@@ -743,6 +787,30 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         args.discovery_port
     ));
 
+    if let Some(network) = network {
+        let directory = FederationDirectory::new();
+        emit(
+            "post-office network ready: automatic approved-member discovery; software integrity not attested",
+        );
+        tokio::spawn(run_federation_loop(
+            Arc::clone(&roster),
+            args.relay_seeds,
+            DeviceIdentity::from_secret_bytes(ed, x),
+            Arc::clone(&store),
+            directory.clone(),
+            Some(network.clone()),
+        ));
+        run_network_relay_accept_loop_with_directory(
+            transport_identity,
+            listener,
+            store,
+            network,
+            directory,
+        )
+        .await;
+        return Ok(());
+    }
+
     if args.federation_config.is_some() || !args.federation_peers.is_empty() {
         let directory = gateway
             .map(FederationDirectory::with_gateway)
@@ -760,6 +828,7 @@ async fn run_post_office(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             federation_identity,
             Arc::clone(&store),
             directory.clone(),
+            None,
         ));
         run_federated_relay_accept_loop_with_directory(
             transport_identity,

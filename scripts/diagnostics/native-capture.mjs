@@ -44,10 +44,13 @@ const finiteAnimations=animationBlockers.length;
 const dialogs=Array.from(document.querySelectorAll('[role=dialog],[role=alertdialog]')).filter(visible).map(e=>({testId:e.getAttribute('data-testid'),state:e.getAttribute('data-state'),opacity:getComputedStyle(e).opacity,rect:rect(e)}));
 return {settled:!foregroundLoader&&finiteAnimations===0,foregroundLoader,finiteAnimations,loaderBlockers,animationBlockers,dialogs,main:rect(document.querySelector('main'))};`;
 
-export async function captureNativeEvidence({ command, execute, until }, expected) {
+export async function captureNativeEvidence({ command, execute, until, focus }, expected) {
   let diagnostics, previousPaint;
   try {
     return await until("native evidence visibly painted and stable", async () => {
+      // WKWebView can suspend frame callbacks after a login remount or when
+      // another application takes focus. Activate only the owned test window.
+      await focus?.();
       await command("POST", "/execute/async", { script: "const done=arguments[arguments.length-1]; requestAnimationFrame(()=>requestAnimationFrame(()=>done(true)));", args: [] });
       const auth = expected?.kind === "auth-error";
       const sample = async () => expected ? execute(auth ? authErrorObservation : receiptObservation, auth ? [] : [expected.label]) : undefined;

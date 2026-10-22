@@ -35,12 +35,22 @@ The composer is a stable bottom dock. Attachment, media, expression and send con
 
 Empty conversation and no-selection states have a quiet concentric motif, a clear explanation and the existing next action. Loading, connection, offline and error states say what is happening and offer retry or diagnostics when available. Technical values remain selectable and easy to compare. Text and controls must wrap or truncate within their pane, including long names, identifiers, messages and filenames.
 
-People use two primary presence states: Online and Offline. Recent local observation
-history can supplement Offline. The member profile shows fresh devices and their
-overlapping discovery sources, alongside the client-relative offline explanation.
+People use one concise status line: Online, Online · slow connection, or Offline
+with recent local observation history. Do not add a long quality paragraph.
+Physical LAN observations expire at 15 seconds; cross-network observations keep
+Online for 120 seconds from their last valid public observation. Fresh device
+evidence remains independently bounded. A slow quality hint clears after thirty
+healthy seconds and renewed public evidence, avoiding flicker. Withdrawal is
+immediate. Returning observations use the existing five-second confirmation;
+delivery progresses independently. The member profile shows fresh devices and
+their overlapping discovery sources without turning tolerance into fresh evidence.
 Group headers use accepted account totals and known-online people counts, with
 unresolved device memberships stated separately. Source provenance does not imply
-physical location or successful communication. A quiet global status notice
-explains unavailable presence updates while evidence continues to expire.
+physical location or successful communication. A compact status disclosure in
+the sidebar's connection footer announces unavailable online updates and retry.
+It never overlays the conversation header. Expanding it explains potentially
+stale indicators and reveals the latest refresh error; long errors wrap and
+scroll within the footer. Successful refresh removes the notice. Evidence
+continues to expire independently of this presentation.
 
 Controls need accessible names, keyboard focus indicators and at least the existing touch target sizes. Native buttons handle Enter and Space; Escape closes Radix dialogs and menus. Brief 150–190ms motion is reserved for press feedback and floating surfaces. Ordinary message reading does not animate on entry. Reduced-motion settings remove spatial movement while preserving 80ms color and opacity feedback; progress that would otherwise be shown by a spinner has readable text. Theme previews use the actual canvas, signal and rail tokens. At narrow widths, the existing responsive conversation behavior remains intact; at short heights, dialogs scroll and tools remain reachable. Title-bar drag regions and native control insets remain clear on macOS, Windows and Linux.

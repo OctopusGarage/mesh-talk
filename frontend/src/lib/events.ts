@@ -1,7 +1,9 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   CallSignalEvent,
+  NodeStateChangedEvent,
   ChannelMessageEvent,
+  ChannelChangedEvent,
   DmReceivedEvent,
   FileProgressEvent,
   FileReceivedEvent,
@@ -12,7 +14,9 @@ import type {
 /** Subscribe to the node's inbound events. Returns a single unlisten function. */
 export function subscribeNodeEvents(handlers: {
   onIntegrationMessageAccepted?: (e: IntegrationMessageAcceptedEvent) => void;
+  onStateChanged?: (e: NodeStateChangedEvent) => void;
   onDm?: (e: DmReceivedEvent) => void;
+  onChannelChanged?: (e: ChannelChangedEvent) => void;
   onChannelMessage?: (e: ChannelMessageEvent) => void;
   onFile?: (e: FileReceivedEvent) => void;
   onFileProgress?: (e: FileProgressEvent) => void;
@@ -28,9 +32,23 @@ export function subscribeNodeEvents(handlers: {
       ),
     );
   }
+  if (handlers.onStateChanged) {
+    unlisteners.push(
+      listen<NodeStateChangedEvent>("node-state-changed", (e) =>
+        handlers.onStateChanged!(e.payload),
+      ),
+    );
+  }
   if (handlers.onDm) {
     unlisteners.push(
       listen<DmReceivedEvent>("dm-received", (e) => handlers.onDm!(e.payload)),
+    );
+  }
+  if (handlers.onChannelChanged) {
+    unlisteners.push(
+      listen<ChannelChangedEvent>("channel-changed", (e) =>
+        handlers.onChannelChanged!(e.payload),
+      ),
     );
   }
   if (handlers.onChannelMessage) {

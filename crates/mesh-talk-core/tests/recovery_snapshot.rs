@@ -470,3 +470,38 @@ fn file_card_must_match_its_signed_event_author_and_time() {
         .unwrap();
     assert_eq!(validator.finish(), Err(SnapshotError::InvalidFileCard));
 }
+
+#[test]
+fn trust_card_snapshot_checks_signature_version_and_duplicates() {
+    let account = Account::generate();
+    let card = mesh_talk_core::node::TrustCard::new(
+        &account,
+        1,
+        "Alice".into(),
+        "bio".into(),
+        Some(42),
+        None,
+    );
+    let record = SnapshotRecordV1::PeerTrustCard { card: card.clone() };
+    let mut current = header();
+    current.schema_version = SNAPSHOT_SCHEMA_VERSION;
+    current.record_count = 2;
+    let mut validator = SnapshotValidator::new(current.clone()).unwrap();
+    validator.accept(&record).unwrap();
+    assert_eq!(
+        validator.accept(&record),
+        Err(SnapshotError::DuplicateRecord)
+    );
+    let mut bad = card;
+    bad.bio = "forged".into();
+    let mut validator = SnapshotValidator::new(current).unwrap();
+    assert_eq!(
+        validator.accept(&SnapshotRecordV1::PeerTrustCard { card: bad }),
+        Err(SnapshotError::InvalidEncoding)
+    );
+    let mut validator = SnapshotValidator::new(header()).unwrap();
+    assert_eq!(
+        validator.accept(&record),
+        Err(SnapshotError::UnsupportedVersion)
+    );
+}

@@ -6,6 +6,76 @@ use crate::identity::device::DeviceIdentity;
 use tokio::net::TcpListener;
 
 #[tokio::test]
+async fn completed_receipt_scope_keeps_the_authenticated_connection_for_the_next_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let public = bob.identity.public();
+    let account = bob.account_id();
+    let (addr, count, server) = counted_sync_peer(bob.clone()).await;
+    let proof = bob.signed_announce("Bob", addr.port());
+    bob.configure_privacy(
+        &dir.path().join("bob"),
+        "pw",
+        &proof,
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    alice
+        .configure_privacy(
+            &dir.path().join("alice"),
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, addr.ip(), &alice.user_id());
+    let peer = alice
+        .roster
+        .lock()
+        .unwrap()
+        .get(&public.user_id())
+        .unwrap()
+        .clone();
+    let id = alice
+        .enqueue_to_account(&account, b"one locally queued message", None)
+        .await
+        .unwrap();
+    let destination = alice
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations[0]
+        .clone();
+    assert!(
+        alice
+            .transfer_delivery_destination(&peer, &destination, destination.event.conversation_id)
+            .await
+    );
+    let control =
+        super::delivery_receipt::delivery_conversation_id(&alice.identity.public(), &public);
+    alice
+        .transfer_delivery_destination(&peer, &destination, control)
+        .await;
+    alice
+        .deliver_direct(&peer, destination.event.conversation_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "a completed receipt round must not force a new Noise handshake"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn successful_sync_rounds_reuse_one_authenticated_tcp_connection() {
     let dir = tempfile::tempdir().unwrap();
     let (alice, _) = node(&dir.path().join("alice"));
@@ -476,4 +546,145 @@ async fn sync_pool_rejects_retired_account_before_new_presence_arrives() {
         "fresh authentication must be attempted"
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn fresh_sync_protocol_errors_do_not_trigger_another_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let proof = bob.signed_announce("Bob", addr.port());
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, addr.ip(), &alice.user_id());
+    let peer = alice
+        .roster
+        .lock()
+        .unwrap()
+        .get(&bob.user_id())
+        .unwrap()
+        .clone();
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = accepted.clone();
+    let server = tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            count.fetch_add(1, Ordering::SeqCst);
+            let bob = bob.clone();
+            tasks.spawn(async move {
+                let mut channel = bob.privacy_accept(stream).await.unwrap();
+                channel.recv().await.unwrap();
+                channel.send(b"malformed sync response").await.unwrap();
+            });
+        }
+    });
+    let result = alice
+        .deliver_direct(&peer, crate::eventlog::ConversationId::new([227; 32]))
+        .await;
+    server.abort();
+    assert!(result.is_err());
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "fresh malformed responses must not be retried"
+    );
+}
+
+#[tokio::test]
+async fn sync_pool_reuses_authenticated_fallback_route_and_mapped_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let expected = bob.identity.public();
+    let (addr, accepted, server) = counted_sync_peer(bob).await;
+    let unused = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let absent = unused.local_addr().unwrap();
+    drop(unused);
+    // Learn an authenticated route, then actually fall back to it from the
+    // unavailable input. Other explicit listener addresses remain independent.
+    drop(alice.privacy_dial(addr, &expected).await.unwrap());
+    let mut warm = alice.privacy_sync_dial(absent, &expected).await.unwrap();
+    super::session::request_round(
+        &mut warm,
+        &alice.sync_store(&expected),
+        crate::eventlog::ConversationId::new([228; 32]),
+    )
+    .await
+    .unwrap();
+    alice.recycle_sync_channel(warm);
+    for endpoint in [
+        absent,
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V6(std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped()),
+            addr.port(),
+        ),
+    ] {
+        let (mut channel, reused) = alice
+            .privacy_sync_dial_with_reuse(endpoint, &expected)
+            .await
+            .unwrap();
+        assert!(
+            reused,
+            "a retained authenticated route must be found before dialing"
+        );
+        super::session::request_round(
+            &mut channel,
+            &alice.sync_store(&expected),
+            crate::eventlog::ConversationId::new([228; 32]),
+        )
+        .await
+        .unwrap();
+        alice.recycle_sync_channel(channel);
+    }
+    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn sync_pool_reuses_authenticated_route_after_verified_hint_loses_route_race() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let expected = bob.identity.public();
+    let (reachable, count, server) = counted_sync_peer(bob.clone()).await;
+    let proof = bob.signed_announce("Bob", reachable.port());
+    bob.configure_privacy(
+        &dir.path().join("bob"),
+        "pw",
+        &proof,
+        Arc::new(DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    let departed = std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), reachable.port());
+    {
+        let mut roster = alice.roster.lock().unwrap();
+        roster.update(&proof, reachable.ip(), &alice.user_id());
+        roster.update(&proof, departed.ip(), &alice.user_id());
+    }
+    for _ in 0..2 {
+        // The caller keeps its verified snapshot; the route race chooses the
+        // reachable address and returns that actual socket to the sync pool.
+        let mut channel = alice.privacy_sync_dial(departed, &expected).await.unwrap();
+        assert_eq!(channel.tcp_peer_addr().unwrap(), reachable);
+        let store = alice.sync_store(channel.peer_identity());
+        super::session::request_round(
+            &mut channel,
+            &store,
+            crate::eventlog::event::ConversationId::new([47; 32]),
+        )
+        .await
+        .unwrap();
+        alice.recycle_sync_channel(channel);
+    }
+    let connections = count.load(Ordering::SeqCst);
+    server.abort();
+    assert_eq!(
+        connections, 1,
+        "the completed authenticated route must carry the next sync scope without another Noise handshake"
+    );
 }

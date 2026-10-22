@@ -26,7 +26,7 @@ test("both mutation modes use process-isolated tests with bounded execution", ()
   assert.equal([...workflow.matchAll(/run: node \.\.\/scripts\/release\/run-mutants\.mjs/g)].length, 2);
   assert.match(wrapper, /"--test-tool", "nextest"/);
   assert.match(wrapper, /"--cargo-test-arg=--profile=mutants"/);
-  assert.match(wrapper, /"--", "--test-threads=2"/);
+  assert.match(wrapper, /"--", "--test-threads=4"/);
   assert.doesNotMatch(workflow, /continue-on-error: true/);
   assert.doesNotMatch(workflow, /cargo test --workspace/);
   assert.doesNotMatch(wrapper, /"--baseline", "skip"/);

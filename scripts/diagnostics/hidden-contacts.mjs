@@ -206,7 +206,7 @@ async function contextMenu(id) {
 }
 async function screenshot(name, expected) {
   const filename = `${name}.png`;
-  const { png, observation, paint } = await captureNativeEvidence({ command, execute, until }, expected);
+  const { png, observation, paint } = await captureNativeEvidence({ command, execute, until, focus: focusOwnedWindow }, expected);
   assert.ok(png.length > 100 && png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), "native driver returned a PNG screenshot");
   await writeFile(join(output, filename), png);
   return expected ? { filename, ...observation, ...(paint ? { paint } : {}) } : filename;
@@ -415,8 +415,9 @@ try {
   assert.ok((await observe("list_accounts")).some(a => a.account_id === account));
   await passed("raw-peer-retained", { rawPeerPresent: true, accountPresent: true });
 
-  await writeChildCommand(peer, "/peers\n");
-  await until("CLI discovered GUI identity", () => peer.output.includes(`peer ${userId}`));
+  // Public restoration can race the next signed announcement. Query fresh
+  // roster snapshots instead of waiting forever on one early empty response.
+  await signedPeerObservation(coreContext);
   const hiddenText = `native-hidden-${randomBytes(4).toString("hex")}`;
   const guiAccount = await observe("account_id");
   assert.match(guiAccount, /^[0-9a-f]{32}$/);

@@ -340,3 +340,32 @@ it("deletes an offline contact under the expected owner", async () => {
     account: "account",
   });
 });
+
+it("carries the expected owner on all linked synchronization commands", async () => {
+  await chat.getDeviceSyncPolicy("owner-a");
+  expect(invoke).toHaveBeenLastCalledWith("get_device_sync_policy", {
+    owner: "owner-a",
+  });
+  await chat.getDeviceSyncStatus("owner-a");
+  expect(invoke).toHaveBeenLastCalledWith("get_device_sync_status", {
+    owner: "owner-a",
+  });
+  await chat.setDeviceSyncCategory("history", false, "owner-a");
+  expect(invoke).toHaveBeenLastCalledWith("set_device_sync_category", {
+    category: "history",
+    enabled: false,
+    owner: "owner-a",
+  });
+  await chat.getAccountPreferences("appearance", "owner-a");
+  expect(invoke).toHaveBeenLastCalledWith("get_account_preferences", {
+    category: "appearance",
+    owner: "owner-a",
+  });
+  await chat.setAccountPreference("appearance", "theme", "dark", "owner-a");
+  expect(invoke).toHaveBeenLastCalledWith("set_account_preference", {
+    category: "appearance",
+    key: "theme",
+    value: "dark",
+    owner: "owner-a",
+  });
+});

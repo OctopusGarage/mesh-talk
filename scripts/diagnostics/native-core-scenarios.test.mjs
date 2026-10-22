@@ -274,3 +274,47 @@ test("native attachment fixture creates an owned download directory before confi
     assert.deepEqual(calls, ["get_app_settings", "set_app_settings", "get_app_settings"]);
   } finally { await rm(fixture, { recursive: true, force: true }); }
 });
+
+
+test("native attachment verifies durable export after transient chunks are pruned", async () => {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { verifyNativeAttachmentDownload } = await import("./native-core-scenarios.mjs");
+  const root = await mkdtemp(join(tmpdir(), "native-download-"));
+  const path = join(root, "unique.txt"), expected = Buffer.from("exact decrypted 你好 bytes");
+  try {
+    let polls = 0;
+    const c = { until: async (_label, poll) => {
+      assert.equal(await poll(), false, "missing file cannot count as received");
+      polls++;
+      await writeFile(path, expected);
+      return poll();
+    } };
+    assert.equal(await verifyNativeAttachmentDownload(c, path, expected), true);
+    assert.equal(polls, 1);
+    await writeFile(path, Buffer.from("corrupt"));
+    await assert.rejects(verifyNativeAttachmentDownload({ until: (_label, poll) => poll() }, path, expected), /complete original bytes/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+test("public restoration rechecks an early empty CLI roster despite stale pre-private output", async () => {
+  const { signedPeerObservation } = await import("./native-core-scenarios.mjs");
+  const userId = "a".repeat(32), rawPeer = { name: "eval-peer", user_id: "b".repeat(32) };
+  let queries = 0;
+  const peer = { output: `peer ${userId} before private mode\n`, stdin: new Writable({
+    write(_bytes, _encoding, done) {
+      peer.output += ++queries === 1 ? "(no peers yet)\n" : `peer ${userId} after public restoration\n`;
+      done();
+    },
+  }) };
+  const found = await signedPeerObservation({ peer, userId, peerName: rawPeer.name,
+    observe: async () => [rawPeer], until: async (_label, poll) => {
+      for (let i = 0; i < 3; i++) { const result = await poll(); if (result) return result; }
+      throw new Error("fresh public discovery missing");
+    },
+  });
+  assert.equal(found, rawPeer);
+  assert.equal(queries, 2, "old stdout and one early empty query cannot prove current public discovery");
+});

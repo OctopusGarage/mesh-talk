@@ -73,9 +73,9 @@ test("typed observations reject missing checks and preserve explicit download li
   const { validateObservations } = await import("./hidden-contacts-report.mjs");
   assert.deepEqual(validateObservations("direct-messages", { uiToCliRendered: true, uiToCliPersisted: true, cliToUiRendered: true, cliToUiPersisted: true }), []);
   for (const observations of [{}, { uiToCliRendered: "true" }, { uiToCliRendered: false }]) assert.ok(validateObservations("direct-messages", observations).length);
-  assert.deepEqual(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, bytesVerified: true, completion: {backendReady:true,renderedComplete:true}, downloadVerified: false, limitation: "OS save picker is not automated" }), []);
-  assert.ok(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, downloadVerified: false, limitation: "OS save picker is not automated" }).length);
-  assert.ok(validateObservations("incoming-attachment", { manifestPersisted: true, genericFileRendered: true, downloadVerified: false }).length);
+  assert.deepEqual(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, bytesVerified: true, completion: {backendReady:true,renderedComplete:true}, downloadVerified: true, limitation: "OS save picker is not automated" }), []);
+  assert.ok(validateObservations("incoming-attachment", { fileName: "fixture.txt", manifestPersisted: true, genericFileRendered: true, downloadVerified: true, limitation: "OS save picker is not automated" }).length);
+  assert.ok(validateObservations("incoming-attachment", { manifestPersisted: true, genericFileRendered: true, downloadVerified: true }).length);
 });
 test("rejects missing, failed and evidence-free scenarios", () => {
   for (const value of [undefined, { passed: false, evidence: ["x"] }, { passed: true, evidence: [] }]) {
@@ -118,7 +118,7 @@ test("wrong-password proof requires its localized visible error and supplemental
 
 test("semantic capture checkpoints cannot pass from backend-only observations", async()=>{
   const {validateObservations}=await import('./hidden-contacts-report.mjs');
-  const attachment={fileName:'file',manifestPersisted:true,genericFileRendered:true,bytesVerified:true,recipientApproved:true,downloadVerified:false,limitation:'OS save picker not invoked'};
+  const attachment={fileName:'file',manifestPersisted:true,genericFileRendered:true,bytesVerified:true,recipientApproved:true,downloadVerified:true,limitation:'OS save picker not invoked'};
   assert.ok(validateObservations('incoming-attachment',attachment).length);
   assert.deepEqual(validateObservations('incoming-attachment',{...attachment,completion:{backendReady:true,renderedComplete:true}}),[]);
   const privacy={cancelledBeforeCommit:true,durable:{invisible:true},passivePeerRetained:true};

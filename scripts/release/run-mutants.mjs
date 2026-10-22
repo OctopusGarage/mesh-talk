@@ -7,6 +7,9 @@ import { mutationShard, parseSelectedMutants, validateMutationReport } from "./m
 const args = process.argv.slice(2);
 assert.ok(args.length === 0 || (args.length === 2 && args[0] === "--in-diff"), "unsupported mutation filter arguments");
 const shard = mutationShard(Number(process.env.GITHUB_RUN_NUMBER ?? "1"), Number(process.env.MUTATION_WORKER ?? "0"), Number(process.env.MUTATION_WORKERS ?? "1"));
+// Two test processes spent 430 seconds in completed tests before the 240-second
+// suite limit; four processes fit the growing baseline without relaxing per-test
+// or whole-suite deadlines. In-place mutation still uses one mutation worker.
 // In-place mode enforces one worker, reusing the checkout's build cache. CI runs
 // shards on separate machines to avoid competing workspace builds and tests.
 const options = ["--test-tool", "nextest", "--cargo-test-arg=--profile=mutants", "--workspace", "--test-workspace", "true", "--in-place", "--profile", "mutants", "--no-shuffle", "--shard", shard, "--sharding", "round-robin", "--timeout", "240", "--output", "..", ...args];
@@ -17,7 +20,7 @@ const selected = parseSelectedMutants(listing.stdout, listing.status);
 const reportPath = resolve("../mutants.out/outcomes.json");
 let exitCode = 0;
 if (selected.length > 0) {
-  const result = spawnSync("cargo", ["mutants", ...options, "--", "--test-threads=2"], { stdio: "inherit" });
+  const result = spawnSync("cargo", ["mutants", ...options, "--", "--test-threads=4"], { stdio: "inherit" });
   if (result.error) throw result.error;
   exitCode = result.status;
 }

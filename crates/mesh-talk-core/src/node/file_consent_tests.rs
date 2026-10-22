@@ -231,7 +231,9 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         .unwrap()
         .fail_appends_for_test(true)
         .unwrap();
-    a.drain_from_post_office().await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), a.drain_from_post_office())
+        .await
+        .expect("failed consent storage must defer retries to the next drain, not re-fetch the same blob thousands of times");
     let mut received = Vec::new();
     while let Ok(message) = messages.try_recv() {
         received.push(message.text);
@@ -242,6 +244,24 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
             .any(|text| text == b"chat survives consent storage failure"),
         "failed consent persistence must not block unrelated chat events"
     );
+    assert_eq!(a.outgoing_file_consent_status(card, binding), None);
+    let retry_mailbox =
+        crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public()).unwrap();
+    let deferred_control = retry_mailbox.wrap(&control).unwrap().id;
+    assert!(
+        a.opaque_seen
+            .lock()
+            .unwrap()
+            .get(&retry_mailbox.id())
+            .is_none_or(|seen| !seen.contains(&deferred_control)),
+        "failed controls must not enter the node-wide seen cache"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        a.drain_from_post_office(),
+    )
+    .await
+    .expect("a second drain during the outage must remain bounded");
     assert_eq!(a.outgoing_file_consent_status(card, binding), None);
     a.file_consent
         .lock()

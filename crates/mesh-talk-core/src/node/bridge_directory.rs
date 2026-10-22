@@ -60,11 +60,22 @@ fn valid_gateway_route(proofs: &[Announce], gateway: &(String, u16)) -> bool {
         })
 }
 
-#[derive(Default)]
 pub struct BridgeDirectory {
     members: HashMap<String, (Announce, Instant)>,
     remote_members: HashMap<String, FederatedPresence>,
     gateway: Option<Arc<Mutex<Option<GatewayProof>>>>,
+    changes: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for BridgeDirectory {
+    fn default() -> Self {
+        Self {
+            members: HashMap::new(),
+            remote_members: HashMap::new(),
+            gateway: None,
+            changes: tokio::sync::watch::channel(0).0,
+        }
+    }
 }
 
 impl BridgeDirectory {
@@ -73,7 +84,12 @@ impl BridgeDirectory {
             members: HashMap::new(),
             remote_members: HashMap::new(),
             gateway: Some(gateway),
+            changes: tokio::sync::watch::channel(0).0,
         }
+    }
+
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     /// The caller's Noise-authenticated presence is the only admissible proof.
@@ -100,6 +116,9 @@ impl BridgeDirectory {
         }
         self.members
             .insert(proof.user_id.clone(), (proof.clone(), now));
+        // A fresh origin registration renews its lease and must reach other relays.
+        self.changes
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
         let mut proofs: Vec<_> = self
             .members
             .iter()
@@ -184,8 +203,17 @@ impl BridgeDirectory {
             {
                 break;
             }
-            self.remote_members
-                .insert(proof.announce.user_id.clone(), proof.clone());
+            let id = &proof.announce.user_id;
+            if self
+                .remote_members
+                .get(id)
+                .is_some_and(|old| old.expires_at_secs >= proof.expires_at_secs)
+            {
+                continue;
+            }
+            self.remote_members.insert(id.clone(), proof.clone());
+            self.changes
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
         }
     }
 }
@@ -504,6 +532,36 @@ mod tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn federated_duplicate_presence_is_quiet_but_newer_origin_wakes_subscribers() {
+        let mut directory = BridgeDirectory::default();
+        let mut first = directory.subscribe_changes();
+        let second = directory.subscribe_changes();
+        let now = unix_seconds_now();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "member",
+            47475,
+        );
+        let mut entry = FederatedPresence {
+            announce: proof,
+            expires_at_secs: now + 10,
+        };
+        directory.import_federated(&[entry.clone()], now);
+        assert!(first.has_changed().unwrap());
+        assert!(second.has_changed().unwrap());
+        first.borrow_and_update();
+        directory.import_federated(&[entry.clone()], now);
+        assert!(
+            !first.has_changed().unwrap(),
+            "equal forwarded leases must not cause federation wake loops"
+        );
+        entry.expires_at_secs += 1;
+        directory.import_federated(&[entry], now);
+        assert!(first.has_changed().unwrap());
+    }
 
     #[test]
     fn directory_freshness_rejects_expired_and_out_of_budget_origin_lifetimes() {

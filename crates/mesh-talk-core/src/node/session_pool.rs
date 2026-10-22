@@ -20,8 +20,25 @@ pub(super) const MAX_TCP_CONNECTIONS: usize = 8;
 pub(super) const MAX_DIRECTION_CONNECTIONS: usize = MAX_TCP_CONNECTIONS - 1;
 const IDLE_TTL: Duration = Duration::from_secs(15);
 const CAPACITY_WAIT: Duration = Duration::from_secs(2);
+const ACCOUNT_CAPABILITY_COOLDOWN: Duration = Duration::from_secs(60);
+const MAX_ACCOUNT_CAPABILITIES: usize = 256;
+const MAX_ROUTE_AFFINITIES: usize = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::node) enum SessionProtocol {
+    Sync,
+    Account,
+}
+
+#[derive(Clone, PartialEq)]
+pub(in crate::node) struct PeerEndpointKey {
+    identity: PublicIdentity,
+    address: SocketAddr,
+    generation: u64,
+}
 
 struct Idle {
+    protocol: SessionProtocol,
     address: SocketAddr,
     generation: u64,
     returned: Instant,
@@ -42,6 +59,9 @@ pub(in crate::node) struct SessionPool {
     outbound: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
     idle: Arc<Mutex<Vec<Idle>>>,
+    timings: Mutex<super::route_timing::RouteTimings>,
+    account_unsupported: Mutex<std::collections::VecDeque<(PeerEndpointKey, Instant)>>,
+    route_affinities: Mutex<std::collections::VecDeque<(PeerEndpointKey, SocketAddr)>>,
 }
 
 impl Default for SessionPool {
@@ -51,6 +71,9 @@ impl Default for SessionPool {
             outbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             inbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             idle: Arc::new(Mutex::new(Vec::new())),
+            timings: Mutex::new(super::route_timing::RouteTimings::default()),
+            account_unsupported: Mutex::new(Default::default()),
+            route_affinities: Mutex::new(Default::default()),
         }
     }
 }
@@ -65,18 +88,93 @@ impl SessionPool {
 
     pub(in crate::node) fn clear(&self) {
         self.idle.lock().unwrap().clear();
+        self.account_unsupported.lock().unwrap().clear();
+        self.route_affinities.lock().unwrap().clear();
+    }
+
+    pub(in crate::node) fn network_changed(&self) {
+        self.clear();
+        self.timings.lock().unwrap().clear();
+    }
+
+    pub(in crate::node) fn authentication_timeout(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+    ) -> Duration {
+        self.timings
+            .lock()
+            .unwrap()
+            .deadline(&peer.user_id(), address)
+    }
+
+    pub(in crate::node) fn authentication_succeeded(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+        elapsed: Duration,
+    ) {
+        self.timings
+            .lock()
+            .unwrap()
+            .succeeded(&peer.user_id(), address, elapsed);
+    }
+
+    pub(in crate::node) fn authentication_timed_out(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+    ) {
+        self.timings
+            .lock()
+            .unwrap()
+            .timed_out(&peer.user_id(), address);
+    }
+
+    pub(in crate::node) fn control_timeout(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+    ) -> Duration {
+        self.timings
+            .lock()
+            .unwrap()
+            .control_deadline(&peer.user_id(), address)
+    }
+
+    pub(in crate::node) fn control_succeeded(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+        elapsed: Duration,
+    ) {
+        self.timings
+            .lock()
+            .unwrap()
+            .control_succeeded(&peer.user_id(), address, elapsed);
+    }
+
+    pub(in crate::node) fn control_timed_out(&self, peer: &PublicIdentity, address: SocketAddr) {
+        self.timings
+            .lock()
+            .unwrap()
+            .control_timed_out(&peer.user_id(), address);
+    }
+
+    fn prepare_capacity(&self, direction: &Arc<Semaphore>) {
+        self.prune();
+        if direction.available_permits() == 0 || self.total.available_permits() == 0 {
+            // Idle connections must never prevent a new identity/route or an
+            // incoming peer from making progress. Active sessions are untouched.
+            self.idle.lock().unwrap().clear();
+        }
     }
 
     async fn acquire(
         &self,
         direction: &Arc<Semaphore>,
     ) -> Result<Vec<OwnedSemaphorePermit>, TransportError> {
-        self.prune();
-        if direction.available_permits() == 0 || self.total.available_permits() == 0 {
-            // Idle connections must never prevent a new identity/route or an
-            // incoming peer from making progress. Active sessions are untouched.
-            self.clear();
-        }
+        self.prepare_capacity(direction);
         tokio::time::timeout(CAPACITY_WAIT, async {
             let directional = direction
                 .clone()
@@ -101,6 +199,15 @@ impl SessionPool {
         self.acquire(&self.outbound).await
     }
 
+    /// An alternate route gets its own socket permits. Racing addresses must
+    /// not turn one logical dial into unaccounted TCP connections.
+    pub(in crate::node) fn try_outbound(&self) -> Option<Vec<OwnedSemaphorePermit>> {
+        self.prepare_capacity(&self.outbound);
+        let directional = self.outbound.clone().try_acquire_owned().ok()?;
+        let shared = self.total.clone().try_acquire_owned().ok()?;
+        Some(vec![directional, shared])
+    }
+
     pub(in crate::node) async fn inbound(
         &self,
     ) -> Result<Vec<OwnedSemaphorePermit>, TransportError> {
@@ -109,6 +216,7 @@ impl SessionPool {
 
     fn checkout(
         &self,
+        protocol: SessionProtocol,
         address: SocketAddr,
         expected: &PublicIdentity,
         generation: u64,
@@ -116,7 +224,8 @@ impl SessionPool {
         self.prune();
         let mut idle = self.idle.lock().unwrap();
         while let Some(index) = idle.iter().position(|entry| {
-            entry.address == address
+            entry.protocol == protocol
+                && entry.address == address
                 && entry.generation == generation
                 && entry.channel.peer_identity() == expected
         }) {
@@ -127,6 +236,41 @@ impl SessionPool {
         }
         None
     }
+
+    pub(in crate::node) fn account_capability_due(&self, key: &PeerEndpointKey) -> bool {
+        let mut entries = self.account_unsupported.lock().unwrap();
+        entries.retain(|(_, at)| at.elapsed() < ACCOUNT_CAPABILITY_COOLDOWN);
+        !entries.iter().any(|(candidate, _)| candidate == key)
+    }
+
+    pub(in crate::node) fn note_account_unsupported(&self, key: PeerEndpointKey) {
+        let mut entries = self.account_unsupported.lock().unwrap();
+        entries.retain(|(candidate, at)| {
+            candidate != &key && at.elapsed() < ACCOUNT_CAPABILITY_COOLDOWN
+        });
+        if entries.len() >= MAX_ACCOUNT_CAPABILITIES {
+            entries.pop_front();
+        }
+        entries.push_back((key, Instant::now()));
+    }
+
+    pub(in crate::node) fn note_account_supported(&self, key: &PeerEndpointKey) {
+        self.account_unsupported
+            .lock()
+            .unwrap()
+            .retain(|(candidate, _)| candidate != key);
+    }
+}
+
+pub(in crate::node) fn retryable_transport_error(error: &TransportError) -> bool {
+    matches!(error, TransportError::Io(error) if matches!(error.kind(),
+        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset |
+        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::NotConnected |
+        std::io::ErrorKind::ConnectionAborted))
+}
+
+pub(in crate::node) fn retryable_sync_error(error: &super::session::SessionError) -> bool {
+    matches!(error, super::session::SessionError::Transport(error) if retryable_transport_error(error))
 }
 
 impl Node {
@@ -167,9 +311,75 @@ impl Node {
     /// ordinary privacy_dial intentionally stays fresh for first-frame protocols.
     pub(in crate::node) async fn privacy_sync_dial(
         &self,
-        mut addr: SocketAddr,
+        addr: SocketAddr,
         expected: &PublicIdentity,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        self.privacy_sync_dial_with_reuse(addr, expected)
+            .await
+            .map(|(channel, _)| channel)
+    }
+
+    pub(in crate::node) async fn privacy_sync_dial_with_reuse(
+        &self,
+        addr: SocketAddr,
+        expected: &PublicIdentity,
+    ) -> Result<(SecureChannel<TcpStream>, bool), TransportError> {
+        if let Some(channel) = self
+            .checkout_reusable_channel(SessionProtocol::Sync, addr, expected)
+            .await?
+        {
+            return Ok((channel, true));
+        }
+        self.privacy_dial(addr, expected)
+            .await
+            .map(|channel| (channel, false))
+    }
+
+    pub(in crate::node) fn peer_endpoint_key(
+        &self,
+        mut addr: SocketAddr,
+        expected: &PublicIdentity,
+    ) -> PeerEndpointKey {
+        addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
+        PeerEndpointKey {
+            identity: expected.clone(),
+            address: addr,
+            generation: self
+                .privacy
+                .generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+
+    /// Remember an actually authenticated fallback for this precise dial input.
+    /// A different explicit listener must not inherit another endpoint's affinity.
+    pub(in crate::node) fn note_dialed_route(
+        &self,
+        requested: SocketAddr,
+        channel: &SecureChannel<TcpStream>,
+    ) {
+        let (Ok(actual), Some(generation)) = (channel.tcp_peer_addr(), channel.host_generation())
+        else {
+            return;
+        };
+        let mut key = self.peer_endpoint_key(requested, channel.peer_identity());
+        key.generation = generation;
+        let mut entries = self.sessions.route_affinities.lock().unwrap();
+        entries.retain(|(candidate, _)| candidate != &key);
+        if key.address != actual {
+            if entries.len() >= MAX_ROUTE_AFFINITIES {
+                entries.pop_front();
+            }
+            entries.push_back((key, actual));
+        }
+    }
+
+    pub(in crate::node) async fn checkout_reusable_channel(
+        &self,
+        protocol: SessionProtocol,
+        mut addr: SocketAddr,
+        expected: &PublicIdentity,
+    ) -> Result<Option<SecureChannel<TcpStream>>, TransportError> {
         addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
         {
             let _operation = self.privacy.gate.read().await;
@@ -177,26 +387,52 @@ impl Node {
                 .privacy
                 .generation
                 .load(std::sync::atomic::Ordering::SeqCst);
-            if let Some(channel) = self.sessions.checkout(addr, expected, generation)
-                && self.pooled_presence_current(&channel)
-            {
-                if !self.account_allowed(expected, channel.peer_announcement())
-                    && !self.group_member(expected)
-                    && !self.group_departure_peer(expected)
+            let announce = self.roster.lock().unwrap().announcement(expected).cloned();
+            let permitted = self.privacy_route_candidates(addr, expected, announce.as_ref());
+            let key = PeerEndpointKey {
+                identity: expected.clone(),
+                address: addr,
+                generation,
+            };
+            let fallback = self
+                .sessions
+                .route_affinities
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(candidate, _)| candidate == &key)
+                .map(|(_, actual)| *actual)
+                .filter(|actual| permitted.contains(actual));
+            for addr in std::iter::once(addr).chain(fallback) {
+                if let Some(channel) = self.sessions.checkout(protocol, addr, expected, generation)
+                    && self.pooled_presence_current(&channel)
                 {
-                    return Err(TransportError::AdmissionDenied);
+                    if !self.account_allowed(expected, channel.peer_announcement())
+                        && !self.group_member(expected)
+                        && !self.group_departure_peer(expected)
+                    {
+                        return Err(TransportError::AdmissionDenied);
+                    }
+                    return Ok(Some(channel));
                 }
-                return Ok(channel);
             }
             // A valid new certificate or role announcement invalidates the old
             // auth snapshot. Drop it and require a fresh, verified handshake.
         }
-        self.privacy_dial(addr, expected).await
+        Ok(None)
     }
 
     /// The caller must have consumed a successful complete sync exchange. On
     /// cancellation, malformed replies or I/O errors, simply drop the channel.
     pub(in crate::node) fn recycle_sync_channel(&self, channel: SecureChannel<TcpStream>) {
+        self.recycle_channel(SessionProtocol::Sync, channel);
+    }
+
+    pub(in crate::node) fn recycle_account_channel(&self, channel: SecureChannel<TcpStream>) {
+        self.recycle_channel(SessionProtocol::Account, channel);
+    }
+
+    fn recycle_channel(&self, protocol: SessionProtocol, channel: SecureChannel<TcpStream>) {
         let Some(generation) = channel.host_generation() else {
             return;
         };
@@ -215,7 +451,9 @@ impl Node {
             return;
         }
         idle.retain(|entry| {
-            !(entry.address == address && entry.channel.peer_identity() == channel.peer_identity())
+            !(entry.protocol == protocol
+                && entry.address == address
+                && entry.channel.peer_identity() == channel.peer_identity())
         });
         let returned = Instant::now();
         let weak = Arc::downgrade(&self.sessions.idle);
@@ -228,11 +466,72 @@ impl Node {
             }
         });
         idle.push(Idle {
+            protocol,
             address,
             generation,
             returned,
             channel,
             _expiry: ExpiryTask(expiry.abort_handle()),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_account_capabilities_are_bounded_and_scope_specific() {
+        let pool = SessionPool::default();
+        let identity = crate::identity::device::DeviceIdentity::generate().public();
+        let key = |port| PeerEndpointKey {
+            identity: identity.clone(),
+            address: SocketAddr::from(([127, 0, 0, 1], port)),
+            generation: 1,
+        };
+        for port in 1..=300 {
+            pool.note_account_unsupported(key(port));
+        }
+        assert!(
+            pool.account_capability_due(&key(1)),
+            "old entries must be evicted at the capacity bound"
+        );
+        assert!(!pool.account_capability_due(&key(300)));
+        assert_eq!(
+            pool.account_unsupported.lock().unwrap().len(),
+            MAX_ACCOUNT_CAPABILITIES
+        );
+        let mut changed = key(300);
+        changed.generation += 1;
+        assert!(pool.account_capability_due(&changed));
+        changed = key(300);
+        changed.identity = crate::identity::device::DeviceIdentity::generate().public();
+        assert!(pool.account_capability_due(&changed));
+        assert!(pool.account_capability_due(&key(301)));
+        pool.note_account_supported(&key(300));
+        assert!(pool.account_capability_due(&key(300)));
+        pool.clear();
+        assert!(
+            pool.account_capability_due(&key(299)),
+            "privacy/network reset must clear unsupported state"
+        );
+    }
+
+    #[test]
+    fn unsupported_account_capabilities_expire_without_background_polling() {
+        let pool = SessionPool::default();
+        let key = PeerEndpointKey {
+            identity: crate::identity::device::DeviceIdentity::generate().public(),
+            address: SocketAddr::from(([127, 0, 0, 1], 9)),
+            generation: 1,
+        };
+        pool.note_account_unsupported(key.clone());
+        pool.account_unsupported
+            .lock()
+            .unwrap()
+            .back_mut()
+            .unwrap()
+            .1 = Instant::now() - ACCOUNT_CAPABILITY_COOLDOWN;
+        assert!(pool.account_capability_due(&key));
     }
 }

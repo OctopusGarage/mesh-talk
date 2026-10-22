@@ -10,7 +10,7 @@
       "min_score": 0.9,
       "scenario": "Review the person-presence contract for group members observed across local discovery, routed discovery, and federated post-office directories. Judge the Person presence contract section, not unrelated topology scenarios.",
       "rubric": [
-        "Online and Offline are observations of the current client; recent history is secondary and never-observed people receive no invented timestamp.",
+        "Online and Offline are observations of the current client; Reconnecting is bounded to thirty seconds from an expired original public observation, is not Online evidence, and ends on authoritative withdrawal. Never-observed people receive no invented timestamp.",
         "Presence distinguishes eligible public local, routed, directory and authenticated observations from private routes, membership, cached routes, receipts and relay custody.",
         "Group counts use accepted distinct verified accounts, exclude pending/removed members and infrastructure, include running accepted self, and report unresolved devices separately.",
         "Explains source overlap, source versus physical location, discovery versus TCP/delivery success, and the absence of transitive A-B-C presence guarantees.",
@@ -39,7 +39,7 @@
       "min_score": 0.9,
       "scenario": "Review the shared presence store as a small state machine. Native observations supply source-specific remaining lifetime and optional history. Judge frontend handling of silence, failed IPC, overlapping responses, owner changes, and group counters.",
       "rubric": [
-        "Ages evidence independently and removes expired device evidence even without a successful refresh; recent history does not become a third primary state.",
+        "Ages evidence independently and removes expired device evidence even without a successful refresh. A separate nonrenewing Reconnecting deadline expires independently of polling within thirty seconds total, never contributes to known-online group counts, and cannot be renewed by failed IPC.",
         "Failed/malformed top-level refreshes produce an unavailable indication instead of an empty successful map; valid recovery clears that indication.",
         "Prevents older successful or failed responses and obsolete owner/runtime polling sessions from overwriting newer accepted state.",
         "Bounds outstanding refreshes and retained history, clears state on stop/replacement, and preserves unchanged record references.",

@@ -48,3 +48,33 @@ describe("connectionState", () => {
     ).toBe("ready");
   });
 });
+
+it("shows reconnecting instead of a new network search while recent peers recover", () => {
+  expect(
+    connectionState({
+      bootFailed: false,
+      ready: true,
+      noNetwork: false,
+      onlinePeople: 0,
+      reconnecting: true,
+    }),
+  ).toBe("reconnecting");
+  expect(
+    connectionState({
+      bootFailed: false,
+      ready: true,
+      noNetwork: false,
+      onlinePeople: 1,
+      reconnecting: true,
+    }),
+  ).toBe("ready");
+  expect(
+    connectionState({
+      bootFailed: false,
+      ready: true,
+      noNetwork: true,
+      onlinePeople: 0,
+      reconnecting: true,
+    }),
+  ).toBe("no-network");
+});

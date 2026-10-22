@@ -35,9 +35,39 @@ pub struct PeerEndpoint {
     pub presence_origin_expires_at: Option<u64>,
 }
 
+impl PeerEndpoint {
+    fn public_presence_deadline(&self) -> Option<Instant> {
+        match self.source {
+            RouteSource::Lan | RouteSource::Discovery => Some(self.last_seen + PUBLIC_PRESENCE_TTL),
+            RouteSource::RoutedQuery => self
+                .presence_expires_at
+                .or(Some(self.last_seen + PUBLIC_PRESENCE_TTL)),
+            RouteSource::Authenticated | RouteSource::PostOffice => self.presence_expires_at,
+            RouteSource::Gateway => None,
+        }
+    }
+    fn public_presentation_deadline(&self, physical_lan: bool) -> Option<Instant> {
+        let deadline = self.public_presence_deadline()?;
+        Some(match self.source {
+            RouteSource::RoutedQuery => self.last_seen + CROSS_NETWORK_PRESENCE_TTL,
+            RouteSource::PostOffice => {
+                deadline + (CROSS_NETWORK_PRESENCE_TTL - PUBLIC_PRESENCE_TTL)
+            }
+            RouteSource::Authenticated if !physical_lan => {
+                deadline + (CROSS_NETWORK_PRESENCE_TTL - PUBLIC_PRESENCE_TTL)
+            }
+            _ => deadline,
+        })
+    }
+}
+
 const MAX_ROUTES_PER_PEER: usize = 8;
 /// Public observations expire promptly after logout, independently of dial-route retention.
 pub const PUBLIC_PRESENCE_TTL: Duration = Duration::from_secs(15);
+/// Maximum adaptive freshness lease for measured routed observations.
+pub const PUBLIC_RECONNECT_TTL: Duration = Duration::from_secs(60);
+/// Cross-network presentation tolerance, anchored to the original public observation.
+pub const CROSS_NETWORK_PRESENCE_TTL: Duration = Duration::from_secs(120);
 
 /// Keep a directly discovered endpoint ahead of a bridge gateway, even when
 /// the gateway refreshes its directory more recently. Routes within each tier
@@ -79,28 +109,59 @@ impl PeerRecord {
     /// Fresh public observations, independently of preferred route or TCP success.
     /// The third value is the remaining monotonic lifetime in seconds.
     pub fn presence_evidence(&self, now: Instant) -> Vec<(RouteSource, u64, u64)> {
+        self.presence_routes(now)
+            .map(|(route, age, remaining)| (route.source, age, remaining))
+            .collect()
+    }
+
+    /// Fresh observations with their exact introducing endpoint retained.
+    /// A post-office endpoint identifies the introducer, not the member's location.
+    pub fn presence_routes(&self, now: Instant) -> impl Iterator<Item = (&PeerEndpoint, u64, u64)> {
+        self.routes.iter().filter_map(move |route| {
+            let age = now.saturating_duration_since(route.last_seen).as_secs();
+            let deadline = route.public_presence_deadline()?;
+            (deadline > now).then(|| {
+                (
+                    route,
+                    age,
+                    deadline.saturating_duration_since(now).as_secs(),
+                )
+            })
+        })
+    }
+
+    /// Bounded presentation tolerance, independent of fresh device evidence.
+    /// Physical LAN observations expire promptly. Other public paths tolerate
+    /// loss for two minutes; private traffic and repeated directory metadata
+    /// cannot move the original observation deadline.
+    pub fn reconnect_remaining(&self, now: Instant) -> Duration {
         self.routes
             .iter()
             .filter_map(|route| {
-                let age = now.saturating_duration_since(route.last_seen).as_secs();
-                let deadline = match route.source {
-                    RouteSource::Lan | RouteSource::Discovery | RouteSource::RoutedQuery => {
-                        route.last_seen + PUBLIC_PRESENCE_TTL
-                    }
-                    RouteSource::Authenticated | RouteSource::PostOffice => {
-                        route.presence_expires_at?
-                    }
-                    RouteSource::Gateway => return None,
-                };
-                (deadline > now).then(|| {
-                    (
-                        route.source,
-                        age,
-                        deadline.saturating_duration_since(now).as_secs(),
-                    )
-                })
+                route.public_presentation_deadline(self.routes.iter().any(|other| {
+                    other.source == RouteSource::Lan && other.addr.ip() == route.addr.ip()
+                }))
             })
-            .collect()
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .max()
+            .unwrap_or(Duration::ZERO)
+    }
+
+    /// Age of the newest original public observation, never a private route refresh.
+    pub fn public_observation_age(&self, now: Instant) -> Option<Duration> {
+        self.routes
+            .iter()
+            .filter_map(|route| {
+                let deadline = route.public_presence_deadline()?;
+                let observed = match route.source {
+                    RouteSource::Authenticated | RouteSource::PostOffice => {
+                        deadline.checked_sub(PUBLIC_PRESENCE_TTL)?
+                    }
+                    _ => route.last_seen,
+                };
+                Some(now.saturating_duration_since(observed))
+            })
+            .min()
     }
 
     /// A known application route without an intermediate Mesh Talk post office.
@@ -162,7 +223,6 @@ pub(crate) struct RelayedRollback {
 }
 
 /// The known-peers map.
-#[derive(Default)]
 pub struct Roster {
     peers: HashMap<UserId, PeerRecord>,
     announcements: HashMap<UserId, Announce>,
@@ -170,9 +230,39 @@ pub struct Roster {
     conflicting_history: HashSet<UserId>,
     linked_bindings: HashMap<UserId, (PublicIdentity, crate::identity::account::DeviceCertificate)>,
     changes: std::sync::Arc<Notify>,
+    observations: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for Roster {
+    fn default() -> Self {
+        Self {
+            peers: HashMap::new(),
+            announcements: HashMap::new(),
+            historical: BTreeMap::new(),
+            conflicting_history: HashSet::new(),
+            linked_bindings: HashMap::new(),
+            changes: std::sync::Arc::new(Notify::new()),
+            observations: tokio::sync::watch::channel(0).0,
+        }
+    }
 }
 
 impl Roster {
+    /// Independent subscribers do not consume recovery's coalesced notification.
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.observations.subscribe()
+    }
+
+    fn publish_observation(&self) {
+        self.observations
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    fn notify_changes(&self) {
+        self.changes.notify_one();
+        self.publish_observation();
+    }
+
     /// Install a locally authorized own-account device transition. Callers derive
     /// this from the durable account-device registry, never discovery traffic.
     pub(crate) fn authorize_linked_account(
@@ -290,6 +380,7 @@ impl Roster {
         expiry: Instant,
         origin_secs: u64,
     ) {
+        let mut changed = false;
         if let Some(peer) = self.peers.get_mut(id) {
             for route in &mut peer.routes {
                 if route.addr == relay && route.source == RouteSource::PostOffice {
@@ -300,16 +391,21 @@ impl Roster {
                     let newer = route
                         .presence_origin_expires_at
                         .is_none_or(|old| origin_secs > old);
+                    let previous = route.presence_expires_at;
                     route.presence_expires_at = Some(if newer {
                         capped
                     } else {
                         route.presence_expires_at.unwrap_or(capped).min(capped)
                     });
+                    changed |= previous != route.presence_expires_at;
                     if newer {
                         route.presence_origin_expires_at = Some(origin_secs);
                     }
                 }
             }
+        }
+        if changed {
+            self.publish_observation();
         }
     }
 
@@ -326,6 +422,52 @@ impl Roster {
             self_user_id,
             RouteSource::RoutedQuery,
         )
+    }
+
+    /// Only nonce-bound, signature-verified discovery can supply this RTT.
+    /// Slow paths get up to sixty seconds; healthy samples shrink by five
+    /// seconds per observation, avoiding an abrupt return to a strict lease.
+    pub(crate) fn update_routed_with_latency(
+        &mut self,
+        announce: &Announce,
+        source_ip: IpAddr,
+        own: &str,
+        rtt: Duration,
+    ) -> UpdateOutcome {
+        let previous = self
+            .peers
+            .get(&announce.user_id)
+            .filter(|p| p.public == announce.public())
+            .and_then(|p| {
+                p.routes
+                    .iter()
+                    .find(|r| r.source == RouteSource::RoutedQuery && r.addr.ip() == source_ip)
+            })
+            .and_then(|r| {
+                r.presence_expires_at
+                    .map(|deadline| deadline.saturating_duration_since(r.last_seen))
+            })
+            .unwrap_or(PUBLIC_PRESENCE_TTL);
+        let measured = (PUBLIC_PRESENCE_TTL
+            + rtt
+                .saturating_sub(Duration::from_millis(100))
+                .min(Duration::from_secs(5))
+                * 150)
+            .min(PUBLIC_RECONNECT_TTL);
+        let lease = measured
+            .max(previous.saturating_sub(Duration::from_secs(5)))
+            .max(PUBLIC_PRESENCE_TTL);
+        let outcome = self.update_routed(announce, source_ip, own);
+        if outcome != UpdateOutcome::Rejected
+            && let Some(peer) = self.peers.get_mut(&announce.user_id)
+            && let Some(route) = peer
+                .routes
+                .iter_mut()
+                .find(|r| r.source == RouteSource::RoutedQuery && r.addr.ip() == source_ip)
+        {
+            route.presence_expires_at = Some(route.last_seen + lease);
+        }
+        outcome
     }
 
     /// Signed relay proof supplied over a Noise-authenticated local bridge
@@ -427,7 +569,7 @@ impl Roster {
             },
         );
         if route_changed {
-            self.changes.notify_one();
+            self.notify_changes();
         }
         if existed {
             UpdateOutcome::Refreshed
@@ -536,7 +678,7 @@ impl Roster {
             self.peers.remove(&undo.user_id);
             self.announcements.remove(&undo.user_id);
         }
-        self.changes.notify_one();
+        self.notify_changes();
     }
 
     fn update_from(
@@ -626,6 +768,7 @@ impl Roster {
         if route_changed {
             self.changes.notify_one();
         }
+        self.publish_observation();
         if existed {
             UpdateOutcome::Refreshed
         } else {
@@ -647,6 +790,7 @@ impl Roster {
             return;
         };
         let now = Instant::now();
+        let mut new_route = false;
         if let Some(route) = peer.routes.iter_mut().find(|route| route.addr == addr) {
             route.last_authenticated = Some(now);
             if route.source == RouteSource::Authenticated {
@@ -664,10 +808,13 @@ impl Roster {
             if peer.routes.len() > MAX_ROUTES_PER_PEER {
                 peer.routes.remove(0);
             }
-            self.changes.notify_one();
+            new_route = true;
         }
         peer.addr = addr;
         peer.last_seen = now;
+        if new_route {
+            self.notify_changes();
+        }
     }
 
     /// Signed source proof retained only while the corresponding roster entry is live.
@@ -716,6 +863,7 @@ impl Roster {
 
     /// Drop peers not seen within `ttl`.
     pub fn evict_stale(&mut self, ttl: Duration) {
+        let before: usize = self.peers.values().map(|peer| peer.routes.len() + 1).sum();
         let now = Instant::now();
         self.peers.retain(|_, r| {
             r.routes.retain(|route| {
@@ -727,6 +875,10 @@ impl Roster {
                     RouteSource::PostOffice => ttl.max(Duration::from_secs(45)),
                 };
                 now.saturating_duration_since(route.last_seen) < lifespan
+                    || (route.source == RouteSource::PostOffice
+                        && route
+                            .public_presentation_deadline(false)
+                            .is_some_and(|deadline| deadline > now))
             });
             if let Some(last) = preferred_route(&r.routes) {
                 r.addr = last.addr;
@@ -738,6 +890,10 @@ impl Roster {
         });
         self.announcements
             .retain(|id, _| self.peers.contains_key(id));
+        let after: usize = self.peers.values().map(|peer| peer.routes.len() + 1).sum();
+        if before != after {
+            self.notify_changes();
+        }
     }
 
     /// Authenticated private presence supersedes an earlier public sighting.
@@ -746,6 +902,7 @@ impl Roster {
         if self.peers.get(&id).is_some_and(|p| p.public == *public) {
             self.peers.remove(&id);
             self.announcements.remove(&id);
+            self.notify_changes();
         }
     }
 
@@ -764,15 +921,259 @@ impl Roster {
             self.peers.remove(user_id);
             self.announcements.remove(user_id);
         }
-        self.changes.notify_one();
+        self.notify_changes();
     }
 }
 
 #[cfg(test)]
 mod routed_tests {
+    #[test]
+    fn directory_commit_notifies_presence_after_staging_without_recovery_storms() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "member", 1);
+        let mut roster = Roster::default();
+        let relay = "127.0.0.1:47479".parse().unwrap();
+        roster.update_relayed(&proof, relay, "self");
+        let mut observer = roster.subscribe_changes();
+        let _ = futures_util::FutureExt::now_or_never(roster.changes().notified());
+        let now = Instant::now();
+        roster.set_directory_expiry(&proof.user_id, relay, now + Duration::from_secs(10), 10);
+        assert!(
+            observer.has_changed().unwrap(),
+            "committed public evidence must notify the UI"
+        );
+        observer.borrow_and_update();
+        roster.set_directory_expiry(&proof.user_id, relay, now + Duration::from_secs(10), 10);
+        assert!(
+            !observer.has_changed().unwrap(),
+            "identical origin is quiet"
+        );
+        roster.set_directory_expiry(&proof.user_id, relay, now + Duration::from_secs(14), 14);
+        assert!(
+            observer.has_changed().unwrap(),
+            "renewed origin must not wait for the desktop fallback"
+        );
+        assert!(
+            futures_util::FutureExt::now_or_never(roster.changes().notified()).is_none(),
+            "presentation renewal must not launch expensive recovery"
+        );
+    }
+
+    #[test]
+    fn directory_history_survives_route_cleanup_until_its_original_presentation_deadline() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "member", 1);
+        let mut roster = Roster::default();
+        let relay = "127.0.0.1:47479".parse().unwrap();
+        roster.update_relayed(&proof, relay, "self");
+        let now = Instant::now();
+        let origin = now - Duration::from_secs(46);
+        {
+            let peer = roster.peers.get_mut(&proof.user_id).unwrap();
+            peer.last_seen = origin;
+            peer.routes[0].last_seen = origin;
+            peer.routes[0].presence_expires_at = Some(origin + PUBLIC_PRESENCE_TTL);
+        }
+        roster.evict_stale(Duration::from_secs(30));
+        let peer = roster
+            .get(&proof.user_id)
+            .expect("routing cleanup must retain bounded public history");
+        assert!(peer.presence_evidence(now).is_empty());
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(119)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(120)),
+            Duration::ZERO
+        );
+        {
+            let peer = roster.peers.get_mut(&proof.user_id).unwrap();
+            peer.last_seen = now - Duration::from_secs(121);
+            peer.routes[0].last_seen = peer.last_seen;
+            peer.routes[0].presence_expires_at = Some(peer.last_seen + PUBLIC_PRESENCE_TTL);
+        }
+        roster.evict_stale(Duration::from_secs(30));
+        assert!(roster.get(&proof.user_id).is_none());
+    }
+
+    #[test]
+    fn roster_watch_broadcasts_renewals_without_consuming_recovery_notifications() {
+        let mut roster = Roster::default();
+        let mut first = roster.subscribe_changes();
+        let second = roster.subscribe_changes();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "member",
+            1,
+        );
+        roster.update(&proof, "127.0.0.1".parse().unwrap(), "self");
+        assert!(first.has_changed().unwrap());
+        assert!(second.has_changed().unwrap());
+        assert!(futures_util::FutureExt::now_or_never(roster.changes().notified()).is_some());
+        first.borrow_and_update();
+        roster.update(&proof, "127.0.0.1".parse().unwrap(), "self");
+        assert!(
+            first.has_changed().unwrap(),
+            "fresh public leases must reach presentation subscribers"
+        );
+        assert!(
+            futures_util::FutureExt::now_or_never(roster.changes().notified()).is_none(),
+            "lease renewals do not schedule expensive recovery"
+        );
+        first.borrow_and_update();
+        roster.forget(&proof.public());
+        assert!(first.has_changed().unwrap());
+    }
+
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn measured_routed_latency_grows_the_online_lease_and_shrinks_it_gradually() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
+        let mut roster = Roster::default();
+        let ip = "127.0.0.1".parse().unwrap();
+        roster.update_routed_with_latency(&proof, ip, "self", Duration::from_millis(10));
+        let route = &roster.get(&proof.user_id).unwrap().routes[0];
+        assert_eq!(
+            route.presence_expires_at.unwrap() - route.last_seen,
+            Duration::from_secs(15)
+        );
+        roster.update_routed_with_latency(&proof, ip, "self", Duration::from_millis(500));
+        let peer = roster.get(&proof.user_id).unwrap();
+        let route = &peer.routes[0];
+        assert_eq!(
+            route.presence_expires_at.unwrap() - route.last_seen,
+            Duration::from_secs(60)
+        );
+        assert!(
+            !peer
+                .presence_evidence(route.last_seen + Duration::from_secs(45))
+                .is_empty()
+        );
+        roster.update_routed_with_latency(&proof, ip, "self", Duration::from_millis(10));
+        let route = &roster.get(&proof.user_id).unwrap().routes[0];
+        assert_eq!(
+            route.presence_expires_at.unwrap() - route.last_seen,
+            Duration::from_secs(55)
+        );
+        for _ in 0..20 {
+            roster.update_routed_with_latency(&proof, ip, "self", Duration::from_millis(10));
+        }
+        let route = &roster.get(&proof.user_id).unwrap().routes[0];
+        assert_eq!(
+            route.presence_expires_at.unwrap() - route.last_seen,
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn routed_latency_lease_tolerates_loss_without_sliding_beyond_two_minutes() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
+        let mut roster = Roster::default();
+        roster.update_routed(&proof, "127.0.0.1".parse().unwrap(), "self");
+        let peer = roster.peers.get_mut(&proof.user_id).unwrap();
+        let origin = peer.routes[0].last_seen;
+        peer.routes[0].presence_expires_at = Some(origin + Duration::from_secs(60));
+        assert!(
+            !peer
+                .presence_evidence(origin + Duration::from_secs(45))
+                .is_empty()
+        );
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(119)),
+            Duration::from_secs(1)
+        );
+        assert!(
+            peer.presence_evidence(origin + Duration::from_secs(60))
+                .is_empty()
+        );
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(120)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn authenticated_tolerance_uses_the_observed_path_not_an_old_lan_address() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
+        let mut roster = Roster::default();
+        let lan = "192.168.1.2".parse().unwrap();
+        roster.update(&proof, lan, "self");
+        roster.update_authenticated(&proof, lan, "self");
+        let peer = roster.get(&proof.user_id).unwrap();
+        let after_local_expiry = Instant::now() + PUBLIC_PRESENCE_TTL;
+        assert_eq!(peer.reconnect_remaining(after_local_expiry), Duration::ZERO);
+        roster.update_authenticated(&proof, "100.64.0.2".parse().unwrap(), "self");
+        let peer = roster.get(&proof.user_id).unwrap();
+        assert!(
+            peer.reconnect_remaining(Instant::now() + Duration::from_secs(119)) > Duration::ZERO,
+            "old LAN discovery must not shorten a different authenticated path"
+        );
+    }
+
+    #[test]
+    fn reconnect_window_is_bounded_by_public_deadline_not_route_refresh() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
+        let mut roster = Roster::default();
+        roster.update_authenticated(&proof, "127.0.0.1".parse().unwrap(), "self");
+        let peer = roster.get(&proof.user_id).unwrap();
+        let origin = peer.routes[0].presence_expires_at.unwrap() - PUBLIC_PRESENCE_TTL;
+        assert_eq!(peer.reconnect_remaining(origin), Duration::from_secs(120));
+        assert!(
+            peer.presence_evidence(origin + Duration::from_secs(15))
+                .is_empty()
+        );
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(15)),
+            Duration::from_secs(105)
+        );
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(120)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            peer.reconnect_remaining(origin + Duration::from_secs(119)),
+            Duration::from_secs(1)
+        );
+        let mut copy = peer.clone();
+        copy.routes[0].last_seen = origin + Duration::from_secs(119);
+        copy.routes[0].last_authenticated = Some(copy.routes[0].last_seen);
+        assert_eq!(
+            copy.reconnect_remaining(origin + Duration::from_secs(120)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            copy.public_observation_age(origin + Duration::from_secs(119)),
+            Some(Duration::from_secs(119)),
+            "private route refresh does not rewrite public history"
+        );
+        copy.routes[0].source = RouteSource::PostOffice;
+        assert_eq!(
+            copy.reconnect_remaining(origin + Duration::from_secs(119)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            copy.reconnect_remaining(origin + Duration::from_secs(120)),
+            Duration::ZERO
+        );
+        copy.routes[0].presence_expires_at = None;
+        assert_eq!(copy.reconnect_remaining(origin), Duration::ZERO);
+        copy.routes[0].source = RouteSource::Gateway;
+        assert_eq!(copy.reconnect_remaining(origin), Duration::ZERO);
+        roster.forget(&proof.public());
+        assert!(
+            roster.get(&proof.user_id).is_none(),
+            "explicit withdrawal has no reconnect grace"
+        );
+    }
 
     #[test]
     fn logout_expires_authenticated_presence_without_discarding_routes() {
@@ -807,6 +1208,37 @@ mod routed_tests {
         let peer = roster.get(&proof.user_id).unwrap();
         assert!(peer.has_direct_route());
         assert!(peer.presence_evidence(Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn fresh_presence_routes_keep_introducing_endpoints_until_each_deadline() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Peer", 1);
+        let mut roster = Roster::default();
+        roster.update(&proof, "192.168.1.2".parse().unwrap(), "self");
+        let mut peer = roster.get(&proof.user_id).unwrap().clone();
+        let now = peer.routes[0].last_seen;
+        for (endpoint, lifetime) in [("127.0.0.2:47479", 5), ("127.0.0.3:47479", 10)] {
+            let mut route = peer.routes[0].clone();
+            route.source = RouteSource::PostOffice;
+            route.addr = endpoint.parse().unwrap();
+            route.presence_expires_at = Some(now + Duration::from_secs(lifetime));
+            peer.routes.push(route);
+        }
+        let project = |at| {
+            peer.presence_routes(at)
+                .map(|(route, _, _)| (route.source, route.addr.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(project(now).len(), 3);
+        assert_eq!(
+            project(now + Duration::from_secs(5)),
+            vec![
+                (RouteSource::Lan, "192.168.1.2:1".into()),
+                (RouteSource::PostOffice, "127.0.0.3:47479".into()),
+            ]
+        );
+        assert_eq!(project(now + Duration::from_secs(15)), vec![]);
     }
 
     #[test]

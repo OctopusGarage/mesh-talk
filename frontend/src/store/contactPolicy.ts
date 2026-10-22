@@ -1,3 +1,4 @@
+import { notifySyncInvalidation } from "@/lib/syncInvalidation";
 import { create } from "zustand";
 import { contactPolicy } from "@/lib/api";
 import type { HiddenContact, HiddenContactsSnapshot } from "@/lib/types";
@@ -74,6 +75,7 @@ export const useContactPolicy = create<ContactPolicyState>((set, get) => ({
       );
       if (request !== generation) return false;
       set({ contacts, busy: false });
+      notifySyncInvalidation({ owner, kind: "contacts" });
       return true;
     } catch {
       if (request === generation) set({ busy: false, error: "save" });

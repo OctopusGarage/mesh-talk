@@ -1,3 +1,4 @@
+import { TrustCardPanel } from "./TrustCardPanel";
 import { useEffect, useState } from "react";
 import { Check, Pencil, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -67,7 +68,10 @@ export function ProfileDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm" data-testid="profile-dialog">
+      <DialogContent
+        className="max-h-[85dvh] max-w-sm overflow-y-auto"
+        data-testid="profile-dialog"
+      >
         <DialogHeader>
           <DialogTitle>{t("profile.title")}</DialogTitle>
           <DialogDescription>{t("profile.description")}</DialogDescription>
@@ -165,6 +169,14 @@ export function ProfileDialog({
             </p>
           </dl>
         </div>
+        {open && myAccountId && (
+          <TrustCardPanel
+            key={`${user?.id}:${myAccountId}`}
+            accountId={myAccountId}
+            own
+            displayName={displayName}
+          />
+        )}
       </DialogContent>
     </Dialog>
   );

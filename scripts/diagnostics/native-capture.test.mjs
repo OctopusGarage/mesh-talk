@@ -61,6 +61,22 @@ test("native capture waits for painted visible receipt state and retains its obs
   assert.equal(result.observation.visible, true);
   assert.equal(c.shots(), 2);
 });
+test("native capture reactivates its window before each frame sample", async () => {
+  const { captureNativeEvidence } = await load();
+  const c = webview();
+  const command = c.command;
+  let active = false, activations = 0;
+  c.focus = async () => { await Promise.resolve(); active = true; activations++; };
+  c.command = async (method, path, body) => {
+    if (path === "/execute/async") assert.ok(active, "background webview cannot advance animation frames");
+    const result = await command(method, path, body);
+    if (path === "/screenshot") active = false;
+    return result;
+  };
+  await captureNativeEvidence(c, { label: "receipt text", status: "awaiting" });
+  assert.equal(c.shots(), 2);
+  assert.equal(activations, 2);
+});
 test("native capture rejects a matching DOM receipt whose status is outside the viewport", async () => {
   const { captureNativeEvidence } = await load();
   for (const config of [{ hidden: true }, { status: "delivered" }]) {

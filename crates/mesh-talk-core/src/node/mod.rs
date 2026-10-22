@@ -10,6 +10,7 @@ pub(crate) mod account_devices;
 pub(crate) mod account_file_proofs;
 pub(crate) mod account_preferences;
 mod account_profile;
+mod account_session;
 pub(crate) mod account_suppression;
 pub(crate) mod account_sync;
 pub(crate) mod account_sync_policy;
@@ -25,6 +26,7 @@ pub(crate) mod channel_senders;
 pub(crate) mod channels;
 pub(crate) mod conversation;
 pub(crate) mod delivery_receipt;
+mod delivery_retry;
 mod delivery_runtime;
 #[cfg(test)]
 mod delivery_runtime_tests;
@@ -73,6 +75,7 @@ pub(crate) mod received_log;
 pub(crate) mod recovered_sent_ids;
 pub(crate) mod recovery;
 mod relay_policy;
+mod route_timing;
 pub(crate) mod runtime;
 mod runtime_work;
 mod search;
@@ -83,6 +86,7 @@ mod session_pool;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod transport;
+mod ui_state;
 #[cfg(test)]
 mod unrestricted_messages_tests;
 pub(crate) mod wire;
@@ -115,7 +119,8 @@ pub use participant_runtime::{
 };
 pub use postbox::{
     elected_post_office, run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway,
-    run_federated_relay_accept_loop_with_directory, run_relay_accept_loop,
+    run_federated_relay_accept_loop_with_directory, run_network_relay_accept_loop_with_directory,
+    run_relay_accept_loop,
 };
 pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapshot};
 pub use profile::{MAX_AVATAR_BYTES, ProfilePayload};
@@ -129,3 +134,8 @@ pub use outgoing_message::{MessageAcceptance, MessageDestination, OutgoingMessag
 mod timeline;
 
 pub use channels::ChannelRecovery;
+
+mod trust_card;
+pub use trust_card::{Introduction, TimestampWitness, TrustCard};
+
+mod trust_card_io;

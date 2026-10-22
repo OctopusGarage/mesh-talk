@@ -108,7 +108,9 @@ impl NodeState {
     /// released before return; new synchronous commands use RuntimeAdmission,
     /// and asynchronous producers authorize at their actual commit seam.
     pub(crate) async fn node_handle(&self) -> Result<Arc<Node>, CommandError> {
-        let guard = self.0.lock().await;
+        let guard = tokio::time::timeout(std::time::Duration::from_secs(5), self.0.lock())
+            .await
+            .map_err(|_| CommandError::Internal("runtime observation timed out".into()))?;
         let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
         Ok(runtime.handle())
     }
@@ -237,5 +239,26 @@ impl StartupPermit {
             runtime.unwrap().stop().await;
         }
         installed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn runtime_observation_deadline_releases_the_waiter_and_allows_recovery() {
+        let node = NodeState::empty();
+        let held = node.0.lock().await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(6), node.node_handle())
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Err(CommandError::Internal(message)) if message.contains("timed out"))
+        );
+        drop(held);
+        assert!(matches!(
+            node.node_handle().await,
+            Err(CommandError::NotStarted(_))
+        ));
     }
 }

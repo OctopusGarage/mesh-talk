@@ -131,8 +131,13 @@ alone establishes neither conversation permission nor successful transport.
 _Avoid_: authorization, delivery, presence as an interchangeable operation.
 
 **Presence**:
-This client's unexpired eligible public evidence of a participant's availability.
-Offline means absent eligible evidence here, not a global sign-out claim.
+This client's eligible public evidence of a participant's availability.
+Fresh evidence and displayed online tolerance are distinct: pure local discovery
+expires at 15 seconds; cross-network public observations retain Online for up to
+120 seconds from the original observation, with a concise slow-connection hint
+when freshness expires. This tolerance counts consistently in UI online totals,
+but does not create fresh device evidence or prove delivery. Authoritative
+withdrawal ends it immediately. Offline is client-relative, not global sign-out.
 _Avoid_: global online state, guaranteed connectivity.
 
 **Roster**:
@@ -171,9 +176,17 @@ must not be mistaken for the participant's own transport listener.
 _Avoid_: direct endpoint, participant's physical machine address.
 
 **Federation**:
-Authenticated exchange among explicitly enrolled, equally eligible post offices.
-Network reachability and co-location do not constitute enrollment.
-_Avoid_: automatic trust, mandatory global hub.
+Authenticated exchange among operator-approved, equally eligible post offices.
+Approval uses explicit device pins or authority-signed network memberships;
+network reachability and co-location do not constitute enrollment.
+_Avoid_: trust of every discovered relay, mandatory global hub.
+
+**Relay network membership**:
+An expiring, nondelegating operator-signed approval of one device fingerprint
+for relay reconciliation. Each relay verifies it against a locally approved
+network authority and revocation snapshot, bound to the authenticated Noise peer.
+It does not grant conversation membership or attest software integrity.
+_Avoid_: official-client verification, malware-free device, account membership.
 
 **Anti-entropy**:
 Bounded reconciliation of missing authenticated events between authorized holders.
@@ -216,3 +229,19 @@ _Avoid_: file downloaded because its message arrived.
 A retained authorized copy served by an accepted channel member. It is distinct
 from an opaque post-office copy whose holder cannot decrypt channel content.
 _Avoid_: post-office membership, global archive.
+
+## Peer trust evidence
+
+- **Trust card**: an Account-signed public profile statement, not proof of a human
+  identity or honesty. A valid signature identifies the claiming Account.
+- **Creation claim**: a self-declared Account creation date. Unknown dates remain
+  unknown; local User registration and backup dates are not Account creation.
+- **Creation witness receipt**: an independent Account’s signed observation of an
+  Account creation claim, using the witness’s clock. It is not a trusted clock or
+  timestamp-authority certificate.
+- **Signed introduction**: an Account-attributed statement about another Account;
+  its credibility depends on the issuer, not the number of signatures.
+- **First observed by this installation**: private local evidence of the first
+  recorded certified Account/Device observation. It is never a public account age.
+
+The [peer trust guide](docs/peer-trust.md) owns evidence limits and sharing rules.

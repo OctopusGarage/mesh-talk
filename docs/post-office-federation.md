@@ -7,7 +7,8 @@ update every affected federation seed and legacy bridge endpoint together with
 the service listener; preserve device fingerprints, credentials and custody.
 Each relay keeps its own private identity and encrypted storage. All relays may
 use the same **public trust manifest**; there is no primary hub. Discovery finds
-candidates, but only explicitly pinned identities can exchange federation data.
+candidates; explicit identity pins or operator-approved network memberships authorize
+federation data exchange.
 Clients select a directly reachable relay and opt into bridge discovery separately.
 
 ## Responsibilities and boundaries
@@ -22,6 +23,98 @@ Clients select a directly reachable relay and opt into bridge discovery separate
 Message bodies, file consent, and completion controls remain encrypted for their
 recipients. Relays can observe transport and mailbox metadata. Retention is at
 most 30 days and may be shorter under storage limits. Custody is not delivery.
+
+## Automatic membership in an approved network
+
+Network mode removes pairwise federation configuration. An operator approves one
+network authority; each relay holds its own expiring, nondelegating membership.
+LAN discovery automatically finds relay candidates. Both sides verify membership
+against their locally approved policy and authenticated Noise device identity
+before sending mailbox inventories or opted-in presence. Discovery, co-location,
+VPN access and a reported client version never grant membership.
+
+Create the network on an enrollment workstation, keeping the private authority
+key off every relay:
+
+```bash
+mesh-talk-node network init --authority-key authority.key --policy network.policy
+```
+
+Obtain each relay's full device fingerprint from its existing startup output and
+verify it through a trusted channel. A newly deployed relay can first run without
+network mode to establish its persistent identity. Issue its public approval:
+
+```bash
+mesh-talk-node network enroll --authority-key authority.key --policy network.policy \
+  --device aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --membership alice-relay.membership --valid-days 30
+mesh-talk-node network inspect --policy network.policy --membership alice-relay.membership
+```
+
+Distribute the same public `network.policy` and the corresponding device's
+membership file to each relay. Never copy an identity keystore between relays.
+Start with its existing identity, password and listener arguments plus:
+
+```bash
+mesh-talk-node --post-office --name relay --keystore /data/identity.keystore \
+  --password-file /data/password --relay-network /data/network.policy \
+  --relay-membership /data/relay.membership
+```
+
+Network mode enables the relay directory automatically; clients must still opt
+into directory discovery themselves. No client federation configuration is
+required. Settings show relay availability, which is neither proof of a live
+connection nor a software-integrity verdict.
+
+For another reachable site, optionally repeat `--relay-seed
+<full-fingerprint>@<ip>:<discovery-udp-port>`. Seeds use the existing signed,
+nonce-bound discovery probe; they locate a route and do not replace membership.
+Network mode cannot be combined with `--federation-config`, `--federation-peer`
+or a legacy `--bridge-peer` gateway. Existing pin mode remains supported separately.
+A membership failure closes the exchange without retrying legacy federation.
+Normal mailbox clients continue to use the same opaque-only relay protocol and
+need no relay membership certificate.
+
+Memberships last 1–90 days (30 by default). Relays check validity on each new
+membership exchange; keep clocks synchronized. To renew, issue a certificate to
+a new file, deploy it as the relay's membership file, and restart. `init` and
+`enroll` never overwrite existing files. Public policy and membership use bounded
+versioned binary encoding: manage them with the CLI rather than a text editor.
+Policies are at most 64 KiB with 1,024 revoked fingerprints; memberships are at
+most 4 KiB. The mutual membership exchange has a 10-second timeout per endpoint
+and reuses existing bounded discovery, connection and reconciliation budgets.
+
+Revoke a whole device without the offline authority key:
+
+```bash
+mesh-talk-node network revoke --policy network.policy --device aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+```
+
+Distribute the updated public policy and restart **every** affected relay.
+Running processes retain their startup policy; editing a file does not terminate
+an active session. A revoked fingerprint cannot be renewed under that policy;
+replace a compromised device identity and approve its replacement instead.
+Revocation cannot erase ciphertext or metadata already copied by an operator.
+Policy deployment is a privileged local administrative operation, not an
+untrusted peer update. Protect it against replacement and rollback. CLI mutations
+use the same persistent companion-file locking and atomic publication as legacy
+trust manifests. Authority keys are private regular files (0600 or stricter on
+Unix); protect their parent directory and workstation, and apply private ACLs on
+Windows. Authority compromise requires a new network authority, replacement
+memberships and policy deployment to all participants.
+
+Membership establishes operator approval of an identity. It does **not** establish
+an official running binary, malware-free host or trustworthy operator behavior.
+Release signatures verify downloaded artifacts; self-reported versions/hashes
+can be copied by modified clients. Hardware-backed remote software attestation
+is not implemented. See [security boundaries](../SECURITY.md#relay-membership-and-software-integrity).
+
+Focused evidence: `cargo test -p mesh-talk-core --test relay_network --test
+relay_network_cli --test federation_config_cli`, the `postoffice::network::` and
+`postbox::` library selectors, and `federation_runtime::` binary tests cover
+certificate rejection, mutual admission, automatic LAN candidate selection,
+legacy compatibility and opaque mailbox transfer on loopback. Installer fixtures
+cover public-file persistence without the enrollment key. These are not evidence
+of a real service restart or cross-site physical discovery on Windows/macOS.
 
 ## One shared public configuration
 

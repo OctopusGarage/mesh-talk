@@ -2,7 +2,6 @@ import {
   startAutomaticDownloads,
   useAutomaticDownloads,
 } from "@/lib/automaticDownloads";
-import { PresenceAvailability } from "./PresenceAvailability";
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CircleAlert, X } from "lucide-react";
@@ -48,7 +47,7 @@ export function ChatApp() {
     };
   }, [owner, generation]);
   useEffect(() => {
-    if (owner && ready) return startLinkedAppearance();
+    if (owner && ready) return startLinkedAppearance(owner);
   }, [owner, generation, ready]);
   useEffect(() => {
     if (owner && ready) return startLinkedContacts(owner);
@@ -177,7 +176,6 @@ export function ChatApp() {
       <ConversationView />
       <CallDialog />
       <div className="absolute inset-x-4 top-3 z-40 flex flex-col gap-2">
-        <PresenceAvailability />
         {downloadPersistenceError && (
           <div
             role="alert"

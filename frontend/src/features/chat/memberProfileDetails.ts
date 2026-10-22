@@ -1,5 +1,34 @@
-import type { PeerInfo } from "@/lib/types";
+import type { PeerInfo, PresenceEvidence, PresenceInfo } from "@/lib/types";
 import { rosterProjection } from "@/lib/rosterProjection";
+
+export interface MemberDiscoverySource {
+  source: PresenceEvidence["source"];
+  postOffice?: PresenceEvidence["post_office"];
+}
+
+/** Deduplicate people/devices without losing independently fresh introducers. */
+export function memberDiscoverySources(
+  presence: PresenceInfo,
+): MemberDiscoverySource[] {
+  const sources = new Map<string, MemberDiscoverySource>();
+  for (const device of presence.devices ?? []) {
+    for (const evidence of device.evidence) {
+      if (evidence.expires_in_secs <= 0) continue;
+      const postOffice =
+        evidence.source === "directory" ? evidence.post_office : undefined;
+      const key = JSON.stringify([
+        evidence.source,
+        postOffice?.user_id ?? postOffice?.endpoint ?? null,
+      ]);
+      if (!sources.has(key))
+        sources.set(key, {
+          source: evidence.source,
+          ...(postOffice ? { postOffice } : {}),
+        });
+    }
+  }
+  return [...sources.values()];
+}
 
 export interface MemberProfileTarget {
   name: string;

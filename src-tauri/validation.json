@@ -24,8 +24,10 @@
             "desktop_session::",
             "services::auth_service::tests::",
             "runtime_admission::",
+            "runtime_bootstrap::tests::",
             "commands::tests::",
-            "owner_commands::tests::"
+            "owner_commands::tests::",
+            "chat_commands::state::tests::"
           ]
         }
       ],
@@ -62,11 +64,15 @@
     },
     {
       "id": "desktop-integrations",
-      "paths": ["src-tauri/src/integrations.rs"],
+      "paths": [
+        "src-tauri/src/integrations.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["integrations::tests::"]
+          "filters": [
+            "integrations::tests::"
+          ]
         }
       ],
       "escalation": [
@@ -75,6 +81,9 @@
     },
     {
       "id": "desktop-chat",
+      "escalation": [
+        "IPC command names/payloads and emitted events require typed frontend API/store consumer checks and affected browser behavior; file/native side effects require focused native evidence."
+      ],
       "paths": [
         "src-tauri/src/chat_commands/",
         "src-tauri/src/avatars.rs",
@@ -85,11 +94,21 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["chat_commands::", "channel_reception::"]
+          "filters": [
+            "chat_commands::",
+            "channel_reception::",
+            "events::"
+          ]
+        },
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "chat_commands::",
+            "channel_reception::",
+            "runtime_bootstrap::tests::",
+            "favorites::"
+          ]
         }
-      ],
-      "escalation": [
-        "IPC command names/payloads and emitted events require typed frontend API/store consumer checks and affected browser behavior; file/native side effects require focused native evidence."
       ]
     },
     {
@@ -101,7 +120,9 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["contact_policy::"]
+          "filters": [
+            "contact_policy::"
+          ]
         }
       ],
       "escalation": [
@@ -110,11 +131,15 @@
     },
     {
       "id": "desktop-app-lock",
-      "paths": ["src-tauri/src/app_lock.rs"],
+      "paths": [
+        "src-tauri/src/app_lock.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["app_lock::"]
+          "filters": [
+            "app_lock::"
+          ]
         }
       ],
       "escalation": [
@@ -123,28 +148,44 @@
     },
     {
       "id": "desktop-settings",
-      "paths": ["src-tauri/src/settings.rs", "src-tauri/src/config_store.rs"],
+      "paths": [
+        "src-tauri/src/settings.rs",
+        "src-tauri/src/config_store.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["settings::", "config_store::"]
+          "filters": [
+            "settings::",
+            "config_store::"
+          ]
         }
       ],
-      "consumers": ["desktop-chat"],
+      "consumers": [
+        "desktop-chat"
+      ],
       "escalation": [
         "Persisted settings and live policy application require frontend settings and native session/revision evidence."
       ]
     },
     {
       "id": "desktop-recovery",
-      "paths": ["src-tauri/src/recovery.rs", "src-tauri/src/trust.rs"],
+      "paths": [
+        "src-tauri/src/recovery.rs",
+        "src-tauri/src/trust.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["recovery::", "trust::"]
+          "filters": [
+            "recovery::",
+            "trust::"
+          ]
         }
       ],
-      "consumers": ["desktop-session"],
+      "consumers": [
+        "desktop-session"
+      ],
       "escalation": [
         "Crypto, archive and trust persistence changes require affected core recovery integration tests and frontend/native restore evidence."
       ]
@@ -169,8 +210,12 @@
           ]
         }
       ],
-      "node": ["scripts/diagnostics/background-command.test.mjs"],
-      "consumers": ["desktop-session"],
+      "node": [
+        "scripts/diagnostics/background-command.test.mjs"
+      ],
+      "consumers": [
+        "desktop-session"
+      ],
       "capability": {
         "summary": "Discover desktop and standard dedicated post-office endpoints from optional VPN inventories without trusting inventory identities.",
         "guide": "docs/routed-network-discovery.md",
@@ -191,14 +236,20 @@
     },
     {
       "id": "desktop-privacy",
-      "paths": ["src-tauri/src/privacy_commands.rs"],
+      "paths": [
+        "src-tauri/src/privacy_commands.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["privacy_commands::"]
+          "filters": [
+            "privacy_commands::"
+          ]
         }
       ],
-      "consumers": ["desktop-session"],
+      "consumers": [
+        "desktop-session"
+      ],
       "escalation": [
         "Privacy IPC/public policy changes require core guarded-admission and typed frontend consumer checks."
       ]
@@ -213,7 +264,10 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["tray::", "window_geometry::"]
+          "filters": [
+            "tray::",
+            "window_geometry::"
+          ]
         }
       ],
       "escalation": [
@@ -230,7 +284,11 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["diagnostics::", "perf::", "logger::"]
+          "filters": [
+            "diagnostics::",
+            "perf::",
+            "logger::"
+          ]
         }
       ],
       "escalation": [
@@ -239,11 +297,15 @@
     },
     {
       "id": "desktop-updates",
-      "paths": ["src-tauri/src/updates.rs"],
+      "paths": [
+        "src-tauri/src/updates.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["updates::"]
+          "filters": [
+            "updates::"
+          ]
         }
       ],
       "escalation": [
@@ -294,6 +356,41 @@
       "escalation": [
         "Desktop entry points/build configuration, binary-only Linux renderer, native capabilities and integration harnesses use conservative library coverage. Explicitly build changed binary/example targets, run affected integration targets and native platform/renderer/capability checks; library filters do not execute them."
       ]
+    },
+    {
+      "id": "desktop-trust-cards",
+      "paths": [
+        "src-tauri/src/trust_cards.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "trust_cards::tests::",
+            "owner_commands::tests::registered_trust_card_commands_reject_wrong_owner_and_locked_app",
+            "owner_commands::tests::registered_trust_card_commands_round_trip_public_evidence_without_verifying",
+            "owner_commands::tests::registered_trust_card_commands_reject_replaced_queued_authority",
+            "trust::tests::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Adapt signed public trust evidence behind exact-session authority without importing private verification.",
+        "guide": "docs/peer-trust.md",
+        "invariants": [
+          {
+            "name": "Public signatures never grant private verification or trusted time",
+            "reference": "docs/peer-trust.md"
+          },
+          {
+            "name": "Logout and replacement invalidate trust card mutation authority",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
+      "escalation": [
+        "Run trust-card browser interaction and native owner/lock/replacement command evidence; JSON parser unit tests alone do not prove runtime wiring."
+      ]
     }
   ],
   "prScenarios": [
@@ -312,7 +409,9 @@
         "src-tauri/src/session_store/",
         "src-tauri/tauri.conf.json"
       ],
-      "native": ["host"]
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "native-acceptance-harness",
@@ -323,7 +422,24 @@
         "scripts/diagnostics/native-capture.mjs",
         "scripts/evals/png-evidence.mjs"
       ],
-      "native": ["darwin", "linux", "win32"]
+      "native": [
+        "darwin",
+        "linux",
+        "win32"
+      ]
+    },
+    {
+      "id": "desktop-trust-card-acceptance",
+      "paths": [
+        "src-tauri/src/trust_cards.rs",
+        "src-tauri/src/trust.rs"
+      ],
+      "browser": [
+        "e2e/trust-cards.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
     }
   ]
 }

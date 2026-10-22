@@ -56,6 +56,19 @@ Tailscale endpoints for a relay where appropriate; each pins the same identity.
 and revocation require restarting all affected services after distribution;
 editing a file does not hot-revoke a running connection.
 
+For automatic member discovery, replace `-FederationConfig` with
+`-RelayNetwork 'D:\staging\network.policy' -RelayMembership
+'D:\staging\relay.membership'`, optionally repeating routed seeds through the
+`-RelaySeed` array. Issue the device-specific membership on the offline
+workstation using [network administration](post-office-federation.md#automatic-membership-in-an-approved-network).
+No explicit `-Bridge` is needed. The installer validates public approval before
+mutation and persists `network.policy` and `relay.membership` in the restricted
+service data directory. Startup additionally checks the membership matches the
+loaded persistent identity before binding listeners. Preserve the existing
+keystore/password, never install the authority private key, and rerun the
+installer to restart after public policy deployment or membership renewal.
+Network mode conflicts with legacy federation pins and bridge gateways.
+
 The installer fixes the main TCP listener at 47479 and enforces
 `-DiscoveryPort 47478 -LanAnnouncePort 47474` and rejects
 other discovery ports before changing service state. Different hosts use the

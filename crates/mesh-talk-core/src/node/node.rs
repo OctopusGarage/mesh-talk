@@ -48,6 +48,11 @@ pub struct ReceivedProfile {
 /// A received direct message, surfaced to the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedDm {
+    /// Account-envelope logical ID matching account conversation history.
+    /// Legacy device messages have no logical account-message identity.
+    pub message_id: Option<EventId>,
+    /// Authenticated account-envelope sender, when present.
+    pub from_account: Option<String>,
     pub from: UserId,
     pub from_name: String,
     pub text: Vec<u8>,
@@ -249,6 +254,10 @@ pub struct Node {
     pub(in crate::node) account_file_proofs: Mutex<super::account_file_proofs::AccountFileProofs>,
     pub(in crate::node) account_sync_notify: tokio::sync::Notify,
     pub(in crate::node) account_history_revision: std::sync::atomic::AtomicU64,
+    pub(in crate::node) account_archive_cache: Mutex<super::account_sync::ArchiveCache>,
+    pub(in crate::node) known_account_cache: Mutex<super::recovery::KnownAccountCache>,
+    pub(in crate::node) account_sync_commit: Mutex<()>,
+    pub(in crate::node) account_wake: super::account_sync::AccountWake,
     pub(in crate::node) account_sync_status:
         Mutex<std::collections::HashMap<String, super::account_sync::DeviceSyncStatus>>,
     /// One-time pairing code while in "link a device" mode (linker side). Set by
@@ -294,6 +303,13 @@ pub struct Node {
     /// missed push would strand the file at 0 chunks). Cleared once a file completes; not
     /// seeded from saved files (whose chunks are pruned), so we never re-pull a saved file.
     pub(in crate::node) pending_files: Mutex<HashSet<ConversationId>>,
+    pub(in crate::node) file_pull_notify: tokio::sync::Notify,
+    pub(in crate::node) file_pull_cursor: std::sync::atomic::AtomicUsize,
+    pub(in crate::node) file_pull_gate: tokio::sync::Mutex<()>,
+    pub(in crate::node) relay_retry_after: Mutex<HashMap<String, std::time::Instant>>,
+    pub(in crate::node) relay_drain_cursor: Mutex<HashMap<String, usize>>,
+    pub(in crate::node) ui_changes: tokio::sync::watch::Sender<u64>,
+    pub(in crate::node) file_changes: tokio::sync::watch::Sender<u64>,
     /// Encrypted, account-local attachment receive preferences and exact offer decisions.
     pub(in crate::node) attachment_consent: Mutex<super::attachment_consent::AttachmentConsent>,
     /// Durable pairwise file-consent controls, separate from local receive policy.
@@ -312,6 +328,8 @@ pub struct Node {
     /// Last authenticated recipient answer for each outgoing manifest destination.
     pub(in crate::node) outgoing_file_consents:
         Mutex<HashMap<(EventId, EventId), crate::eventlog::sync::FileConsentStatus>>,
+    pub(in crate::node) channel_changes: tokio::sync::broadcast::Sender<ConversationId>,
+    pub(in crate::node) channel_recovery_pending: Mutex<HashSet<ConversationId>>,
     pub(in crate::node) channel_recovery_notify: tokio::sync::Notify,
     pub(in crate::node) channel_recovery:
         Mutex<HashMap<ConversationId, super::channels::ChannelRecovery>>,
@@ -328,7 +346,8 @@ pub struct Node {
     pub(in crate::node) bridge_discovery_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) bridge_hub_id: Mutex<Option<String>>,
     pub(in crate::node) bridge_notify: tokio::sync::Notify,
-    pub(in crate::node) bridge_refresh: tokio::sync::Mutex<()>,
+    pub(in crate::node) bridge_refresh:
+        tokio::sync::Mutex<super::bridge_client::BridgeRefreshState>,
     pub(in crate::node) bridge_generation: std::sync::atomic::AtomicU64,
     pub(in crate::node) delivery_control_ids:
         Mutex<HashMap<EventId, super::delivery_store::ControlBinding>>,
@@ -344,6 +363,7 @@ pub struct Node {
     /// restart (unlike own reactions).
     pub(in crate::node) recalls: Mutex<crate::node::recall::RecallLog>,
     /// Owns profile journals, local publication and coordinated account transitions.
+    pub(in crate::node) trust_cards: Mutex<super::trust_card::TrustCardStore>,
     pub(in crate::node) account_profiles: super::account_profile::AccountProfiles,
     /// Live stream of received peer profiles (avatar updates), surfaced to the app. The
     /// node owns BOTH ends (created in `open_with_account`) so the constructor signature
@@ -513,6 +533,10 @@ impl Node {
         let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let account_profiles = super::account_profile::AccountProfiles::new(&account, profiles);
+        let trust_cards = Mutex::new(super::trust_card::TrustCardStore::open(
+            &dir.join("trust-cards.log"),
+            password,
+        )?);
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -719,8 +743,13 @@ impl Node {
             account_file_proofs: Mutex::new(account_file_proofs),
             account_sync_notify: tokio::sync::Notify::new(),
             account_history_revision: std::sync::atomic::AtomicU64::new(0),
+            account_archive_cache: Mutex::new(Default::default()),
+            known_account_cache: Mutex::new(Default::default()),
+            account_sync_commit: Mutex::new(()),
+            account_wake: Default::default(),
             account_sync_status: Mutex::new(std::collections::HashMap::new()),
             account_profiles,
+            trust_cards,
             profile_incoming: profile_tx,
             profile_rx: Mutex::new(Some(profile_rx)),
             call_signal_incoming: call_signal_tx,
@@ -750,6 +779,13 @@ impl Node {
             file_incoming,
             files: Mutex::new(files),
             pending_files: Mutex::new(HashSet::new()),
+            file_pull_notify: tokio::sync::Notify::new(),
+            file_pull_cursor: std::sync::atomic::AtomicUsize::new(0),
+            file_pull_gate: tokio::sync::Mutex::new(()),
+            relay_retry_after: Mutex::new(HashMap::new()),
+            relay_drain_cursor: Mutex::new(HashMap::new()),
+            ui_changes: tokio::sync::watch::channel(0).0,
+            file_changes: tokio::sync::watch::channel(0).0,
             attachment_consent: Mutex::new(attachment_consent),
             file_consent: Mutex::new(file_consent),
             media,
@@ -757,6 +793,8 @@ impl Node {
             delivery: Mutex::new(delivery),
             outgoing_file_acks: Mutex::new(HashMap::new()),
             outgoing_file_consents: Mutex::new(HashMap::new()),
+            channel_changes: tokio::sync::broadcast::channel(256).0,
+            channel_recovery_pending: Mutex::new(HashSet::new()),
             channel_recovery_notify: tokio::sync::Notify::new(),
             channel_recovery: Mutex::new(HashMap::new()),
             delivery_notify: tokio::sync::Notify::new(),
@@ -768,7 +806,7 @@ impl Node {
             bridge_discovery_enabled: std::sync::atomic::AtomicBool::new(false),
             bridge_hub_id: Mutex::new(None),
             bridge_notify: tokio::sync::Notify::new(),
-            bridge_refresh: tokio::sync::Mutex::new(()),
+            bridge_refresh: tokio::sync::Mutex::new(Default::default()),
             sessions: super::session_pool::SessionPool::default(),
             bridge_generation: std::sync::atomic::AtomicU64::new(0),
             delivery_control_ids: Mutex::new(delivery_control_ids),
@@ -783,6 +821,8 @@ impl Node {
             recalls: Mutex::new(recalls),
             my_dm_reactions: Mutex::new(my_dm_reactions),
         });
+        node.reconcile_trust_profiles_on_open()
+            .map_err(|error| LogError::CorruptFile(format!("trust card projection: {error}")))?;
         node.prune_expired_received_on_open()
             .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
         node.queue_approved_incomplete_files();
@@ -958,6 +998,18 @@ impl Node {
         kind: EventKind,
         ciphertext: Vec<u8>,
     ) -> Result<u64, NodeError> {
+        self.append_event_with_profile_parent(channel, kind, ciphertext, None)
+            .map(|(seq, _)| seq)
+    }
+
+    /// Reuse ordinary allocation while retaining a required signed-profile parent.
+    pub(in crate::node) fn append_event_with_profile_parent(
+        &self,
+        channel: ConversationId,
+        kind: EventKind,
+        ciphertext: Vec<u8>,
+        required_profile_parent: Option<EventId>,
+    ) -> Result<(u64, EventId), NodeError> {
         if self
             .channels
             .lock()
@@ -985,6 +1037,25 @@ impl Node {
             // categories are paused. The event log permits sparse author sequences.
             parents.clear();
         }
+        if let Some(parent) = required_profile_parent {
+            if kind != EventKind::Profile
+                || !log.get(&parent).is_some_and(|event| {
+                    event.kind == EventKind::Profile
+                        && event.conversation_id == channel
+                        && event.author == self_author
+                })
+            {
+                return Err(NodeError::InvalidInput(
+                    "required profile parent is not a local profile in this conversation".into(),
+                ));
+            }
+            // Even independent sibling profiles retain this Profile-only edge. It
+            // never depends on paused message/file categories and prevents a legacy
+            // avatar projection from overtaking its signed metadata across pages.
+            parents.push(parent);
+            parents.sort_unstable();
+            parents.dedup();
+        }
         let seq = log
             .next_sequence(&channel, &self_author)
             .map_err(NodeError::Log)?;
@@ -1003,8 +1074,9 @@ impl Node {
                 "file manifest exceeds transport frame".into(),
             ));
         }
+        let id = event.id;
         log.append(event).map_err(NodeError::Log)?;
-        Ok(seq)
+        Ok((seq, id))
     }
 }
 
