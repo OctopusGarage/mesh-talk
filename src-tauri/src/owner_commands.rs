@@ -1022,7 +1022,7 @@ mod tests {
                     .set("entry".into(), user("alice"), "pw".into());
                 let (entered, captured) = std::sync::mpsc::channel();
                 *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
-                let lifecycle = fixture.node.0.blocking_lock();
+                let lifecycle = fixture.node.0.blocking_write();
                 let webview = fixture.webview.clone();
                 let pending = std::thread::spawn(move || invoke(&webview, command, body));
                 let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
