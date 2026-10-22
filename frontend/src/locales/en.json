@@ -286,6 +286,8 @@
       "help": "Automatic receipt from the target account. Not a read receipt.",
       "fileHelp": "File card delivered. File download and reading are separate.",
       "metadataPending": "File details pending",
+      "fileAwaiting": "Awaiting file offer receipt",
+      "fileDelivered": "File offer received",
       "detailsTitle": "Delivery details",
       "attempted": "Local attempt started {{age}}.",
       "retryScheduled": "Retry was scheduled {{age}}.",
@@ -294,6 +296,8 @@
       "awaitingFileHelp": "A receipt confirms the file card. File download and reading are separate."
     },
     "custody": {
+      "postOfficeHelp": "The post office confirmed durable storage of this encrypted message. Recipient delivery, downloads and reading are separate.",
+      "postOffice": "Post office confirmed a stored copy",
       "local": "No member copy confirmed",
       "one": "Last confirmed: 1 member copy",
       "multiple": "Last confirmed: 2+ member copies",
@@ -324,7 +328,7 @@
   },
   "transfer": {
     "preparing": "Preparing file…",
-    "awaitingRecipient": "Waiting for recipient…",
+    "awaitingRecipient": "Waiting for file transfer to start…",
     "awaitingApproval": "Waiting for recipient approval…",
     "recipientDeclined": "Recipient declined this attachment",
     "confirming": "Confirming receipt…",
@@ -1027,7 +1031,7 @@
     "signedProfileAvatar": "Signed profile avatar",
     "accountIDQRCode": "Account ID QR code",
     "accountIDCopied": "Account ID copied.",
-    "cardPublished": "Card published.",
+    "cardPublished": "Signed card saved on this device.",
     "signedCardCopied": "Signed card copied.",
     "introductionReadyToExport": "Introduction ready to export.",
     "creationWitnessReadyToExport": "Creation witness ready to export.",

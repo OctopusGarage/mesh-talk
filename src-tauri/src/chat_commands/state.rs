@@ -3,12 +3,13 @@ use crate::state::{SessionInfo, SessionLease, SessionState};
 use mesh_talk_core::node::{Node, NodeRuntime};
 use std::future::Future;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
-/// Managed state holding the current session's node runtime (`None` until login).
+/// Managed runtime slot (`None` until login). Operations borrow it concurrently;
+/// installation and retirement require exclusive access to the slot.
 #[derive(Clone)]
 pub struct NodeState(
-    pub Arc<Mutex<Option<NodeRuntime>>>,
+    pub Arc<RwLock<Option<NodeRuntime>>>,
     Arc<Mutex<()>>,
     Arc<std::sync::atomic::AtomicU64>,
     Arc<std::sync::Mutex<Option<(crate::state::SessionLease, u64)>>>,
@@ -52,7 +53,7 @@ impl NodeState {
         if self.2.load(std::sync::atomic::Ordering::Acquire) != ticket {
             return;
         }
-        let old = self.0.lock().await.take();
+        let old = self.0.write().await.take();
         if let Some(old) = old {
             before_stop.await;
             old.stop().await;
@@ -95,7 +96,7 @@ impl NodeState {
 
     pub fn empty() -> Self {
         NodeState(
-            Arc::new(Mutex::new(None)),
+            Arc::new(RwLock::new(None)),
             Arc::new(Mutex::new(())),
             Arc::new(std::sync::atomic::AtomicU64::new(0)),
             Arc::new(std::sync::Mutex::new(None)),
@@ -108,7 +109,7 @@ impl NodeState {
     /// released before return; new synchronous commands use RuntimeAdmission,
     /// and asynchronous producers authorize at their actual commit seam.
     pub(crate) async fn node_handle(&self) -> Result<Arc<Node>, CommandError> {
-        let guard = tokio::time::timeout(std::time::Duration::from_secs(5), self.0.lock())
+        let guard = tokio::time::timeout(std::time::Duration::from_secs(5), self.0.read())
             .await
             .map_err(|_| CommandError::Internal("runtime observation timed out".into()))?;
         let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
@@ -127,7 +128,7 @@ impl NodeState {
         if lease.owner() != owner {
             return None;
         }
-        let guard = self.0.lock().await;
+        let guard = self.0.read().await;
         let runtime = guard.as_ref()?;
         self.with_session_runtime(session, &lease, runtime, || Ok(runtime.handle()))
             .ok()
@@ -186,7 +187,7 @@ impl RuntimeAuthority {
     pub(crate) async fn begin(&self) -> Result<StartupPermit, String> {
         let serialization = self.node.1.clone().lock_owned().await;
         self.current(|_| ())?;
-        let old = self.node.0.lock().await.take();
+        let old = self.node.0.write().await.take();
         if let Some(old) = old {
             old.stop().await;
         }
@@ -219,7 +220,7 @@ pub(crate) struct StartupPermit {
 
 impl StartupPermit {
     pub(crate) async fn install(self, runtime: NodeRuntime) -> bool {
-        let mut guard = self.authority.node.0.lock().await;
+        let mut guard = self.authority.node.0.write().await;
         let mut runtime = Some(runtime);
         let installed = self
             .authority
@@ -248,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_observation_deadline_releases_the_waiter_and_allows_recovery() {
         let node = NodeState::empty();
-        let held = node.0.lock().await;
+        let held = node.0.write().await;
         let result = tokio::time::timeout(std::time::Duration::from_secs(6), node.node_handle())
             .await
             .unwrap();

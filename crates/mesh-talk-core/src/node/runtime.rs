@@ -143,7 +143,7 @@ pub struct NodeRuntime {
     user_id: String,
     account_id: String,
     /// The display name this node advertises (for the diagnostics page).
-    display_name: String,
+    display_name: Mutex<String>,
     participant: ParticipantRuntime,
     /// Where the account keystore lives, so a successful device link can persist the
     /// adopted account secret (effective on next login).
@@ -534,7 +534,7 @@ impl NodeRuntime {
                 names,
                 user_id: self_uid,
                 account_id,
-                display_name: current_name.to_string(),
+                display_name: Mutex::new(current_name.to_string()),
                 participant,
                 account_path: dir.join("account.keystore"),
                 password: password.to_string(),
@@ -569,8 +569,8 @@ impl NodeRuntime {
     }
 
     /// The display name this node advertises to peers.
-    pub fn display_name(&self) -> &str {
-        &self.display_name
+    pub fn display_name(&self) -> String {
+        self.display_name.lock().expect("display name lock").clone()
     }
 
     /// Change the display name this node advertises, live: re-sign the announce with the
@@ -578,12 +578,13 @@ impl NodeRuntime {
     /// discovery loops broadcast it from their next send, and record our own name durably
     /// so it resolves consistently. Fires an immediate re-announce so peers converge fast.
     /// `account_id`/`user_id` are unchanged — only the human-readable name moves.
-    pub fn set_display_name(&mut self, display_name: &str) {
+    pub fn set_display_name(&self, display_name: &str) {
+        let mut current = self.display_name.lock().expect("display name lock");
         if self.participant.set_display_name(display_name).is_err() {
             log::warn!("Unable to update node presence");
             return;
         }
-        self.display_name = display_name.to_string();
+        *current = display_name.to_string();
         // Keep our own name in the durable directory too (it otherwise only tracks peers),
         // so `display_name_for(own_id)` stays consistent. A no-op when unchanged.
         let _ = self

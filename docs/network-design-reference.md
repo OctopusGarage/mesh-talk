@@ -611,6 +611,31 @@ Membership and key controls are signed authority. Invitations require normal acc
 
 Small groups retain direct fanout. Text/sticker distribution in larger groups seeds a bounded subset and relies on authorized member recovery; membership/key controls retain their broader bounded fanout. File manifests have their own fanout behavior and must not inherit a text-only optimization without an explicit retention/recovery design.
 
+Channel send acceptance returns the exact locally committed event ID before
+network fanout completes. “Sending” describes local acceptance only. Authenticated
+member custody and post-office custody update independently, so a stalled peer or
+optional relay cannot leave an already accepted message pending in the composer.
+A post-office copy requires a positive durable-have response for the exact opaque
+wrapper, not successful sync alone. Its historical confirmation is stored apart
+from member identities in the existing custody journal. Relay copies do not satisfy
+member-replication targets or imply that recipients have received or read content.
+
+Channel file offers reach directly routed members before optional relay custody.
+For automatic inline images, direct chunk fanout follows that offer before any
+relay replication is awaited. A stalled custody path must not strand a reachable
+receiver with a file offer but no image bytes. Other attachments retain signed
+receive-consent requirements; this ordering does not permit unsolicited chunk
+pushes for files that require approval.
+
+A source's local image preview does not complete channel delivery. Channel media
+with other members retains its original signed chunks under the same 64 MiB,
+newest-first budget as channel attachments. Sources retain these chunks even
+when their sharing preference is off; that preference continues to deny inbound
+recovery. Sharing receivers can retain channel media as bounded replicas too.
+An incoming fingerprint probe must not reclaim the source bytes before the next
+chunk-page request. Media in a channel with no other members can still reclaim
+transient chunks after its durable local copy is verified.
+
 Each accepted member controls **Share a copy**. A receiver can obtain its own authorized events while declining to serve retained history. Recovery automatically selects accepted sharing members from signed group state; users need not inspect individual members or grant separate DM permissions. Lower-frequency reconciliation still checks known non-sharing members so a later sharing change can be learned. The serving peer always enforces current authority and sharing preference.
 
 Newly validated messages and projected group-info changes coalesce targeted recovery work. Duplicate processing and empty rounds remain quiet. Recovery bounds concurrent groups and peer exchanges, so a stalled peer does not delay a healthy source in the same batch. Identity/channel-specific rotation distributes peer selection. Idle history reconciliation uses capped exponential backoff with jitter; discovery changes wake recovery immediately. Custody and failed plaintext retain their own retry schedules.

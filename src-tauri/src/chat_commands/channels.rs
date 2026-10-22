@@ -25,7 +25,7 @@ pub struct ChannelInfo {
 pub async fn list_channels(
     state: tauri::State<'_, NodeState>,
 ) -> Result<Vec<ChannelInfo>, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt
         .list_channels()
@@ -50,7 +50,7 @@ pub async fn channel_members(
     channel_id: String,
 ) -> Result<ChannelMembersInfo, CommandError> {
     let channel = parse_channel_id(&channel_id)?;
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     // Resolve each member's display name via the runtime, which checks the LIVE roster
     // first and then the DURABLE name directory — so a member that's gone offline (and so
@@ -123,6 +123,7 @@ pub async fn set_channel_replica_enabled(
 pub struct ChannelCustodyInfo {
     id: String,
     replicas: usize,
+    post_offices: usize,
 }
 
 /// Historical, authenticated durable-copy confirmations for this device's own
@@ -152,6 +153,9 @@ pub async fn channel_custody_statuses<R: tauri::Runtime>(
                 .map(|replicas| ChannelCustodyInfo {
                     id: id.to_hex(),
                     replicas,
+                    post_offices: node
+                        .channel_post_office_custody_count(channel, id)
+                        .unwrap_or(0),
                 })
         })
         .collect();
@@ -173,7 +177,7 @@ pub async fn channel_activity(
     channel_id: String,
 ) -> Result<Vec<ChannelActivityInfo>, CommandError> {
     let channel = parse_channel_id(&channel_id)?;
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt
         .channel_activity(channel)
@@ -429,7 +433,7 @@ pub async fn channel_history<R: tauri::Runtime>(
 ) -> Result<Vec<HistoryItem>, CommandError> {
     let limit = limit.min(500);
     let id = parse_channel_id(&channel_id)?;
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     let history = rt
         .channel_history(id, limit)
@@ -472,7 +476,7 @@ pub async fn channel_reactions(
     channel_id: String,
 ) -> Result<Vec<ReactionInfo>, CommandError> {
     let channel = parse_channel_id(&channel_id)?;
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(to_reaction_infos(rt.channel_reactions(channel)))
 }

@@ -57,6 +57,10 @@ Blocking operations retain runtime lifecycle and matching session authority unti
 completion, even when their IPC waiter is cancelled. Asynchronous producers use
 guarded core commit seams; plaintext queries recheck the originating admission
 before returning results. A cloned node handle alone conveys no session authority.
+The installed runtime slot uses shared operation leases and exclusive replacement
+access. Network waits in one producer must not serialize identity, presence,
+history or unrelated sends. Retirement still waits for every admitted lease;
+session authorization continues to enclose synchronous commits.
 
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 
@@ -386,6 +390,10 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   for a runtime while holding the session lock: startup installation and admitted
   producers also need that session. Presence and self-contact identity are still
   read inside the authorized policy transaction, with the runtime retained.
+  Local send preparation and journal acceptance always enter host authority
+  before the delivery journal; no producer retains that journal while requesting
+  session authority. This ordering also covers cached retry lookups and prevents
+  concurrent signed-card/legacy-avatar publication from forming a lock cycle.
   Local text/sticker/file
   enqueue keeps that lifecycle admission through privacy updates and staging.
   Waiting for the privacy gate holds no session guard;
@@ -880,6 +888,13 @@ backend acceptance, history loading, and delivery-status queries. `store/convers
 owns cache eviction, deletion protection, exact-ID send completion, and history/status
 state transitions. A late accepted ID after intent removal becomes a deletion tombstone;
 completion never recreates an evicted conversation cache.
+Owner-scoped channel text, sticker and file enqueue commands return exact durable
+IDs before network work; a separate admitted fanout retains runtime retirement
+protection. Nickname publication uses shared runtime admission and synchronized
+metadata, leaving lifecycle replacement exclusive. `NodeRuntime::display_name`
+returns an owned snapshot so concurrent rename never exposes a borrowed mutable
+name. Member and verified opaque post-office custody are separate projections,
+with post-office confirmations never retiring member-copy recovery work.
 `store/chat.ts` exposes the UI-facing state and routes incoming DMs to the sender's
 _account_ (one conversation per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
 message view) with replies, reactions, @mentions, file send + a searchable received-files dialog,

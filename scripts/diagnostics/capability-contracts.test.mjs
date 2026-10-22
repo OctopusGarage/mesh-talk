@@ -101,6 +101,14 @@ test("outgoing capability selects tests for acceptance projection and retired fr
       "Retired frontend owners cannot publish send completion",
       "ignores acceptance completed after its owner generation retires",
     ],
+    [
+      "File offer receipt does not stop approval and byte-progress refresh",
+      "continues polling file approval and bytes after the file offer is delivered",
+    ],
+    [
+      "Channel durable IDs settle acceptance independently of fanout and custody",
+      "projects member and post-office custody separately for exact channel IDs",
+    ],
   ]);
   assert.deepEqual(
     owner("frontend-outgoing").capability.invariants.map(({ name }) => name),
@@ -125,6 +133,21 @@ test("outgoing capability selects tests for acceptance projection and retired fr
 test("session capability retains executable generation and retirement obligations", () => {
   const obligations = [
     [
+      "Signed-card acceptance releases the UI before admitted network fanout completes",
+      "owner_commands::tests::signed_card_publication_returns_after_local_commit_with_a_stalled_peer",
+      "src-tauri/src/owner_commands.rs",
+    ],
+    [
+      "Nickname publication does not block observations behind stalled network work",
+      "commands::tests::nickname_change_during_a_stalled_send_preserves_node_observations",
+      "src-tauri/src/commands.rs",
+    ],
+    [
+      "Channel acceptance returns exact IDs before admitted network fanout finishes",
+      "owner_commands::tests::registered_channel_enqueues_return_exact_ids_and_reject_retired_owners",
+      "src-tauri/src/owner_commands.rs",
+    ],
+    [
       "Replacement and logout invalidate captured session authority",
       "desktop_session::session_generation_tests::owner_replacement_and_logout_invalidate_queued_operations_but_rename_does_not",
       "src-tauri/src/desktop_session.rs",
@@ -138,6 +161,11 @@ test("session capability retains executable generation and retirement obligation
       "Runtime replacement awaits prior runtime retirement",
       "commands::tests::replacement_begin_awaits_real_host_stop_and_latest_same_owner_ticket_wins",
       "src-tauri/src/commands.rs",
+    ],
+    [
+      "Stalled network producers allow observations and unrelated sends while blocking runtime retirement",
+      "runtime_admission::integration_lease_tests::stalled_producer_allows_observation_but_prevents_runtime_retirement",
+      "src-tauri/src/runtime_admission.rs",
     ],
   ];
   assert.deepEqual(

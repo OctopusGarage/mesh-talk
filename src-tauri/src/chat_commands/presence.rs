@@ -211,7 +211,7 @@ pub async fn get_presence(
     state: tauri::State<'_, NodeState>,
 ) -> Result<HashMap<String, PresenceInfo>, CommandError> {
     let node = {
-        let guard = state.0.lock().await;
+        let guard = state.0.read().await;
         let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
         if !rt.discovery_available() {
             return Err(CommandError::Internal("discovery unavailable".into()));
@@ -222,7 +222,7 @@ pub async fn get_presence(
         .cached_peer_snapshot_async()
         .await
         .map_err(|e| CommandError::Io(e.to_string()))?;
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     if !rt.discovery_available() || !std::sync::Arc::ptr_eq(&rt.handle(), &node) {
         return Err(CommandError::not_started());

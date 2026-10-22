@@ -286,6 +286,8 @@
       "help": "收件帳戶自動發出嘅收據，唔代表已讀。",
       "fileHelp": "檔案卡片已送達，唔代表檔案已下載或睇過。",
       "metadataPending": "等候檔案資料",
+      "fileAwaiting": "等緊收件人收到檔案邀請",
+      "fileDelivered": "收件人已收到檔案邀請",
       "detailsTitle": "送達詳情",
       "attempted": "本機喺{{age}}開始咗一次傳送嘗試。",
       "retryScheduled": "本機喺{{age}}安排咗重試。",
@@ -294,6 +296,8 @@
       "awaitingFileHelp": "回執確認嘅係檔案卡片已送達，同檔案下載同閱讀係分開嘅。"
     },
     "custody": {
+      "postOfficeHelp": "郵局已確認持久保存呢則加密訊息。收件人收到、下載同已讀係獨立狀態。",
+      "postOffice": "郵局已確認儲存副本",
       "local": "未確認有成員副本",
       "one": "最後確認：1 位成員有副本",
       "multiple": "最後確認：2 位或以上成員有副本",
@@ -324,7 +328,7 @@
   },
   "transfer": {
     "preparing": "準備緊檔案…",
-    "awaitingRecipient": "等緊收件人…",
+    "awaitingRecipient": "等緊開始傳送檔案…",
     "awaitingApproval": "等緊收件人批准…",
     "recipientDeclined": "收件人已拒絕呢個附件",
     "confirming": "確認緊收件…",
@@ -1027,7 +1031,7 @@
     "signedProfileAvatar": "已簽署嘅個人資料頭像",
     "accountIDQRCode": "帳號 ID QR 碼",
     "accountIDCopied": "已複製帳號 ID。",
-    "cardPublished": "已發布卡片。",
+    "cardPublished": "已喺呢部裝置儲存簽署卡片。",
     "signedCardCopied": "已複製已簽署卡片。",
     "introductionReadyToExport": "介紹已經可以匯出。",
     "creationWitnessReadyToExport": "建立見證已經可以匯出。",

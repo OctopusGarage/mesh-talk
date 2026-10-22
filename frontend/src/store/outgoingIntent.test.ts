@@ -209,6 +209,81 @@ it("polls an accepted fallback without recursively polling through reload", asyn
   expect(store.getState().statusBusy).toBe(false);
 });
 
+it("continues polling file approval and bytes after the file offer is delivered", async () => {
+  const store = session();
+  store.setState({
+    messages: {
+      [key]: [
+        {
+          ...row("file-offer"),
+          delivery: "awaiting",
+          file: {
+            fileConv: "file",
+            name: "photo.png",
+            size: 10,
+            mime: "image/png",
+            media: true,
+          },
+        },
+        { ...row("text"), delivery: "delivered" },
+      ],
+    },
+  });
+  invoke
+    .mockResolvedValueOnce([
+      {
+        id: "file-offer",
+        status: "delivered",
+        file_progress: {
+          done: 0,
+          total: 10,
+          delivered: false,
+          consent: "pending",
+        },
+      },
+    ])
+    .mockResolvedValueOnce([
+      {
+        id: "file-offer",
+        status: "delivered",
+        file_progress: {
+          done: 5,
+          total: 10,
+          delivered: false,
+          consent: "accepted",
+        },
+      },
+    ])
+    .mockResolvedValueOnce([
+      {
+        id: "file-offer",
+        status: "delivered",
+        file_progress: {
+          done: 10,
+          total: 10,
+          delivered: true,
+          consent: "accepted",
+        },
+      },
+    ]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages[key][0].delivery).toBe("delivered");
+  expect(useTransfers.getState().transfers["file-offer"]?.consent).toBe(
+    "pending",
+  );
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(useTransfers.getState().transfers["file-offer"]).toMatchObject({
+    consent: "accepted",
+    done: 5,
+  });
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(useTransfers.getState().transfers["file-offer"]?.delivered).toBe(true);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(invoke).toHaveBeenCalledTimes(3);
+  for (const [, args] of invoke.mock.calls)
+    expect(args.ids).toEqual(["file-offer"]);
+});
+
 it("keeps the original deadline on an optimistic expiring send", async () => {
   const store = session();
   invoke.mockReturnValue(new Promise(() => {}));
@@ -325,6 +400,91 @@ it("drops queued delivery invalidations when the captured runtime changes", asyn
   release([{ id: "event-a", status: "awaiting" }]);
   await read;
   expect(invoke).toHaveBeenCalledTimes(1);
+});
+
+it.each(["text", "sticker", "file"] as const)(
+  "settles a channel %s by exact acceptance before network delivery finishes",
+  async (kind) => {
+    const store = session();
+    const channel: Conversation = {
+      kind: "channel",
+      id: "group",
+      name: "Group",
+    };
+    store.setState({ active: channel });
+    invoke.mockImplementation(async (command) => {
+      if (
+        command === "owner_enqueue_channel_text" ||
+        command === "owner_enqueue_channel_sticker"
+      )
+        return "accepted-event";
+      if (command === "owner_enqueue_channel_file")
+        return { id: "accepted-event", fileConv: "photo-bytes" };
+      // The previous channel IPC waits for a stalled optional relay.
+      return new Promise(() => {});
+    });
+    const payload =
+      kind === "text"
+        ? { kind, text: "kk", replyTo: null }
+        : kind === "sticker"
+          ? { kind, stickerId: "heart", fallback: "❤️" }
+          : { kind, path: "/photo.png", media: true };
+    const sending = beginSendIntent(
+      store.setState,
+      store.getState,
+      channel,
+      payload,
+    );
+    await vi.waitFor(
+      () => {
+        expect(store.getState().messages["channel:group"]).toEqual([
+          expect.objectContaining({ id: "accepted-event", pending: false }),
+        ]);
+      },
+      { timeout: 200 },
+    );
+    expect(await sending).toBe(true);
+    const message = store.getState().messages["channel:group"][0];
+    if (kind === "file") expect(message.file?.fileConv).toBe("photo-bytes");
+    const reconciled = reconcileMessages(
+      [{ ...message, clientId: undefined, replicas: 1 }],
+      [message],
+      Object.values(store.getState().intents),
+      [],
+    );
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0]).toMatchObject({
+      id: "accepted-event",
+      pending: false,
+      replicas: 1,
+    });
+  },
+);
+
+it("projects member and post-office custody separately for exact channel IDs", async () => {
+  const store = session();
+  const channel: Conversation = { kind: "channel", id: "group", name: "Group" };
+  store.setState({
+    active: channel,
+    messages: { "channel:group": [{ ...row("event"), pending: false }] },
+  });
+  invoke.mockResolvedValue([
+    { id: "event", replicas: 0, post_offices: 1 },
+    { id: "unrelated", replicas: 2, post_offices: 9 },
+  ]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages["channel:group"]).toEqual([
+    expect.objectContaining({
+      id: "event",
+      pending: false,
+      replicas: 0,
+      postOfficeCopies: 1,
+    }),
+  ]);
+  expect(invoke).toHaveBeenCalledWith("channel_custody_statuses", {
+    channelId: "group",
+    ids: ["event"],
+  });
 });
 
 it("samples local delivery facts monotonically and clears absent or confirmed observations", async () => {

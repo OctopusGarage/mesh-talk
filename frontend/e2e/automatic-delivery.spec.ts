@@ -304,6 +304,10 @@ test("text, sticker and file card stay Awaiting until explicit authoritative moc
     .getByTestId("message-bubble")
     .filter({ hasText: "card.txt" })
     .locator('[data-delivery="delivered"]');
+  await expect(cardReceipt).toHaveAccessibleName("File offer received");
+  await expect(
+    cardReceipt.getByText("File offer received", { exact: true }),
+  ).toBeVisible();
   await cardReceipt.focus();
   await expect(cardReceipt.getByRole("tooltip")).toBeVisible();
   await expect(cardReceipt.getByRole("tooltip")).toContainText(
@@ -517,4 +521,54 @@ test("a scoped native delivery invalidation refreshes status without a polling r
           .__pushDelivery.reads,
     ),
   ).toBe(1);
+});
+
+test("channel acceptance reconciles repeated text once and confirmed post-office custody clears the waiting indicator", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId("conversation-row-chan_team_dddd4444").click();
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      __channelCustody: boolean;
+    };
+    const original = w.__TAURI_INTERNALS__.invoke;
+    w.__channelCustody = false;
+    w.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "send_channel_message")
+        throw new Error("Legacy fanout IPC must not gate local acceptance");
+      if (cmd === "channel_custody_statuses")
+        return (args.ids as string[]).map((id) => ({
+          id,
+          replicas: 0,
+          post_offices: w.__channelCustody ? 1 : 0,
+        }));
+      return original(cmd, args);
+    };
+  });
+  for (let i = 0; i < 2; i++) {
+    await page.getByTestId("composer-input").fill("same channel text");
+    await page.getByTestId("composer-send").click();
+  }
+  const bubbles = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "same channel text" });
+  await expect(bubbles).toHaveCount(2);
+  await expect(bubbles.filter({ hasText: "sending…" })).toHaveCount(0);
+  await expect(bubbles.locator('[data-custody="0"]')).toHaveCount(2);
+  await page.evaluate(() => {
+    (window as unknown as { __channelCustody: boolean }).__channelCustody =
+      true;
+  });
+  await expect(bubbles.locator('[data-custody="1"]')).toHaveCount(2);
+  await expect(
+    bubbles.getByRole("img", { name: "Post office confirmed a stored copy" }),
+  ).toHaveCount(2);
+  await expect(bubbles).toHaveCount(2);
 });

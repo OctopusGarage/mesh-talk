@@ -117,8 +117,8 @@ export function displayName(
   return favorites[id]?.custom_alias || announced;
 }
 
-/** Number of boot poll attempts (≈30s at BOOT_POLL_MS). */
-const BOOT_POLL_TRIES = 60;
+/** Total boot window, including time spent waiting for native reads. */
+const BOOT_TIMEOUT_MS = 30_000;
 const BOOT_POLL_MS = 500;
 
 /**
@@ -132,12 +132,16 @@ async function pollUntilReady(
   get: Get,
   isCancelled: () => boolean,
 ): Promise<boolean> {
-  for (let i = 0; i < BOOT_POLL_TRIES && !isCancelled(); i++) {
+  const deadline = performance.now() + BOOT_TIMEOUT_MS;
+  while (performance.now() < deadline && !isCancelled()) {
     try {
       const owner = captureOwner().owner;
       if (!owner) return false;
-      const identity = await readWithDeadline(() => chat.ownerIdentity(owner));
-      if (isCancelled()) return false;
+      const identity = await readWithDeadline(
+        () => chat.ownerIdentity(owner),
+        Math.min(10_000, deadline - performance.now()),
+      );
+      if (isCancelled() || performance.now() >= deadline) return false;
       if (identity.owner !== owner)
         throw new Error("Node identity is not ready for this owner");
       const acct = identity.account_id;
@@ -199,7 +203,11 @@ async function pollUntilReady(
       return true;
     } catch {
       if (isCancelled()) return false;
-      await new Promise((r) => setTimeout(r, BOOT_POLL_MS));
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return false;
+      await new Promise((r) =>
+        setTimeout(r, Math.min(BOOT_POLL_MS, remaining)),
+      );
     }
   }
   return false;

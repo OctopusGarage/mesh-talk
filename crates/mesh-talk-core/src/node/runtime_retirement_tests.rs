@@ -198,7 +198,7 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
     let alice_dir = tempfile::tempdir().unwrap();
     let bob_dir = tempfile::tempdir().unwrap();
     let mut alice = start(alice_dir.path()).await;
-    let mut bob = start(bob_dir.path()).await;
+    let bob = start(bob_dir.path()).await;
     // Isolate this explicit probe from discovery, accept/delivery, and periodic
     // probes. Join producers and admitted children without closing admission.
     for task in &alice.participant.tasks {

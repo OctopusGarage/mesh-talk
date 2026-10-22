@@ -16,7 +16,9 @@ type AdmissionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CommandError
 
 /// The owner captured at IPC entry, together with the only authority allowed to
 /// run synchronous producers against the installed runtime. Detached operations
-/// retain the lifecycle guard even if the caller cancels its IPC future.
+/// retain a shared lifecycle guard even if the caller cancels its IPC future.
+/// A slow network producer must not exclude observations or unrelated sends;
+/// replacing the runtime still waits for every admitted operation to finish.
 #[derive(Clone)]
 pub(crate) struct RuntimeAdmission {
     app: AppState,
@@ -117,7 +119,7 @@ impl RuntimeAdmission {
         &self,
         operation: impl FnOnce(&NodeRuntime) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
-        let guard = tokio::time::timeout(std::time::Duration::from_secs(5), self.node.0.lock())
+        let guard = tokio::time::timeout(std::time::Duration::from_secs(5), self.node.0.read())
             .await
             .map_err(|_| CommandError::Internal("runtime admission timed out".into()))?;
         let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
@@ -162,7 +164,7 @@ impl RuntimeAdmission {
         self,
         operation: impl FnOnce(&NodeRuntime, &Self) -> Result<T, CommandError> + Send + 'static,
     ) -> Result<T, CommandError> {
-        let guard = self.node.0.clone().lock_owned().await;
+        let guard = self.node.0.clone().read_owned().await;
         tokio::task::spawn_blocking(move || {
             let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
             self.checked(runtime, || operation(runtime, &self))
@@ -177,7 +179,7 @@ impl RuntimeAdmission {
         + Send
         + 'static,
     ) -> Result<T, CommandError> {
-        let guard = self.node.0.clone().lock_owned().await;
+        let guard = self.node.0.clone().read_owned().await;
         tokio::spawn(async move {
             let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
             #[cfg(test)]
@@ -219,6 +221,85 @@ mod integration_lease_tests {
             is_online: true,
         };
         (root, app, NodeState::empty(), user)
+    }
+
+    #[tokio::test]
+    async fn stalled_producer_allows_observation_but_prevents_runtime_retirement() {
+        let (root, app, node, user) = fixture();
+        app.session().publish("token".into(), user, "pw".into());
+        let runtime = NodeRuntime::start(
+            root.path(),
+            "integration-owner",
+            "Owner",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let channel = runtime
+            .handle()
+            .create_channel("Concurrent send", vec![])
+            .await
+            .unwrap();
+        *node.0.write().await = Some(runtime);
+        let producer = RuntimeAdmission::capture_current(&app, &node).unwrap();
+        let observer = RuntimeAdmission::capture_current(&app, &node).unwrap();
+        let sender = RuntimeAdmission::capture_current(&app, &node).unwrap();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(producer.detached(move |_, _| {
+            Box::pin(async move {
+                entered.send(()).unwrap();
+                blocked.await.unwrap();
+                Ok(())
+            })
+        }));
+        started.await.unwrap();
+        let observed = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            observer.with_runtime(|runtime| Ok(runtime.user_id().to_owned())),
+        )
+        .await;
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            sender.detached(move |runtime, admission| {
+                Box::pin(async move {
+                    runtime
+                        .handle()
+                        .send_channel_message_reply_expiring_if(
+                            channel,
+                            b"hi",
+                            None,
+                            None,
+                            |commit| admission.authorize_accept(runtime, commit),
+                        )
+                        .await
+                        .map_err(CommandError::from)
+                })
+            }),
+        )
+        .await;
+        let retirement_blocked = node.0.try_write().is_err();
+        release.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        node.0.write().await.take().unwrap().stop().await;
+        assert!(
+            observed.is_ok_and(|result| result.is_ok()),
+            "a stalled send must not block identity/history/presence observations"
+        );
+        assert!(
+            retirement_blocked,
+            "retirement must still wait for the active producer"
+        );
+        assert!(
+            sent.is_ok_and(|result| result.is_ok()),
+            "a stalled producer must not queue an unrelated channel send"
+        );
     }
 
     #[test]

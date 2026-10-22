@@ -721,6 +721,49 @@ export const test = base.extend({
               const status = delivery[String(a.account)]?.[id];
               return status ? [{ id, status }] : [];
             }),
+          owner_enqueue_channel_text: (a) => {
+            recordSend(
+              `ch:${a.channelId}`,
+              String(a.text),
+              a.replyTo,
+              a.expiresAtMs as number | null | undefined,
+            );
+            return msgs[`ch:${a.channelId}`][
+              msgs[`ch:${a.channelId}`].length - 1
+            ].id;
+          },
+          owner_enqueue_channel_sticker: (a) => {
+            recordSticker(
+              `ch:${a.channelId}`,
+              String(a.stickerId),
+              String(a.fallback),
+            );
+            return msgs[`ch:${a.channelId}`][
+              msgs[`ch:${a.channelId}`].length - 1
+            ].id;
+          },
+          owner_enqueue_channel_file: (a) => {
+            const fileConv = `fc_${++mid}`;
+            const row = msg({
+              from_me: true,
+              who: SELF.device,
+              file: {
+                name: String(a.path).split(/[\\/]/).pop() || "file",
+                size: 123,
+                mime: "application/octet-stream",
+                file_conv: fileConv,
+                media: Boolean(a.media),
+              },
+            });
+            (msgs[`ch:${a.channelId}`] ||= []).push(row);
+            return { id: row.id, fileConv };
+          },
+          channel_custody_statuses: (a) =>
+            (a.ids as string[]).map((id) => ({
+              id,
+              replicas: 0,
+              post_offices: 0,
+            })),
           owner_enqueue_text: (a) => {
             recordSend(
               `acc:${a.account}`,

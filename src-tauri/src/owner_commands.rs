@@ -132,6 +132,162 @@ pub async fn owner_enqueue_sticker(
         .await
 }
 
+/// Network fanout retains admission, but cannot hold the acceptance IPC open.
+fn flush_channel_acceptance(
+    admission: RuntimeAdmission,
+    channel: mesh_talk_core::eventlog::ConversationId,
+    id: EventId,
+    file: Option<mesh_talk_core::eventlog::ConversationId>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let _ = admission
+            .detached(move |runtime, _| {
+                Box::pin(async move {
+                    let node = runtime.handle();
+                    if let Some(file) = file {
+                        node.flush_channel_file(channel, file).await;
+                    } else {
+                        node.flush_accepted_message(
+                            &mesh_talk_core::node::MessageDestination::Channel(channel),
+                            id,
+                        )
+                        .await;
+                    }
+                    Ok(())
+                })
+            })
+            .await;
+    });
+}
+
+#[tauri::command]
+pub async fn owner_enqueue_channel_text(
+    owner: String,
+    channel_id: String,
+    text: String,
+    reply_to: Option<String>,
+    expires_at_ms: Option<u64>,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<String, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    let channel = crate::chat_commands::parse_channel_id(&channel_id)?;
+    let reply = reply_to.as_deref().map(parse_id).transpose()?;
+    let flush = admission.clone();
+    let id = admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                runtime
+                    .handle()
+                    .enqueue_channel_message_reply_expiring_if(
+                        channel,
+                        text.as_bytes(),
+                        reply,
+                        expires_at_ms,
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
+                    .map_err(CommandError::from)
+            })
+        })
+        .await?;
+    flush_channel_acceptance(flush, channel, id, None);
+    Ok(id.to_hex())
+}
+
+#[tauri::command]
+pub async fn owner_enqueue_channel_sticker(
+    owner: String,
+    channel_id: String,
+    sticker_id: String,
+    fallback: String,
+    expires_at_ms: Option<u64>,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<String, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    let channel = crate::chat_commands::parse_channel_id(&channel_id)?;
+    let flush = admission.clone();
+    let id = admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                runtime
+                    .handle()
+                    .enqueue_sticker_channel_expiring_if(
+                        channel,
+                        &sticker_id,
+                        fallback.as_bytes(),
+                        expires_at_ms,
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
+                    .map_err(CommandError::from)
+            })
+        })
+        .await?;
+    flush_channel_acceptance(flush, channel, id, None);
+    Ok(id.to_hex())
+}
+
+#[tauri::command]
+pub async fn owner_enqueue_channel_file<R: tauri::Runtime>(
+    owner: String,
+    channel_id: String,
+    path: String,
+    media: bool,
+    progress_key: Option<String>,
+    expires_at_ms: Option<u64>,
+    handle: tauri::AppHandle<R>,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<AcceptedFile, CommandError> {
+    let admission = match RuntimeAdmission::capture(&app, &node, &owner) {
+        Ok(admission) => admission,
+        Err(error) => {
+            crate::chat_commands::cleanup_pasted_file(&handle, &path);
+            return Err(error);
+        }
+    };
+    let channel = match crate::chat_commands::parse_channel_id(&channel_id) {
+        Ok(channel) => channel,
+        Err(error) => {
+            crate::chat_commands::cleanup_pasted_file(&handle, &path);
+            return Err(error);
+        }
+    };
+    let flush = admission.clone();
+    let cleanup = handle.clone();
+    let mut progress =
+        crate::events::ProgressThrottle::new(handle, progress_key.unwrap_or(channel_id), "prepare");
+    let (id, file) = admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let kind = if media {
+                    mesh_talk_core::file::FileKind::Media
+                } else {
+                    mesh_talk_core::file::FileKind::File
+                };
+                let result = runtime
+                    .handle()
+                    .enqueue_file_channel_progress_expiring_if(
+                        channel,
+                        std::path::Path::new(&path),
+                        kind,
+                        move |p| progress.emit(p.done, p.total),
+                        expires_at_ms,
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
+                    .await;
+                crate::chat_commands::cleanup_pasted_file(&cleanup, &path);
+                result.map_err(CommandError::from)
+            })
+        })
+        .await?;
+    flush_channel_acceptance(flush, channel, id, Some(file));
+    Ok(AcceptedFile {
+        id: id.to_hex(),
+        file_conv: hex::encode(file.as_bytes()),
+    })
+}
+
 #[derive(Serialize)]
 pub struct AcceptedFile {
     id: String,
@@ -441,6 +597,7 @@ mod tests {
                     crate::chat_commands::send_to_account,
                     crate::chat_commands::send_sticker,
                     crate::chat_commands::create_channel,
+                    crate::chat_commands::channel_history,
                     crate::chat_commands::rescan_peers,
                     crate::chat_commands::probe_peer_endpoint,
                     crate::chat_commands::rename_channel,
@@ -477,6 +634,9 @@ mod tests {
                     super::owner_search_context,
                     super::owner_node_identity,
                     super::owner_enqueue_text,
+                    super::owner_enqueue_channel_text,
+                    super::owner_enqueue_channel_sticker,
+                    super::owner_enqueue_channel_file,
                     super::owner_enqueue_sticker,
                     super::owner_enqueue_file,
                     super::owner_account_history,
@@ -517,7 +677,7 @@ mod tests {
             }
             .unwrap();
             drop(reservation);
-            *node.0.blocking_lock() = Some(runtime);
+            *node.0.blocking_write() = Some(runtime);
             Self {
                 root,
                 app_state,
@@ -553,7 +713,7 @@ mod tests {
         }
 
         fn sync_documents(&self) -> [Vec<u8>; 2] {
-            let guard = self.node.0.blocking_lock();
+            let guard = self.node.0.blocking_write();
             let runtime = guard.as_ref().unwrap();
             let directory = self
                 .root
@@ -581,7 +741,7 @@ mod tests {
                     while self
                         .node
                         .0
-                        .lock()
+                        .write()
                         .await
                         .as_ref()
                         .unwrap()
@@ -862,7 +1022,7 @@ mod tests {
                     .set("entry".into(), user("alice"), "pw".into());
                 let (entered, captured) = std::sync::mpsc::channel();
                 *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
-                let lifecycle = fixture.node.0.blocking_lock();
+                let lifecycle = fixture.node.0.blocking_write();
                 let webview = fixture.webview.clone();
                 let pending = std::thread::spawn(move || invoke(&webview, command, body));
                 let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
@@ -931,7 +1091,7 @@ mod tests {
             1,
         ));
         let legacy_id = tauri::async_runtime::block_on(async {
-            let guard = fixture.node.0.lock().await;
+            let guard = fixture.node.0.write().await;
             let rt = guard.as_ref().unwrap();
             rt.handle()
                 .send_dm(
@@ -972,7 +1132,7 @@ mod tests {
                 .signed_announce("Sender", remote.listen_tcp_port()),
         );
         let (announce, account, device) = {
-            let guard = fixture.node.0.blocking_lock();
+            let guard = fixture.node.0.blocking_write();
             let rt = guard.as_ref().unwrap();
             (
                 rt.handle().signed_announce("Alice", rt.listen_tcp_port()),
@@ -1004,7 +1164,7 @@ mod tests {
                 while fixture
                     .node
                     .0
-                    .lock()
+                    .write()
                     .await
                     .as_ref()
                     .unwrap()
@@ -1031,7 +1191,7 @@ mod tests {
 
     impl Drop for Fixture {
         fn drop(&mut self) {
-            let runtime = self.node.0.blocking_lock().take();
+            let runtime = self.node.0.blocking_write().take();
             if let Some(runtime) = runtime {
                 tauri::async_runtime::block_on(runtime.stop());
             }
@@ -1062,6 +1222,62 @@ mod tests {
             },
         )
         .map(|body| body.deserialize::<serde_json::Value>().unwrap())
+    }
+
+    #[test]
+    fn registered_channel_enqueues_return_exact_ids_and_reject_retired_owners() {
+        let fixture = Fixture::new();
+        let channel = fixture
+            .invoke(
+                "create_channel",
+                serde_json::json!({"name":"Acceptance", "memberIds":[]}),
+            )
+            .unwrap();
+        let path = fixture.root.path().join("photo.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nphoto").unwrap();
+        let cases = [
+            (
+                "owner_enqueue_channel_text",
+                serde_json::json!({"owner":"alice","channelId":channel,"text":"kk","replyTo":null}),
+            ),
+            (
+                "owner_enqueue_channel_sticker",
+                serde_json::json!({"owner":"alice","channelId":channel,"stickerId":"heart","fallback":"heart"}),
+            ),
+            (
+                "owner_enqueue_channel_file",
+                serde_json::json!({"owner":"alice","channelId":channel,"path":path,"media":true}),
+            ),
+        ];
+        let mut ids = Vec::new();
+        for (command, body) in cases {
+            let accepted = fixture.invoke(command, body.clone()).unwrap();
+            let id = if command.ends_with("file") {
+                accepted["id"].clone()
+            } else {
+                accepted
+            };
+            assert_eq!(id.as_str().unwrap().len(), 64);
+            ids.push(id);
+            let mut retired = body;
+            retired["owner"] = serde_json::json!("retired");
+            assert!(fixture.invoke(command, retired).is_err());
+        }
+        let history = fixture
+            .invoke(
+                "channel_history",
+                serde_json::json!({"channelId":channel,"limit":10}),
+            )
+            .unwrap();
+        for id in ids {
+            assert!(
+                history
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["id"] == id)
+            );
+        }
     }
 
     #[test]
@@ -1191,7 +1407,7 @@ mod tests {
             );
             assert_eq!(result.unwrap_err()["kind"], "authorization");
         }
-        let guard = fixture.node.0.blocking_lock();
+        let guard = fixture.node.0.blocking_write();
         let node = guard.as_ref().unwrap().handle();
         assert!(node.device_sync_policy().history);
         assert!(
@@ -1235,7 +1451,7 @@ mod tests {
             path.exists(),
             "ordinary user source files must remain intact"
         );
-        let runtime = fixture.node.0.blocking_lock();
+        let runtime = fixture.node.0.blocking_write();
         assert_eq!(
             runtime
                 .as_ref()
@@ -1273,7 +1489,7 @@ mod tests {
             let result = fixture.invoke(command, body);
             assert_eq!(result.unwrap_err()["kind"], "authorization", "{command}");
         }
-        let runtime = fixture.node.0.blocking_lock();
+        let runtime = fixture.node.0.blocking_write();
         assert!(
             runtime
                 .as_ref()
@@ -1311,7 +1527,7 @@ mod tests {
             pending.abort();
             assert!(pending.await.unwrap_err().is_cancelled());
             assert!(
-                fixture.node.0.try_lock().is_err(),
+                fixture.node.0.try_write().is_err(),
                 "retirement must wait for the real writer after cancellation"
             );
             release.send(()).unwrap();
@@ -1319,7 +1535,7 @@ mod tests {
         done.recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         // The writer releases session and runtime guards before retirement proceeds.
-        drop(fixture.node.0.blocking_lock());
+        drop(fixture.node.0.blocking_write());
     }
 
     #[test]
@@ -1445,7 +1661,7 @@ mod tests {
                 fixture.app_state.app_lock().clear();
                 let (entered_tx, entered_rx) = std::sync::mpsc::channel();
                 *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
-                let lifecycle = fixture.node.0.blocking_lock();
+                let lifecycle = fixture.node.0.blocking_write();
                 let webview = fixture.webview.clone();
                 let command = *command;
                 let body = body.clone();
@@ -1479,7 +1695,7 @@ mod tests {
                     fixture
                         .node
                         .0
-                        .blocking_lock()
+                        .blocking_write()
                         .as_ref()
                         .unwrap()
                         .list_channels()
@@ -1550,6 +1766,67 @@ mod tests {
     }
 
     #[test]
+    fn signed_card_publication_returns_after_local_commit_with_a_stalled_peer() {
+        use mesh_talk_core::identity::{account::Account, device::DeviceIdentity};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fixture = Fixture::new();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let release = std::sync::Arc::new(AtomicBool::new(false));
+        let released = release.clone();
+        let stalled = std::thread::spawn(move || {
+            let mut sockets = Vec::new();
+            while !released.load(Ordering::Acquire) {
+                if let Ok((socket, _)) = listener.accept() {
+                    sockets.push(socket);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        let peer = DeviceIdentity::generate();
+        let account = Account::generate();
+        fixture.announce_peer(mesh_talk_core::discovery::Announce::new_with_account(
+            &peer, &account, "Stalled", port,
+        ));
+        fixture.invoke("owner_enqueue_text",serde_json::json!({"owner":"alice","account":account.account_id(),"text":"grant contact","replyTo":null})).unwrap();
+        let own = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let card = fixture
+            .invoke(
+                "get_trust_card",
+                serde_json::json!({"owner":"alice","accountId":own}),
+            )
+            .unwrap();
+        let webview = fixture.webview.clone();
+        let (completed, result) = std::sync::mpsc::channel();
+        let publishing = std::thread::spawn(move || {
+            completed.send(invoke(&webview,"publish_trust_card",serde_json::json!({"owner":"alice","displayName":"Signed locally","bio":"Public profile","createdAtMs":card["created_at_ms"]}))).unwrap();
+        });
+        let accepted = result.recv_timeout(std::time::Duration::from_secs(1));
+        let responsive = fixture
+            .invoke("owner_node_identity", serde_json::json!({"owner":"alice"}))
+            .is_ok();
+        release.store(true, Ordering::Release);
+        stalled.join().unwrap();
+        publishing.join().unwrap();
+        assert!(
+            accepted.is_ok_and(|value| value.is_ok()),
+            "publishing a locally committed signed card must not wait for a peer handshake"
+        );
+        assert!(
+            responsive,
+            "public-card fanout must preserve node observations"
+        );
+    }
+
+    #[test]
     fn registered_trust_card_commands_round_trip_public_evidence_without_verifying() {
         use mesh_talk_core::{
             identity::account::Account,
@@ -1559,7 +1836,7 @@ mod tests {
         let own_id = fixture
             .node
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .account_id()
@@ -1659,7 +1936,7 @@ mod tests {
                     .set("entry".into(), user("alice"), "pw".into());
                 let (entered, captured) = std::sync::mpsc::channel();
                 *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
-                let lifecycle = fixture.node.0.blocking_lock();
+                let lifecycle = fixture.node.0.blocking_write();
                 let webview = fixture.webview.clone();
                 let pending = std::thread::spawn(move || invoke(&webview, command, body));
                 let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
@@ -1747,7 +2024,7 @@ mod tests {
                     .set("entry".into(), user("alice"), "pw".into());
                 let (entered, captured) = std::sync::mpsc::channel();
                 *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
-                let lifecycle = fixture.node.0.blocking_lock();
+                let lifecycle = fixture.node.0.blocking_write();
                 let webview = fixture.webview.clone();
                 let pending = std::thread::spawn(move || invoke(&webview, command, body));
                 let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
@@ -1843,7 +2120,7 @@ mod tests {
         for (command, body) in cases {
             let (entered_tx, entered_rx) = std::sync::mpsc::channel();
             *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
-            let lifecycle = fixture.node.0.blocking_lock();
+            let lifecycle = fixture.node.0.blocking_write();
             let webview = fixture.webview.clone();
             let pending = std::thread::spawn(move || invoke(&webview, command, body));
             entered_rx
@@ -1859,7 +2136,7 @@ mod tests {
             assert_eq!(error["kind"], "authorization", "queued {command}");
             *fixture.app_state.owner_command_captured.lock().unwrap() = None;
         }
-        let guard = fixture.node.0.blocking_lock();
+        let guard = fixture.node.0.blocking_write();
         let node = guard.as_ref().unwrap().handle();
         assert!(node.device_sync_policy().history);
         assert!(
@@ -1894,7 +2171,7 @@ mod tests {
                     .set("a".into(), user("alice"), "pw".into());
                 let (entered_tx, entered_rx) = std::sync::mpsc::channel();
                 *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
-                let lifecycle = fixture.node.0.blocking_lock();
+                let lifecycle = fixture.node.0.blocking_write();
                 let webview = fixture.webview.clone();
                 let command = *command;
                 let body = body.clone();
@@ -1920,7 +2197,7 @@ mod tests {
                 *fixture.app_state.owner_command_captured.lock().unwrap() = None;
             }
         }
-        let guard = fixture.node.0.blocking_lock();
+        let guard = fixture.node.0.blocking_write();
         let node = guard.as_ref().unwrap().handle();
         assert!(node.device_sync_policy().history);
         assert!(
@@ -1964,7 +2241,7 @@ mod tests {
             fixture
                 .node
                 .0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .handle()
@@ -2001,7 +2278,7 @@ mod tests {
         fixture
             .node
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .handle()
@@ -2011,7 +2288,7 @@ mod tests {
         for (command, body) in privacy_requests(&account) {
             let (entered, captured) = std::sync::mpsc::channel();
             *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
-            let lifecycle = fixture.node.0.blocking_lock();
+            let lifecycle = fixture.node.0.blocking_write();
             let webview = fixture.webview.clone();
             let pending = std::thread::spawn(move || invoke(&webview, command, body));
             captured
@@ -2057,7 +2334,7 @@ mod tests {
         let lease = fixture.app_state.session().capture().unwrap();
         let owner = lease.owner().to_owned();
         let account = fixture.offline_peer();
-        let node = fixture.node.0.blocking_lock().as_ref().unwrap().handle();
+        let node = fixture.node.0.blocking_write().as_ref().unwrap().handle();
         node.cached_peer_snapshot().unwrap();
         let directory = fixture.root.path().join("accounts").join(&owner);
         let metadata = || {
@@ -2187,7 +2464,7 @@ mod tests {
             // Capture precedes the runtime mutex. Wait until the detached IPC
             // owns that mutex and is queued behind the actual core policy gate.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while fixture.node.0.try_lock().is_ok() {
+            while fixture.node.0.try_write().is_ok() {
                 assert!(
                     std::time::Instant::now() < deadline,
                     "privacy never retained lifecycle"
@@ -2334,7 +2611,7 @@ mod tests {
             request.abort();
             assert!(request.await.is_err());
             assert!(
-                fixture.node.0.try_lock().is_err(),
+                fixture.node.0.try_write().is_err(),
                 "dropping IPC must not detach the file writer from lifecycle admission"
             );
             fixture.app_state.session().clear();
@@ -2343,7 +2620,7 @@ mod tests {
                 .session()
                 .set("new".into(), user("bob"), "pw".into());
             release_tx.send(()).unwrap();
-            let mut guard = fixture.node.0.lock().await;
+            let mut guard = fixture.node.0.write().await;
             let old = guard.take().unwrap();
             assert!(
                 old.account_history(&account, 10).is_empty(),
@@ -2365,7 +2642,7 @@ mod tests {
             )
             .await
             .unwrap();
-            *fixture.node.0.lock().await = Some(replacement);
+            *fixture.node.0.write().await = Some(replacement);
         });
         let identity = fixture
             .invoke("owner_node_identity", serde_json::json!({"owner":"bob"}))
@@ -2428,7 +2705,7 @@ mod tests {
             )
             .await
             .unwrap();
-            *node.0.lock().await = Some(rt);
+            *node.0.write().await = Some(rt);
         });
         let identity = invoke("alice").expect(
             "owner-sensitive identity command is registered and returns the actual runtime",
@@ -2445,7 +2722,7 @@ mod tests {
             "Session B must never observe still-installed runtime A"
         );
         tauri::async_runtime::block_on(async {
-            node.0.lock().await.take().unwrap().stop().await;
+            node.0.write().await.take().unwrap().stop().await;
         });
     }
     #[test]

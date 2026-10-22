@@ -271,7 +271,7 @@ impl ParticipantRuntime {
     }
 
     /// Update the signed presence and wake discovery, respecting Node privacy.
-    pub fn set_display_name(&mut self, display_name: &str) -> std::io::Result<()> {
+    pub fn set_display_name(&self, display_name: &str) -> std::io::Result<()> {
         let announce = self.node.signed_announce(display_name, self.tcp_port);
         self.node.update_presence(&announce)?;
         swap_announce(&self.announce, &announce);

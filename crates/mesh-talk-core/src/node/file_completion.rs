@@ -6,7 +6,7 @@ use crate::{
 };
 use std::path::PathBuf;
 
-/// A receiver lends recently downloaded channel ciphertext to other members.
+/// Sources and sharing receivers retain recent channel ciphertext for members.
 /// Count encoded chunk bytes rather than file plaintext, so disk growth stays bounded.
 const CHANNEL_FILE_REPLICA_BUDGET: usize = 64 * 1024 * 1024;
 
@@ -103,7 +103,13 @@ impl Node {
         if !committed && !self.untracked_file_reclaimable(conversation, &store) {
             return false;
         }
-        if self.is_channel_attachment(conversation) && self.shares_replica(&conversation) {
+        let own_source = self
+            .retained_file_rows(conversation)
+            .iter()
+            .any(|row| row.from == self.user_id());
+        if self.is_channel_file_replica(conversation)
+            && (own_source || self.shares_replica(&conversation))
+        {
             self.prune_channel_file_replicas();
             return true;
         }
@@ -115,23 +121,33 @@ impl Node {
         true
     }
 
-    fn is_channel_attachment(&self, conversation: ConversationId) -> bool {
-        if self
-            .files
-            .lock()
-            .expect("files lock not poisoned")
-            .manifest(&conversation)
-            .and_then(|manifest| manifest.kind())
-            != Some(crate::file::FileKind::File)
-        {
-            return false;
-        }
+    fn is_channel_file_replica(&self, conversation: ConversationId) -> bool {
+        let media = {
+            let files = self.files.lock().expect("files lock not poisoned");
+            let Some(manifest) = files.manifest(&conversation) else {
+                return false;
+            };
+            match manifest.kind() {
+                Some(crate::file::FileKind::File) => false,
+                _ if super::media_store::manifest_is_media(manifest) => true,
+                _ => return false,
+            }
+        };
         self.retained_file_rows(conversation).iter().any(|row| {
             self.channels
                 .lock()
                 .expect("channels lock not poisoned")
                 .state(&row.conversation)
-                .is_some()
+                .is_some_and(|channel| {
+                    // A local media preview is not recipient delivery. Its
+                    // original signed chunks must survive incoming fingerprint
+                    // probes and remain available to other channel members.
+                    !media
+                        || channel
+                            .members()
+                            .iter()
+                            .any(|member| member.user_id() != self.user_id())
+                })
         })
     }
 
@@ -147,7 +163,7 @@ impl Node {
             .file_convs();
         let mut replicas = Vec::new();
         for file in file_convs {
-            if !self.is_channel_attachment(file) {
+            if !self.is_channel_file_replica(file) {
                 continue;
             }
             let rows = self.retained_file_rows(file);

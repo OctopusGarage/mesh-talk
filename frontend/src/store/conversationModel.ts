@@ -27,6 +27,7 @@ export interface ChatMessage {
     sampledAt: number;
   };
   replicas?: number;
+  postOfficeCopies?: number;
   metadataPending?: boolean;
   id: string | null; // hex EventId; null while pending
   fromMe: boolean;

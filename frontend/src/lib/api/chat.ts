@@ -138,6 +138,50 @@ export const chat = {
       expiresAtMs,
       ...(progressKey ? { progressKey } : {}),
     }),
+  enqueueChannelText: (
+    owner: string,
+    channelId: string,
+    text: string,
+    replyTo: string | null,
+    expiresAtMs?: number | null,
+  ) =>
+    invoke<string>("owner_enqueue_channel_text", {
+      owner,
+      channelId,
+      text,
+      replyTo,
+      expiresAtMs,
+    }),
+  enqueueChannelSticker: (
+    owner: string,
+    channelId: string,
+    stickerId: string,
+    fallback: string,
+    expiresAtMs?: number | null,
+  ) =>
+    invoke<string>("owner_enqueue_channel_sticker", {
+      owner,
+      channelId,
+      stickerId,
+      fallback,
+      expiresAtMs,
+    }),
+  enqueueChannelFile: (
+    owner: string,
+    channelId: string,
+    path: string,
+    media: boolean,
+    progressKey: string,
+    expiresAtMs?: number | null,
+  ) =>
+    invoke<{ id: string; fileConv: string }>("owner_enqueue_channel_file", {
+      owner,
+      channelId,
+      path,
+      media,
+      progressKey,
+      expiresAtMs,
+    }),
   ownerHistory: (owner: string, account: string, limit: number) =>
     invoke<HistoryItem[]>("owner_account_history", { owner, account, limit }),
   deliveryStatuses: (owner: string, account: string, ids: string[]) =>
@@ -239,7 +283,7 @@ export const chat = {
   setChannelReplicaEnabled: (channelId: string, enabled: boolean) =>
     invoke<void>("set_channel_replica_enabled", { channelId, enabled }),
   channelCustodyStatuses: (channelId: string, ids: string[]) =>
-    invoke<Array<{ id: string; replicas: number }>>(
+    invoke<Array<{ id: string; replicas: number; post_offices?: number }>>(
       "channel_custody_statuses",
       {
         channelId,
