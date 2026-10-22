@@ -35,6 +35,31 @@ test("first-run sign-in keeps a quiet, bounded surface", async ({ page }) => {
   await expect(page).toHaveScreenshot(snapshotName("login", "dark", 1280, 800));
 });
 
+for (const theme of ["light", "dark"] as const) {
+  test(`first-run registration remains readable in a short ${theme} window`, async ({
+    page,
+  }) => {
+    await seedThemeBeforeLoad(page, theme);
+    await page.setViewportSize({ width: 760, height: 520 });
+    await page.goto("/");
+    await page.getByTestId("login-tab-register").click();
+    await expect(page.getByTestId("login-stay-signed-in")).toBeEnabled();
+    await expect(page.getByTestId("login-submit")).toBeInViewport();
+    await prepareForScreenshot(page);
+    const name = snapshotName("register", theme, 760, 520);
+    // Native system font metrics change wrapping and form height in this short
+    // viewport. Reuse reviewed platform/font references without relaxing the diff.
+    const profile =
+      process.platform === "win32"
+        ? await windowsSnapshotProfile(page.locator("#password-guidance"))
+        : process.platform;
+    const reference = ["linux", "win32"].includes(process.platform)
+      ? name.replace(".png", `-${profile}.png`)
+      : name;
+    await expect(page).toHaveScreenshot(reference);
+  });
+}
+
 test("no peers offers a direct connection path", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");
@@ -43,12 +68,10 @@ test("no peers offers a direct connection path", async ({ page }) => {
       window as unknown as { __mockClearRoster: () => void }
     ).__mockClearRoster();
   });
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill("tester");
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await waitForChatShell(page);
   await expect(page.getByText("Connection help")).toBeVisible();
   await prepareForScreenshot(page);
@@ -136,7 +159,8 @@ for (const viewport of VIEWPORTS) {
           viewport.width === 760 &&
           ((theme === "oled" &&
             ["linux", "win32"].includes(process.platform)) ||
-            (["light", "dark"].includes(theme) && process.platform === "linux"));
+            (["light", "dark"].includes(theme) &&
+              process.platform === "linux"));
         const reference = needsPlatformReference
           ? name.replace(".png", `-${profile}.png`)
           : name;

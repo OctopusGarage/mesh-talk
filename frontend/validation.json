@@ -190,12 +190,31 @@
       "paths": [
         "frontend/src/features/auth/LoginScreen.tsx",
         "frontend/src/features/auth/RestoreBackup.tsx",
-        "frontend/src/components/ui/label.tsx"
+        "frontend/src/components/ui/label.tsx",
+        "frontend/src/features/auth/LoginScreen.test.ts",
+        "frontend/src/features/chat/AccountProtectionNotice.tsx"
       ],
-      "frontend": ["src/store/auth.test.ts"],
+      "frontend": [
+        "src/store/auth.test.ts",
+        "src/features/auth/LoginScreen.test.ts"
+      ],
       "escalation": [
-        "Auth forms and their label primitive use conservative auth-store unit fallback only; required browser login/recovery scenarios verify interaction. Archive crypto, persistence and OS dialog behavior still require their core/native owners."
-      ]
+        "Run login-recovery browser scenarios for create-and-enter, partial entry failure, password visibility, saved-login retry and optional backup; include minimum-window, macOS guidance and visual evidence. Actual OS Keychain prompts and restart resume require native evidence."
+      ],
+      "capability": {
+        "summary": "Create a local account and enter once, clearly distinguish empty password fields and report device credential saving separately from portable backup.",
+        "guide": "docs/help/topics/first-run.md#keep-access-to-your-account",
+        "invariants": [
+          {
+            "name": "Created accounts retry entry without duplicate registration; retired sessions cannot publish saved-login results",
+            "reference": "docs/help/topics/first-run.md#keep-access-to-your-account"
+          },
+          {
+            "name": "Credential failure never blocks entry or claims saved login; backup remains optional",
+            "reference": "docs/help/topics/first-run.md#keep-access-to-your-account"
+          }
+        ]
+      }
     },
     {
       "id": "frontend-chat-shell",

@@ -166,3 +166,23 @@ test("recovered channel history is readable without send actions", async ({
   ).toBeVisible();
   await expect(page.getByPlaceholder("Message #team")).toHaveCount(0);
 });
+
+test("onboarding keeps backup confirmation visible until the user closes it", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("login-tab-register").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
+  await page
+    .getByTestId("account-protection")
+    .getByRole("button", { name: "Create encrypted backup" })
+    .click();
+  await page.getByTestId("recovery-key-check").fill("22222222-77777777");
+  await page.getByTestId("recovery-export").click();
+  await expect(page.getByText("Backup saved and verified")).toBeVisible();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("account-protection")).toBeHidden();
+});

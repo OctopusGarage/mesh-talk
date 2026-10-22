@@ -4,6 +4,9 @@ Mesh-Talk has no account server. Your local password unlocks this installation;
 it does not recover data from a lost device. Create a manual encrypted backup
 while you still have access to an unlocked device.
 
+For first-use sign-in, saved credentials and the optional account-protection
+reminder, see [Keep access to your account](help/topics/first-run.md#keep-access-to-your-account).
+
 ## Create a backup
 
 1. Open **Settings → History & backup → Create encrypted backup**.

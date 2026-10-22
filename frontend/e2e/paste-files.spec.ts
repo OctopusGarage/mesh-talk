@@ -4,10 +4,6 @@ test("pasted file waits for Enter and transfers as an attachment", async ({
   page,
 }) => {
   await page.goto("/");
-  await page.getByTestId("login-tab-register").click();
-  await page.getByTestId("login-username").fill("paster");
-  await page.getByTestId("login-password").fill("password123");
-  await page.getByTestId("login-submit").click();
   await page.getByTestId("login-tab-signin").click();
   await page.getByTestId("login-username").fill("paster");
   await page.getByTestId("login-password").fill("password123");

@@ -65,3 +65,13 @@ it.each(SUPPORTED_LANGUAGES)(
 it("renders no error alert before a failure", () => {
   expect(alertText()).toBeNull();
 });
+
+it.each(SUPPORTED_LANGUAGES)(
+  "never makes an empty password look prefilled in %s",
+  async (language) => {
+    await i18n.changeLanguage(language);
+    const html = renderToStaticMarkup(createElement(LoginScreen));
+    expect(html).not.toContain('placeholder="••••••••"');
+    expect(html).toContain('autoComplete="current-password"');
+  },
+);

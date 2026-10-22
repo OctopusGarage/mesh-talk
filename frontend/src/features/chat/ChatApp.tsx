@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CircleAlert, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { AccountProtectionNotice } from "./AccountProtectionNotice";
 import { Sidebar } from "./Sidebar";
 import { ConversationView } from "./ConversationView";
 import { CallDialog } from "./CallDialog";
@@ -168,81 +169,84 @@ export function ChatApp() {
   }, [startPresence, owner, generation, ready, presenceRun, presenceIdentity]);
 
   return (
-    <div
-      data-testid="chat-shell"
-      className="relative flex h-full overflow-hidden"
-    >
-      <Sidebar />
-      <ConversationView />
-      <CallDialog />
-      <div className="absolute inset-x-4 top-3 z-40 flex flex-col gap-2">
-        {downloadPersistenceError && (
-          <div
-            role="alert"
-            className="rounded-md border border-destructive/40 bg-popover px-4 py-3 text-sm text-foreground shadow-elevation"
-          >
-            {t("files.queuePersistenceFailed", {
-              error: downloadPersistenceError,
-            })}
-          </div>
-        )}
-        {mediaWarning && (
-          <div
-            role="alert"
-            className="rounded-md border border-destructive/40 bg-popover px-4 py-3 text-sm text-foreground shadow-elevation"
-          >
-            {t("settings.mediaMigrationWarning")}
-          </div>
-        )}
-      </div>
-      <AnimatePresence>
-        {error && (
-          <motion.div
-            role="alert"
-            initial={{
-              opacity: 0,
-              transform: motionOK ? "translateY(-6px)" : "none",
-            }}
-            animate={{
-              opacity: 1,
-              transform: motionOK ? "translateY(0px)" : "none",
-            }}
-            exit={{
-              opacity: 0,
-              transform: motionOK ? "translateY(-6px)" : "none",
-            }}
-            transition={{ duration: motionOK ? 0.18 : 0.08, ease }}
-            className="absolute right-4 top-20 z-50 flex max-w-[min(26rem,calc(100vw-2rem))] items-start gap-3 rounded-lg border border-destructive/35 bg-popover px-3 py-3 text-[13px] text-foreground shadow-elevation"
-          >
-            <CircleAlert
-              className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
-              aria-hidden="true"
-            />
-            <span className="min-w-0 flex-1">
-              <strong className="block font-semibold">
-                {t(
-                  fileSendError
-                    ? "message.fail.unknown"
-                    : "redesign.actionFailed",
-                )}
-              </strong>
-              <span className="mt-0.5 block break-words text-muted-foreground">
-                {fileSendError
-                  ? error.replace(/^Couldn't send file: /, "")
-                  : error}
-              </span>
-            </span>
-            <button
-              type="button"
-              onClick={clearError}
-              aria-label={t("conversation.dismissError")}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:h-11 [@media(hover:none)]:w-11"
+    <div className="flex h-full flex-col overflow-hidden">
+      <AccountProtectionNotice key={`${owner}:${generation}`} />
+      <div
+        data-testid="chat-shell"
+        className="relative flex min-h-0 flex-1 overflow-hidden"
+      >
+        <Sidebar />
+        <ConversationView />
+        <CallDialog />
+        <div className="absolute inset-x-4 top-3 z-40 flex flex-col gap-2">
+          {downloadPersistenceError && (
+            <div
+              role="alert"
+              className="rounded-md border border-destructive/40 bg-popover px-4 py-3 text-sm text-foreground shadow-elevation"
             >
-              <X className="h-4 w-4" aria-hidden="true" />
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
+              {t("files.queuePersistenceFailed", {
+                error: downloadPersistenceError,
+              })}
+            </div>
+          )}
+          {mediaWarning && (
+            <div
+              role="alert"
+              className="rounded-md border border-destructive/40 bg-popover px-4 py-3 text-sm text-foreground shadow-elevation"
+            >
+              {t("settings.mediaMigrationWarning")}
+            </div>
+          )}
+        </div>
+        <AnimatePresence>
+          {error && (
+            <motion.div
+              role="alert"
+              initial={{
+                opacity: 0,
+                transform: motionOK ? "translateY(-6px)" : "none",
+              }}
+              animate={{
+                opacity: 1,
+                transform: motionOK ? "translateY(0px)" : "none",
+              }}
+              exit={{
+                opacity: 0,
+                transform: motionOK ? "translateY(-6px)" : "none",
+              }}
+              transition={{ duration: motionOK ? 0.18 : 0.08, ease }}
+              className="absolute right-4 top-20 z-50 flex max-w-[min(26rem,calc(100vw-2rem))] items-start gap-3 rounded-lg border border-destructive/35 bg-popover px-3 py-3 text-[13px] text-foreground shadow-elevation"
+            >
+              <CircleAlert
+                className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
+                aria-hidden="true"
+              />
+              <span className="min-w-0 flex-1">
+                <strong className="block font-semibold">
+                  {t(
+                    fileSendError
+                      ? "message.fail.unknown"
+                      : "redesign.actionFailed",
+                  )}
+                </strong>
+                <span className="mt-0.5 block break-words text-muted-foreground">
+                  {fileSendError
+                    ? error.replace(/^Couldn't send file: /, "")
+                    : error}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={clearError}
+                aria-label={t("conversation.dismissError")}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:h-11 [@media(hover:none)]:w-11"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
     </div>
   );
 }

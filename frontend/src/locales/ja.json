@@ -107,8 +107,8 @@
     "register": "登録",
     "username": "ユーザー名",
     "password": "パスワード",
-    "usernamePlaceholder": "alice",
-    "passwordPlaceholder": "••••••••",
+    "usernamePlaceholder": "ユーザー名を入力",
+    "passwordPlaceholder": "アカウントのパスワードを入力",
     "passwordHint": "8文字以上",
     "createAccount": "アカウントを作成",
     "accountCreated": "アカウントを作成しました。サインインできます。",
@@ -117,7 +117,27 @@
     "resuming": "セッションを再開しています…",
     "footer": "鍵がこの端末から出ることはありません。相手はLAN上で検出されます。",
     "signingIn": "サインインしています…",
-    "creatingIdentity": "ID を作成しています…"
+    "creatingIdentity": "ID を作成しています…",
+    "newPasswordPlaceholder": "アカウントのパスワードを設定",
+    "passwordGuidance": "8文字以上。続行する前に、目のボタンでパスワードを確認できます。",
+    "signInGuidance": "このローカルアカウントの作成時に設定したパスワードを入力してください。",
+    "showPassword": "パスワードを表示",
+    "hidePassword": "パスワードを隠す",
+    "createAndEnter": "アカウントを作成して開始",
+    "createdEntryFailed": "アカウントは作成されましたが、サインインが完了しませんでした。下のフォームから再試行してください。作成し直す必要はありません。",
+    "stayMacDescription": "ログイン情報をmacOSキーチェーンに安全に保存し、このMacで自動サインインします。サインアウトすると保存した情報は削除されます。",
+    "stayDescription": "ログイン情報をこのデバイスの資格情報ストアに保存し、自動サインインします。サインアウトすると保存した情報は削除されます。",
+    "protectTitle": "アカウントへのアクセスを守る",
+    "saveFailed": "ログイン情報を保存できませんでした。今すぐアプリを使えますが、次回はアカウントのパスワードが必要です。",
+    "savedOnDevice": "ログイン情報をこのデバイスに安全に保存しました。次回はパスワードを再入力せずにアプリを開けます。",
+    "notSaved": "ログイン情報は保存されていません。次回も必要なため、パスワードを安全に保管してください。",
+    "saveUnknown": "パスワードを安全に保管してください。ログイン情報の保存状態を確認できませんでした。",
+    "backupGuidance": "自動サインインはこのデバイスでのみ有効です。別のデバイスで復元するには、暗号化バックアップを作成し、復元キーを別に保管してください。後で「設定 → 履歴とバックアップ」から行うこともできます。",
+    "retrySaveFailed": "ログイン情報を保存できませんでした。パスワードを保管して、もう一度お試しください。",
+    "retrySave": "ログイン情報の保存を再試行",
+    "savingCredential": "保存中…",
+    "protectLater": "後で行う",
+    "newUsernamePlaceholder": "ローカルユーザー名を設定"
   },
   "sidebar": {
     "hideChannel": "チャンネルを非表示",
@@ -917,7 +937,7 @@
     "messagesFiles": "メッセージとファイル",
     "advanced": "詳細設定",
     "identityStep": "このデバイスに保存されるIDを作成します。",
-    "discoveryStep": "サインインして、同じローカルネットワーク上の人を探します。"
+    "discoveryStep": "アプリを開き、同じローカルネットワーク上の人を見つけます。"
   },
   "packs": {
     "libraries": "ライブラリ",
