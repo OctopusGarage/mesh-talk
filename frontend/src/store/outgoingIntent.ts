@@ -57,32 +57,6 @@ function nextClientId(): string {
   return `c${clientIdCounter}`;
 }
 
-function sendFileFor(
-  c: Conversation,
-  path: string,
-  media: boolean,
-  progressKey: string,
-  expiresAtMs?: number | null,
-) {
-  return c.kind === "account"
-    ? chat.sendFileToAccount(c.id, path, media)
-    : chat.sendFileChannel(c.id, path, media, progressKey, expiresAtMs);
-}
-function sendStickerFor(
-  c: Conversation,
-  stickerId: string,
-  fallback: string,
-  expiresAtMs?: number | null,
-) {
-  return chat.sendSticker(
-    c.id,
-    stickerId,
-    fallback,
-    c.kind === "channel",
-    expiresAtMs,
-  );
-}
-
 type StatusRefreshRun = {
   current(): boolean;
   dirty: Map<string, Conversation>;
@@ -126,13 +100,20 @@ export async function refreshDeliveryStatuses(
             .map((m) => m.id!),
         ),
       ];
-      const replicas = new Map<string, number>();
+      const replicas = new Map<
+        string,
+        { members: number; postOffices: number }
+      >();
       for (let i = 0; i < ids.length; i += 256) {
         const rows = await readWithDeadline(() =>
           chat.channelCustodyStatuses(c.id, ids.slice(i, i + 256)),
         );
         if (!lease.current()) return;
-        for (const row of rows) replicas.set(row.id, row.replicas);
+        for (const row of rows)
+          replicas.set(row.id, {
+            members: row.replicas,
+            postOffices: row.post_offices ?? 0,
+          });
       }
       set((s) => ({
         messages: s.messages[key]
@@ -140,7 +121,11 @@ export async function refreshDeliveryStatuses(
               ...s.messages,
               [key]: s.messages[key].map((m) =>
                 m.id && replicas.has(m.id)
-                  ? { ...m, replicas: replicas.get(m.id) }
+                  ? {
+                      ...m,
+                      replicas: replicas.get(m.id)!.members,
+                      postOfficeCopies: replicas.get(m.id)!.postOffices,
+                    }
                   : m,
               ),
             }
@@ -171,7 +156,14 @@ export async function refreshDeliveryStatuses(
             .filter((i) => convKey(i.conversation) === key)
             .map((i) => i.message),
         ]
-          .filter((m) => m.fromMe && m.id && m.delivery !== "delivered")
+          .filter(
+            (m) =>
+              m.fromMe &&
+              m.id &&
+              (m.delivery !== "delivered" ||
+                (m.file &&
+                  !useTransfers.getState().transfers[m.id]?.delivered)),
+          )
           .map((m) => m.id!),
       ),
     ];
@@ -409,31 +401,52 @@ export async function dispatchIntent(
       update(accepted);
       if (!hadIntent) return true;
     } else {
+      const owner = lease.owner!;
       if (payload.kind === "text")
-        await chat.sendChannelMessage(
-          c.id,
-          payload.text,
-          payload.replyTo,
-          payload.expiresAtMs,
-        );
+        accepted = {
+          ...message,
+          id: await chat.enqueueChannelText(
+            owner,
+            c.id,
+            payload.text,
+            payload.replyTo,
+            payload.expiresAtMs,
+          ),
+          pending: false,
+        };
       else if (payload.kind === "sticker")
-        await sendStickerFor(
-          c,
-          payload.stickerId,
-          payload.fallback,
-          payload.expiresAtMs,
-        );
-      else
-        await sendFileFor(
-          c,
+        accepted = {
+          ...message,
+          id: await chat.enqueueChannelSticker(
+            owner,
+            c.id,
+            payload.stickerId,
+            payload.fallback,
+            payload.expiresAtMs,
+          ),
+          pending: false,
+        };
+      else {
+        const result = await chat.enqueueChannelFile(
+          owner,
+          c.id,
           payload.path,
           payload.media,
           clientId,
           payload.expiresAtMs,
         );
+        accepted = {
+          ...message,
+          id: result.id,
+          pending: false,
+          file: { ...message.file!, fileConv: result.fileConv },
+        };
+      }
       admitted = true;
       if (!lease.current()) return false;
-      update(null); // Legacy void never claims acceptance/receipt for a placeholder.
+      const hadIntent = !!get().intents[clientId];
+      update(accepted);
+      if (!hadIntent) return true;
     }
     if (!lease.current()) return false;
     if (accepted?.id) {

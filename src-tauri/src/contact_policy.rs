@@ -581,7 +581,7 @@ mod tests {
             .build()
             .unwrap();
         for cmd in ["list_accounts", "set_contact_hidden", "delete_contact"] {
-            let runtime_guard = node_state.0.blocking_lock();
+            let runtime_guard = node_state.0.blocking_write();
             let (entered, waiting) = channel();
             *app_state.owner_command_captured.lock().unwrap() = Some(entered);
             let window = webview.clone();
@@ -672,7 +672,7 @@ mod tests {
         .unwrap();
         let before = node.account_reactions(A);
         assert_eq!(before.len(), 1);
-        *node_state.0.blocking_lock() = Some(runtime);
+        *node_state.0.blocking_write() = Some(runtime);
         let app = tauri::test::mock_builder()
             .manage(app_state.clone())
             .manage(node_state.clone())
@@ -688,7 +688,7 @@ mod tests {
             .build()
             .unwrap();
         for cmd in ["delete_contact", "set_contact_hidden", "list_accounts"] {
-            let guard = node_state.0.blocking_lock();
+            let guard = node_state.0.blocking_write();
             let (entered, waiting) = channel();
             *app_state.owner_command_captured.lock().unwrap() = Some(entered);
             let window = webview.clone();
@@ -718,7 +718,7 @@ mod tests {
                 "replacement session's durable data survives"
             );
         }
-        tauri::async_runtime::block_on(node_state.0.blocking_lock().take().unwrap().stop());
+        tauri::async_runtime::block_on(node_state.0.blocking_write().take().unwrap().stop());
     }
 
     #[test]
@@ -819,7 +819,7 @@ mod tests {
         ))
         .unwrap();
         let own = runtime.account_id().to_owned();
-        *node_state.0.blocking_lock() = Some(runtime);
+        *node_state.0.blocking_write() = Some(runtime);
         assert!(invoke(
             "set_contact_hidden",
             serde_json::json!({ "owner": "alice", "account": own, "hidden": true, "name": "self" })
@@ -877,7 +877,7 @@ mod tests {
         // Stop the node: restoration remains a local authenticated operation.
         app.state::<crate::chat_commands::NodeState>()
             .0
-            .blocking_lock()
+            .blocking_write()
             .take();
         assert!(
             invoke(
@@ -1306,7 +1306,7 @@ pub async fn set_contact_hidden(
             if let Some(entered) = captured.lock().unwrap().as_ref() {
                 let _ = entered.send("contact-runtime-wait");
             }
-            Some(node.0.blocking_lock())
+            Some(node.0.blocking_read())
         } else {
             None
         };
@@ -1360,7 +1360,7 @@ pub async fn set_contact_hidden_batch(
         Some(
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                node.0.clone().lock_owned(),
+                node.0.clone().read_owned(),
             )
             .await
             .map_err(|_| "Runtime observation timed out")?,

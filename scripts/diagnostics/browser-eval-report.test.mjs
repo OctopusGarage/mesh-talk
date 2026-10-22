@@ -4,12 +4,12 @@ import { test } from "node:test";
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 62], ["extended", 63]]) {
+  for (const [tier, count] of [["core", 63], ["extended", 64]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[0] === "portable-core.spec.ts" && path[1] === "presence waits for node readiness without showing a startup failure"));
     assert.ok(paths.some(path => path[1] === "city avatar thumbnails load after scrolling the gallery"));
-    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 11);
+    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 12);
     assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "a scoped native delivery invalidation refreshes status without a polling response"));
     for (const result of ["acceptance", "rejection"]) assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === `submitted text stays in its bubble after ${result} and navigation`));
     for (const size of ["1280x800", "760x620", "320x360"]) {

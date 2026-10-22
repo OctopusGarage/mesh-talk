@@ -291,6 +291,8 @@
       "help": "目标账户的自动回执，不代表已读。",
       "fileHelp": "文件卡片已送达，文件下载与阅读另行进行。",
       "metadataPending": "等待文件信息",
+      "fileAwaiting": "等待接收方收到文件邀请",
+      "fileDelivered": "接收方已收到文件邀请",
       "detailsTitle": "送达详情",
       "attempted": "本机于{{age}}开始了一次发送尝试。",
       "retryScheduled": "本机于{{age}}安排了重试。",
@@ -299,6 +301,8 @@
       "awaitingFileHelp": "回执确认的是文件卡片已送达，与文件下载和阅读分开。"
     },
     "custody": {
+      "postOfficeHelp": "邮局已确认持久保存此加密消息。收件人收到、文件下载和已读是独立状态。",
+      "postOffice": "邮局已确认保存副本",
       "local": "尚未确认成员副本",
       "one": "上次确认：1 位成员有副本",
       "multiple": "上次确认：2 位或更多成员有副本",
@@ -329,7 +333,7 @@
   },
   "transfer": {
     "preparing": "正在准备文件…",
-    "awaitingRecipient": "正在等待接收方…",
+    "awaitingRecipient": "正在等待文件传输开始…",
     "awaitingApproval": "等待接收方批准…",
     "recipientDeclined": "接收方已拒绝此附件",
     "confirming": "正在确认接收…",
@@ -1036,7 +1040,7 @@
     "signedProfileAvatar": "已签名的资料头像",
     "accountIDQRCode": "账号 ID 二维码",
     "accountIDCopied": "已复制账号 ID。",
-    "cardPublished": "已发布卡片。",
+    "cardPublished": "已在此设备上保存签名卡片。",
     "signedCardCopied": "已复制签名卡片。",
     "introductionReadyToExport": "介绍已准备好导出。",
     "creationWitnessReadyToExport": "创建见证已准备好导出。",

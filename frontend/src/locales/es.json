@@ -291,6 +291,8 @@
       "help": "Recibo automático de la cuenta destinataria. No confirma lectura.",
       "fileHelp": "Tarjeta del archivo entregada. La descarga y la lectura son independientes.",
       "metadataPending": "Detalles del archivo pendientes",
+      "fileAwaiting": "Esperando confirmación de la oferta de archivo",
+      "fileDelivered": "Oferta de archivo recibida",
       "detailsTitle": "Detalles de entrega",
       "attempted": "El intento local se inició {{age}}.",
       "retryScheduled": "Se programó un reintento {{age}}.",
@@ -299,6 +301,8 @@
       "awaitingFileHelp": "El recibo confirma la entrega de la tarjeta del archivo. La descarga y la lectura son independientes."
     },
     "custody": {
+      "postOfficeHelp": "La oficina de correos confirmó el almacenamiento duradero de este mensaje cifrado. La entrega al destinatario, las descargas y la lectura son independientes.",
+      "postOffice": "La oficina de correos confirmó una copia almacenada",
       "local": "Ninguna copia de miembro confirmada",
       "one": "Última confirmación: 1 copia de un miembro",
       "multiple": "Última confirmación: 2 o más copias de miembros",
@@ -329,7 +333,7 @@
   },
   "transfer": {
     "preparing": "Preparando archivo…",
-    "awaitingRecipient": "Esperando al destinatario…",
+    "awaitingRecipient": "Esperando que comience la transferencia…",
     "awaitingApproval": "Esperando la aprobación del destinatario…",
     "recipientDeclined": "El destinatario rechazó este archivo",
     "confirming": "Confirmando la recepción…",
@@ -1036,7 +1040,7 @@
     "signedProfileAvatar": "Avatar del perfil firmado",
     "accountIDQRCode": "Código QR del ID de cuenta",
     "accountIDCopied": "ID de cuenta copiado.",
-    "cardPublished": "Tarjeta publicada.",
+    "cardPublished": "Tarjeta firmada guardada en este dispositivo.",
     "signedCardCopied": "Tarjeta firmada copiada.",
     "introductionReadyToExport": "Presentación lista para exportar.",
     "creationWitnessReadyToExport": "Testimonio de creación listo para exportar.",

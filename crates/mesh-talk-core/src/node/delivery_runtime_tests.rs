@@ -5210,6 +5210,47 @@ async fn legacy_device_only_media_completion_qualifies_exact_origin_without_acco
 }
 
 #[tokio::test]
+async fn channel_media_source_keeps_signed_chunks_when_local_preview_completes() {
+    for sharing in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let other = DeviceIdentity::generate();
+        let proof = Announce::new(&other, "Other", 9);
+        let (sender, _) = node(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = sender
+            .create_channel("Photos", vec![other.public()])
+            .await
+            .unwrap();
+        if !sharing {
+            sender
+                .set_channel_replica_enabled(channel, false)
+                .await
+                .unwrap();
+        }
+        let bytes = [b"\x89PNG\r\n\x1a\n".as_slice(), &vec![3; 128 * 1024]].concat();
+        let path = dir.path().join("source.png");
+        std::fs::write(&path, &bytes).unwrap();
+        let file = sender
+            .send_file_channel(channel, &path, crate::file::FileKind::Media)
+            .await
+            .unwrap();
+        // An incoming file fingerprint is a handled sync frame and invokes
+        // this callback before the requester asks for its first chunk page.
+        sender.process_file_events(file);
+        assert_eq!(sender.read_media(file).unwrap(), bytes);
+        assert_eq!(
+            sender.file_progress(file).unwrap().done,
+            crate::file::chunk_count_for(bytes.len() as u64),
+            "a local preview must not reclaim the source's signed channel photo before members fetch it; sharing={sharing}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn untracked_channel_media_local_export_verifies_retained_row_and_managed_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let other = DeviceIdentity::generate();

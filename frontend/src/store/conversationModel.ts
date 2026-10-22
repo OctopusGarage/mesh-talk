@@ -34,6 +34,7 @@ export interface ChatMessage {
     reason?: "post_office_disabled" | "no_known_route" | "attempt_timed_out";
   };
   replicas?: number;
+  postOfficeCopies?: number;
   metadataPending?: boolean;
   id: string | null; // hex EventId; null while pending
   fromMe: boolean;

@@ -651,6 +651,35 @@ impl Node {
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<crate::eventlog::EventId, NodeError> {
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        let mut target_account = Some(target_account);
+        let mut accepted = None;
+        authorize(&mut || {
+            let target = target_account
+                .take()
+                .ok_or_else(|| NodeError::Authorization("accept is single-use".into()))?;
+            accepted = Some(self.accept_staged_manifest_authorized(
+                peers,
+                host,
+                target,
+                manifest,
+                expires_at_ms,
+            )?);
+            Ok(())
+        })?;
+        accepted.ok_or_else(|| {
+            NodeError::Authorization("authorization did not execute acceptance".into())
+        })
+    }
+
+    fn accept_staged_manifest_authorized(
+        &self,
+        peers: &[crate::discovery::PeerRecord],
+        host: ConversationId,
+        target_account: Option<String>,
+        manifest: &FileManifestV3,
+        expires_at_ms: Option<u64>,
+    ) -> Result<crate::eventlog::EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         use super::delivery_store::{DeliveryDestination, OutgoingDelivery};
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut store).map_err(NodeError::Log)?;
@@ -734,7 +763,7 @@ impl Node {
             )
         }
         .map_err(NodeError::Log)?;
-        if self.accept_outgoing_transaction(&mut store, transaction, authorize)? {
+        if self.commit_outgoing_transaction(&mut store, transaction)? {
             let mut book = self.files.lock().expect("files lock not poisoned");
             book.mark_emitted(id);
             book.record_event(
@@ -837,9 +866,32 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
         expires_at_ms: Option<u64>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<ConversationId, NodeError> {
+        let (_, file) = self
+            .enqueue_file_channel_progress_expiring_if(
+                channel,
+                path,
+                kind,
+                on_progress,
+                expires_at_ms,
+                authorize,
+            )
+            .await?;
+        self.flush_channel_file(channel, file).await;
+        Ok(file)
+    }
+
+    pub async fn enqueue_file_channel_progress_expiring_if(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
-    ) -> Result<ConversationId, NodeError> {
+    ) -> Result<(EventId, ConversationId), NodeError> {
         authorize(&mut || Ok(()))?;
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
         {
@@ -853,14 +905,6 @@ impl Node {
         }
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
-        let members = self
-            .channels
-            .lock()
-            .expect("channels lock")
-            .state(&channel)
-            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?
-            .members()
-            .to_vec();
         let id = self.enqueue_channel_payload_if(
             channel,
             crate::expiry::wrap(&outgoing_manifest_bytes(&manifest), expires_at_ms),
@@ -878,15 +922,27 @@ impl Node {
         authorize(&mut || {
             self.record_sent_manifest(channel, channel, seq, &manifest, expires_at_ms)
         })?;
-        // A file/folder manifest is an offer. Members pull its chunks only after
-        // their own receive policy permits it; pushing the chunk conversation here
-        // would transmit the bytes before they could approve. Inline media keeps
-        // the existing automatic transfer behavior.
-        self.distribute_channel(channel, &members).await;
-        if crate::node::media_store::automatic_inline_image(&outgoing_manifest(&manifest)) {
-            self.distribute_channel(file_conv, &members).await;
+        Ok((id, file_conv))
+    }
+
+    /// Fan out an already accepted channel offer and its automatically permitted bytes.
+    pub async fn flush_channel_file(&self, channel: ConversationId, file: ConversationId) {
+        let members = self
+            .channels
+            .lock()
+            .expect("channels lock")
+            .state(&channel)
+            .map(|state| state.members().to_vec());
+        let automatic_inline = self
+            .files
+            .lock()
+            .expect("files lock")
+            .manifest(&file)
+            .is_some_and(crate::node::media_store::automatic_inline_image);
+        if let Some(members) = members {
+            self.distribute_channel_file(channel, file, &members, automatic_inline)
+                .await;
         }
-        Ok(file_conv)
     }
 
     /// Off-reactor wrapper around [`Node::stage_file`]: staging is a synchronous burst of

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::discovery::roster::PeerRecord;
-use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
+use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::node::conversation::account_conversation_id;
 use crate::node::session::{Served, SessionError, request_round, serve_one, serve_wire_bytes};
 use crate::transport::SecureChannel;
@@ -97,6 +97,16 @@ impl Node {
         conv: ConversationId,
         targets: Vec<crate::identity::device::PublicIdentity>,
     ) -> Result<bool, SessionError> {
+        self.replicate_to_post_office_targets_confirming(conv, targets, None)
+            .await
+    }
+
+    pub(in crate::node) async fn replicate_to_post_office_targets_confirming(
+        &self,
+        conv: ConversationId,
+        targets: Vec<crate::identity::device::PublicIdentity>,
+        confirm: Option<EventId>,
+    ) -> Result<bool, SessionError> {
         if targets.is_empty() {
             return Ok(false);
         }
@@ -123,6 +133,53 @@ impl Node {
                 else {
                     continue;
                 };
+                // Sync completion is not durable custody. Probe the exact
+                // recipient-encrypted wrapper before publishing a relay copy.
+                if let Some(id) = confirm {
+                    let mut mailboxes = vec![
+                        crate::postoffice::opaque::RelayMailbox::new(
+                            &self.identity,
+                            recipient,
+                            &po.public,
+                        )
+                        .map_err(|error| SessionError::Serialization(error.to_string()))?,
+                    ];
+                    if self.bridge_directory_allowed() {
+                        mailboxes.push(
+                            crate::postoffice::opaque::RelayMailbox::federated(
+                                &self.identity,
+                                recipient,
+                            )
+                            .map_err(|error| SessionError::Serialization(error.to_string()))?,
+                        );
+                    }
+                    let mut held = false;
+                    for (_, outer) in events.iter().filter(|(inner, _)| *inner == id) {
+                        for mailbox in &mailboxes {
+                            if super::session::request_durable_have(
+                                &mut channel,
+                                mailbox.id(),
+                                *outer,
+                            )
+                            .await?
+                            {
+                                held = true;
+                                break;
+                            }
+                        }
+                        if held {
+                            break;
+                        }
+                    }
+                    if held {
+                        self.channel_custody
+                            .lock()
+                            .expect("channel custody lock")
+                            .confirm(id, &format!("relay:{}", po.public.user_id()))
+                            .map_err(|error| SessionError::Serialization(error.to_string()))?;
+                        self.delivery_status_notify.notify_waiters();
+                    }
+                }
                 self.recycle_sync_channel(channel);
                 uploaded |= !events.is_empty();
                 complete = true;

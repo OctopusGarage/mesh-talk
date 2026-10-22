@@ -291,6 +291,8 @@
       "help": "宛先アカウントからの自動受領確認です。既読確認ではありません。",
       "fileHelp": "ファイルカードの配信完了。ダウンロードや閲覧とは別です。",
       "metadataPending": "ファイル情報を確認中",
+      "fileAwaiting": "ファイルの案内の受領待ち",
+      "fileDelivered": "ファイルの案内を受領済み",
       "detailsTitle": "配信の詳細",
       "attempted": "ローカルでの送信試行を開始したのは{{age}}です。",
       "retryScheduled": "再試行を予定したのは{{age}}です。",
@@ -299,6 +301,8 @@
       "awaitingFileHelp": "受領確認はファイルカードの受け取りを示します。ファイルのダウンロードや閲覧とは別です。"
     },
     "custody": {
+      "postOfficeHelp": "ポストオフィスがこの暗号化メッセージの永続保存を確認しました。受信者への配信、ダウンロード、既読は別です。",
+      "postOffice": "ポストオフィスが保存済みコピーを確認しました",
       "local": "メンバーの複製は未確認",
       "one": "最後に確認: メンバーに1件の複製",
       "multiple": "最後に確認: メンバーに2件以上の複製",
@@ -329,7 +333,7 @@
   },
   "transfer": {
     "preparing": "ファイルを準備中…",
-    "awaitingRecipient": "受信者を待っています…",
+    "awaitingRecipient": "ファイル転送の開始を待っています…",
     "awaitingApproval": "受信者の承認を待っています…",
     "recipientDeclined": "受信者が添付ファイルを拒否しました",
     "confirming": "受信を確認中…",
@@ -1036,7 +1040,7 @@
     "signedProfileAvatar": "署名付きプロフィールのアバター",
     "accountIDQRCode": "アカウントIDのQRコード",
     "accountIDCopied": "アカウントIDをコピーしました。",
-    "cardPublished": "カードを公開しました。",
+    "cardPublished": "署名済みカードをこのデバイスに保存しました。",
     "signedCardCopied": "署名付きカードをコピーしました。",
     "introductionReadyToExport": "紹介をエクスポートできます。",
     "creationWitnessReadyToExport": "作成に関する立会記録をエクスポートできます。",

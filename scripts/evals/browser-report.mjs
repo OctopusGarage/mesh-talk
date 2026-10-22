@@ -35,6 +35,7 @@ export function requiredBrowserPaths(tier) {
     ["automatic-delivery.spec.ts", "a scoped native delivery invalidation refreshes status without a polling response"],
     ["automatic-delivery.spec.ts", "submitted text stays in its bubble after acceptance and navigation"],
     ["automatic-delivery.spec.ts", "submitted text stays in its bubble after rejection and navigation"],
+    ["automatic-delivery.spec.ts", "channel acceptance reconciles repeated text once and confirmed post-office custody clears the waiting indicator"],
     ["media-recovery.spec.ts", "received media recovers when bytes become available with stable fileConv"],
     ["media-lifecycle.spec.ts", "same-identity disable/re-enable never returns a revoked URL"],
     ["media-lifecycle.spec.ts", "cleanup during an admitted durable read prevents fallback and blob creation"],

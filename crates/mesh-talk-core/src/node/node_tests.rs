@@ -1765,6 +1765,21 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
             .windows(b"relay-secret-room".len())
             .any(|window| window == b"relay-secret-room")
     }));
+    alice_node
+        .send_channel_message(group, b"relay custody")
+        .await
+        .unwrap();
+    let id = alice_node
+        .channel_history(group, 10)
+        .into_iter()
+        .find(|row| row.text == b"relay custody")
+        .unwrap()
+        .id;
+    assert_eq!(alice_node.channel_custody_count(group, id), Some(0));
+    assert_eq!(
+        alice_node.channel_post_office_custody_count(group, id),
+        Some(1)
+    );
     bob_node.drain_from_post_office().await;
     assert!(
         bob_node
@@ -5337,6 +5352,106 @@ async fn a_dm_reaction_is_visible_to_both_peers() {
 /// `process_file_events`; the chunk conversation syncs separately. Bob is a
 /// non-creator member, so his send must first distribute his own sender key —
 /// the same path the creator-only-send fix repaired for messages.
+#[tokio::test]
+async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_member() {
+    let root = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_public = bob.public();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let roster = seed_roster(
+        &bob,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+        &alice.user_id(),
+    );
+    let bob_roster = seed_roster(&alice, "Alice", 1, &bob.user_id());
+    let open = |name: &str, identity, roster| {
+        let directory = root.path().join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (files, received) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm,
+            channel,
+            files,
+            &directory.join("messages.log"),
+            &directory.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        (node, received)
+    };
+    let (sender, _) = open("sender", alice, roster.clone());
+    let (recipient, mut received) = open("recipient", bob, bob_roster);
+    for (name, node, port) in [
+        ("sender", &sender, 1),
+        (
+            "recipient",
+            &recipient,
+            listener.local_addr().unwrap().port(),
+        ),
+    ] {
+        node.configure_privacy(
+            &root.path().join(name),
+            "pw",
+            &node.signed_announce(name, port),
+            std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    }
+    let receiver = tokio::spawn(recipient.clone().run_accept_loop(listener));
+    let channel = sender
+        .create_channel("Photos", vec![bob_public])
+        .await
+        .unwrap();
+    let relay = DeviceIdentity::generate();
+    let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    roster.lock().unwrap().update(
+        &Announce::new_post_office(
+            &relay,
+            "Stalled relay",
+            relay_listener.local_addr().unwrap().port(),
+        ),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    // Keep the TCP connection open without completing authentication. A live
+    // member must get the bytes without waiting for this optional custody path.
+    let relay_task = tokio::spawn(async move {
+        let (_connection, _) = relay_listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let payload = b"\x89PNG\r\n\x1a\ninline photo payload";
+    let path = root.path().join("photo.png");
+    std::fs::write(&path, payload).unwrap();
+    let sending = tokio::spawn(async move {
+        sender
+            .send_file_channel(channel, &path, crate::file::FileKind::Media)
+            .await
+    });
+    let bytes = tokio::time::timeout(Duration::from_secs(3), async {
+        let offer = received.recv().await.expect("file offer");
+        loop {
+            if let Some(bytes) = recipient.read_media(offer.file_conv) {
+                break bytes;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    sending.abort();
+    relay_task.abort();
+    receiver.abort();
+    assert_eq!(
+        bytes.expect("an optional stalled relay must not hold back online photo bytes"),
+        payload
+    );
+}
+
 #[tokio::test]
 async fn two_nodes_transfer_a_file_in_a_channel() {
     let alice = DeviceIdentity::generate();
@@ -10029,4 +10144,109 @@ async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_pare
     delayed.log.lock().unwrap().append(pair[1].clone()).unwrap();
     // The profile ciphertext is sealed to Bob, so admission proves causality;
     // Bob's real loopback session above proves decryption and metadata convergence.
+}
+
+#[tokio::test]
+async fn channel_acceptance_returns_exact_ids_without_waiting_for_network_fanout() {
+    let root = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (files, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_tx,
+        files,
+        &root.path().join("messages.log"),
+        &root.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("Acceptance", vec![]).await.unwrap();
+    let text = node
+        .enqueue_channel_message_reply_expiring_if(channel, b"kk", None, None, |accept| accept())
+        .unwrap();
+    let sticker = node
+        .enqueue_sticker_channel_expiring_if(channel, "heart", b"heart", None, |accept| accept())
+        .unwrap();
+    let path = root.path().join("photo.png");
+    std::fs::write(&path, b"\x89PNG\r\n\x1a\nphoto").unwrap();
+    let (photo, file) = node
+        .enqueue_file_channel_progress_expiring_if(
+            channel,
+            &path,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let history = node.channel_history(channel, 10);
+    assert_eq!(history.len(), 3);
+    for id in [text, sticker, photo] {
+        assert!(history.iter().any(|row| row.id == id));
+    }
+    assert!(node.file_progress(file).is_some());
+}
+
+#[tokio::test]
+async fn send_authorization_never_retains_the_delivery_journal_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (files, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_tx,
+        files,
+        &root.path().join("messages.log"),
+        &root.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("Lock ordering", vec![]).await.unwrap();
+    let authorize = |commit: &mut dyn FnMut() -> Result<(), NodeError>| {
+        assert!(
+            node.delivery.try_lock().is_ok(),
+            "requesting host session authority while holding the delivery journal can deadlock signed-card publication"
+        );
+        commit()
+    };
+    node.enqueue_channel_message_reply_expiring_if(channel, b"channel", None, None, authorize)
+        .unwrap();
+    node.enqueue_to_account_if(&node.account_id(), b"self", None, authorize)
+        .await
+        .unwrap();
+    let path = root.path().join("file.txt");
+    std::fs::write(&path, b"file bytes").unwrap();
+    node.enqueue_file_to_account_progress_expiring_if(
+        &node.account_id(),
+        &path,
+        crate::file::FileKind::File,
+        |_| {},
+        None,
+        authorize,
+    )
+    .await
+    .unwrap();
+    let request = OutgoingMessageRequest {
+        request_id: [33; 32],
+        destination: MessageDestination::Channel(channel),
+        text: b"request".to_vec(),
+        reply_to: None,
+        expires_at_ms: None,
+    };
+    node.enqueue_message_once_if(&request, authorize)
+        .await
+        .unwrap();
+    assert!(
+        node.enqueue_message_once_if(&request, authorize)
+            .await
+            .unwrap()
+            .duplicate
+    );
 }

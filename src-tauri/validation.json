@@ -91,6 +91,18 @@
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
         "invariants": [
           {
+            "name": "Signed-card acceptance releases the UI before admitted network fanout completes",
+            "reference": "docs/peer-trust.md"
+          },
+          {
+            "name": "Nickname publication does not block observations behind stalled network work",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Channel acceptance returns exact IDs before admitted network fanout finishes",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
             "name": "Replacement and logout invalidate captured session authority",
             "reference": "docs/ARCHITECTURE.md"
           },
@@ -101,6 +113,10 @@
           {
             "name": "Runtime replacement awaits prior runtime retirement",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Stalled network producers allow observations and unrelated sends while blocking runtime retirement",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       }

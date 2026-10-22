@@ -446,11 +446,18 @@
           {
             "name": "Directory freshness, recovery membership and presentation lifetimes are distinct; healthy five-second refresh waves progress beside stalled queries with eight global slots and cancellation ownership",
             "reference": "docs/network-design-reference.md#person-presence-contract"
+          },
+          {
+            "name": "Direct channel image bytes progress before optional relay custody without bypassing attachment consent; local previews preserve bounded original signed chunks for other members",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           }
         ],
         "guide": "docs/ARCHITECTURE.md"
       },
       "escalation": [
+        "Channel acceptance/custody changes require registered owner enqueue tests, exact-ID frontend reconciliation, and loopback post-office durable-wrapper confirmation evidence.",
+        "Producer/session lock-order changes require send_authorization_never_retains_the_delivery_journal_lock plus concurrent signed-card publication and account/channel send evidence.",
+        "Channel media retention/completion changes also require cargo test -p mesh-talk-core --bin mesh-talk-node file_saves:: --features fast-test-kdf; library-only selection cannot exercise delayed CLI export after a non-sharing receiver prunes chunks.",
         "Node wiring has broad shared state and dynamic consumers: retain conservative Node library coverage; crypto/wire/storage changes need loopback, restart and protocol integration evidence. Runtime/discovery lifecycle changes require focused native acceptance.",
         "Delivery observation changes require focused observation-owner and actual worker tests, exact-account/owner isolation, stale completion and recipient confirmation precedence. Host projection also requires typed frontend consumer checks; native acceptance must exercise participant retirement and the registered IPC response."
       ],

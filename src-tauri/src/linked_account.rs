@@ -18,7 +18,7 @@ pub(crate) async fn adopt_linked_account<R: tauri::Runtime>(
         .capture()
         .map_err(CommandError::Authentication)?;
     let password = {
-        let guard = node_state.0.lock().await;
+        let guard = node_state.0.read().await;
         app_state
             .session()
             .matching(&lease, |_| {

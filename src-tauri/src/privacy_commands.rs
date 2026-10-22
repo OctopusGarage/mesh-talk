@@ -164,7 +164,7 @@ mod tests {
         .await
         .unwrap();
         let node = runtime.handle();
-        *state.0.lock().await = Some(runtime);
+        *state.0.write().await = Some(runtime);
         let documents = || {
             ["privacy.policy", "peer-proofs", "peer-routes"]
                 .map(|name| std::fs::read(root.path().join("accounts/alice").join(name)).unwrap())
@@ -218,13 +218,13 @@ mod tests {
         caller.abort();
         assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
         assert!(
-            state.0.try_lock().is_err(),
+            state.0.try_write().is_err(),
             "cancelled IPC released live runtime producer"
         );
         app.session().clear();
         release.send(()).unwrap();
         assert!(holder.join().unwrap().is_err());
-        let runtime = state.0.lock().await.take().unwrap();
+        let runtime = state.0.write().await.take().unwrap();
         assert!(!runtime.privacy_snapshot().invisible);
         assert_eq!(documents(), before);
         runtime.stop().await;
@@ -299,7 +299,7 @@ mod tests {
             |_| {},
         ))
         .unwrap();
-        *node.0.blocking_lock() = Some(runtime);
+        *node.0.blocking_write() = Some(runtime);
         let read = invoke("get_privacy", serde_json::json!({"owner":"alice"})).unwrap();
         assert_eq!(read.owner, "alice");
         assert!(!read.policy.invisible);
@@ -341,7 +341,7 @@ mod tests {
         // Poll until the operation waits for the runtime lifecycle lock, then
         // log out. A previously authorized queued write must not become durable.
         tauri::async_runtime::block_on(async {
-            let guard = node.0.lock().await;
+            let guard = node.0.write().await;
             let mut queued = std::pin::pin!(dispatch(
                 &app_state,
                 &node,
@@ -366,13 +366,13 @@ mod tests {
         );
         assert!(
             node.0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .privacy_snapshot()
                 .invisible
         );
-        node.0.blocking_lock().take();
+        node.0.blocking_write().take();
         let saved = mesh_talk_core::node::PrivacyPolicy::open(
             &root.path().join("accounts/alice/privacy.policy"),
             "pw",

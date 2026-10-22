@@ -76,9 +76,9 @@ impl IntegrationHost for DesktopHost {
     ) -> HostFuture<'a, MessageAcceptance> {
         Box::pin(async move {
             let admission = self.admission()?;
-            // Runtime retirement must acquire this same mutex before taking the
+            // Runtime retirement must acquire exclusive access before taking the
             // profile, so a cancelled caller cannot leave a live producer behind.
-            let guard = self.node.0.lock().await;
+            let guard = self.node.0.read().await;
             let runtime = guard.as_ref().ok_or_else(|| {
                 IntegrationError::new("SCOPE_DENIED", "Desktop runtime is unavailable")
             })?;
@@ -141,7 +141,7 @@ impl Drop for AdminConfig {
     }
 }
 
-/// Called with the installed runtime mutex held. Both producers are owned by
+/// Called with exclusive access to the installed runtime. Both producers are owned by
 /// its retirement barrier; no listener, flush, or encrypted grant writer escapes.
 pub(crate) async fn start(
     app: &AppState,
@@ -301,7 +301,7 @@ mod tests {
         .unwrap();
         let channel = runtime.create_channel("Alerts", vec![]).await.unwrap();
         let account_id = runtime.account_id().to_owned();
-        *node.0.lock().await = Some(runtime);
+        *node.0.write().await = Some(runtime);
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let observed = events.clone();
         let mut host = DesktopHost::new(app, node.clone(), lease.clone(), account_id.clone());
@@ -329,7 +329,7 @@ mod tests {
                 })
             );
         }
-        let runtime = node.0.lock().await.take().unwrap();
+        let runtime = node.0.write().await.take().unwrap();
         runtime.stop().await;
     }
 
@@ -350,7 +350,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut guard = node.0.lock().await;
+        let mut guard = node.0.write().await;
         *guard = Some(runtime);
         start(
             &app,
@@ -388,7 +388,7 @@ mod tests {
             .await
             .unwrap();
         assert!(context["account_id"].is_string());
-        let runtime = node.0.lock().await.take().unwrap();
+        let runtime = node.0.write().await.take().unwrap();
         runtime.stop().await;
         assert!(!admin_path.exists());
         assert!(!manifest_path.exists());
@@ -433,7 +433,7 @@ mod tests {
         .await
         .unwrap();
         let account = runtime.account_id().to_owned();
-        let mut guard = node.0.lock().await;
+        let mut guard = node.0.write().await;
         *guard = Some(runtime);
         let (captured, received) = std::sync::mpsc::channel();
         *app.owner_command_captured.lock().unwrap() = Some(captured);
@@ -459,7 +459,7 @@ mod tests {
         drop(guard);
         assert!(operation.await.unwrap().is_err());
         assert!(!ran.load(Ordering::SeqCst));
-        let runtime = node.0.lock().await.take().unwrap();
+        let runtime = node.0.write().await.take().unwrap();
         runtime.stop().await;
     }
 }
