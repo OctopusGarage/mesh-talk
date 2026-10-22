@@ -44,6 +44,25 @@ function assertDocumentReference(reference) {
   assert.ok(headings.includes(anchor), `Missing Markdown anchor ${reference}`);
 }
 
+test("delivery details select projection, disclosure and browser acceptance", () => {
+  const plan = buildAffectedPlan([
+    "frontend/src/features/chat/DeliveryDetails.tsx",
+  ], { contracts });
+  assert.deepEqual(plan.blockers, []);
+  const selected = plan.owners.find(({ id }) => id === "frontend-delivery-details");
+  assert.ok(selected, "delivery details need an explicit business owner");
+  assertDocumentReference(selected.capability.guide);
+  for (const path of [
+    "src/store/outgoingIntent.test.ts",
+    "src/features/chat/deliveryFooter.test.ts",
+    "src/features/chat/DeliveryDetails.test.ts",
+  ]) assert.ok(plan.frontend.includes(path), path);
+  const scenarios = JSON.parse(read("frontend/validation.json")).prScenarios;
+  assert.ok(scenarios.some(({ paths, browser }) =>
+    paths.includes("frontend/src/features/chat/DeliveryDetails.tsx") &&
+    browser?.includes("e2e/automatic-delivery.spec.ts")));
+});
+
 test("capability pilots link maintained domain and architecture rules", () => {
   for (const id of ["frontend-outgoing", "desktop-session"]) {
     const { capability } = owner(id);

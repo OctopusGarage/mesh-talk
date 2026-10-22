@@ -6,6 +6,232 @@ import {
   BOB,
 } from "./helpers/session";
 import { seedMarketPacks } from "./helpers/packs";
+import { seedThemeBeforeLoad } from "./helpers/session";
+import type { Page } from "@playwright/test";
+
+async function observeLocalDelivery(page: Page) {
+  await page.evaluate(() => {
+    const scope = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      __deliveryDetailsFixture: {
+        observation: { kind: string; age_ms: number } | null;
+        hold: boolean;
+        entered: boolean;
+        seenKind: string | null;
+        release: () => void;
+      };
+    };
+    const state = {
+      observation: { kind: "retry_scheduled", age_ms: 180000 } as {
+        kind: string;
+        age_ms: number;
+      } | null,
+      hold: false,
+      entered: false,
+      seenKind: null as string | null,
+      release: () => {},
+    };
+    scope.__deliveryDetailsFixture = state;
+    const original = scope.__TAURI_INTERNALS__.invoke;
+    scope.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      const result = await original(command, args);
+      if (command !== "owner_delivery_statuses") return result;
+      state.seenKind = state.observation?.kind ?? null;
+      const rows = (result as Array<{ id: string; status: string }>).map(
+        (row) => ({
+          ...row,
+          ...(row.status === "awaiting" && state.observation
+            ? { observation: state.observation }
+            : {}),
+        }),
+      );
+      if (!state.hold) return rows;
+      state.entered = true;
+      return new Promise((resolve) => {
+        state.release = () => resolve(rows);
+      });
+    };
+  });
+}
+
+for (const viewport of [
+  { width: 1280, height: 800, theme: "dark" },
+  { width: 760, height: 620, theme: "light" },
+  { width: 320, height: 360, theme: "dark" },
+]) {
+  test(`delivery details preserve keyboard focus and fit ${viewport.width}x${viewport.height}`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await seedThemeBeforeLoad(page, viewport.theme);
+    await enterChat(page);
+    await openBobDm(page);
+    await observeLocalDelivery(page);
+    await page
+      .getByTestId("composer-input")
+      .fill("Inspect this local delivery");
+    await page.getByTestId("composer-send").click();
+    const bubble = page
+      .getByTestId("message-bubble")
+      .filter({ hasText: "Inspect this local delivery" });
+    const trigger = bubble.getByTestId("delivery-details-trigger");
+    await expect(trigger).toBeVisible();
+    await trigger.focus();
+    await trigger.press("Enter");
+    const details = page.getByTestId("delivery-details");
+    await expect(details).toBeVisible();
+    await expect(details).toHaveAccessibleName("Delivery details");
+    await expect(details).toContainText(/Retry was scheduled .*minutes ago\./);
+    await expect(details.locator("[aria-live]")).toHaveCount(0);
+    await expect(bubble.getByRole("button", { name: /resend/i })).toHaveCount(
+      0,
+    );
+    const bounds = await details.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height);
+    expect(
+      await details.evaluate(
+        (element) => element.scrollWidth <= element.clientWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: testInfo.outputPath("delivery-details-open.png"),
+    });
+    await details.press("Escape");
+    await expect(details).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await trigger.press("Space");
+    await expect(details).toBeVisible();
+    await page.evaluate(() => {
+      (
+        window as unknown as {
+          __deliveryDetailsFixture: { observation: unknown };
+        }
+      ).__deliveryDetailsFixture.observation = null;
+    });
+    await expect(details).toContainText(
+      "No current local attempt details are available.",
+    );
+    await page.evaluate(() => {
+      (
+        window as unknown as {
+          __deliveryDetailsFixture: { observation: unknown };
+        }
+      ).__deliveryDetailsFixture.observation = {
+        kind: "future_phase",
+        age_ms: 0,
+      };
+    });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __deliveryDetailsFixture: { seenKind: string | null };
+              }
+            ).__deliveryDetailsFixture.seenKind,
+        ),
+      )
+      .toBe("future_phase");
+    await expect(details).toContainText(
+      "No current local attempt details are available.",
+    );
+    await page.evaluate((account) => {
+      const scope = window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            cmd: string,
+            args: Record<string, unknown>,
+          ) => Promise<Array<{ id: string }>>;
+        };
+        __mockSetDelivery: (
+          account: string,
+          id: string,
+          status: string,
+        ) => void;
+      };
+      void scope.__TAURI_INTERNALS__
+        .invoke("owner_account_history", {
+          owner: "u_self",
+          account,
+          limit: 500,
+        })
+        .then((rows) => {
+          scope.__mockSetDelivery(
+            account,
+            rows[rows.length - 1]!.id,
+            "delivered",
+          );
+        });
+    }, BOB.account);
+    await expect(details).toBeHidden();
+    await expect(trigger).toHaveCount(0);
+    await expect(bubble.locator('[data-delivery="delivered"]')).toBeVisible();
+  });
+}
+
+test("delivery details close on navigation and app lock, including a late status response", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await observeLocalDelivery(page);
+  await page.getByTestId("composer-input").fill("Owner-scoped delivery detail");
+  await page.getByTestId("composer-send").click();
+  const trigger = page.getByTestId("delivery-details-trigger");
+  await trigger.click();
+  await expect(page.getByTestId("delivery-details")).toBeVisible();
+  await page.getByTestId("conversation-row-acc_carol_cccc3333").click();
+  await expect(page.getByTestId("delivery-details")).toBeHidden();
+  await openBobDm(page);
+  await expect(page.getByTestId("delivery-details")).toBeHidden();
+  await trigger.click();
+  await expect(page.getByTestId("delivery-details")).toBeVisible();
+  await page.evaluate(() => {
+    (
+      window as unknown as { __deliveryDetailsFixture: { hold: boolean } }
+    ).__deliveryDetailsFixture.hold = true;
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              __deliveryDetailsFixture: { entered: boolean };
+            }
+          ).__deliveryDetailsFixture.entered,
+      ),
+    )
+    .toBe(true);
+  await page.evaluate(async () => {
+    const scope = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      __mockEmit: (event: string, payload: unknown) => void;
+      __deliveryDetailsFixture: { release: () => void };
+    };
+    await scope.__TAURI_INTERNALS__.invoke("lock_app", {});
+    scope.__mockEmit("app-locked", null);
+    scope.__deliveryDetailsFixture.release();
+  });
+  await expect(page.getByTestId("chat-shell")).toBeHidden();
+  await expect(page.getByTestId("delivery-details")).toBeHidden();
+  await expect(page.getByTestId("delivery-details-trigger")).toHaveCount(0);
+});
 
 test("text, sticker and file card stay Awaiting until explicit authoritative mock projection", async ({
   page,
@@ -47,6 +273,16 @@ test("text, sticker and file card stay Awaiting until explicit authoritative moc
   ).toBeVisible();
   await expect(page.locator('[data-delivery="awaiting"]')).toHaveCount(3);
   await expect(page.locator('[data-delivery="delivered"]')).toHaveCount(0);
+  const awaitingCard = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "card.txt" });
+  await awaitingCard.getByTestId("delivery-details-trigger").click();
+  const fileDetails = page.getByTestId("delivery-details");
+  await expect(fileDetails).toContainText(
+    "File download and reading are separate.",
+  );
+  await expect(fileDetails).not.toContainText("File card delivered.");
+  await fileDetails.press("Escape");
   // This is a UI presentation mock, not authenticated receipt protocol evidence.
   await page.evaluate((account) => {
     const w = window as unknown as {

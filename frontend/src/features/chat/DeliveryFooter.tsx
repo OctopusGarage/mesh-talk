@@ -1,3 +1,5 @@
+import { DeliveryDetails } from "./DeliveryDetails";
+import { useAuth } from "@/store/auth";
 import { Timer } from "lucide-react";
 import { useChat } from "@/store/chat";
 import { useId } from "react";
@@ -19,6 +21,12 @@ export function DeliveryFooter({
 }) {
   const { t } = useTranslation();
   const tooltip = useId();
+  // A different message, conversation or session owns a fresh, closed disclosure.
+  const authScope = useAuth((s) => `${s.user?.id ?? ""}:${s.generation}`);
+  const chatScope = useChat(
+    (s) => `${s.runEpoch}:${s.identityEpoch}:${s.active?.kind}:${s.active?.id}`,
+  );
+  const detailsKey = `${authScope}:${chatScope}:${message.id}:${message.clientId}`;
   const clock = useChat((state) =>
     message.expiresAtMs == null ? 0 : state.expiryNow,
   );
@@ -47,7 +55,9 @@ export function DeliveryFooter({
     !isChannel &&
     !isPersonal &&
     !message.pending &&
-    !message.failed
+    !message.failed &&
+    !message.recalled &&
+    !!message.id
       ? message.delivery
       : undefined;
   const label = delivery ? t(`message.delivery.${delivery}`) : "";
@@ -116,7 +126,10 @@ export function DeliveryFooter({
           {t(message.file ? "personal.fileCardSaved" : "personal.saved")}
         </span>
       )}
-      {delivery && (
+      {delivery === "awaiting" && (
+        <DeliveryDetails key={detailsKey} message={message} />
+      )}
+      {delivery === "delivered" && (
         <span
           className="group relative inline-flex items-center gap-1"
           tabIndex={0}
@@ -126,7 +139,6 @@ export function DeliveryFooter({
           data-delivery={delivery}
         >
           <span aria-hidden="true">{delivery === "delivered" ? "✓" : "◷"}</span>
-          {delivery === "awaiting" && <span aria-hidden="true">{label}</span>}
           <span
             id={tooltip}
             role="tooltip"

@@ -285,7 +285,13 @@
       "delivered": "已送达",
       "help": "目标账户的自动回执，不代表已读。",
       "fileHelp": "文件卡片已送达，文件下载与阅读另行进行。",
-      "metadataPending": "等待文件信息"
+      "metadataPending": "等待文件信息",
+      "detailsTitle": "送达详情",
+      "attempted": "本机于{{age}}开始了一次发送尝试。",
+      "retryScheduled": "本机于{{age}}安排了重试。",
+      "noDetails": "目前没有本机发送尝试的详情。",
+      "automaticRetry": "系统会自动重试发送，无需重新发送这条消息。",
+      "awaitingFileHelp": "回执确认的是文件卡片已送达，与文件下载和阅读分开。"
     },
     "custody": {
       "local": "尚未确认成员副本",

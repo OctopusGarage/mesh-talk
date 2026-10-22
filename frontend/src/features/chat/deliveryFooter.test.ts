@@ -68,7 +68,7 @@ describe("automatic delivery footer", () => {
       "Saved on this device",
     );
   });
-  it("renders accessible static awaiting/delivered for text, sticker and file cards", async () => {
+  it("renders an awaiting disclosure button and static delivered receipt for text, sticker and file cards", async () => {
     await i18n.changeLanguage("en");
     for (const m of [
       base,
@@ -89,7 +89,9 @@ describe("automatic delivery footer", () => {
       expect(render({ ...m, delivery: "delivered" })).toContain(
         'data-delivery="delivered"',
       );
-      expect(render(m)).toContain('tabindex="0"');
+      expect(render(m)).toContain('data-testid="delivery-details-trigger"');
+      expect(render(m)).toContain('aria-haspopup="dialog"');
+      expect(render({ ...m, delivery: "delivered" })).toContain('tabindex="0"');
     }
   });
   it("never shows a receipt claim for groups, incoming or untracked messages", () => {
@@ -118,6 +120,12 @@ describe("automatic delivery footer", () => {
         "help",
         "fileHelp",
         "metadataPending",
+        "detailsTitle",
+        "attempted",
+        "retryScheduled",
+        "noDetails",
+        "automaticRetry",
+        "awaitingFileHelp",
       ])
         expect(
           i18n.getResource(language, "translation", `message.delivery.${key}`),
@@ -166,4 +174,17 @@ it("shows a countdown for each expiring message, including grouped incoming mess
   });
   expect(html).toContain('data-testid="message-expiry"');
   expect(html).toMatch(/4:5[89]/);
+});
+
+it("excludes details for recalled, pending, failed and unaccepted messages", () => {
+  for (const message of [
+    { ...base, recalled: true },
+    { ...base, pending: true },
+    { ...base, failed: true },
+    { ...base, id: null },
+  ]) {
+    expect(render(message)).not.toContain(
+      'data-testid="delivery-details-trigger"',
+    );
+  }
 });

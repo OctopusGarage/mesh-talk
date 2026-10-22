@@ -285,7 +285,13 @@
       "delivered": "已送達",
       "help": "收件帳戶自動發出嘅收據，唔代表已讀。",
       "fileHelp": "檔案卡片已送達，唔代表檔案已下載或睇過。",
-      "metadataPending": "等候檔案資料"
+      "metadataPending": "等候檔案資料",
+      "detailsTitle": "送達詳情",
+      "attempted": "本機喺{{age}}開始咗一次傳送嘗試。",
+      "retryScheduled": "本機喺{{age}}安排咗重試。",
+      "noDetails": "暫時冇本機傳送嘗試嘅詳情。",
+      "automaticRetry": "系統會自動重試傳送，你唔使重新傳送呢則訊息。",
+      "awaitingFileHelp": "回執確認嘅係檔案卡片已送達，同檔案下載同閱讀係分開嘅。"
     },
     "custody": {
       "local": "未確認有成員副本",
