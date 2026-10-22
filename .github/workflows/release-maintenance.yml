@@ -1,0 +1,104 @@
+name: Release Maintenance
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      stable_tag:
+        description: Published Stable tag to advance development after (empty to refresh the release PR)
+        type: string
+        default: ""
+
+concurrency:
+  group: release-maintenance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-proposal:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'release' && inputs.stable_tag == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22
+      - name: Propose the next release or create its draft after merge
+        id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          target-branch: main
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - name: Synchronize the release PR's checked version projections
+        if: steps.release.outputs.pr != ''
+        env:
+          RELEASE_PR: ${{ fromJSON(steps.release.outputs.pr).number }}
+        run: node scripts/release/maintenance.mjs sync-pr "$RELEASE_PR"
+      - name: Explicitly start the exact tagged draft build
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: node scripts/release/maintenance.mjs draft-build "$RELEASE_TAG" "$RELEASE_SHA"
+
+  next-development:
+    if: (github.event_name == 'release' && github.event.release.prerelease == false && github.event.release.draft == false) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.stable_tag != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22
+      - name: Advance the development target beyond published Stable
+        id: next
+        env:
+          STABLE_TAG: ${{ github.event.release.tag_name || inputs.stable_tag }}
+        run: node scripts/release/maintenance.mjs next-development "$STABLE_TAG"
+      - name: Open a reviewed development-target PR
+        if: steps.next.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: main
+          branch: automation/next-development
+          delete-branch: true
+          commit-message: "chore(release): prepare development version ${{ steps.next.outputs.version }}"
+          title: "chore(release): prepare development version ${{ steps.next.outputs.version }}"
+          body: |
+            Advance the canonical Cargo development target beyond published Stable and synchronize its generated metadata. This creates no release or tag.
+
+            Review the diff and run required CI before merging. GitHub may require a maintainer to approve bot PR workflows; if required checks are absent, close/reopen this PR as a maintainer to trigger them. Follow docs/updates.md.
+          add-paths: |
+            Cargo.toml
+            Cargo.lock
+            package.json
+            package-lock.json
+            frontend/package.json
+            frontend/package-lock.json

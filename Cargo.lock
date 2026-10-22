@@ -3165,7 +3165,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-talk"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "ashpd",
  "block2 0.6.2",
@@ -3210,7 +3210,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-talk-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "aes-gcm 0.11.1",
  "argon2",
@@ -3243,7 +3243,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-talk-integrations"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "clap",
  "hex",
@@ -3262,7 +3262,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-talk-mcp"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "clap",
  "mesh-talk-core",

@@ -1,6 +1,5 @@
 {
   "name": "mesh-talk-frontend",
-  "version": "0.4.3",
   "description": "Encrypted peer-to-peer messaging across local networks and sites",
   "type": "module",
   "scripts": {
@@ -79,5 +78,6 @@
     "v8-to-istanbul": "^9.3.0",
     "vite": "^8.3.4",
     "vitest": "^5.0.3"
-  }
+  },
+  "private": true
 }

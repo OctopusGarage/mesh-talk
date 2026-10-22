@@ -118,6 +118,10 @@ fn release_version(release: &Release, channel: UpdateChannel) -> Result<ReleaseI
     )
 }
 
+pub(crate) fn current_build_version() -> &'static str {
+    env!("MESH_TALK_BUILD_VERSION")
+}
+
 fn current_identity() -> ReleaseIdentity {
     ReleaseIdentity::parse(env!("MESH_TALK_BUILD_TAG")).expect("validated build identity")
 }
@@ -161,7 +165,7 @@ fn describe_release(
         .and_then(|name| selected_asset(release, name));
     let newer = latest > current;
     Ok(UpdateCheck {
-        current_version: env!("MESH_TALK_BUILD_TAG")[1..].to_string(),
+        current_version: current_build_version().to_string(),
         latest_version: release.tag_name[1..].to_string(),
         is_newer: newer,
         release_url: format!("{RELEASES_URL}/tag/{}", release.tag_name),
@@ -189,7 +193,7 @@ fn describe_release(
 
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .user_agent(format!("mesh-talk/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("mesh-talk/{}", current_build_version()))
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
         .build()
@@ -353,6 +357,29 @@ fn destination(downloads: &std::path::Path, name: &str) -> PathBuf {
     downloads.join(format!("{base} ({}).zip", std::process::id()))
 }
 
+/// Revalidate the exact immutable build selected by the user, independently of
+/// destination paths and native window state. Newer publications do not change it.
+async fn requested_release_from(
+    client: &reqwest::Client,
+    releases_url: &str,
+    version: &str,
+    channel: UpdateChannel,
+    current: &ReleaseIdentity,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<Release, String> {
+    let tag = format!("v{version}");
+    let identity = ReleaseIdentity::published(&tag, version.contains("-nightly."), false, channel)?;
+    if identity <= *current {
+        return Err("The selected build is not a newer update for this channel".into());
+    }
+    let url = format!("{releases_url}/tags/{tag}");
+    let release = release_or_cancel(latest_release_from(client, &url), cancel).await?;
+    if release.tag_name != tag || release_version(&release, channel)? != identity {
+        return Err("The available release changed. Check for updates again".into());
+    }
+    Ok(release)
+}
+
 #[tauri::command]
 pub async fn download_update(
     app: tauri::AppHandle,
@@ -371,23 +398,15 @@ pub async fn download_update(
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cancel_sender);
     let _cancel_registration = CancelRegistration;
     let channel = update_channel.unwrap_or_default();
-    // Resolve only an allowlisted, canonical tag on the owning repository. The
-    // exact checked build remains downloadable if another Nightly is published.
-    let tag = format!("v{version}");
-    let identity = ReleaseIdentity::parse(&tag)?;
-    if identity <= current_identity() || (channel == UpdateChannel::Stable && identity.is_nightly())
-    {
-        return Err("The selected build is not a newer update for this channel".into());
-    }
-    let url = format!("{API_RELEASES}/tags/{tag}");
-    let release = release_or_cancel(
-        latest_release_from(&client(Duration::from_secs(20))?, &url),
+    let release = requested_release_from(
+        &client(Duration::from_secs(20))?,
+        API_RELEASES,
+        &version,
+        channel,
+        &current_identity(),
         cancel_receiver.clone(),
     )
     .await?;
-    if release.tag_name != tag || release_version(&release, channel)? != identity {
-        return Err("The available release changed. Check for updates again".into());
-    }
     let name = package_name(
         &release.tag_name,
         std::env::consts::OS,
@@ -743,14 +762,151 @@ mod tests {
         server.await.unwrap();
     }
 
+    async fn serve_release_responses(
+        responses: Vec<(String, &'static str, String)>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            for (path, status, body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 2048];
+                let read = stream.read(&mut request).await.unwrap();
+                assert!(
+                    String::from_utf8_lossy(&request[..read]).starts_with(&format!("GET {path} "))
+                );
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (url, task)
+    }
+
+    fn release_body(tag: &str, prerelease: bool, draft: bool) -> serde_json::Value {
+        serde_json::json!({"tag_name":tag,"body":"Notes","prerelease":prerelease,"draft":draft,"assets":[]})
+    }
+
+    #[tokio::test]
+    async fn download_lookup_keeps_exact_identity_and_rejects_changed_publication() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let current = ReleaseIdentity::parse("v0.4.3").unwrap();
+        let tag = "v0.4.4-nightly.123.1";
+        for (returned_tag, prerelease, draft, succeeds) in [
+            (tag, true, false, true),
+            ("v0.4.4-nightly.124.1", true, false, false),
+            (tag, false, false, false),
+            (tag, true, true, false),
+        ] {
+            let (url, server) = serve_release_responses(vec![(
+                format!("/tags/{tag}"),
+                "200 OK",
+                release_body(returned_tag, prerelease, draft).to_string(),
+            )])
+            .await;
+            let (_cancel_sender, cancel) = tokio::sync::watch::channel(false);
+            let result = requested_release_from(
+                &client,
+                &url,
+                &tag[1..],
+                UpdateChannel::Nightly,
+                &current,
+                cancel,
+            )
+            .await;
+            assert_eq!(
+                result.is_ok(),
+                succeeds,
+                "{returned_tag} prerelease={prerelease} draft={draft}"
+            );
+            server.await.unwrap();
+        }
+        // Reject channel mismatch, development identities, traversal and
+        // downgrades before making any HTTP request.
+        for (version, channel) in [
+            ("0.4.4-nightly.123.1", UpdateChannel::Stable),
+            ("0.4.4-dev", UpdateChannel::Nightly),
+            ("0.4.3", UpdateChannel::Stable),
+            ("0.4.2", UpdateChannel::Nightly),
+            ("0.4.4/../../other", UpdateChannel::Nightly),
+        ] {
+            let (_cancel_sender, cancel) = tokio::sync::watch::channel(false);
+            let error = requested_release_from(
+                &client,
+                "http://127.0.0.1:1",
+                version,
+                channel,
+                &current,
+                cancel,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(
+                !error.contains("reach GitHub"),
+                "must reject before the connection: {version}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nightly_discovery_stops_at_its_bound_and_reports_no_public_builds() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let foreign = vec![release_body("v99.0.0-beta.1", true, false); RELEASE_PAGE_SIZE];
+        let mut responses = vec![("/latest".to_string(), "404 Not Found", "{}".to_string())];
+        for page in 1..=MAX_RELEASE_PAGES {
+            responses.push((
+                format!("/releases?per_page={RELEASE_PAGE_SIZE}&page={page}"),
+                "200 OK",
+                serde_json::to_string(&foreign).unwrap(),
+            ));
+        }
+        let (url, server) = serve_release_responses(responses).await;
+        let error = nightly_release_from(
+            &client,
+            &format!("{url}/releases"),
+            &format!("{url}/latest"),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("catalog is too large"));
+        server.await.unwrap();
+
+        for stable in [None, Some("v0.4.3")] {
+            let response = stable
+                .map(|tag| ("200 OK", release_body(tag, false, false).to_string()))
+                .unwrap_or(("404 Not Found", "{}".into()));
+            let (url, server) = serve_release_responses(vec![
+                ("/latest".into(), response.0, response.1),
+                ("/releases?per_page=10&page=1".into(), "200 OK", "[]".into()),
+            ])
+            .await;
+            let result = nightly_release_from(
+                &client,
+                &format!("{url}/releases"),
+                &format!("{url}/latest"),
+            )
+            .await;
+            if let Some(tag) = stable {
+                assert_eq!(result.unwrap().tag_name, tag);
+            } else {
+                assert!(result.err().unwrap().contains("No published release"));
+            }
+            server.await.unwrap();
+        }
+    }
+
     #[test]
     fn channel_selection_ignores_drafts_and_foreign_prereleases() {
         let releases = || {
             vec![
-                catalog_release("v0.4.3-nightly.9.1", true, false),
-                catalog_release("v0.4.3-nightly.10.1", true, false),
-                catalog_release("v0.4.4-beta.999", true, false),
-                catalog_release("v0.4.4-nightly.20.1", true, true),
+                catalog_release("v0.4.4-nightly.9.1", true, false),
+                catalog_release("v0.4.4-nightly.10.1", true, false),
+                catalog_release("v0.4.5-beta.999", true, false),
+                catalog_release("v0.4.5-nightly.20.1", true, true),
                 catalog_release("v0.4.3", false, false),
             ]
         };
@@ -764,23 +920,23 @@ mod tests {
             select_release(releases(), UpdateChannel::Nightly)
                 .unwrap()
                 .tag_name,
-            "v0.4.3-nightly.10.1"
+            "v0.4.4-nightly.10.1"
         );
         assert_eq!(
             select_release(
                 vec![
-                    catalog_release("v0.4.4", false, false),
-                    catalog_release("v0.4.3-nightly.10.1", true, false)
+                    catalog_release("v0.4.5", false, false),
+                    catalog_release("v0.4.4-nightly.10.1", true, false)
                 ],
                 UpdateChannel::Nightly
             )
             .unwrap()
             .tag_name,
-            "v0.4.4"
+            "v0.4.5"
         );
         assert!(
             select_release(
-                vec![catalog_release("v0.4.4-beta.1", true, false)],
+                vec![catalog_release("v0.4.5-beta.1", true, false)],
                 UpdateChannel::Nightly
             )
             .is_err()
@@ -1115,7 +1271,10 @@ mod tests {
             UpdateChannel::Stable,
         )
         .unwrap();
-        assert!(!current.is_newer);
+        assert_eq!(
+            current.is_newer,
+            release_version(&release, UpdateChannel::Stable).unwrap() > current_identity()
+        );
         assert_eq!(current.current_version, env!("MESH_TALK_BUILD_TAG")[1..]);
         assert_eq!(current.latest_version, installed.to_string());
         assert_eq!(current.notes.chars().count(), 1200);

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { compareVersions } from "./version.mjs";
 import { execFileSync } from "node:child_process";
 
 export function releaseFromPages(pages, tag) {
@@ -31,4 +32,11 @@ export function getPublishedNightly(repo, sha) {
   const pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+-nightly\\.[1-9][0-9]*\\.[1-9][0-9]*$";
   const matches = filteredReleases(repo, `select(.draft == false and .prerelease == true and .target_commitish == ${JSON.stringify(sha)} and (.tag_name | test(${JSON.stringify(pattern)}))) | {tag_name, target_commitish, draft, prerelease}`);
   return matches[0] ?? null;
+}
+
+/** Highest numeric published Stable, independent of pagination/creation order. */
+export function getLatestPublishedStable(repo) {
+  const pattern = "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$";
+  const matches = filteredReleases(repo, `select(.draft == false and .prerelease == false and (.tag_name | test(${JSON.stringify(pattern)}))) | {tag_name}`);
+  return matches.reduce((latest, release) => latest === null || compareVersions(release.tag_name.slice(1), latest.tag_name.slice(1)) > 0 ? release : latest, null);
 }

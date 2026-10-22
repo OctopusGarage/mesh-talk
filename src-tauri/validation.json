@@ -286,6 +286,7 @@
           "package": "mesh-talk",
           "filters": [
             "diagnostics::",
+            "updates::",
             "perf::",
             "logger::"
           ]
@@ -311,14 +312,14 @@
         }
       ],
       "escalation": [
-        "Updater/native process and release artifact changes require explicit native/release validation; exercise same-base Nightly replacement on each native installer and exact-source hosted signing/publication."
+        "Updater/native process and release artifact changes require explicit native/release validation; verify logical About/diagnostics versions and numeric native metadata agree with the canonical target; exercise same-base Nightly replacement on each native installer and exact-source hosted signing/publication."
       ],
       "capability": {
         "summary": "Discover explicit update channels and revalidate immutable build identity before verified manual device-matching downloads.",
         "guide": "docs/updates.md",
         "invariants": [
           {
-            "name": "Stable is the default and rejects drafts and all prereleases. Nightly accepts only published canonical Nightly identities or Stable; compare base versions then numeric run/attempt, preserving edition/OS/architecture and never silently downgrading.",
+            "name": "Stable is the default and rejects drafts and all prereleases. Nightly accepts only published canonical Nightly identities or Stable; use standard SemVer ordering for BASE-dev, BASE-nightly.RUN.ATTEMPT and tagged BASE, preserving edition/OS/architecture and never silently downgrading.",
             "reference": "docs/updates.md"
           },
           {

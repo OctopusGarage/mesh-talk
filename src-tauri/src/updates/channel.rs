@@ -10,39 +10,35 @@ pub enum UpdateChannel {
     Nightly,
 }
 
-/// Native installer versions remain the workspace base version. The update feed
-/// orders immutable builds separately, so a new build needs no stable version bump.
-/// At the same base, nightly builds follow stable; returning to stable therefore
-/// never presents an older same-base binary as an upgrade.
+/// Canonical logical build identity. Ordering delegates directly to SemVer:
+/// previous stable < next-target dev < next-target Nightly < final stable.
+/// Numeric native installer versions are a separate projection of the target.
 #[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) struct ReleaseIdentity {
-    base: semver::Version,
-    nightly: Option<(u64, u64)>,
-}
+pub(super) struct ReleaseIdentity(semver::Version);
 
 impl ReleaseIdentity {
     pub(super) fn parse(tag: &str) -> Result<Self, String> {
         let invalid = || "The release build identity is invalid".to_string();
-        let version = tag.strip_prefix('v').ok_or_else(invalid)?;
-        let (base, nightly) = match version.split_once("-nightly.") {
-            Some((base, build)) => {
-                let (run, attempt) = build.split_once('.').ok_or_else(invalid)?;
-                let number = |value: &str| -> Result<u64, String> {
-                    let parsed = value.parse::<u64>().map_err(|_| invalid())?;
-                    if parsed == 0 || parsed.to_string() != value {
-                        return Err(invalid());
-                    }
-                    Ok(parsed)
-                };
-                (base, Some((number(run)?, number(attempt)?)))
-            }
-            None => (version, None),
-        };
-        let base = semver::Version::parse(base).map_err(|_| invalid())?;
-        if !base.pre.is_empty() || !base.build.is_empty() {
+        let value = tag.strip_prefix('v').ok_or_else(invalid)?;
+        let version = semver::Version::parse(value).map_err(|_| invalid())?;
+        if version.to_string() != value || !version.build.is_empty() {
             return Err(invalid());
         }
-        Ok(Self { base, nightly })
+        let pre = version.pre.as_str();
+        if !pre.is_empty() && pre != "dev" {
+            let build = pre.strip_prefix("nightly.").ok_or_else(invalid)?;
+            let parts: Vec<_> = build.split('.').collect();
+            if parts.len() != 2
+                || !parts.iter().all(|value| {
+                    value
+                        .parse::<u64>()
+                        .is_ok_and(|number| number > 0 && number.to_string() == *value)
+                })
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(Self(version))
     }
 
     pub(super) fn published(
@@ -53,7 +49,8 @@ impl ReleaseIdentity {
     ) -> Result<Self, String> {
         let identity = Self::parse(tag)?;
         if draft
-            || prerelease != identity.nightly.is_some()
+            || identity.0.pre.as_str() == "dev"
+            || prerelease != identity.is_nightly()
             || (channel == UpdateChannel::Stable && prerelease)
         {
             return Err("The release does not belong to the selected update channel".into());
@@ -62,7 +59,7 @@ impl ReleaseIdentity {
     }
 
     pub(super) fn is_nightly(&self) -> bool {
-        self.nightly.is_some()
+        self.0.pre.as_str().starts_with("nightly.")
     }
 }
 
@@ -90,19 +87,23 @@ mod tests {
     }
 
     #[test]
-    fn nightly_order_is_numeric_and_does_not_require_a_version_bump() {
-        let stable = ReleaseIdentity::parse("v0.4.3").unwrap();
-        let first = ReleaseIdentity::parse("v0.4.3-nightly.9.1").unwrap();
-        let second = ReleaseIdentity::parse("v0.4.3-nightly.10.1").unwrap();
-        let retry = ReleaseIdentity::parse("v0.4.3-nightly.10.2").unwrap();
-        let next = ReleaseIdentity::parse("v0.4.4").unwrap();
-        assert!(first > stable);
+    fn semver_orders_development_nightly_and_final_release() {
+        let previous = ReleaseIdentity::parse("v0.4.3").unwrap();
+        let first = ReleaseIdentity::parse("v0.4.4-nightly.9.1").unwrap();
+        let second = ReleaseIdentity::parse("v0.4.4-nightly.10.1").unwrap();
+        let retry = ReleaseIdentity::parse("v0.4.4-nightly.10.2").unwrap();
+        let stable = ReleaseIdentity::parse("v0.4.4").unwrap();
+        assert!(first > previous);
         assert!(second > first);
         assert!(retry > second);
-        assert!(next > retry);
         assert!(
-            stable < retry,
-            "returning to stable must not silently downgrade"
+            stable > retry,
+            "the final release must naturally replace its Nightly"
+        );
+        let development = ReleaseIdentity::parse("v0.4.4-dev").unwrap();
+        assert!(development > previous && development < first);
+        assert!(
+            ReleaseIdentity::published("v0.4.4-dev", true, false, UpdateChannel::Nightly).is_err()
         );
     }
 

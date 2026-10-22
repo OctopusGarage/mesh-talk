@@ -218,13 +218,13 @@ test("Nightly choice persists, discards candidates and downloads the same lite e
           args.updateChannel;
         return {
           channel: args.updateChannel,
-          current_version: "0.4.3-nightly.41.1",
-          latest_version: "0.4.3-nightly.42.1",
+          current_version: "0.4.4-nightly.41.1",
+          latest_version: "0.4.4-nightly.42.1",
           is_newer: true,
           release_url:
-            "https://github.com/OctopusGarage/mesh-talk/releases/tag/v0.4.3-nightly.42.1",
+            "https://github.com/OctopusGarage/mesh-talk/releases/tag/v0.4.4-nightly.42.1",
           notes: "Nightly preview",
-          package_name: "mesh-talk_v0.4.3-nightly.42.1_linux_x86_64_lite.zip",
+          package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
           package_size: 42,
           edition: "lite",
         };
@@ -237,8 +237,8 @@ test("Nightly choice persists, discards candidates and downloads the same lite e
           channel: args.updateChannel,
         };
         return {
-          path: "/Downloads/mesh-talk_v0.4.3-nightly.42.1_linux_x86_64_lite.zip",
-          file_name: "mesh-talk_v0.4.3-nightly.42.1_linux_x86_64_lite.zip",
+          path: "/Downloads/mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
+          file_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
         };
       }
       return original(cmd, args);
@@ -248,9 +248,9 @@ test("Nightly choice persists, discards candidates and downloads the same lite e
   await expect(choice).toHaveValue("nightly");
   await expect(page.getByTestId("download-update")).toHaveCount(0);
   await page.getByTestId("check-for-updates").click();
-  await expect(page.getByText("Installed: 0.4.3-nightly.41.1")).toBeVisible();
+  await expect(page.getByText("Installed: 0.4.4-nightly.41.1")).toBeVisible();
   await expect(
-    page.getByText(/mesh-talk_v0.4.3-nightly.42.1_linux_x86_64_lite.zip/),
+    page.getByText(/mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip/),
   ).toBeVisible();
   await choice.selectOption("stable");
   await expect(page.getByTestId("download-update")).toHaveCount(0);
@@ -271,7 +271,7 @@ test("Nightly choice persists, discards candidates and downloads the same lite e
         (window as unknown as { __downloadRequest: unknown }).__downloadRequest,
     ),
   ).toEqual({
-    version: "0.4.3-nightly.42.1",
+    version: "0.4.4-nightly.42.1",
     channel: "nightly",
   });
 });

@@ -82,7 +82,7 @@ test("Nightly runs gate main before the shared matrix and publish verified prere
   assert.match(preflight, /check-source-checks\.mjs/);
   assert.match(preflight, /checks: read/);
   assert.match(preflight, /security-events: read/);
-  assert.match(workflow, /MESH_TALK_BUILD_TAG: .*outputs.nightly == 'true' && needs.preflight.outputs.tag \|\| format\('v\{0\}'/);
+  assert.match(workflow, /MESH_TALK_BUILD_TAG: .*outputs.nightly == 'true' \|\| startsWith\(github.ref, 'refs\/tags\/'\)\).*outputs.tag \|\| format\('v\{0\}-dev'/);
   const verify = workflow.split("  verify-release:\n")[1].split("  resolve-publication:\n")[0];
   assert.match(verify, /prepare-nightly\.mjs/);
   assert.match(verify, /target_commitish: \$\{\{ github.sha \}\}/);

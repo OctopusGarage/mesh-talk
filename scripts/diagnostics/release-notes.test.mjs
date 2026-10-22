@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { renderReleaseNotes } from "../release/render-notes.mjs";
 
@@ -47,7 +48,7 @@ test("the workflow renderer writes notes from the GitHub build identity", (t) =>
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, ".github"));
   writeFileSync(join(root, ".github/release-notes.md"), template);
-  execFileSync(process.execPath, [new URL("../release/render-notes.mjs", import.meta.url).pathname], {
+  execFileSync(process.execPath, [fileURLToPath(new URL("../release/render-notes.mjs", import.meta.url))], {
     cwd: root,
     env: { ...process.env, ARTIFACT_TAG: "v0.1.6-nightly.123.2", SOURCE_REPO: source.repository, SOURCE_REF: "refs/heads/main", SOURCE_SHA: source.sha, GITHUB_RUN_ID: source.runId, GITHUB_RUN_ATTEMPT: source.runAttempt, RELEASE_NIGHTLY: "true" },
   });

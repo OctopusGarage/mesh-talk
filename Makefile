@@ -1,7 +1,7 @@
 # Makefile for Mesh-Talk
 
 # Development commands
-.PHONY: dev build test test-focused test-plan test-changed verify-plan verify-changed standards-check validation-report validation-audit test-timing e2e eval-smoke ai-eval smoke-full clean clean-builds clean-builds-dry-run check
+.PHONY: dev build test test-focused test-plan test-changed verify-plan verify-changed version-check version-sync version-prepare standards-check validation-report validation-audit test-timing e2e eval-smoke ai-eval smoke-full clean clean-builds clean-builds-dry-run check
 
 # Managed commands coordinate with cache eviction across all local worktrees.
 MANAGED_BUILD = python3 scripts/build-retention.py run --
@@ -40,6 +40,16 @@ verify-plan:
 
 verify-changed:
 	node scripts/validation/changed.mjs --checks --run --managed $(VALIDATION_ARGS)
+
+version-check:
+	node scripts/release/version.mjs check
+
+version-sync:
+	node scripts/release/version.mjs sync
+
+version-prepare:
+	@test -n "$(VERSION)" || { echo "Usage: make version-prepare VERSION=0.x.y" >&2; exit 2; }
+	node scripts/release/version.mjs prepare "$(VERSION)"
 
 standards-check:
 	node scripts/validation/standards.mjs
@@ -136,6 +146,9 @@ help:
 	@echo "  make test-focused TEST_PACKAGE=... TEST_FILTER=...  Run affected Rust tests"
 	@echo "  make test-plan        Preview affected development tests and selection reasons"
 	@echo "  make test-changed     Run the affected plan; block unknown/no-test selections"
+	@echo "  make version-check    Verify canonical product version and generated projections"
+	@echo "  make version-sync     Repair generated version projections"
+	@echo "  make version-prepare VERSION=0.x.y  Prepare the next numeric product target"
 	@echo "  make standards-check  Check validation ownership and maintained references"
 	@echo "  make verify-plan      Preview affected tests and static obligations"
 	@echo "  make verify-changed   Run affected formatting, lint/types, builds and tests"

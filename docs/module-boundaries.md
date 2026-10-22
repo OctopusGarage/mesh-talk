@@ -188,7 +188,15 @@ for preview/run commands, unknown-path handling and the unchanged mandatory gate
 `updates.rs` owns bounded GitHub discovery, exact-release revalidation and verified manual downloads.
 The frontend update store owns the device-local channel preference and invalidation of checked
 candidates; its IPC adapter forwards the choice without choosing packages. The existing release
-workflow and `scripts/release/` own build identity, publication and provenance. See
+workflow and `scripts/release/` own build identity, publication and provenance.
+Root Cargo `workspace.package.version` owns the next numeric product target;
+`scripts/release/version.mjs` owns version preparation, checked projections and drift detection.
+Tauri inherits Cargo, root private npm metadata is a generated release-tooling projection,
+and the private frontend metadata is versionless. `scripts/release/maintenance.mjs` and
+`release-maintenance.yml` coordinate reviewed release and next-target PRs, draft creation and
+explicit build dispatch; they cannot replace the final verified Stable publication gate.
+Source/Nightly/Stable logical identities follow SemVer independently of numeric native package
+metadata. New consumers extend these owners rather than creating manual version copies. See
 [updates and publication](updates.md) for invariants, triggers and native acceptance requirements.
 Channel choice does not change protocol, account/device identity, data location or edition.
 

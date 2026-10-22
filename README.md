@@ -183,6 +183,10 @@ Protect the password file; on Unix, use mode `0600`. For post-office flags, serv
 deployment, and release builds, follow the
 [deployment guide](specifications/deployment_guide.md).
 
+Source builds identify themselves as the next target's `-dev` build. Product versions have
+one Cargo owner; release proposals, immutable Nightlies and reviewed next-target updates
+follow the [version and release lifecycle](docs/updates.md#version-ownership-and-lifecycle).
+
 Bots and local AI agents can send through scoped credentials. See the
 [bot integration guide](docs/bot-integrations.md) for desktop and headless setup.
 

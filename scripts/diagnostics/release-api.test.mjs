@@ -45,6 +45,14 @@ test("release API filters large paginated histories before Node captures metadat
   assert.equal(Object.hasOwn(summary, "assets"), false, "schedule dedup must capture only a lean summary");
   assert.equal(run(`api.getReleaseByTag('owner/repo', 'v9.9.9')`, pages), null);
   assert.deepEqual(run(`api.getReleaseByTag('owner/repo', '${selected.tag_name}')`, [[...unrelated], [{ ...selected, draft: true }]]), { ...selected, draft: true }, "draft lookup must span every page");
+  assert.equal(run("api.getLatestPublishedStable('owner/repo')", pages), null);
+  assert.deepEqual(run("api.getLatestPublishedStable('owner/repo')", [[
+    { tag_name: "v0.4.9", draft: false, prerelease: false, assets: ["excluded"] },
+    { tag_name: "v0.4.10", draft: false, prerelease: false },
+    { tag_name: "v0.5.0", draft: true, prerelease: false },
+    { tag_name: "v0.6.0", draft: false, prerelease: true },
+    { tag_name: "v1.0.0-nightly.3.1", draft: false, prerelease: false },
+  ]]), { tag_name: "v0.4.10" }, "highest published numeric Stable wins, independent of creation order");
   const unusualTag = 'v0.1.6" or true #';
   assert.equal(run(`api.getReleaseByTag('owner/repo', ${JSON.stringify(unusualTag)})`, pages), null, "tag values must remain a jq string literal");
   assert.throws(() => run(`api.getReleaseByTag('owner/repo', '${selected.tag_name}')`, [[selected], [selected]]), /multiple releases/);

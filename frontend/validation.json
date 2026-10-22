@@ -440,16 +440,23 @@
         "frontend/src/store/updates.ts",
         "frontend/src/store/updates.test.ts",
         "frontend/src/features/chat/UpdatePanel.tsx",
+        "frontend/src/features/chat/UpdatePanel.test.ts",
         "frontend/src/lib/api/diagnostics.ts",
+        "frontend/src/lib/api/diagnostics.test.ts",
+        "frontend/src/features/chat/AboutDialog.tsx",
         "frontend/e2e/update-flow.spec.ts"
       ],
-      "frontend": ["src/store/updates.test.ts"],
+      "frontend": [
+        "src/store/updates.test.ts",
+        "src/features/chat/UpdatePanel.test.ts",
+        "src/lib/api/diagnostics.test.ts"
+      ],
       "capability": {
         "summary": "Persist a device-local explicit update channel and discard prior candidates on channel changes, preserving native release and edition authority.",
         "guide": "docs/updates.md",
         "invariants": [
           {
-            "name": "Channel changes never implicitly check, download or downgrade, and in-flight work prevents selection changes",
+            "name": "About displays the host logical build identity; channel changes never implicitly check, download or downgrade, and in-flight work prevents selection changes",
             "reference": "docs/updates.md"
           }
         ]
@@ -661,7 +668,10 @@
         "frontend/src/store/updates.ts",
         "frontend/src/store/updates.test.ts",
         "frontend/src/features/chat/UpdatePanel.tsx",
+        "frontend/src/features/chat/UpdatePanel.test.ts",
         "frontend/src/lib/api/diagnostics.ts",
+        "frontend/src/lib/api/diagnostics.test.ts",
+        "frontend/src/features/chat/AboutDialog.tsx",
         "frontend/e2e/update-flow.spec.ts",
         "frontend/src/lib/types.ts"
       ],

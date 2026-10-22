@@ -12,11 +12,11 @@ const key = "mesh-talk-update-channel";
 const candidate = {
   channel: "nightly",
   current_version: "0.4.3",
-  latest_version: "0.4.3-nightly.42.1",
+  latest_version: "0.4.4-nightly.42.1",
   is_newer: true,
   release_url: "https://example.com/release",
   notes: "Preview",
-  package_name: "mesh-talk_v0.4.3-nightly.42.1_linux_x86_64_lite.zip",
+  package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
   package_size: 42,
   edition: "lite",
 } satisfies UpdateCheck;
