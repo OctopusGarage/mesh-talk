@@ -11,7 +11,6 @@ import { Sidebar } from "./Sidebar";
 import { ConversationView } from "./ConversationView";
 import { CallDialog } from "./CallDialog";
 import { chat as chatApi } from "@/lib/api";
-import { ensureNotificationPermission } from "@/lib/notify";
 import { savePendingUnread, saveUnread } from "@/lib/unreadStorage";
 import { useChat } from "@/store/chat";
 import { usePresence } from "@/store/presence";
@@ -77,12 +76,6 @@ export function ChatApp() {
     }
   }, [owner, unreadOwner, accountId, ready, unread, pendingUnknownUnread]);
 
-  // Request notification authorization once at startup. On macOS the dock unread badge only
-  // renders if the app is authorized for notification badges, so this is what makes the badge
-  // work out of the box (rather than requiring the user to enable it in System Settings).
-  useEffect(() => {
-    void ensureNotificationPermission();
-  }, []);
   useEffect(() => {
     useSettings.getState().setOwner(owner ?? null);
     if (owner) void loadSettings();

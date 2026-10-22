@@ -93,8 +93,8 @@ fn paint_badge<R: tauri::Runtime>(handle: &tauri::AppHandle<R>, count: u32) {
 /// `NSApp` (nil until first set), and force a `display()` so the number actually shows.
 ///
 /// NOTE: macOS only renders the dock badge if the app is authorized for notification badges
-/// (System Settings ▸ Notifications ▸ <app> ▸ Badges). The app requests that authorization at
-/// startup (see the frontend `ensureNotificationPermission`); without it this silently no-ops.
+/// (System Settings ▸ Notifications ▸ <app> ▸ Badges). The app requests that authorization through
+/// the explicit notification-enable action; without it this silently no-ops.
 ///
 /// MUST be called on the main thread (AppKit requirement); callers hop via `run_on_main_thread`.
 #[cfg(target_os = "macos")]

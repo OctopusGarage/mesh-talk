@@ -1,3 +1,5 @@
+import { NotificationPermissionNotice } from "./NotificationPermissionNotice";
+import { useNotificationPermissionReminder } from "./useNotificationPermissionReminder";
 import { displayIdentity } from "@/lib/displayIdentity";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso } from "react-virtuoso";
@@ -77,6 +79,9 @@ export function ConversationView() {
   const active = useChat((s) => s.active);
   const owner = useAuth((s) => s.user?.id ?? null);
   const authGeneration = useAuth((s) => s.generation);
+  const notificationReminder = useNotificationPermissionReminder(
+    `${owner}:${authGeneration}`,
+  );
   const receptionScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
   const myAccountId = useChat((s) => s.myAccountId);
   const isPersonal = active?.kind === "account" && active.id === myAccountId;
@@ -403,6 +408,11 @@ export function ConversationView() {
           )
         )}
       </header>
+      {notificationReminder.visible && (
+        <NotificationPermissionNotice
+          onDismiss={notificationReminder.dismiss}
+        />
+      )}
       <ReceptionStatus
         key={`${receptionScope}:${key}`}
         conversation={key}

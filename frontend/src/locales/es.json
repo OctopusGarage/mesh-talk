@@ -1070,5 +1070,30 @@
     "previousFingerprint": "Anterior: {{fingerprint}}",
     "currentFingerprint": "Actual: {{fingerprint}}",
     "noDeviceChanges": "No hay cambios de dispositivo registrados."
+  },
+  "notificationPermission": {
+    "denied": "Las notificaciones están bloqueadas en los ajustes del sistema",
+    "granted": "El sistema permite las notificaciones",
+    "prompt": "Permitir notificaciones en este dispositivo",
+    "limited": "Las alertas de notificación están limitadas",
+    "unknown": "No se pudo verificar el permiso del sistema",
+    "checking": "Comprobando el permiso del sistema…",
+    "settingsHint": "Tu preferencia está guardada. Las alertas de mensajes nuevos necesitan el permiso del sistema.",
+    "messageHint": "Los mensajes se siguen enviando, pero podrías perderte las notificaciones de respuesta.",
+    "allowedHint": "El modo de concentración o No molestar puede silenciar las alertas.",
+    "openSettings": "Abrir ajustes del sistema",
+    "checkAgain": "Volver a comprobar",
+    "allow": "Permitir notificaciones",
+    "requesting": "Esperando permiso…",
+    "returnHint": "Vuelve aquí después de cambiar el ajuste. El permiso se comprueba automáticamente.",
+    "openFailed": "No se pudieron abrir los ajustes del sistema.",
+    "reminder": "Permiso de notificaciones",
+    "dismiss": "Descartar recordatorio de notificaciones",
+    "instructions": {
+      "macos": "En Ajustes del Sistema → Notificaciones → Mesh-Talk, activa Permitir notificaciones.",
+      "windows": "En Configuración → Sistema → Notificaciones, activa las notificaciones y permite Mesh-Talk.",
+      "linux": "Revisa los ajustes de notificaciones de tu escritorio y permite Mesh-Talk.",
+      "other": "Abre los ajustes de notificaciones del dispositivo y permite Mesh-Talk."
+    }
   }
 }

@@ -543,6 +543,41 @@
       "escalation": [
         "Run the update-flow browser spec for persisted selection, candidate invalidation, lite identity forwarding and manual installation. Signed native downloads require native owner evidence."
       ]
+    },
+    {
+      "id": "frontend-notification-permission",
+      "paths": [
+        "frontend/src/lib/notify.ts",
+        "frontend/src/lib/notify.test.ts",
+        "frontend/src/lib/api/notifications.ts",
+        "frontend/src/features/chat/NotificationPermissionHelp.tsx",
+        "frontend/src/features/chat/NotificationPermissionHelp.test.ts",
+        "frontend/src/features/chat/NotificationPermissionNotice.tsx",
+        "frontend/src/features/chat/useNotificationPermissionReminder.ts",
+        "frontend/e2e/notification-permission.spec.ts"
+      ],
+      "frontend": [
+        "src/lib/notify.test.ts",
+        "src/features/chat/NotificationPermissionHelp.test.ts",
+        "src/store/settings.test.ts"
+      ],
+      "capability": {
+        "summary": "Explain OS notification authorization separately from saved preferences and offer nonblocking, dismissible messaging guidance.",
+        "guide": "docs/settings.md#system-notification-permission",
+        "invariants": [
+          {
+            "name": "Message submission never awaits permission; dismissal survives conversation navigation for the current login generation",
+            "reference": "docs/settings.md#system-notification-permission"
+          },
+          {
+            "name": "Passive observations never request permission and originating-view retirement prevents delayed prompting",
+            "reference": "docs/settings.md#system-notification-permission"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/notification-permission.spec.ts and affected settings/visual browser scenarios. Native authorization prompts and OS navigation require packaged-app macOS/Windows evidence."
+      ]
     }
   ],
   "prScenarios": [
@@ -767,6 +802,24 @@
         "frontend/src/lib/types.ts"
       ],
       "browser": ["e2e/update-flow.spec.ts"]
+    },
+    {
+      "id": "frontend-notification-permission-acceptance",
+      "paths": [
+        "frontend/src/lib/notify.ts",
+        "frontend/src/lib/notify.test.ts",
+        "frontend/src/lib/api/notifications.ts",
+        "frontend/src/features/chat/NotificationPermissionHelp.tsx",
+        "frontend/src/features/chat/NotificationPermissionHelp.test.ts",
+        "frontend/src/features/chat/NotificationPermissionNotice.tsx",
+        "frontend/src/features/chat/useNotificationPermissionReminder.ts",
+        "frontend/e2e/notification-permission.spec.ts"
+      ],
+      "browser": [
+        "e2e/notification-permission.spec.ts",
+        "e2e/settings-categories.spec.ts",
+        "e2e/ui-visual-regression.spec.ts"
+      ]
     }
   ]
 }

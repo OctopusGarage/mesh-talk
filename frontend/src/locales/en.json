@@ -1070,5 +1070,30 @@
     "previousFingerprint": "Previous: {{fingerprint}}",
     "currentFingerprint": "Current: {{fingerprint}}",
     "noDeviceChanges": "No recorded device changes."
+  },
+  "notificationPermission": {
+    "denied": "Notifications are blocked in system settings",
+    "granted": "Allowed by your system",
+    "prompt": "Allow notifications on this device",
+    "limited": "Notification alerts are limited",
+    "unknown": "System permission couldn’t be verified",
+    "checking": "Checking system permission…",
+    "settingsHint": "Your preference is saved. System permission is needed to show new-message alerts.",
+    "messageHint": "Messages still send, but you may miss notifications for replies.",
+    "allowedHint": "Focus or Do Not Disturb may still silence alerts.",
+    "openSettings": "Open system settings",
+    "checkAgain": "Check again",
+    "allow": "Allow notifications",
+    "requesting": "Waiting for permission…",
+    "returnHint": "Return here after changing the setting. Permission is checked automatically.",
+    "openFailed": "Couldn’t open system settings.",
+    "reminder": "Notification permission",
+    "dismiss": "Dismiss notification reminder",
+    "instructions": {
+      "macos": "In System Settings → Notifications → Mesh-Talk, turn on Allow notifications.",
+      "windows": "In Settings → System → Notifications, enable notifications and allow Mesh-Talk.",
+      "linux": "Check your desktop’s notification settings and allow Mesh-Talk.",
+      "other": "Open your device’s notification settings and allow Mesh-Talk."
+    }
   }
 }
