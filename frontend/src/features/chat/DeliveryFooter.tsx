@@ -148,9 +148,7 @@ export function DeliveryFooter({
           data-delivery={delivery}
         >
           <span aria-hidden="true">{delivery === "delivered" ? "✓" : "◷"}</span>
-          {(delivery === "awaiting" || message.file) && (
-            <span aria-hidden="true">{label}</span>
-          )}
+          {message.file && <span aria-hidden="true">{label}</span>}
           <span
             id={tooltip}
             role="tooltip"
