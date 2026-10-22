@@ -241,6 +241,8 @@ owning workflow rather than bypassing version or source checks.
 An incomplete or failed draft stays unpublished. Hosted automation acceptance must establish
 bot-PR permissions/check execution, draft-only behavior, explicit build dispatch and next-target
 PR creation; local mocked tests do not prove GitHub settings or real signing/publication.
+Release-state API reads request cache revalidation: a stale empty listing must not
+hide an existing draft or replace the fresh asset identity/digest checks.
 
 The numeric target and channel build identity have separate responsibilities. The target
 supports native package formats; `BASE-dev`, `BASE-nightly.RUN.ATTEMPT`, and tagged `BASE`
