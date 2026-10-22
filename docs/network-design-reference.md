@@ -400,8 +400,15 @@ completed and the existing retry scheduler recorded its next eligible turn.
 Neither state establishes transport success, relay custody, recipient presence,
 delivery failure or a recipient receipt. The scheduler shares pacing across a
 peer's lane, so the observation does not promise a message-specific retry delay.
-The current aggregate progress result cannot distinguish a skipped route from
-a failed exchange; it must not be rendered as a typed transport error.
+The worker can additionally attach an optional recovery reason to a completed
+attempt. `post_office_disabled` means no eligible direct peer was known and local
+post-office sending was disabled; `no_known_route` means neither an eligible
+direct peer nor a permitted post-office candidate was known. These are local
+route/policy observations, not proof of a remote outage. `attempt_timed_out`
+requires an actual exchange deadline to expire without progress. An ordinary
+false progress result, connection rejection or malformed response cannot be
+relabeled as a timeout. Successful progress suppresses recovery reasons and
+still does not replace recipient confirmation.
 
 Observations are runtime memory only, capped at 256 logical messages with oldest
 observation eviction. Multiple recipient devices share that message budget.
@@ -418,6 +425,8 @@ queries then prune its details. Durable `Delivered` always suppresses runtime hi
 Own-account synchronization and receipt/control work do not produce recipient
 delivery observations. Querying another conversation's ID returns no state or
 detail. Hosts retain their exact-session admission checks and the 256-ID limit.
+Reasons share that lifetime and are omitted when unknown. UI consumers ignore
+unrecognized future reason codes and retain the ordinary awaiting explanation.
 
 The registered desktop response adds an optional observation, allowing existing
 consumers to continue using durable status alone. This surface does not change

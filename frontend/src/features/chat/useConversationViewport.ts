@@ -29,6 +29,7 @@ export function useConversationViewport(
   const [showJump, setShowJump] = useState(false);
   const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
   const [searchMiss, setSearchMiss] = useState(false);
+  const exactSearch = searchTarget?.key === key && "reference" in searchTarget;
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const scrollerRef = useRef<HTMLElement | null>(null);
   const scrollPositions = useRef(new Map<string, number>());
@@ -50,7 +51,11 @@ export function useConversationViewport(
   const userInteractionUntil = useRef(0);
   const pendingUserAnchor = useRef(false);
   const pendingScrollIntent = useRef(false);
-  const initialList = useRef<{ key: string; index: number } | null>(null);
+  const initialList = useRef<{
+    key: string;
+    index: number;
+    searchRequest: number | null;
+  } | null>(null);
   const renderedConversation = useRef(key);
   if (renderedConversation.current !== key) {
     renderedConversation.current = key;
@@ -64,6 +69,7 @@ export function useConversationViewport(
     const scroller = scrollerRef.current;
     if (
       !scroller ||
+      exactSearch ||
       anchors.current.has(key) ||
       pendingUserAnchor.current ||
       pendingScrollIntent.current ||
@@ -81,7 +87,7 @@ export function useConversationViewport(
         behavior: "auto",
       });
     else scroller.scrollTop = top;
-  }, [key]);
+  }, [key, exactSearch]);
   const restoreVisibleAnchor = useCallback(() => {
     const scroller = scrollerRef.current;
     const anchor = anchors.current.get(key);
@@ -303,19 +309,22 @@ export function useConversationViewport(
   useEffect(() => {
     if (!searchTarget || searchTarget.key !== key || loading || historyError)
       return;
-    if (handledSearch.current === searchTarget.request) return;
-    const index = messages.findIndex(
-      (message) =>
-        message.wallClock === searchTarget.wallClock &&
-        message.text === searchTarget.text &&
-        message.fromMe === searchTarget.fromMe,
+    const index = messages.findIndex((message) =>
+      "reference" in searchTarget
+        ? searchTarget.reference.message_id !== null &&
+          message.id === searchTarget.reference.message_id
+        : message.wallClock === searchTarget.wallClock &&
+          message.text === searchTarget.text &&
+          message.fromMe === searchTarget.fromMe,
     );
     if (index < 0) {
       handledSearch.current = searchTarget.request;
       setSearchMiss(true);
+      setHighlightedKey(null);
       return;
     }
     setSearchMiss(false);
+    if (handledSearch.current === searchTarget.request) return;
     setHighlightedKey(messageRowKey(messages[index], index));
     const frame = requestAnimationFrame(() => {
       if (restoringScroll.current === key) restoringScroll.current = null;
@@ -340,22 +349,41 @@ export function useConversationViewport(
 
   // initialTopMostItemIndex is an initial condition, not a reactive scroll target.
   // Later ledger updates or row measurements must not change it mid-mount.
+  const searchRequest =
+    searchTarget?.key === key && "reference" in searchTarget
+      ? searchTarget.request
+      : null;
   if (messages.length === 0) initialList.current = null;
-  else if (initialList.current?.key !== key) {
+  else if (
+    initialList.current?.key !== key ||
+    initialList.current?.searchRequest !== searchRequest
+  ) {
     const anchor = anchors.current.get(key);
+    const searchIndex =
+      searchTarget?.key === key && "reference" in searchTarget
+        ? messages.findIndex(
+            (message) =>
+              message.id !== null &&
+              message.id === searchTarget.reference.message_id,
+          )
+        : -1;
     initialList.current = {
       key,
-      index: anchor
-        ? Math.max(
-            0,
-            messages.findIndex((m, i) => messageRowKey(m, i) === anchor.id),
-          )
-        : exactScrollPositions.current.has(key)
-          ? 0
-          : Math.min(
-              messages.length - 1,
-              scrollPositions.current.get(key) ?? messages.length - 1,
-            ),
+      searchRequest,
+      index:
+        searchIndex >= 0
+          ? searchIndex
+          : anchor
+            ? Math.max(
+                0,
+                messages.findIndex((m, i) => messageRowKey(m, i) === anchor.id),
+              )
+            : exactScrollPositions.current.has(key)
+              ? 0
+              : Math.min(
+                  messages.length - 1,
+                  scrollPositions.current.get(key) ?? messages.length - 1,
+                ),
     };
   }
 

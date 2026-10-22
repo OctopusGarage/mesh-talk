@@ -229,14 +229,18 @@ test("shared Cargo configuration selects every workspace crate via owning contra
     "node::account_profile::tests::",
     "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
     "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
+    "node::node::tests::signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp",
+    "node::node::tests::signed_avatar_retries_after_relay_publication_is_reenabled",
     "node::node::tests::trust_card_exhausted_avatar_revision_rejects_before_either_store_mutates",
     "node::node::tests::trust_card_linked_device_pair_preserves_metadata_and_requires_card_parent",
     "node::node::tests::trust_card_projection_retry_and_restart_preserve_avatar_and_identity_lifetime",
     "node::node::tests::trust_card_propagates_signed_claims_over_loopback",
     "node::node::tests::trust_card_reconciles_newer_sibling_legacy_avatar",
     "node::node::tests::trust_card_terminal_legacy_avatar_reconciles_on_restart",
+    "node::opaque_relay::",
     "node::profile::tests::",
     "node::profile_store::tests::",
+    "node::runtime::tests::profile_republish_targets_fires_on_first_sight_and_on_reconnect",
     "node::trust_card::tests::",
   ]);
   const consentFixture = buildAffectedPlan(["crates/mesh-talk-core/src/node/file_consent_tests.rs"], {contracts:registered});

@@ -2,10 +2,52 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-search",
+      "paths": [
+        "frontend/src/features/chat/SearchDialog.tsx",
+        "frontend/src/features/chat/SearchDialog.test.ts",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/useConversationViewport.ts",
+        "frontend/src/features/chat/useConversationViewport.test.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/contactVisibility.ts",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/e2e/chat.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/SearchDialog.test.ts",
+        "src/features/chat/ConversationView.test.ts",
+        "src/features/chat/useConversationViewport.test.ts",
+        "src/lib/api.test.ts",
+        "src/lib/contactVisibility.test.ts",
+        "src/store/conversationHistory.test.ts"
+      ],
+      "consumers": ["frontend-chat", "frontend-history"],
+      "capability": {
+        "summary": "Navigate recent search results by exact owner-scoped namespace and message identity with separate read-only context and explicit coverage.",
+        "guide": "docs/ARCHITECTURE.md#recent-search-references",
+        "invariants": [
+          {
+            "name": "Duplicate text and timestamps never substitute for an exact selected message ID; unresolved or unavailable references never fall back to approximate matching",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          },
+          {
+            "name": "Context presentation cannot replace canonical history, advance unread coverage or cross owner/runtime lifetimes",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          }
+        ]
+      },
+      "escalation": [
+        "Run search browser scenarios for identical duplicate results, older exact context, unavailable targets, hidden contacts and failed retry. Visible context and delivery changes also require relevant narrow-window and visual-regression scenarios; browser mocks do not certify native IPC authorization."
+      ]
+    },
+    {
       "id": "frontend-delivery-details",
       "paths": [
         "frontend/src/features/chat/DeliveryDetails.tsx",
         "frontend/src/features/chat/DeliveryDetails.test.ts",
+        "frontend/src/features/chat/DeliveryRecoveryProvider.tsx",
+        "frontend/src/features/chat/deliveryRecovery.ts",
         "frontend/src/features/chat/DeliveryFooter.tsx",
         "frontend/src/features/chat/deliveryFooter.test.ts",
         "frontend/src/store/conversationModel.ts",
@@ -28,6 +70,10 @@
           },
           {
             "name": "Delivered messages and retired owners cannot retain an awaiting disclosure",
+            "reference": "docs/help/topics/delivery.md#inspect-delivery-details"
+          },
+          {
+            "name": "Recovery dialogs outlive row virtualization and receipt confirmation, close on owner/runtime/conversation retirement and restore focus only within their original active scope",
             "reference": "docs/help/topics/delivery.md#inspect-delivery-details"
           }
         ]
@@ -582,9 +628,25 @@
   ],
   "prScenarios": [
     {
+      "id": "frontend-exact-search-acceptance",
+      "paths": [
+        "frontend/src/features/chat/SearchDialog.tsx",
+        "frontend/src/features/chat/useConversationViewport.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/lib/api/chat.ts",
+        "src-tauri/src/owner_commands/search.rs",
+        "crates/mesh-talk-core/src/node/search.rs",
+        "crates/mesh-talk-core/src/node/queries.rs"
+      ],
+      "browser": ["e2e/chat.spec.ts", "e2e/hidden-contacts.spec.ts"]
+    },
+    {
       "id": "frontend-delivery-details-acceptance",
       "paths": [
         "frontend/src/features/chat/DeliveryDetails.tsx",
+        "frontend/src/features/chat/DeliveryRecoveryProvider.tsx",
+        "frontend/src/features/chat/deliveryRecovery.ts",
         "frontend/src/features/chat/DeliveryFooter.tsx",
         "frontend/src/store/conversationModel.ts",
         "frontend/src/store/conversationState.ts",

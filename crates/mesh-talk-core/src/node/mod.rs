@@ -104,7 +104,9 @@ pub use account_sync_policy::{DeviceSyncPolicy, SyncCategory};
 pub use attachment_consent::ReceiveDecision;
 pub use call::{CallSignal, ReceivedCallSignal};
 pub use channel::{ChannelActivity, ReceivedChannelMessage};
-pub use delivery_observation::{DeliveryObservation, DeliveryObservationKind};
+pub use delivery_observation::{
+    DeliveryObservation, DeliveryObservationKind, DeliveryRecoveryReason,
+};
 pub use delivery_store::DeliveryStatus;
 pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;

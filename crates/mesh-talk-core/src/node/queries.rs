@@ -10,82 +10,6 @@ use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::device::PublicIdentity;
 
 impl Node {
-    /// File/media messages (`FileManifest` events) of `conversation`, as history entries
-    /// ordered with text by their callers. Sources the durable `received_files` store,
-    /// which now holds both files we SENT (recorded at stage time, `from_me`) and files we
-    /// RECEIVED (recorded on open), keyed by their host (DM/channel) conversation. Each
-    /// entry carries the file metadata the UI needs to render inline media or a file card;
-    /// `text` is empty. `from_me` is true when the recorded author is this device.
-    pub(in crate::node) fn conversation_files(
-        &self,
-        conversation: ConversationId,
-    ) -> Vec<HistoryEntry> {
-        let me = self.identity.public().user_id();
-        let recovered_me: std::collections::HashSet<_> = self
-            .recovery_origins
-            .iter()
-            .map(|author| author.user_id())
-            .collect();
-        let linked_me: std::collections::HashSet<_> = self
-            .linked_devices()
-            .into_iter()
-            .map(|device| device.public.user_id())
-            .collect();
-        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
-        let mut entries = self
-            .received_files
-            .lock()
-            .expect("received_files mutex not poisoned")
-            .entries(&conversation);
-        for transaction in delivery.pending_transactions() {
-            if let super::delivery_store::DeliveryTransaction::OutgoingManifest { received, .. } =
-                transaction
-                && received.conversation == conversation
-                && !entries
-                    .iter()
-                    .any(|entry| entry.event_id == received.event_id)
-            {
-                entries.push((**received).clone());
-            }
-        }
-        entries
-            .into_iter()
-            .filter(|entry| !delivery.file_erased(entry.conversation, entry.event_id))
-            .filter(|entry| {
-                !self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock)
-            })
-            .filter_map(|entry| {
-                let manifest = crate::file::decode_manifest(&entry.plaintext)?;
-                let from_me = entry.from == me
-                    || recovered_me.contains(&entry.from)
-                    || linked_me.contains(&entry.from);
-                Some(HistoryEntry {
-                    id: entry.event_id,
-                    from_me,
-                    who: if from_me {
-                        "you".to_string()
-                    } else {
-                        entry.from
-                    },
-                    text: Vec::new(),
-                    wall_clock: entry.wall_clock,
-                    expires_at_ms: crate::expiry::deadline(&entry.plaintext),
-                    reply_to: None,
-                    file: Some(FileHistoryInfo {
-                        file_conv: manifest.file_conv(),
-                        name: manifest.name().to_string(),
-                        size: manifest.size(),
-                        mime: manifest.mime().to_string(),
-                        media: crate::node::media_store::manifest_is_media(&manifest),
-                    }),
-                    recalled: false,
-                    recalled_text: None,
-                    sticker: None,
-                })
-            })
-            .collect()
-    }
-
     /// The last `limit` messages of a channel in deterministic causal order.
     /// Sender-key wire keys are single-use and gone after one decrypt, so history is
     /// served from the stores — our own sent plaintext from the sent sidecar, plus the
@@ -115,90 +39,12 @@ impl Node {
     /// we received and filed under it. `from_me` is derived from the recorded sender
     /// account, so self-synced copies of our own sends show as ours.
     pub fn account_history(&self, peer_account_id: &str, limit: usize) -> Vec<HistoryEntry> {
-        let my_account = self.account.account_id();
-        let conv = account_conversation_id(&my_account, peer_account_id);
-        let mut entries: Vec<HistoryEntry> = Vec::new();
-
-        // Account messages are stored as full `DmEnvelope`s; the logical `msg_id` is
-        // the stable, cross-device id reactions/replies target.
-        for sent in self.sent_entries_for_history(conv) {
-            if super::expiry_policy::plaintext_deadline(&sent.plaintext)
-                .is_some_and(|deadline| deadline <= self.expiry_now())
-            {
-                continue;
-            }
-            let (id, body) = decode_account_entry(&sent.plaintext);
-            entries.push(HistoryEntry {
-                id,
-                from_me: true,
-                who: "you".to_string(),
-                text: body.text,
-                wall_clock: sent.wall_clock,
-                expires_at_ms: super::expiry_policy::plaintext_deadline(&sent.plaintext),
-                reply_to: body.reply_to,
-                file: None,
-                recalled: false,
-                recalled_text: None,
-                sticker: body.sticker,
-            });
-        }
-
-        for rcv in self
-            .received
-            .lock()
-            .expect("received mutex not poisoned")
-            .entries(&conv)
-        {
-            let envelope = super::dm_envelope::DmEnvelope::decode(&rcv.plaintext);
-            let inner = envelope
-                .as_ref()
-                .map_or(rcv.plaintext.as_slice(), |e| e.body.as_slice());
-            if self.recipient_expired(inner, rcv.event_id, rcv.wall_clock) {
-                continue;
-            }
-            let (id, body) = decode_account_entry(&rcv.plaintext);
-            let from_me = rcv.from == my_account;
-            entries.push(HistoryEntry {
-                id,
-                from_me,
-                who: if from_me { "you".to_string() } else { rcv.from },
-                text: body.text,
-                wall_clock: rcv.wall_clock,
-                expires_at_ms: super::expiry_policy::plaintext_deadline(&rcv.plaintext),
-                reply_to: body.reply_to,
-                file: None,
-                recalled: false,
-                recalled_text: None,
-                sticker: body.sticker,
-            });
-        }
-
-        // Merge file/media messages (FileManifest events) so they're ordered inline with
-        // text by wall-clock.
-        entries.extend(self.conversation_files(conv));
-
-        // A logical account DM can arrive directly and later be imported from a
-        // sibling with a different transport-event id. Keep its first local copy.
-        let mut seen = std::collections::HashSet::new();
-        entries.retain(|entry| seen.insert(entry.id));
-
-        // Tombstone recalled messages: keep the slot (sender + position) but drop the content.
-        tombstone_recalled(
-            &mut entries,
-            &self.recalled_targets_account(peer_account_id),
-        );
-
-        // Tie-break equal wall-clocks by the (global, content-addressed) event id so
-        // both participants render the same order on a same-millisecond collision.
-        entries.sort_by(|a, b| {
-            a.wall_clock
-                .cmp(&b.wall_clock)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        if entries.len() > limit {
-            entries.drain(0..entries.len() - limit);
-        }
-        entries
+        self.project_history(
+            account_conversation_id(&self.account.account_id(), peer_account_id),
+            Some(peer_account_id),
+            HistorySelection::Recent(limit),
+        )
+        .map_or_else(Vec::new, |context| context.messages)
     }
 
     /// The last `limit` messages of `conversation`, both directions, sorted by
@@ -207,105 +53,325 @@ impl Node {
     /// The wire ratchet key is single-use and gone, so history is served from the
     /// stores — that IS the forward-secrecy property, not a limitation.
     pub fn history(&self, conversation: ConversationId, limit: usize) -> Vec<HistoryEntry> {
-        let mut entries: Vec<HistoryEntry> = Vec::new();
-        let own_devices: std::collections::HashSet<_> = self
+        self.project_history(conversation, None, HistorySelection::Recent(limit))
+            .map_or_else(Vec::new, |context| context.messages)
+    }
+
+    /// Build canonical identity/order from borrowed rows, then decode only the
+    /// selected window. Metadata and causal traversal remain O(retained rows);
+    /// copied plaintext is proportional to the selected rows, not retention.
+    pub(in crate::node) fn project_history(
+        &self,
+        conversation: ConversationId,
+        account: Option<&str>,
+        selection: HistorySelection,
+    ) -> Option<super::search::SearchContext> {
+        use super::delivery_store::DeliveryTransaction;
+        use std::collections::{HashMap, HashSet};
+
+        let is_channel = account.is_none()
+            && (self
+                .archived_channels
+                .iter()
+                .any(|ch| ch.id == conversation)
+                || self
+                    .channels
+                    .lock()
+                    .expect("channels mutex not poisoned")
+                    .state(&conversation)
+                    .is_some());
+        let my_account = self.account.account_id();
+        let me = self.identity.public().user_id();
+        let own_devices: HashSet<_> = self
             .linked_devices()
             .into_iter()
             .map(|device| device.public.user_id())
             .collect();
-        for (id, sent) in self.raw_sent_history(conversation) {
-            if super::expiry_policy::plaintext_deadline(&sent.plaintext)
-                .is_some_and(|deadline| deadline <= self.expiry_now())
+        let recovered_me: HashSet<_> = self
+            .recovery_origins
+            .iter()
+            .map(|author| author.user_id())
+            .collect();
+        // Match the delivery owner's lock ordering. No guard escapes this read.
+        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        let log = self.log.lock().expect("log mutex not poisoned");
+        let events = log.events(&conversation);
+        let author = crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
+        let mut sent_ids: HashMap<_, _> = if account.is_none() {
+            events
+                .iter()
+                .filter(|event| {
+                    event.kind == crate::eventlog::EventKind::Message && event.author == author
+                })
+                .map(|event| (event.seq, event.id))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
+        let recovered = self
+            .recovered_sent_ids
+            .lock()
+            .expect("recovered sent ids mutex not poisoned");
+        let received = self.received.lock().expect("received mutex not poisoned");
+        let files = self
+            .received_files
+            .lock()
+            .expect("received_files mutex not poisoned");
+        let pending = delivery.pending_transactions();
+        for transaction in pending {
+            if let DeliveryTransaction::Outgoing { message, sent, .. } = transaction.body()
+                && sent.conversation == conversation
+            {
+                sent_ids.insert(sent.seq, message.logical_id);
+            }
+        }
+        let pending_sent = pending
+            .iter()
+            .filter_map(|transaction| match transaction.body() {
+                DeliveryTransaction::Outgoing { sent, .. } if sent.conversation == conversation => {
+                    Some(sent)
+                }
+                _ => None,
+            });
+        let mut rows = Vec::new();
+        let mut seen = HashSet::new();
+        // Preserve the former sidecar-copy ordering before first-ID dedup.
+        // Arrival order can disagree with wall clocks for sibling imports.
+        let mut sent_rows: Vec<_> = sentlog.entries_ref(&conversation).iter().collect();
+        sent_rows.sort_by_key(|row| (row.wall_clock, row.seq));
+        for sent in sent_rows.into_iter().chain(pending_sent) {
+            let envelope = DmEnvelope::decode_ref(&sent.plaintext);
+            let inner = envelope
+                .as_ref()
+                .map_or(sent.plaintext.as_slice(), |env| env.body);
+            let expires_at_ms = crate::expiry::deadline(inner);
+            if expires_at_ms.is_some_and(|deadline| deadline <= self.expiry_now()) {
+                continue;
+            }
+            let id = if account.is_some() {
+                envelope
+                    .as_ref()
+                    .map_or(EventId::new([0; 32]), |env| EventId::new(env.msg_id))
+            } else {
+                recovered
+                    .as_ref()
+                    .and_then(|saved| saved.id_for(sent))
+                    .or_else(|| sent_ids.get(&sent.seq).copied())
+                    .unwrap_or(EventId::new([0; 32]))
+            };
+            if seen.insert(id) {
+                rows.push(HistoryRow {
+                    id,
+                    wall_clock: sent.wall_clock,
+                    from_me: true,
+                    who: "you",
+                    plaintext: if account.is_some() {
+                        inner
+                    } else {
+                        &sent.plaintext
+                    },
+                    expires_at_ms,
+                    file: false,
+                });
+            }
+        }
+        let mut received_rows: Vec<_> = received.entries_ref(&conversation).iter().collect();
+        received_rows.sort_by_key(|row| row.wall_clock);
+        for row in received_rows {
+            let envelope = account.and_then(|_| DmEnvelope::decode_ref(&row.plaintext));
+            let inner = envelope
+                .as_ref()
+                .map_or(row.plaintext.as_slice(), |env| env.body);
+            if self.recipient_expired(inner, row.event_id, row.wall_clock) {
+                continue;
+            }
+            let id = if account.is_some() {
+                envelope
+                    .as_ref()
+                    .map_or(EventId::new([0; 32]), |env| EventId::new(env.msg_id))
+            } else {
+                row.event_id
+            };
+            let from_me = if account.is_some() {
+                row.from == my_account
+            } else {
+                own_devices.contains(&row.from)
+            };
+            if seen.insert(id) {
+                rows.push(HistoryRow {
+                    id,
+                    wall_clock: row.wall_clock,
+                    from_me,
+                    who: if from_me { "you" } else { &row.from },
+                    plaintext: inner,
+                    expires_at_ms: DmEnvelope::decode_ref(&row.plaintext).map_or_else(
+                        || crate::expiry::deadline(&row.plaintext),
+                        |envelope| crate::expiry::deadline(envelope.body),
+                    ),
+                    file: false,
+                });
+            }
+        }
+        let durable_files = files.entries_ref(&conversation);
+        let pending_files = pending.iter().filter_map(|transaction| match transaction {
+            DeliveryTransaction::OutgoingManifest { received, .. }
+                if received.conversation == conversation
+                    && !durable_files
+                        .iter()
+                        .any(|row| row.event_id == received.event_id) =>
+            {
+                Some(received.as_ref())
+            }
+            _ => None,
+        });
+        let mut file_ids = HashSet::new();
+        let mut file_rows: Vec<_> = durable_files.iter().collect();
+        file_rows.sort_by_key(|row| row.wall_clock);
+        for row in file_rows.into_iter().chain(pending_files) {
+            if !file_ids.insert(row.event_id)
+                || delivery.file_erased(row.conversation, row.event_id)
+                || self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
+                || crate::file::decode_manifest(&row.plaintext).is_none()
             {
                 continue;
             }
-            let body = MessageBody::decode(&sent.plaintext);
-            entries.push(HistoryEntry {
-                id,
-                from_me: true,
-                who: "you".to_string(),
-                text: body.text,
-                wall_clock: sent.wall_clock,
-                expires_at_ms: super::expiry_policy::plaintext_deadline(&sent.plaintext),
-                reply_to: body.reply_to,
-                file: None,
-                recalled: false,
-                recalled_text: None,
-                sticker: body.sticker,
-            });
-        }
-        for rcv in self
-            .received
-            .lock()
-            .expect("received mutex not poisoned")
-            .entries(&conversation)
-        {
-            if self.recipient_expired(&rcv.plaintext, rcv.event_id, rcv.wall_clock) {
-                continue;
+            let from_me = row.from == me
+                || recovered_me.contains(&row.from)
+                || own_devices.contains(&row.from);
+            if seen.insert(row.event_id) {
+                rows.push(HistoryRow {
+                    id: row.event_id,
+                    wall_clock: row.wall_clock,
+                    from_me,
+                    who: if from_me { "you" } else { &row.from },
+                    plaintext: &row.plaintext,
+                    expires_at_ms: crate::expiry::deadline(&row.plaintext),
+                    file: true,
+                });
             }
-            let body = MessageBody::decode(&rcv.plaintext);
-            let from_me = own_devices.contains(&rcv.from);
-            entries.push(HistoryEntry {
-                id: rcv.event_id,
-                from_me,
-                who: if from_me { "you".to_string() } else { rcv.from },
-                text: body.text,
-                wall_clock: rcv.wall_clock,
-                expires_at_ms: super::expiry_policy::plaintext_deadline(&rcv.plaintext),
-                reply_to: body.reply_to,
-                file: None,
-                recalled: false,
-                recalled_text: None,
-                sticker: body.sticker,
-            });
         }
-        // Merge file/media messages (FileManifest events) so they're ordered inline with
-        // text by wall-clock.
-        entries.extend(self.conversation_files(conversation));
-        let mut seen = std::collections::HashSet::new();
-        entries.retain(|entry| seen.insert(entry.id));
-        // Tombstone recalled messages. Recall is only wired for channels (1:1 chats go
-        // through `account_history`); a device-pair DM has no Delete events, so this is an
-        // empty set there.
-        let is_channel = self
-            .archived_channels
-            .iter()
-            .any(|summary| summary.id == conversation)
-            || {
-                let book = self.channels.lock().expect("channels mutex not poisoned");
-                book.state(&conversation).is_some()
-            };
         if is_channel {
-            tombstone_recalled(&mut entries, &self.recalled_targets_channel(conversation));
-        }
-        // Tie-break equal wall-clocks by the (global, content-addressed) event id so
-        // both participants render the same order on a same-millisecond collision.
-        if is_channel {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            let events = log.events(&conversation);
-            let archive: Vec<_> = entries
-                .iter()
-                .map(|entry| (entry.id, entry.wall_clock))
-                .collect();
-            let order = super::timeline::ordered_ids(&events, &archive, false);
-            let ranks: std::collections::HashMap<_, _> = order
+            let archive: Vec<_> = rows.iter().map(|row| (row.id, row.wall_clock)).collect();
+            let ranks: HashMap<_, _> = super::timeline::ordered_ids(&events, &archive, false)
                 .into_iter()
                 .enumerate()
                 .map(|(rank, id)| (id, rank))
                 .collect();
-            entries.sort_by_key(|entry| ranks.get(&entry.id).copied().unwrap_or(usize::MAX));
+            rows.sort_by_key(|row| ranks.get(&row.id).copied().unwrap_or(usize::MAX));
         } else {
-            entries.sort_by(|a, b| {
-                a.wall_clock
-                    .cmp(&b.wall_clock)
-                    .then_with(|| a.id.cmp(&b.id))
-            });
+            rows.sort_by_key(|row| (row.wall_clock, row.id));
         }
-        if entries.len() > limit {
-            entries.drain(0..entries.len() - limit);
+        let (start, end, newer_entries) = match selection {
+            HistorySelection::Recent(limit) => (rows.len().saturating_sub(limit), rows.len(), 0),
+            HistorySelection::Context(id) => {
+                let target = rows.iter().position(|row| row.id == id)?;
+                (
+                    target.saturating_sub(25),
+                    target.saturating_add(26).min(rows.len()),
+                    rows.len() - target - 1,
+                )
+            }
+        };
+        let mut messages: Vec<_> = rows[start..end].iter().map(HistoryRow::decode).collect();
+        // Recall resolution can acquire the same stores. Release the borrowed
+        // snapshot first, then apply the latest authorized recall projection.
+        drop(rows);
+        drop(events);
+        drop(files);
+        drop(received);
+        drop(recovered);
+        drop(sentlog);
+        drop(log);
+        drop(delivery);
+        let recalled = if let Some(peer) = account {
+            self.recalled_targets_account(peer)
+        } else if is_channel {
+            self.recalled_targets_channel(conversation)
+        } else {
+            HashSet::new()
+        };
+        if let HistorySelection::Context(id) = selection
+            && recalled.contains(&id)
+        {
+            return None;
         }
-        entries
+        tombstone_recalled(&mut messages, &recalled);
+        if matches!(selection, HistorySelection::Context(_)) {
+            for entry in &mut messages {
+                entry.recalled_text = None;
+            }
+        }
+        Some(super::search::SearchContext {
+            messages,
+            newer_entries,
+        })
     }
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::node) enum HistorySelection {
+    Recent(usize),
+    Context(EventId),
+}
+
+struct HistoryRow<'a> {
+    id: EventId,
+    wall_clock: u64,
+    from_me: bool,
+    who: &'a str,
+    plaintext: &'a [u8],
+    expires_at_ms: Option<u64>,
+    file: bool,
+}
+
+impl HistoryRow<'_> {
+    fn decode(&self) -> HistoryEntry {
+        #[cfg(test)]
+        PROJECTION_DECODES.with(|count| count.set(count.get() + 1));
+        let body = if self.file {
+            MessageBody::new(Vec::new(), None)
+        } else {
+            MessageBody::decode(self.plaintext)
+        };
+        let file = if self.file {
+            let manifest =
+                crate::file::decode_manifest(self.plaintext).expect("validated file history");
+            Some(FileHistoryInfo {
+                file_conv: manifest.file_conv(),
+                name: manifest.name().to_string(),
+                size: manifest.size(),
+                mime: manifest.mime().to_string(),
+                media: crate::node::media_store::manifest_is_media(&manifest),
+            })
+        } else {
+            None
+        };
+        HistoryEntry {
+            id: self.id,
+            wall_clock: self.wall_clock,
+            from_me: self.from_me,
+            who: self.who.to_string(),
+            text: body.text,
+            reply_to: body.reply_to,
+            expires_at_ms: self.expires_at_ms,
+            file,
+            recalled: false,
+            recalled_text: None,
+            sticker: body.sticker,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! { static PROJECTION_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(super) fn reset_projection_decodes() {
+    PROJECTION_DECODES.with(|count| count.set(0));
+}
+#[cfg(test)]
+pub(super) fn projection_decodes() -> usize {
+    PROJECTION_DECODES.with(std::cell::Cell::get)
 }
 
 /// Blank the content of any entry whose id was recalled, keeping its slot (sender +

@@ -7904,6 +7904,14 @@ async fn delivery_observation_tracks_exact_worker_retry_and_cancellation() {
     .await
     .unwrap();
     assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    assert_eq!(
+        sender.account_delivery_observations(&account, &[id])[0]
+            .2
+            .unwrap()
+            .reason,
+        None,
+        "a refused connection must not be relabeled as a timeout"
+    );
     worker.abort();
     let _ = worker.await;
     assert!(
@@ -8199,4 +8207,143 @@ async fn delivery_observation_cancelled_before_first_poll_releases_exact_hint() 
             .2
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn delivery_observation_worker_reports_local_route_policy_and_clears_stale_reasons() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let remote = DeviceIdentity::generate();
+    let account = Account::generate();
+    let proof = Announce::new_with_account(&remote, &account, "Recipient", 9);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let id = sender
+        .enqueue_to_account(&account.account_id(), b"recover locally", None)
+        .await
+        .unwrap();
+    sender.roster.lock().unwrap().forget(&remote.public());
+    for (enabled, send, expected) in [
+        (true, true, DeliveryRecoveryReason::NoKnownRoute),
+        (false, true, DeliveryRecoveryReason::PostOfficeDisabled),
+        (true, false, DeliveryRecoveryReason::PostOfficeDisabled),
+    ] {
+        sender.set_post_office_enabled(enabled);
+        sender.set_post_office_permissions(send, true);
+        let worker = tokio::spawn(sender.clone().run_delivery_loop());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if sender.account_delivery_observations(&account.account_id(), &[id])[0]
+                    .2
+                    .is_some_and(|o| o.reason == Some(expected))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("worker must publish its locally evidenced recovery reason");
+        // A direction-policy generation change must invalidate even a retained reason.
+        sender.set_post_office_permissions(false, false);
+        assert!(
+            sender.account_delivery_observations(&account.account_id(), &[id])[0]
+                .2
+                .is_none()
+        );
+        worker.abort();
+        let _ = worker.await;
+        sender.set_post_office_permissions(true, true);
+        assert!(
+            sender.account_delivery_observations(&account.account_id(), &[id])[0]
+                .2
+                .is_none()
+        );
+    }
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+}
+
+#[tokio::test]
+async fn delivery_observation_worker_reports_only_an_observed_exchange_timeout() {
+    use std::time::Duration;
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let alice_account = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let alice_announce = Announce::new_with_account(&alice, &alice_account, "Alice", 9);
+    let bob_announce = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(source.path(), alice, alice_account, &bob_announce);
+    let (receiver, _) = node(target.path(), bob, bob_account, &alice_announce);
+    sender.set_post_office_enabled(false);
+    let id = sender
+        .enqueue_to_account(
+            &receiver.account_id(),
+            b"wait for authenticated exchange",
+            None,
+        )
+        .await
+        .unwrap();
+    let (authenticated, ready) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut channel = receiver.privacy_accept(stream).await.unwrap();
+        // Wait for the sender's request so its authenticated exchange is active
+        // before advancing the clock. Keep the socket open without replying.
+        let _request = channel.recv().await.unwrap();
+        authenticated.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let worker = tokio::spawn(sender.clone().run_delivery_loop());
+    tokio::time::timeout(Duration::from_secs(3), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id]);
+    assert_eq!(
+        snapshot[0].2.unwrap().reason,
+        None,
+        "disabled relaying is not blamed when a direct route exists"
+    );
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(70)).await;
+    // The loop can still be awaiting its spawn_blocking store snapshot. A fixed
+    // number of yields does not give that thread a bounded chance to complete.
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id])[0]
+                .2
+                .is_some_and(|o| o.reason == Some(DeliveryRecoveryReason::AttemptTimedOut))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("worker must publish the observed exchange timeout");
+    assert_eq!(
+        sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id])[0]
+            .2
+            .unwrap()
+            .reason,
+        Some(DeliveryRecoveryReason::AttemptTimedOut)
+    );
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = server.await;
 }

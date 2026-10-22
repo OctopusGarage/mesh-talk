@@ -16,7 +16,9 @@
         }
       ],
       "consumers": [
-        "core-node"
+        "core-node",
+        "desktop-search",
+        "frontend-search"
       ],
       "capability": {
         "summary": "Return canonical recent search references and bounded exact context through existing history owners, preserving legacy search consumers.",
@@ -27,7 +29,7 @@
             "reference": "docs/ARCHITECTURE.md#recent-search-references"
           },
           {
-            "name": "Recent search reuses history deduplication, pending acceptance, recovery, expiry and recall; a per-conversation result window does not imply complete retained search or bounded input cost",
+            "name": "Recent search and exact context decode only selected canonical rows while preserving deduplication, pending acceptance, recovery, expiry and recall; retained metadata scans do not imply constant-cost or complete search",
             "reference": "docs/ARCHITECTURE.md#recent-search-references"
           },
           {
@@ -261,6 +263,20 @@
     },
     {
       "id": "core-storage",
+      "capability": {
+        "summary": "Replay encrypted record framing incrementally without buffering the complete ciphertext log, preserving exact corruption and crash-tail recovery semantics.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Record lengths are checked against remaining bytes before allocation; torn trailing records never discard a valid committed prefix",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Streaming replay preserves the encrypted file format, authenticated decode errors and platform-specific repair ownership",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
       "paths": [
         "crates/mesh-talk-core/src/storage/"
       ],
@@ -346,6 +362,10 @@
             "node::profile::tests::",
             "node::profile_store::tests::",
             "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
+            "node::node::tests::signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp",
+            "node::node::tests::signed_avatar_retries_after_relay_publication_is_reenabled",
+            "node::runtime::tests::profile_republish_targets_fires_on_first_sight_and_on_reconnect",
+            "node::opaque_relay::",
             "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
             "node::trust_card::tests::",
             "node::node::tests::trust_card_propagates_signed_claims_over_loopback",
@@ -373,6 +393,14 @@
           },
           {
             "name": "Signed latest-per-account claims survive restart and backup with bounded storage",
+            "reference": "docs/peer-trust.md"
+          },
+          {
+            "name": "Failed public profile publication and avatar clears retry without duplicate events, reconnects or blocking behind one unresponsive peer",
+            "reference": "docs/peer-trust.md"
+          },
+          {
+            "name": "Large signed avatars converge across child-first opaque pages while same-mailbox messages and authenticated receipts remain deliverable",
             "reference": "docs/peer-trust.md"
           }
         ]

@@ -329,3 +329,115 @@ it("commits recovered history with historical arrival metadata while preserving 
     stop();
   }
 });
+
+it("refreshes exact context independently without replacing recent history or unread coverage", async () => {
+  const store = session();
+  store.setState({
+    active: conversation,
+    cacheOrder: [key],
+    activeRequest: 1,
+    searchTarget: {
+      key,
+      request: 1,
+      reference: { kind: "account", target: "friend", message_id: "archive" },
+      context: [],
+    },
+  });
+  invoke.mockImplementation((command: string) =>
+    Promise.resolve(
+      command === "owner_search_context"
+        ? {
+            status: "found",
+            reference: {
+              kind: "account",
+              target: "friend",
+              message_id: "archive",
+            },
+            messages: [row("archive")],
+          }
+        : command === "owner_account_history"
+          ? [row("recent")]
+          : [],
+    ),
+  );
+  await reloadConversation(store.setState, store.getState);
+  expect(store.getState().messages[key].map((m) => m.id)).toEqual(["recent"]);
+  const target = store.getState().searchTarget;
+  expect(
+    target && "reference" in target && target.context.map((m) => m.id),
+  ).toEqual(["archive"]);
+  expect(store.getState().ledger[key]).not.toHaveProperty("archive");
+});
+
+it("releases a stalled exact context read without losing recent history or accepting late context", async () => {
+  vi.useFakeTimers();
+  let finish: ((value: unknown) => void) | undefined;
+  try {
+    const store = session();
+    const reference = {
+      kind: "account" as const,
+      target: "friend",
+      message_id: "archive",
+    };
+    store.setState({
+      active: conversation,
+      cacheOrder: [key],
+      searchTarget: { key, request: 1, reference, context: [] },
+    });
+    invoke.mockImplementation((command: string) =>
+      command === "owner_search_context"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : Promise.resolve(
+            command === "owner_account_history" ? [row("recent")] : [],
+          ),
+    );
+    const loading = reloadConversation(store.setState, store.getState);
+    await vi.advanceTimersByTimeAsync(10_001);
+    await loading;
+    expect(store.getState().loading).toBe(false);
+    expect(store.getState().messages[key].map((message) => message.id)).toEqual(
+      ["recent"],
+    );
+    finish?.({ status: "found", reference, messages: [row("archive")] });
+    await vi.advanceTimersByTimeAsync(0);
+    const target = store.getState().searchTarget;
+    expect(target && "reference" in target && target.context).toEqual([]);
+  } finally {
+    finish?.({ status: "unavailable" });
+    vi.useRealTimers();
+  }
+});
+
+it("drops context with an identical ID from a different namespace", async () => {
+  const store = session();
+  store.setState({
+    active: conversation,
+    cacheOrder: [key],
+    searchTarget: {
+      key,
+      request: 1,
+      reference: { kind: "account", target: "friend", message_id: "same-id" },
+      context: [],
+    },
+  });
+  invoke.mockImplementation((command: string) =>
+    Promise.resolve(
+      command === "owner_search_context"
+        ? {
+            status: "found",
+            reference: {
+              kind: "legacy-device",
+              target: "friend",
+              message_id: "same-id",
+            },
+            messages: [row("same-id")],
+          }
+        : [],
+    ),
+  );
+  await reloadConversation(store.setState, store.getState);
+  const target = store.getState().searchTarget;
+  expect(target && "reference" in target && target.context).toEqual([]);
+});

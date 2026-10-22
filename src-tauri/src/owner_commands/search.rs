@@ -135,7 +135,11 @@ pub async fn owner_search_recent(
     let response = admission
         .clone()
         .blocking(move |runtime, _| {
-            let results = runtime.handle().search_recent(&query);
+            // Keep one extra result to report truncation without retaining all
+            // matching plaintext across every conversation in the desktop host.
+            let results = runtime
+                .handle()
+                .search_recent_limited(&query, RESULT_LIMIT + 1);
             let truncated = results.hits.len() > RESULT_LIMIT;
             let candidates = results.hits.into_iter().take(RESULT_LIMIT).map(|result| {
                 let hit = result.hit;

@@ -301,6 +301,11 @@
   "message": {
     "expiresIn": "Caduca en {{time}} tras el envío; se elimina en ambos lados",
     "delivery": {
+      "postOfficeDisabled": "En el último intento, este dispositivo no conocía una ruta directa y el envío por oficina postal estaba desactivado. Revisa la conexión si quieres usar una oficina postal de confianza.",
+      "noKnownRoute": "En el último intento, este dispositivo no conocía ninguna ruta permitida. Revisa el diagnóstico de conexión, tus redes y las oficinas postales de confianza.",
+      "attemptTimedOut": "El intento local agotó el tiempo de espera sin confirmación del destinatario. Revisa el diagnóstico de conexión; los reintentos automáticos continúan.",
+      "reviewSettings": "Revisar ajustes de entrega",
+      "openDiagnostics": "Abrir diagnóstico de conexión",
       "awaiting": "Esperando recibo",
       "delivered": "Entregado",
       "help": "Recibo automático de la cuenta destinataria. No confirma lectura.",
@@ -564,7 +569,11 @@
     "noMatches": "Sin resultados.",
     "failed": "No se pudo completar la búsqueda. Inténtalo de nuevo.",
     "outsideRecent": "Este resultado no está entre los mensajes recientes. Abre el historial del chat para encontrarlo.",
-    "empty": "Escribe para buscar en tus conversaciones."
+    "empty": "Escribe para buscar en tus conversaciones.",
+    "recentCoverage": "Busca en los {{count}} mensajes más recientes de cada conversación.",
+    "truncated": "Hay más coincidencias. Acota la búsqueda.",
+    "contextUnavailable": "Este mensaje ya no está disponible.",
+    "legacyUnavailable": "Esta conversación antigua no se puede abrir desde la lista de contactos actual."
   },
   "history": {
     "trigger": "Historial del chat",

@@ -11,8 +11,8 @@ use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 // IDs only, scoped to one mailbox operation. Exhaustion ends that operation;
-// a later drain can retry every control after local storage recovers.
-const MAX_DEFERRED_CONSENT_CONTROLS: usize = 4096;
+// a later drain can retry after missing parents arrive or storage recovers.
+const MAX_DEFERRED_EVENTS: usize = 4096;
 // A retained operation keeps IDs and at most two MiB of deterministic wrappers.
 // Missing data is wrapped one bounded page at a time, independent of file size.
 const WRAPPER_CACHE_BYTES: usize = 2 * 1024 * 1024;
@@ -176,7 +176,7 @@ pub(in crate::node) struct OpaqueMailboxProgress {
     conversation: Option<ConversationId>,
     sync: super::session::SyncProgress,
     uploaded: Vec<(EventId, EventId)>,
-    deferred_controls: HashSet<EventId>,
+    deferred_events: HashSet<EventId>,
     wrapper_ids: HashMap<EventId, EventId>,
     wrappers: Mutex<WrapperCache>,
 }
@@ -195,7 +195,7 @@ impl OpaqueMailboxProgress {
             conversation,
             sync: super::session::SyncProgress::default(),
             uploaded: Vec::new(),
-            deferred_controls: HashSet::new(),
+            deferred_events: HashSet::new(),
             wrapper_ids: HashMap::new(),
             wrappers: Mutex::new(WrapperCache::default()),
         }
@@ -203,6 +203,16 @@ impl OpaqueMailboxProgress {
 
     pub(in crate::node) fn uploaded(&self) -> &[(EventId, EventId)] {
         &self.uploaded
+    }
+
+    fn defer_event(&mut self, outer: EventId) -> Result<(), super::session::SessionError> {
+        if self.deferred_events.len() >= MAX_DEFERRED_EVENTS
+            && !self.deferred_events.contains(&outer)
+        {
+            return Err(super::session::SessionError::NoProgress);
+        }
+        self.deferred_events.insert(outer);
+        Ok(())
     }
 }
 
@@ -288,7 +298,7 @@ impl Node {
             .get(&progress.mailbox.id())
             .cloned()
             .unwrap_or_default();
-        seen.extend(progress.deferred_controls.iter().copied());
+        seen.extend(progress.deferred_events.iter().copied());
         let mut controls = HashMap::new();
         let mut source_ids = Vec::new();
         if self.relay_send_allowed(&progress.relay) && authorize_upload() {
@@ -409,12 +419,7 @@ impl Node {
                     // Do not re-download this failed control in every protocol
                     // step. This ID is deliberately absent from the node-wide seen cache:
                     // a fresh mailbox operation must retry its persistence.
-                    if progress.deferred_controls.len() >= MAX_DEFERRED_CONSENT_CONTROLS
-                        && !progress.deferred_controls.contains(&outer_id)
-                    {
-                        return Err(super::session::SessionError::NoProgress);
-                    }
-                    progress.deferred_controls.insert(outer_id);
+                    progress.defer_event(outer_id)?;
                     continue;
                 }
                 Ok(false) => {}
@@ -429,12 +434,18 @@ impl Node {
                 continue;
             }
             let conv = event.conversation_id;
-            if store
+            let admission = store
                 .lock()
                 .expect("projection lock not poisoned")
-                .ingest(event)
-                .is_ok()
-            {
+                .ingest(event);
+            if matches!(admission, Err(LogError::MissingParents(_))) {
+                // Opaque IDs have no causal order. A child can fill a page
+                // before its parent; requesting it again would pin that page
+                // forever. Skip it for this operation only, fetch later pages,
+                // and retry admission in the next drain with its parents held.
+                // It is deliberately absent from the durable/global seen set.
+                progress.defer_event(outer_id)?;
+            } else if admission.is_ok() {
                 processed.push(outer_id);
                 self.emit_new_messages(conv);
                 self.process_channel_reception(conv, "catch_up");

@@ -21,6 +21,11 @@ UPnP = "UPnP"
 # PNG filter 4 uses the Paeth predictor (a proper algorithm name).
 paeth = "paeth"
 
+[type.changelog]
+extend-glob = ["CHANGELOG.md"]
+# Release-please commit-link labels are identifiers, not English words.
+extend-ignore-re = ['\[[0-9a-f]{7,40}\]\(https://github\.com/[^/\s]+/[^/\s]+/commit/[0-9a-f]{40}\)']
+
 [files]
 extend-exclude = [
   "Cargo.lock",
