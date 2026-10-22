@@ -966,6 +966,7 @@ Search hits carry their verified account binding from the scan's own roster snap
 so a device leaving the live roster cannot expose a hidden account's search results.
 Last-known names are display metadata: control characters are removed and names are
 bounded before saving, so an abusive peer name cannot prevent hiding its account.
+
 The hidden-contact tests also exercise actual registered Tauri command dispatch through
 the headless mock runtime, including persisted hide and restoration after stopping the node.
 An additional real-mesh regression keeps authenticated discovery and encrypted delivery
@@ -974,6 +975,41 @@ The `native-contact-eval` example uses the same desktop builder with isolated da
 roots and a dev-only embedded WebDriver. The normal entry point has no driver plugin or
 storage override. Three-platform native scenarios and the usability rubric are documented
 in [platform validation](platform-validation.md).
+
+### Recent search references
+
+The opt-in core `Node::search_recent` query returns `RecentSearchResults`: matches
+with a `SearchReference` and an explicit `per_conversation_limit` of 2,000.
+Eligibility reuses the existing search owner: available human device proofs,
+durable account conversations, and locally available channels; relay-only
+accounts and current relay devices remain excluded. The desktop hidden-contact
+preference remains a separate presentation filter.
+
+Each reference names its conversation kind and canonical message ID. Account
+references use the envelope's logical ID and account-history deduplication;
+channel references use event IDs, including original IDs preserved by recovery;
+legacy device references stay device-scoped even when a verified account binding
+is available for filtering. Unresolved zero-sentinel IDs become `None`, never an
+exact target. Display text, sender and timestamp cannot substitute for identity.
+A reference carries no read authority: future context/IPC consumers must recheck
+the current owner, conversation access and expiry/recall policy at read time.
+
+The query searches the latest 2,000 canonical history entries per conversation,
+using account/device history order and channel causal order to select that window.
+Files and recall tombstones occupy window slots; only current text is matched,
+case-insensitively. Accepted pending transactions and sibling-copy deduplication
+follow the owning history projection. Returned matches sort newest wall-clock
+first; ties within a conversation retain reverse canonical history order.
+Missing matches do not establish absence from all retained or remote history.
+Canonical history currently materializes retained rows before truncation, so the
+window bounds result projection, not input memory or execution time. This is not
+a paged or complete retained-history search.
+
+Existing `Node::search`, desktop search IPC and navigation retain their current
+contracts. Desktop adoption requires exact-ID selection, explicit unavailable
+legacy/context outcomes, bounded old-message context and owner-isolation tests;
+a failed exact reference must never fall back to matching text and timestamps.
+
 
 ### Manual encrypted backup and recovery
 

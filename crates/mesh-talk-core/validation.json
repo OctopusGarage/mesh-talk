@@ -2,6 +2,41 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-search-references",
+      "paths": [
+        "crates/mesh-talk-core/src/node/search.rs",
+        "crates/mesh-talk-core/src/node/search_tests.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::search::tests::"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-node"
+      ],
+      "capability": {
+        "summary": "Return canonical, conversation-scoped recent search references with explicit history-window coverage while retaining legacy search consumers.",
+        "guide": "docs/ARCHITECTURE.md#recent-search-references",
+        "invariants": [
+          {
+            "name": "Account, channel and legacy-device identities remain distinct; unresolved IDs are unavailable and text/time never establish exact identity",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          },
+          {
+            "name": "Recent search reuses history deduplication, pending acceptance, recovery, expiry and recall; a per-conversation result window does not imply complete retained search or bounded input cost",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          }
+        ]
+      },
+      "escalation": [
+        "Desktop adoption requires owner-isolated registered IPC, exact duplicate-result selection and bounded/unavailable old context. Core search tests alone do not certify native or UI navigation acceptance."
+      ]
+    },
+    {
       "id": "core-channel",
       "paths": [
         "crates/mesh-talk-core/src/channel/"
