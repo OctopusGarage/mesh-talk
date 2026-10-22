@@ -329,3 +329,32 @@ it("a saved-login retry cannot update a replacement session", async () => {
   expect(await pending).toBe(false);
   expect(useAuth.getState().savedSession).toBe("disabled");
 });
+
+it("cannot retry saved credentials without a signed-in owner", async () => {
+  expect(await useAuth.getState().retrySavedSession()).toBe(false);
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it.each([
+  { response: { success: false }, error: "Registration failed" },
+  {
+    rejection: "Identity store unavailable",
+    error: "Identity store unavailable",
+  },
+])(
+  "failed creation stays signed out and does not attempt login: $error",
+  async ({ response, rejection, error }) => {
+    if (rejection) invoke.mockRejectedValueOnce(rejection);
+    else invoke.mockResolvedValueOnce(response);
+    expect(await useAuth.getState().register("alice", "password123")).toBe(
+      false,
+    );
+    expect(useAuth.getState()).toMatchObject({
+      user: null,
+      createdUsername: null,
+      loading: false,
+      error,
+    });
+    expect(invoke.mock.calls.map(([cmd]) => cmd)).toEqual(["register"]);
+  },
+);

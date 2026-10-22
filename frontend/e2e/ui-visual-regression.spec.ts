@@ -46,9 +46,17 @@ for (const theme of ["light", "dark"] as const) {
     await expect(page.getByTestId("login-stay-signed-in")).toBeEnabled();
     await expect(page.getByTestId("login-submit")).toBeInViewport();
     await prepareForScreenshot(page);
-    await expect(page).toHaveScreenshot(
-      snapshotName("register", theme, 760, 520),
-    );
+    const name = snapshotName("register", theme, 760, 520);
+    // Native system font metrics change wrapping and form height in this short
+    // viewport. Reuse reviewed platform/font references without relaxing the diff.
+    const profile =
+      process.platform === "win32"
+        ? await windowsSnapshotProfile(page.locator("#password-guidance"))
+        : process.platform;
+    const reference = ["linux", "win32"].includes(process.platform)
+      ? name.replace(".png", `-${profile}.png`)
+      : name;
+    await expect(page).toHaveScreenshot(reference);
   });
 }
 

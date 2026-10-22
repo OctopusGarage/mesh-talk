@@ -236,3 +236,101 @@ for (const language of ["en", "es", "ja", "zh-Hans", "zh-Hant", "yue"]) {
     await expect(page.getByTestId("login-submit")).toBeInViewport();
   });
 }
+
+test("creation respects declining saved login and explains the next password requirement", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("login-tab-register").click();
+  await page.getByTestId("login-stay-signed-in").uncheck();
+  await page.getByTestId("login-username").fill("manual-login");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
+  const notice = page.getByTestId("account-protection");
+  await expect(notice).toContainText("Your login is not saved");
+  await expect(notice).toContainText("you will need it next time");
+  await expect(
+    notice.getByRole("button", { name: "Retry saving login" }),
+  ).toBeHidden();
+});
+
+test("unconfirmed saved-login status never claims that credentials were saved", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const ipc = (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            cmd: string,
+            args?: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    const invoke = ipc.invoke.bind(ipc);
+    ipc.invoke = async (cmd, args) => {
+      const result = await invoke(cmd, args);
+      if (cmd === "login") {
+        const compatible = { ...(result as Record<string, unknown>) };
+        delete compatible.saved_session;
+        return compatible;
+      }
+      return result;
+    };
+  });
+  await page.getByTestId("login-tab-register").click();
+  await page.getByTestId("login-username").fill("unconfirmed-login");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
+  await expect(page.getByTestId("account-protection")).toContainText(
+    "Saved-login status could not be confirmed",
+  );
+});
+
+test("failed and rejected credential retries stay actionable until saving succeeds", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const ipc = (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            cmd: string,
+            args?: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    const invoke = ipc.invoke.bind(ipc);
+    let retries = 0;
+    ipc.invoke = async (cmd, args) => {
+      if (cmd === "retry_saved_session") {
+        retries++;
+        if (retries === 1) return "failed";
+        if (retries === 2) throw new Error("credential provider unavailable");
+      }
+      const result = await invoke(cmd, args);
+      return cmd === "login"
+        ? { ...(result as object), saved_session: "failed" }
+        : result;
+    };
+  });
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
+  const notice = page.getByTestId("account-protection");
+  const retry = notice.getByRole("button", { name: "Retry saving login" });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await retry.click();
+    await expect(notice.getByRole("alert")).toContainText(
+      "Could not save your login",
+    );
+    await expect(retry).toBeEnabled();
+    await expect(page.getByTestId("chat-shell")).toBeVisible();
+  }
+  await retry.click();
+  await expect(notice).toBeHidden();
+});
