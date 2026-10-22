@@ -221,6 +221,7 @@
     {
       "id": "ci-verification",
       "paths": [
+        "_typos.toml",
         "scripts/check-health.sh",
         "scripts/diagnostics/ci-latency.test.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",

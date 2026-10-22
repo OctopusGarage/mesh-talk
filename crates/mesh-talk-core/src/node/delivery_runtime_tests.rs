@@ -8298,7 +8298,10 @@ async fn delivery_observation_worker_reports_only_an_observed_exchange_timeout()
     let (authenticated, ready) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let _channel = receiver.privacy_accept(stream).await.unwrap();
+        let mut channel = receiver.privacy_accept(stream).await.unwrap();
+        // Wait for the sender's request so its authenticated exchange is active
+        // before advancing the clock. Keep the socket open without replying.
+        let _request = channel.recv().await.unwrap();
         authenticated.send(()).unwrap();
         std::future::pending::<()>().await;
     });
@@ -8315,15 +8318,22 @@ async fn delivery_observation_worker_reports_only_an_observed_exchange_timeout()
     );
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(70)).await;
-    for _ in 0..100 {
-        if sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id])[0]
-            .2
-            .is_some_and(|o| o.reason == Some(DeliveryRecoveryReason::AttemptTimedOut))
-        {
-            break;
+    // The loop can still be awaiting its spawn_blocking store snapshot. A fixed
+    // number of yields does not give that thread a bounded chance to complete.
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id])[0]
+                .2
+                .is_some_and(|o| o.reason == Some(DeliveryRecoveryReason::AttemptTimedOut))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        tokio::task::yield_now().await;
-    }
+    })
+    .await
+    .expect("worker must publish the observed exchange timeout");
     assert_eq!(
         sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id])[0]
             .2
