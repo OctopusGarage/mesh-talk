@@ -20,6 +20,12 @@ export interface ChatMessage {
   receivedAt?: number;
   arrivalKind?: import("@/lib/types").ArrivalKind;
   delivery?: "awaiting" | "delivered";
+  /** Local runtime fact sampled at a monotonic response boundary; never persisted. */
+  deliveryObservation?: {
+    kind: "attempting" | "retry_scheduled";
+    ageMs: number;
+    sampledAt: number;
+  };
   replicas?: number;
   postOfficeCopies?: number;
   metadataPending?: boolean;

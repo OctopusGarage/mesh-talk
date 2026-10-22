@@ -427,6 +427,31 @@ impl DeliveryDiagnosticThrottle {
     }
 }
 
+// The delivery-loop lifetime owns all transient observations. Every control
+// task belongs to its JoinSet; cancellation cannot detach a hint producer.
+struct ObservationScope(std::sync::Arc<Node>);
+impl Drop for ObservationScope {
+    fn drop(&mut self) {
+        self.0.clear_delivery_observations();
+    }
+}
+
+pub(super) struct ObservationAttempt {
+    pub(super) node: std::sync::Arc<Node>,
+    pub(super) token: Option<super::delivery_observation::AttemptToken>,
+}
+impl Drop for ObservationAttempt {
+    fn drop(&mut self) {
+        if let Some(token) = self.token {
+            self.node
+                .delivery_observations
+                .lock()
+                .expect("delivery observations lock not poisoned")
+                .cancel(token);
+        }
+    }
+}
+
 impl Node {
     /// Replace the exact device fingerprints allowed for proactive DM recovery.
     /// Hosts populate this from an explicit safety-number verification decision;
@@ -1295,6 +1320,10 @@ impl Node {
             )
             .is_ok()
         {
+            self.delivery_observations
+                .lock()
+                .expect("delivery observations lock not poisoned")
+                .retain(|logical, _| logical != authenticated.logical_id());
             self.delivery_status_notify.notify_waiters();
         }
     }
@@ -1746,6 +1775,7 @@ impl Node {
     /// cursors and network work, so dropping it cancels scheduling and dials.
     pub(in crate::node) async fn run_delivery_loop(self: std::sync::Arc<Self>) {
         use std::time::Duration;
+        let _observation_scope = ObservationScope(self.clone());
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut destination_cursor = None;
@@ -1772,6 +1802,7 @@ impl Node {
                 _ = interval.tick() => {},
                 _ = self.delivery_notify.notified() => {},
                 _ = network.changed() => {
+                    self.clear_delivery_observations();
                     self.sessions.network_changed();
                     file_scheduler.workers.shutdown().await;
                     file_scheduler.running_sockets.clear();
@@ -1779,6 +1810,7 @@ impl Node {
                     file_scheduler.relay_cooldowns.clear();
                     self.relay_retry_after.lock().expect("relay retry lock not poisoned").clear();
                     controls.shutdown().await;
+                    self.clear_delivery_observations();
                     active.clear();
                     retries.clear();
                     self.channel_recovery_notify.notify_one();
@@ -1788,9 +1820,10 @@ impl Node {
                 },
                 result = controls.join_next(), if !controls.is_empty() => {
                     match result {
-                        Some(Ok((key, persistence_failed, progress))) => {
+                        Some(Ok((key, persistence_failed, progress, observation))) => {
                             if let Some(routes) = active.remove(&key) {
                                 retries.finished(key.retry_key(&routes.peer), routes.retry_routes(), progress, std::time::Instant::now());
+                                if let Some(token) = observation { self.finish_delivery_observation(token); }
                             }
                             if persistence_failed {
                                 diagnostic.warn_if_due();
@@ -1814,9 +1847,12 @@ impl Node {
                 .values()
                 .any(|routes| self.control_routes(&routes.peer).endpoints != routes.endpoints)
             {
+                self.clear_delivery_observations();
                 controls.shutdown().await;
+                self.clear_delivery_observations();
                 active.clear();
             }
+            self.prune_delivery_observations();
             // Reading next_destination advances its per-message cursor. Only
             // select work when its lane can admit it, so busy lanes preserve
             // the next queued turn instead of repeatedly skipping it.
@@ -1904,8 +1940,18 @@ impl Node {
                         return;
                     };
                     let node = self.clone();
+                    // Capture the exact admitted attempt before spawning. A
+                    // cancelled task may never be polled; it still owns cleanup,
+                    // and cannot publish a new hint after its parent is dropped.
+                    let attempt = ObservationAttempt {
+                        node: node.clone(),
+                        token: node.begin_delivery_observation(id, &destination),
+                    };
                     active.insert(key.clone(), routes);
                     controls.spawn(work.track(async move {
+                        // Move the entire Drop owner into the future. Capturing
+                        // only its Copy token would drop the guard at admission.
+                        let mut attempt = attempt;
                         let live = node
                             .delivery
                             .lock()
@@ -1920,7 +1966,8 @@ impl Node {
                         } else {
                             false
                         };
-                        (key, failed, progress)
+                        let observation = attempt.token.take();
+                        (key, failed, progress, observation)
                     }));
                 }
             }
@@ -1952,7 +1999,7 @@ impl Node {
                                 .expect("delivery lock not poisoned")
                                 .finish_receipt(receipt.conversation, receipt.original_event_id)
                                 .is_err();
-                        (key, failed, progress)
+                        (key, failed, progress, None)
                     }));
                 }
             }
@@ -2003,7 +2050,7 @@ impl Node {
                     active.insert(key.clone(), routes);
                     controls.spawn(work.track(async move {
                         let progress = node.reconcile_delivery_peer(&peer).await;
-                        (key, false, progress)
+                        (key, false, progress, None)
                     }));
                 }
             }

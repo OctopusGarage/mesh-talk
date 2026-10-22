@@ -287,7 +287,13 @@
       "fileHelp": "File card delivered. File download and reading are separate.",
       "metadataPending": "File details pending",
       "fileAwaiting": "Awaiting file offer receipt",
-      "fileDelivered": "File offer received"
+      "fileDelivered": "File offer received",
+      "detailsTitle": "Delivery details",
+      "attempted": "Local attempt started {{age}}.",
+      "retryScheduled": "Retry was scheduled {{age}}.",
+      "noDetails": "No current local attempt details are available.",
+      "automaticRetry": "Delivery retries automatically; you do not need to resend this message.",
+      "awaitingFileHelp": "A receipt confirms the file card. File download and reading are separate."
     },
     "custody": {
       "postOfficeHelp": "The post office confirmed durable storage of this encrypted message. Recipient delivery, downloads and reading are separate.",

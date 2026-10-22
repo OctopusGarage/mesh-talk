@@ -287,7 +287,13 @@
       "fileHelp": "ファイルカードの配信完了。ダウンロードや閲覧とは別です。",
       "metadataPending": "ファイル情報を確認中",
       "fileAwaiting": "ファイルの案内の受領待ち",
-      "fileDelivered": "ファイルの案内を受領済み"
+      "fileDelivered": "ファイルの案内を受領済み",
+      "detailsTitle": "配信の詳細",
+      "attempted": "ローカルでの送信試行を開始したのは{{age}}です。",
+      "retryScheduled": "再試行を予定したのは{{age}}です。",
+      "noDetails": "現在、ローカルの送信試行の詳細はありません。",
+      "automaticRetry": "配信は自動的に再試行されるため、このメッセージを送り直す必要はありません。",
+      "awaitingFileHelp": "受領確認はファイルカードの受け取りを示します。ファイルのダウンロードや閲覧とは別です。"
     },
     "custody": {
       "postOfficeHelp": "ポストオフィスがこの暗号化メッセージの永続保存を確認しました。受信者への配信、ダウンロード、既読は別です。",

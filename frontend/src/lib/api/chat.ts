@@ -1,5 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** Local scheduling facts only; absence means unknown. */
+export interface DeliveryObservation {
+  kind: "attempting" | "retry_scheduled";
+  age_ms: number;
+}
+
 export type SyncCategory =
   "history" | "attachments" | "profile" | "appearance" | "contacts";
 
@@ -183,6 +189,7 @@ export const chat = {
       Array<{
         id: string;
         status: "awaiting" | "delivered";
+        observation?: DeliveryObservation;
         file_progress?: OutgoingFileStatus;
       }>
     >("owner_delivery_statuses", { owner, account, ids }),

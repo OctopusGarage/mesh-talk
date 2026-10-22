@@ -4,7 +4,54 @@
 use super::conversation::{account_conversation_id, dm_conversation_id};
 use super::queries::decode_account_entry;
 use super::{MessageBody, Node, SearchHit};
-use crate::eventlog::event::ConversationId;
+use crate::eventlog::event::{ConversationId, EventId};
+use crate::identity::device::PublicIdentity;
+
+const RECENT_HISTORY_LIMIT: usize = 2000;
+
+/// Exact history identity, kept distinct from a result's display/account binding.
+/// A missing ID is explicitly unavailable; it must never be resolved by text/time.
+/// References do not authorize a later read; hosts must recheck owner and policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchReference {
+    Account {
+        account_id: String,
+        message_id: Option<EventId>,
+    },
+    Channel {
+        channel_id: ConversationId,
+        message_id: Option<EventId>,
+    },
+    LegacyDevice {
+        device_id: String,
+        message_id: Option<EventId>,
+    },
+}
+
+/// A presentation match and its canonical, conversation-scoped identity.
+#[derive(Debug, Clone)]
+pub struct ReferencedSearchHit {
+    pub hit: SearchHit,
+    pub reference: SearchReference,
+    pub expires_at_ms: Option<u64>,
+}
+
+/// Exact context and the canonical position of its target in retained history.
+/// Position metadata is descriptive and does not grant later read authority.
+pub struct SearchContext {
+    pub messages: Vec<super::HistoryEntry>,
+    pub newer_entries: usize,
+}
+
+/// Matches from a recent canonical-history window in each eligible conversation.
+/// This does not establish completeness over all retained or remote history.
+#[derive(Debug, Clone)]
+pub struct RecentSearchResults {
+    pub hits: Vec<ReferencedSearchHit>,
+    /// Window entries include files and recall tombstones, not just text matches.
+    /// This bounds output per conversation, not input allocations or scan time.
+    pub per_conversation_limit: usize,
+}
 
 impl Node {
     /// Search decrypted history across all known DMs + channels for `query`
@@ -21,6 +68,136 @@ impl Node {
         const PER_CONV: usize = 2000;
         let mut hits: Vec<SearchHit> = Vec::new();
 
+        for conversation in self.search_conversations() {
+            let scope = match &conversation.source {
+                SearchSource::Account(account) => SearchScope::Account(account),
+                SearchSource::Channel => SearchScope::Channel,
+                SearchSource::LegacyDevice(_) => SearchScope::LegacyDm,
+            };
+            for line in self.scan_conversation(conversation.id, &q, PER_CONV, scope) {
+                hits.push(conversation.hit(line.from_me, line.who, line.text, line.wall_clock));
+            }
+        }
+        hits.sort_by_key(|b| std::cmp::Reverse(b.wall_clock));
+        hits
+    }
+
+    /// Search the latest 2,000 canonical history entries per eligible conversation.
+    /// Matching is case-insensitive substring search. Unlike [`Node::search`], this
+    /// opt-in API uses history's logical deduplication, pending accepted records,
+    /// recovered IDs and channel causal ordering. Files and recall tombstones use
+    /// window slots; only visible text is matched. A zero sentinel becomes no ID.
+    ///
+    /// History currently materializes retained rows before truncation. The result
+    /// window is bounded, but execution/allocations are not a paged retained scan.
+    pub fn search_recent(&self, query: &str) -> RecentSearchResults {
+        let q = query.trim().to_lowercase();
+        let mut response = RecentSearchResults {
+            hits: Vec::new(),
+            per_conversation_limit: RECENT_HISTORY_LIMIT,
+        };
+        if q.is_empty() {
+            return response;
+        }
+        for conversation in self.search_conversations() {
+            let history = match &conversation.source {
+                SearchSource::Account(account) => {
+                    self.account_history(account, RECENT_HISTORY_LIMIT)
+                }
+                SearchSource::Channel => {
+                    self.channel_history(conversation.id, RECENT_HISTORY_LIMIT)
+                }
+                SearchSource::LegacyDevice(public) => self.dm_history(public, RECENT_HISTORY_LIMIT),
+            };
+            for entry in history.into_iter().rev() {
+                if entry.recalled
+                    || !String::from_utf8_lossy(&entry.text)
+                        .to_lowercase()
+                        .contains(&q)
+                {
+                    continue;
+                }
+                let message_id = (entry.id != EventId::new([0; 32])).then_some(entry.id);
+                let reference = match &conversation.source {
+                    SearchSource::Account(account) => SearchReference::Account {
+                        account_id: account.clone(),
+                        message_id,
+                    },
+                    SearchSource::Channel => SearchReference::Channel {
+                        channel_id: conversation.id,
+                        message_id,
+                    },
+                    SearchSource::LegacyDevice(public) => SearchReference::LegacyDevice {
+                        device_id: public.user_id(),
+                        message_id,
+                    },
+                };
+                response.hits.push(ReferencedSearchHit {
+                    hit: conversation.hit(entry.from_me, entry.who, entry.text, entry.wall_clock),
+                    reference,
+                    expires_at_ms: entry.expires_at_ms,
+                });
+            }
+        }
+        response
+            .hits
+            .sort_by_key(|hit| std::cmp::Reverse(hit.hit.wall_clock));
+        response
+    }
+
+    /// Resolve an exact reference against currently eligible canonical history.
+    /// Returns at most 25 entries on each side, preserving canonical order. The
+    /// retained history projection materializes its full input before slicing;
+    /// this bounds the response, not retained-history scan time or allocation.
+    pub fn search_context(&self, reference: &SearchReference) -> Option<SearchContext> {
+        let message_id = match reference {
+            SearchReference::Account { message_id, .. }
+            | SearchReference::Channel { message_id, .. }
+            | SearchReference::LegacyDevice { message_id, .. } => (*message_id)?,
+        };
+        if message_id == EventId::new([0; 32]) {
+            return None;
+        }
+        let conversation = self
+            .search_conversations()
+            .into_iter()
+            .find(|conversation| match (reference, &conversation.source) {
+                (SearchReference::Account { account_id, .. }, SearchSource::Account(account)) => {
+                    account_id == account
+                }
+                (SearchReference::Channel { channel_id, .. }, SearchSource::Channel) => {
+                    *channel_id == conversation.id
+                }
+                (
+                    SearchReference::LegacyDevice { device_id, .. },
+                    SearchSource::LegacyDevice(public),
+                ) => *device_id == public.user_id(),
+                _ => false,
+            })?;
+        let mut history = match &conversation.source {
+            SearchSource::Account(account) => self.account_history(account, usize::MAX),
+            SearchSource::Channel => self.channel_history(conversation.id, usize::MAX),
+            SearchSource::LegacyDevice(public) => self.dm_history(public, usize::MAX),
+        };
+        let target = history
+            .iter()
+            .position(|entry| entry.id == message_id && !entry.recalled)?;
+        let newer_entries = history.len() - target - 1;
+        let end = target.saturating_add(26).min(history.len());
+        let mut context: Vec<_> = history.drain(target.saturating_sub(25)..end).collect();
+        for entry in &mut context {
+            entry.recalled_text = None;
+        }
+        Some(SearchContext {
+            messages: context,
+            newer_entries,
+        })
+    }
+
+    // Candidate eligibility is shared; canonical projection and the legacy fast
+    // scan retain their separate coverage/cost contracts.
+    fn search_conversations(&self) -> Vec<SearchConversation> {
+        let mut conversations = Vec::new();
         let peers = self
             .roster
             .lock()
@@ -50,18 +227,13 @@ impl Node {
         }));
         for (public, account_id, name) in dm_peers {
             let conv = dm_conversation_id(&self.identity.public(), &public);
-            for m in self.scan_conversation(conv, &q, PER_CONV, SearchScope::LegacyDm) {
-                hits.push(SearchHit {
-                    is_channel: false,
-                    target: public.user_id(),
-                    account_id: account_id.clone(),
-                    label: name.clone(),
-                    from_me: m.from_me,
-                    who: m.who,
-                    text: m.text,
-                    wall_clock: m.wall_clock,
-                });
-            }
+            conversations.push(SearchConversation {
+                id: conv,
+                target: public.user_id(),
+                account_id,
+                label: name,
+                source: SearchSource::LegacyDevice(public),
+            });
         }
         // Account-addressed DMs (the multi-device path the app uses) remain
         // searchable after every device leaves discovery. The durable message
@@ -109,35 +281,24 @@ impl Node {
                 .and_then(Clone::clone)
                 .unwrap_or_else(|| acct.clone());
             let conv = account_conversation_id(&my_account, &acct);
-            for m in self.scan_conversation(conv, &q, PER_CONV, SearchScope::Account(&acct)) {
-                hits.push(SearchHit {
-                    is_channel: false,
-                    target: acct.clone(),
-                    account_id: Some(acct.clone()),
-                    label: label.clone(),
-                    from_me: m.from_me,
-                    who: m.who,
-                    text: m.text,
-                    wall_clock: m.wall_clock,
-                });
-            }
+            conversations.push(SearchConversation {
+                id: conv,
+                target: acct.clone(),
+                account_id: Some(acct.clone()),
+                label,
+                source: SearchSource::Account(acct),
+            });
         }
         for ch in self.list_channels() {
-            for m in self.scan_conversation(ch.id, &q, PER_CONV, SearchScope::Channel) {
-                hits.push(SearchHit {
-                    is_channel: true,
-                    account_id: None,
-                    target: hex::encode(ch.id.as_bytes()),
-                    label: ch.name.clone(),
-                    from_me: m.from_me,
-                    who: m.who,
-                    text: m.text,
-                    wall_clock: m.wall_clock,
-                });
-            }
+            conversations.push(SearchConversation {
+                id: ch.id,
+                target: hex::encode(ch.id.as_bytes()),
+                account_id: None,
+                label: ch.name,
+                source: SearchSource::Channel,
+            });
         }
-        hits.sort_by_key(|b| std::cmp::Reverse(b.wall_clock)); // most recent first
-        hits
+        conversations
     }
 
     /// Scan one conversation's sent + received plaintext for a lowercased substring `q`,
@@ -297,3 +458,32 @@ struct ScanMatch {
 #[cfg(test)]
 #[path = "search_tests.rs"]
 mod tests;
+
+struct SearchConversation {
+    id: ConversationId,
+    target: String,
+    account_id: Option<String>,
+    label: String,
+    source: SearchSource,
+}
+
+enum SearchSource {
+    Account(String),
+    Channel,
+    LegacyDevice(PublicIdentity),
+}
+
+impl SearchConversation {
+    fn hit(&self, from_me: bool, who: String, text: Vec<u8>, wall_clock: u64) -> SearchHit {
+        SearchHit {
+            is_channel: matches!(self.source, SearchSource::Channel),
+            target: self.target.clone(),
+            account_id: self.account_id.clone(),
+            label: self.label.clone(),
+            from_me,
+            who,
+            text,
+            wall_clock,
+        }
+    }
+}

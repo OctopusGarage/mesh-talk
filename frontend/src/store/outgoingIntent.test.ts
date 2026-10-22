@@ -64,7 +64,8 @@ function session() {
     runEpoch: 0,
     identityEpoch: 0,
     active: conversation,
-    myId: "me",
+    myId: "local-device",
+    myAccountId: "local-account",
     reload: vi.fn(async () => true),
     refreshStatuses: vi.fn(async () => {}),
     setError: vi.fn(),
@@ -484,4 +485,212 @@ it("projects member and post-office custody separately for exact channel IDs", a
     channelId: "group",
     ids: ["event"],
   });
+});
+
+it("samples local delivery facts monotonically and clears absent or confirmed observations", async () => {
+  const store = session();
+  store.setState({ messages: { [key]: [row("event-a")] } });
+  const clock = vi.spyOn(performance, "now").mockReturnValue(200);
+  invoke.mockResolvedValue([
+    {
+      id: "event-a",
+      status: "awaiting",
+      observation: { kind: "attempting", age_ms: 3000 },
+    },
+  ]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages[key][0].deliveryObservation).toEqual({
+    kind: "attempting",
+    ageMs: 3000,
+    sampledAt: 200,
+  });
+  const sampled = store.getState().messages[key][0];
+  expect(
+    reconcileMessages([row("event-a")], [sampled], [], [])[0]
+      .deliveryObservation,
+  ).toEqual(sampled.deliveryObservation);
+  invoke.mockResolvedValue([{ id: "event-a", status: "awaiting" }]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages[key][0].deliveryObservation).toBeUndefined();
+  for (const observation of [
+    { kind: "future", age_ms: 0 },
+    { kind: "attempting", age_ms: -1 },
+    { kind: "attempting", age_ms: Infinity },
+  ]) {
+    invoke.mockResolvedValue([
+      { id: "event-a", status: "awaiting", observation },
+    ]);
+    await refreshDeliveryStatuses(store.setState, store.getState);
+    expect(
+      store.getState().messages[key][0].deliveryObservation,
+    ).toBeUndefined();
+  }
+  invoke.mockResolvedValue([
+    {
+      id: "event-a",
+      status: "delivered",
+      observation: { kind: "attempting", age_ms: 0 },
+    },
+  ]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages[key][0]).toMatchObject({
+    delivery: "delivered",
+  });
+  expect(store.getState().messages[key][0].deliveryObservation).toBeUndefined();
+  clock.mockRestore();
+});
+
+it("scopes observations to requested outgoing IDs and the captured conversation and runtime", async () => {
+  const store = session();
+  store.setState({
+    messages: {
+      [key]: [row("event-a"), { ...row("incoming"), fromMe: false }],
+      "account:other": [row("event-a")],
+    },
+  });
+  let release!: (rows: unknown[]) => void;
+  invoke.mockImplementationOnce(
+    () => new Promise((resolve) => (release = resolve)),
+  );
+  const read = refreshDeliveryStatuses(store.setState, store.getState);
+  const rows = ["event-a", "incoming", "unrequested"].map((id) => ({
+    id,
+    status: "awaiting",
+    observation: { kind: "retry_scheduled", age_ms: 0 },
+  }));
+  release(rows);
+  await read;
+  expect(store.getState().messages[key][0].deliveryObservation?.kind).toBe(
+    "retry_scheduled",
+  );
+  expect(store.getState().messages[key][1].deliveryObservation).toBeUndefined();
+  expect(
+    store.getState().messages["account:other"][0].deliveryObservation,
+  ).toBeUndefined();
+  invoke.mockImplementationOnce(
+    () => new Promise((resolve) => (release = resolve)),
+  );
+  const late = refreshDeliveryStatuses(store.setState, store.getState);
+  store.setState({ runEpoch: 1 });
+  release([
+    {
+      id: "event-a",
+      status: "awaiting",
+      observation: { kind: "attempting", age_ms: 0 },
+    },
+  ]);
+  await late;
+  expect(store.getState().messages[key][0].deliveryObservation?.kind).toBe(
+    "retry_scheduled",
+  );
+});
+
+it("clears evicted observations and never projects a personal conversation hint", async () => {
+  const store = session();
+  const observed = {
+    ...row("event-a"),
+    delivery: "awaiting" as const,
+    deliveryObservation: {
+      kind: "attempting" as const,
+      ageMs: 0,
+      sampledAt: 100,
+    },
+  };
+  store.setState({ messages: { [key]: [observed] } });
+  invoke.mockResolvedValue([]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages[key][0].deliveryObservation).toBeUndefined();
+  store.setState({
+    active: { ...conversation, id: "local-account" },
+    messages: { "account:local-account": [row("event-a")] },
+  });
+  invoke.mockResolvedValue([
+    {
+      id: "event-a",
+      status: "awaiting",
+      observation: { kind: "attempting", age_ms: 0 },
+    },
+  ]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(
+    store.getState().messages["account:local-account"][0].deliveryObservation,
+  ).toBeUndefined();
+});
+
+it("keeps a canonical confirmation ahead of a late awaiting hint and acceptance", async () => {
+  const store = session();
+  store.setState({ messages: { [key]: [row("event-a")] } });
+  let release!: (rows: unknown[]) => void;
+  invoke.mockImplementationOnce(
+    () => new Promise((resolve) => (release = resolve)),
+  );
+  const read = refreshDeliveryStatuses(store.setState, store.getState);
+  const confirmed = { ...row("event-a"), delivery: "delivered" as const };
+  store.setState({ messages: { [key]: [confirmed] } });
+  release([
+    {
+      id: "event-a",
+      status: "awaiting",
+      observation: { kind: "attempting", age_ms: 0 },
+    },
+  ]);
+  await read;
+  expect(store.getState().messages[key][0].delivery).toBe("delivered");
+  expect(store.getState().messages[key][0].deliveryObservation).toBeUndefined();
+  const stale = {
+    ...row("event-a", "client"),
+    delivery: "awaiting" as const,
+    deliveryObservation: {
+      kind: "attempting" as const,
+      ageMs: 0,
+      sampledAt: 0,
+    },
+  };
+  const state = {
+    ...emptyConversationCache(),
+    messages: { [key]: [confirmed] },
+    intents: {
+      client: {
+        conversation,
+        message: stale,
+        payload: { kind: "text" as const, text: "text", replyTo: null },
+      },
+    },
+  };
+  const completion = completeSendIntentState(
+    state,
+    conversation,
+    "client",
+    stale,
+  );
+  expect(completion.messages?.[key][0].delivery).toBe("delivered");
+  expect(completion.messages?.[key][0].deliveryObservation).toBeUndefined();
+});
+
+it("clears a local observation when send completion itself carries confirmation", () => {
+  const stale = {
+    ...row("event-a", "client"),
+    delivery: "awaiting" as const,
+    deliveryObservation: {
+      kind: "attempting" as const,
+      ageMs: 0,
+      sampledAt: 0,
+    },
+  };
+  const state = {
+    ...emptyConversationCache(),
+    messages: { [key]: [stale] },
+    intents: {
+      client: {
+        conversation,
+        message: stale,
+        payload: { kind: "text" as const, text: "text", replyTo: null },
+      },
+    },
+  };
+  const completion = completeSendIntentState(state, conversation, "client", {
+    ...stale,
+    delivery: "delivered",
+  });
+  expect(completion.messages?.[key][0].deliveryObservation).toBeUndefined();
 });

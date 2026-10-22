@@ -32,6 +32,7 @@ export interface OutgoingIntentContext extends OutgoingIntentState {
   identityEpoch: number;
   active: Conversation | null;
   myId: string;
+  myAccountId: string;
   reload: () => Promise<boolean>;
   refreshStatuses: (
     conversation?: Conversation,
@@ -177,15 +178,32 @@ export async function refreshDeliveryStatuses(
         .map((m) => m.id!),
     );
     const projection = new Map<string, "awaiting" | "delivered">();
+    const observations = new Map<string, ChatMessage["deliveryObservation"]>();
     for (let i = 0; i < ids.length; i += 256) {
       if (!lease.current()) return;
       const rows = await readWithDeadline(() =>
         chat.deliveryStatuses(lease.owner!, c.id, ids.slice(i, i + 256)),
       );
       if (!lease.current()) return;
+      const sampledAt = performance.now();
       for (const row of rows) {
-        if (!ids.includes(row.id)) continue;
+        if (!ids.slice(i, i + 256).includes(row.id)) continue;
         projection.set(row.id, row.status);
+        const fact = row.observation;
+        if (
+          c.id !== get().myAccountId &&
+          row.status === "awaiting" &&
+          fact &&
+          (fact.kind === "attempting" || fact.kind === "retry_scheduled") &&
+          Number.isFinite(fact.age_ms) &&
+          fact.age_ms >= 0
+        ) {
+          observations.set(row.id, {
+            kind: fact.kind,
+            ageMs: fact.age_ms,
+            sampledAt,
+          });
+        }
         if (fileIds.has(row.id)) {
           if (row.file_progress)
             useTransfers
@@ -206,7 +224,9 @@ export async function refreshDeliveryStatuses(
       messages: s.messages[key]
         ? {
             ...s.messages,
-            [key]: s.messages[key].map((m) => applyProjection(m, projection)),
+            [key]: s.messages[key].map((m) =>
+              applyProjection(m, projection, observations),
+            ),
           }
         : s.messages,
       intents: Object.fromEntries(
@@ -215,7 +235,11 @@ export async function refreshDeliveryStatuses(
           convKey(intent.conversation) === key
             ? {
                 ...intent,
-                message: applyProjection(intent.message, projection),
+                message: applyProjection(
+                  intent.message,
+                  projection,
+                  observations,
+                ),
               }
             : intent,
         ]),

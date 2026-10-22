@@ -287,7 +287,13 @@
       "fileHelp": "檔案卡片已送達，檔案下載與閱讀另行進行。",
       "metadataPending": "等待檔案資訊",
       "fileAwaiting": "等待接收方收到檔案邀請",
-      "fileDelivered": "接收方已收到檔案邀請"
+      "fileDelivered": "接收方已收到檔案邀請",
+      "detailsTitle": "送達詳情",
+      "attempted": "本機於{{age}}開始了一次傳送嘗試。",
+      "retryScheduled": "本機於{{age}}安排了重試。",
+      "noDetails": "目前沒有本機傳送嘗試的詳情。",
+      "automaticRetry": "系統會自動重試傳送，無需重新傳送這則訊息。",
+      "awaitingFileHelp": "回執確認的是檔案卡片已送達，與檔案下載和閱讀分開。"
     },
     "custody": {
       "postOfficeHelp": "郵局已確認持久保存此加密訊息。收件人收到、檔案下載和已讀是獨立狀態。",

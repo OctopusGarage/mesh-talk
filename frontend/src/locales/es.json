@@ -287,7 +287,13 @@
       "fileHelp": "Tarjeta del archivo entregada. La descarga y la lectura son independientes.",
       "metadataPending": "Detalles del archivo pendientes",
       "fileAwaiting": "Esperando confirmación de la oferta de archivo",
-      "fileDelivered": "Oferta de archivo recibida"
+      "fileDelivered": "Oferta de archivo recibida",
+      "detailsTitle": "Detalles de entrega",
+      "attempted": "El intento local se inició {{age}}.",
+      "retryScheduled": "Se programó un reintento {{age}}.",
+      "noDetails": "No hay detalles actuales sobre los intentos locales.",
+      "automaticRetry": "La entrega se reintenta automáticamente; no hace falta que vuelvas a enviar este mensaje.",
+      "awaitingFileHelp": "El recibo confirma la entrega de la tarjeta del archivo. La descarga y la lectura son independientes."
     },
     "custody": {
       "postOfficeHelp": "La oficina de correos confirmó el almacenamiento duradero de este mensaje cifrado. La entrega al destinatario, las descargas y la lectura son independientes.",

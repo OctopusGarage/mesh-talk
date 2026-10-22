@@ -6,6 +6,24 @@ Distinguish a local send, relay custody and confirmation from the recipient acco
 
 A local message can be pending or failed before recipient confirmation. A relay may hold encrypted events while the recipient is offline. The app's delivery confirmation denotes account receipt, not that a person has read the message.
 
+## Inspect delivery details
+
+Select **Awaiting receipt** on one of your accepted direct messages to open its
+delivery details. The disclosure works with the keyboard: focus the label and
+press Enter or Space; Escape closes it and returns focus to the label.
+
+When available, details show when a local attempt started or a retry was
+scheduled. The age describes that local observation, not the recipient's
+presence or a promised retry time. Older observations can remain after the
+connection changes. Missing details mean no current observation is available,
+including after restart or eviction; they do not establish a delivery failure.
+Automatic delivery continues without creating another copy of your message.
+
+Recipient confirmation replaces the awaiting disclosure. For files, confirmation
+applies to the file card; downloading the bytes and reading the file remain
+separate. Group copy information and Saved Messages retain their own meanings.
+Use **More → Connection** to inspect connection settings and diagnostics.
+
 ## If a message stays pending
 
 1. Check the connection status and open **More → Connection**.

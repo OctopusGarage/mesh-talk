@@ -23,7 +23,11 @@ export function requiredBrowserPaths(tier) {
     "settings switches light dark and Chinese English within bounds", "Unicode multiline and unbroken wide messages stay in the log",
   ]) paths.push(["portable-core.spec.ts", `${size} browser-only core`, title]);
   if (tier === "extended") paths.push(["portable-core.spec.ts", "@extended palette locale resize and repeated dialog DOM retention smoke"]);
+  for (const size of ["1280x800", "760x620", "320x360"]) {
+    paths.push(["automatic-delivery.spec.ts", `delivery details preserve keyboard focus and fit ${size}`]);
+  }
   paths.push(
+    ["automatic-delivery.spec.ts", "delivery details close on navigation and app lock, including a late status response"],
     ["automatic-delivery.spec.ts", "text, sticker and file card stay Awaiting until explicit authoritative mock projection"],
     ["automatic-delivery.spec.ts", "a native picker completed after conversation navigation cannot send to the new conversation"],
     ["automatic-delivery.spec.ts", "a pending local text acceptance moves the submitted text out of the composer"],

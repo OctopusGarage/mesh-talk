@@ -2,6 +2,49 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-search",
+      "paths": [
+        "src-tauri/src/owner_commands/search.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "owner_commands::tests::registered_search_recent_and_exact_context_shapes",
+            "owner_commands::tests::registered_search_validates_inputs_and_explicit_owner",
+            "owner_commands::tests::registered_search_caps_hits_and_context_serialized_bytes",
+            "owner_commands::tests::registered_search_recent_response_byte_cap_keeps_newest_prefix",
+            "owner_commands::tests::registered_search_rejects_queued_replaced_owner_and_app_lock"
+          ]
+        }
+      ],
+      "frontend": [
+        "src/lib/api.test.ts"
+      ],
+      "consumers": [
+        "desktop-session",
+        "frontend-chat",
+        "frontend-owner"
+      ],
+      "capability": {
+        "summary": "Serve exact owner-scoped recent search and bounded read-only message context with validated reference namespaces and explicit coverage.",
+        "guide": "docs/ARCHITECTURE.md#recent-search-references",
+        "invariants": [
+          {
+            "name": "Queued or replaced owners and locked apps cannot publish search or context; malformed references never select an approximate message",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          },
+          {
+            "name": "Search returns at most 200 hits and 1 MiB; context returns at most 51 canonical rows and 1 MiB or an explicit unavailable result",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          }
+        ]
+      },
+      "escalation": [
+        "Search/context command changes require registered IPC owner/malformed-input/lock tests. Frontend adoption also requires typed adapter parity and exact duplicate/older-context browser scenarios. Headless registered dispatch does not certify real native webview acceptance."
+      ]
+    },
+    {
       "id": "desktop-session",
       "paths": [
         "src-tauri/src/desktop_session.rs",
@@ -440,7 +483,8 @@
         "src-tauri/src/tray.rs",
         "src-tauri/src/session_store.rs",
         "src-tauri/src/session_store/",
-        "src-tauri/tauri.conf.json"
+        "src-tauri/tauri.conf.json",
+        "src-tauri/src/owner_commands/"
       ],
       "native": [
         "host"
