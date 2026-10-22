@@ -5,6 +5,7 @@ import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { buildAffectedPlan } from "../validation/affected.mjs";
+import { loadContracts } from "../validation/contracts.mjs";
 
 const rootUrl = new URL("../../", import.meta.url);
 const root = fileURLToPath(rootUrl);
@@ -22,9 +23,7 @@ const sourceFiles = execFileSync("git", ["ls-files", "--cached", "--others", "--
 })
   .split("\0")
   .filter(Boolean);
-const contracts = [...packages.values()].flatMap(
-  (path) => JSON.parse(read(`${path}/validation.json`)).contracts,
-);
+const contracts = await loadContracts(root);
 const plan = (path) => buildAffectedPlan([path], { contracts });
 const owners = (path) => plan(path).owners.map(({ id }) => id);
 
@@ -126,6 +125,42 @@ test("binary, integration harness and native build inputs retain explicit accept
       /crypto|wire|persist|storage/iu,
     );
   }
+});
+
+test("CLI profile ownership changes select explicit binary and restart evidence", () => {
+  const selected = plan("crates/mesh-talk-core/src/bin/mesh-talk-node.rs");
+  assert.deepEqual(selected.blockers, []);
+  assert.ok(owners("specifications/deployment_guide.md").includes("core-cli-harness"));
+  const escalation = selected.escalation.join(" ");
+  assert.match(escalation, /--bin mesh-talk-node tests::profile_lock/u);
+  assert.match(escalation, /participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error/u);
+  const owner = selected.owners.find(({ id }) => id === "core-cli-harness");
+  assert.equal(owner?.capability?.guide,
+    "specifications/deployment_guide.md#data-directory-ownership");
+});
+
+test("delivery observations retain Node consumers, evidence rules and native acceptance", () => {
+  const selected = plan("crates/mesh-talk-core/src/node/delivery_observation.rs");
+  assert.deepEqual(selected.blockers, []);
+  for (const expected of ["core-node", "desktop-session", "integration-service"]) {
+    assert.ok(selected.owners.some(({ id }) => id === expected), expected);
+  }
+  const owner = selected.owners.find(({ id }) => id === "core-node");
+  assert.ok(owner.capability.invariants.some(({ reference }) =>
+    reference === "docs/network-design-reference.md#runtime-delivery-observations"));
+  assert.match(selected.escalation.join(" "), /observation.*recipient.*confirmation/iu);
+  const scenarios = JSON.parse(read("crates/mesh-talk-core/validation.json")).prScenarios;
+  assert.ok(scenarios.some(({ paths, native }) => native?.includes("host") &&
+    paths.includes("crates/mesh-talk-core/src/node/delivery_observation.rs")));
+});
+
+test("desktop search reaches its session and frontend consumers", () => {
+  const selected = plan("src-tauri/src/owner_commands/search.rs");
+  assert.deepEqual(selected.blockers, []);
+  for (const expected of ["desktop-search", "desktop-session", "frontend-chat", "frontend-owner"]) {
+    assert.ok(selected.owners.some(({ id }) => id === expected), expected);
+  }
+  assert.ok(selected.frontend.includes("src/lib/api.test.ts"));
 });
 
 // Source evidence catches accidental empty/fabricated filters without compiling

@@ -145,6 +145,10 @@ export function completeSendIntentState(
           existing?.delivery === "delivered"
             ? ("delivered" as const)
             : next.delivery,
+        deliveryObservation:
+          existing?.delivery === "delivered" || next.delivery === "delivered"
+            ? undefined
+            : (existing?.deliveryObservation ?? next.deliveryObservation),
         ...(next.file && existing?.file && !existing.metadataPending
           ? { file: existing.file, metadataPending: false }
           : {}),
@@ -190,6 +194,8 @@ export function reconcileMessages(
         arrivalKind: old?.arrivalKind ?? m.arrivalKind,
         clientId: old?.clientId,
         delivery: old?.delivery,
+        deliveryObservation:
+          old?.delivery === "awaiting" ? old.deliveryObservation : undefined,
         pending: false,
         metadataPending: false,
       };
@@ -204,12 +210,21 @@ export function reconcileMessages(
 export function applyProjection(
   message: ChatMessage,
   statuses: Map<string, "awaiting" | "delivered">,
+  observations = new Map<string, ChatMessage["deliveryObservation"]>(),
 ): ChatMessage {
   if (!message.fromMe || !message.id) return message;
   const projected = statuses.get(message.id);
   return {
     ...message,
     delivery: message.delivery === "delivered" ? "delivered" : projected,
+    deliveryObservation:
+      message.delivery !== "delivered" &&
+      projected === "awaiting" &&
+      !message.recalled &&
+      !message.pending &&
+      !message.failed
+        ? observations.get(message.id)
+        : undefined,
   };
 }
 

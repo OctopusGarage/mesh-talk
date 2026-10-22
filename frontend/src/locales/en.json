@@ -285,7 +285,13 @@
       "delivered": "Delivered",
       "help": "Automatic receipt from the target account. Not a read receipt.",
       "fileHelp": "File card delivered. File download and reading are separate.",
-      "metadataPending": "File details pending"
+      "metadataPending": "File details pending",
+      "detailsTitle": "Delivery details",
+      "attempted": "Local attempt started {{age}}.",
+      "retryScheduled": "Retry was scheduled {{age}}.",
+      "noDetails": "No current local attempt details are available.",
+      "automaticRetry": "Delivery retries automatically; you do not need to resend this message.",
+      "awaitingFileHelp": "A receipt confirms the file card. File download and reading are separate."
     },
     "custody": {
       "local": "No member copy confirmed",

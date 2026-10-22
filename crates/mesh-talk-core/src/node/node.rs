@@ -323,6 +323,8 @@ pub struct Node {
     pub(in crate::node) dm_ratchet: Mutex<DmRatchet>,
     /// Serializes every DM ratchet consumer and ordered recovery.
     pub(in crate::node) delivery: Mutex<super::delivery_store::DeliveryStore>,
+    pub(in crate::node) delivery_observations:
+        Mutex<super::delivery_observation::DeliveryObservations>,
     /// Transient recipient Have counts for active outgoing file destinations.
     pub(in crate::node) outgoing_file_acks: Mutex<HashMap<(EventId, EventId), u32>>,
     /// Last authenticated recipient answer for each outgoing manifest destination.
@@ -791,6 +793,7 @@ impl Node {
             media,
             dm_ratchet: Mutex::new(dm_ratchet),
             delivery: Mutex::new(delivery),
+            delivery_observations: Mutex::new(Default::default()),
             outgoing_file_acks: Mutex::new(HashMap::new()),
             outgoing_file_consents: Mutex::new(HashMap::new()),
             channel_changes: tokio::sync::broadcast::channel(256).0,

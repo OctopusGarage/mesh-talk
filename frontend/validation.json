@@ -2,6 +2,41 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-delivery-details",
+      "paths": [
+        "frontend/src/features/chat/DeliveryDetails.tsx",
+        "frontend/src/features/chat/DeliveryDetails.test.ts",
+        "frontend/src/features/chat/DeliveryFooter.tsx",
+        "frontend/src/features/chat/deliveryFooter.test.ts",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/store/outgoingIntent.ts"
+      ],
+      "frontend": [
+        "src/features/chat/DeliveryDetails.test.ts",
+        "src/features/chat/deliveryFooter.test.ts",
+        "src/store/outgoingIntent.test.ts",
+        "src/store/chat.test.ts"
+      ],
+      "capability": {
+        "summary": "Disclose owner-scoped local delivery observations without changing recipient confirmation or creating another send.",
+        "guide": "docs/help/topics/delivery.md#inspect-delivery-details",
+        "invariants": [
+          {
+            "name": "Missing or aged scheduling details do not establish recipient presence, failure, custody or delivery",
+            "reference": "docs/network-design-reference.md#runtime-delivery-observations"
+          },
+          {
+            "name": "Delivered messages and retired owners cannot retain an awaiting disclosure",
+            "reference": "docs/help/topics/delivery.md#inspect-delivery-details"
+          }
+        ]
+      },
+      "escalation": [
+        "Delivery disclosure changes require automatic-delivery browser scenarios for keyboard focus, absent/aged observations, confirmation replacement and owner retirement, plus narrow/short-window containment and visual regression. Browser mocks do not establish native IPC or recipient receipt evidence."
+      ]
+    },
+    {
       "id": "frontend-presence",
       "paths": [
         "frontend/src/store/presence.ts",
@@ -467,6 +502,18 @@
     }
   ],
   "prScenarios": [
+    {
+      "id": "frontend-delivery-details-acceptance",
+      "paths": [
+        "frontend/src/features/chat/DeliveryDetails.tsx",
+        "frontend/src/features/chat/DeliveryFooter.tsx",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/e2e/automatic-delivery.spec.ts"
+      ],
+      "browser": ["e2e/automatic-delivery.spec.ts"]
+    },
     {
       "id": "frontend-presence-acceptance",
       "paths": [

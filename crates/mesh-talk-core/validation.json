@@ -2,6 +2,45 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-search-references",
+      "paths": [
+        "crates/mesh-talk-core/src/node/search.rs",
+        "crates/mesh-talk-core/src/node/search_tests.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::search::tests::"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-node"
+      ],
+      "capability": {
+        "summary": "Return canonical recent search references and bounded exact context through existing history owners, preserving legacy search consumers.",
+        "guide": "docs/ARCHITECTURE.md#recent-search-references",
+        "invariants": [
+          {
+            "name": "Account, channel and legacy-device identities remain distinct; unresolved IDs are unavailable and text/time never establish exact identity",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          },
+          {
+            "name": "Recent search reuses history deduplication, pending acceptance, recovery, expiry and recall; a per-conversation result window does not imply complete retained search or bounded input cost",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          },
+          {
+            "name": "Exact context remains namespace-scoped, caps output at 51 canonical rows and omits recalled re-edit plaintext; missing, recalled or expired targets are unavailable",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          }
+        ]
+      },
+      "escalation": [
+        "Desktop adoption requires owner-isolated registered IPC, exact duplicate-result selection and bounded/unavailable old context. Core search tests alone do not certify native or UI navigation acceptance."
+      ]
+    },
+    {
       "id": "core-channel",
       "paths": [
         "crates/mesh-talk-core/src/channel/"
@@ -345,6 +384,10 @@
         "summary": "Retry immutable delivery work across routed latency with bounded independent control lanes and cancellation-owned tasks.",
         "invariants": [
           {
+            "name": "Bounded runtime observations describe only exact recipient attempts; stale or missing details never change durable delivery confirmation",
+            "reference": "docs/network-design-reference.md#runtime-delivery-observations"
+          },
+          {
             "name": "Slow destinations cannot monopolize receipt or file scheduling",
             "reference": "docs/ARCHITECTURE.md"
           },
@@ -392,7 +435,8 @@
         "guide": "docs/ARCHITECTURE.md"
       },
       "escalation": [
-        "Node wiring has broad shared state and dynamic consumers: retain conservative Node library coverage; crypto/wire/storage changes need loopback, restart and protocol integration evidence. Runtime/discovery lifecycle changes require focused native acceptance."
+        "Node wiring has broad shared state and dynamic consumers: retain conservative Node library coverage; crypto/wire/storage changes need loopback, restart and protocol integration evidence. Runtime/discovery lifecycle changes require focused native acceptance.",
+        "Delivery observation changes require focused observation-owner and actual worker tests, exact-account/owner isolation, stale completion and recipient confirmation precedence. Host projection also requires typed frontend consumer checks; native acceptance must exercise participant retirement and the registered IPC response."
       ],
       "consumers": [
         "desktop-session",
@@ -494,7 +538,8 @@
       "paths": [
         "crates/mesh-talk-core/src/bin/",
         "crates/mesh-talk-core/tests/",
-        "crates/mesh-talk-core/examples/"
+        "crates/mesh-talk-core/examples/",
+        "specifications/deployment_guide.md"
       ],
       "rust": [
         {
@@ -505,8 +550,23 @@
         }
       ],
       "escalation": [
-        "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets."
-      ]
+        "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets.",
+        "CLI data-directory ownership changes additionally require cargo test -p mesh-talk-core --features fast-test-kdf --bin mesh-talk-node tests::profile_lock and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart."
+      ],
+      "capability": {
+        "summary": "Exclude cooperating CLI writers before opening participant or post-office stores, retaining the OS lock through the process lifetime.",
+        "guide": "specifications/deployment_guide.md#data-directory-ownership",
+        "invariants": [
+          {
+            "name": "Only one cooperating updated CLI process owns a data directory, including before PID publication",
+            "reference": "specifications/deployment_guide.md#data-directory-ownership"
+          },
+          {
+            "name": "Releasing ownership preserves the lock file and actual process termination permits restart",
+            "reference": "specifications/deployment_guide.md#data-directory-ownership"
+          }
+        ]
+      }
     },
     {
       "id": "core-file-consent-tests",
@@ -534,6 +594,7 @@
         "crates/mesh-talk-core/src/node/session.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-core/src/node/delivery_observation.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime.rs",
         "crates/mesh-talk-core/src/node/session_pool.rs",
         "crates/mesh-talk-core/src/node/route_timing.rs",

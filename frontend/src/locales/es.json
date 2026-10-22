@@ -285,7 +285,13 @@
       "delivered": "Entregado",
       "help": "Recibo automático de la cuenta destinataria. No confirma lectura.",
       "fileHelp": "Tarjeta del archivo entregada. La descarga y la lectura son independientes.",
-      "metadataPending": "Detalles del archivo pendientes"
+      "metadataPending": "Detalles del archivo pendientes",
+      "detailsTitle": "Detalles de entrega",
+      "attempted": "El intento local se inició {{age}}.",
+      "retryScheduled": "Se programó un reintento {{age}}.",
+      "noDetails": "No hay detalles actuales sobre los intentos locales.",
+      "automaticRetry": "La entrega se reintenta automáticamente; no hace falta que vuelvas a enviar este mensaje.",
+      "awaitingFileHelp": "El recibo confirma la entrega de la tarjeta del archivo. La descarga y la lectura son independientes."
     },
     "custody": {
       "local": "Ninguna copia de miembro confirmada",

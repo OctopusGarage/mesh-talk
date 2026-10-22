@@ -391,6 +391,40 @@ Accepted user work, cryptographic ratchets and delivery bookkeeping must commit 
 
 Transport awaits must not retain ordinary store/roster mutex guards. Network tasks use owned snapshots, bounded work and cancellation-safe ownership. Privacy generation checks revoke retained sessions and in-flight publication after a policy transition; directory queries additionally validate their captured directory/preference generation before publishing results. Startup applies network preferences before disclosure or delivery producers run.
 
+### Runtime delivery observations
+
+The delivery runtime can attach an optional local observation to the existing
+account-conversation status query. `attempting` means the worker admitted one
+exact immutable recipient destination; `retry_scheduled` means that worker
+completed and the existing retry scheduler recorded its next eligible turn.
+Neither state establishes transport success, relay custody, recipient presence,
+delivery failure or a recipient receipt. The scheduler shares pacing across a
+peer's lane, so the observation does not promise a message-specific retry delay.
+The current aggregate progress result cannot distinguish a skipped route from
+a failed exchange; it must not be rendered as a typed transport error.
+
+Observations are runtime memory only, capped at 256 logical messages with oldest
+observation eviction. Multiple recipient devices share that message budget.
+Elapsed age uses a monotonic clock, independently of wall-clock corrections.
+An absent observation means no current detail is available, including after
+restart, eviction or invalidation. It does not establish that no attempt occurred.
+
+The immutable destination and admission token bind updates to their originating
+attempt. A late completion cannot replace a newer attempt or publish across a
+privacy-generation change. Cancellation, route reset and participant retirement
+invalidate retained observations. Receipt completion and local erasure remove
+their eligibility. Existing expiry maintenance cancels expired work; observation
+queries then prune its details. Durable `Delivered` always suppresses runtime hints.
+Own-account synchronization and receipt/control work do not produce recipient
+delivery observations. Querying another conversation's ID returns no state or
+detail. Hosts retain their exact-session admission checks and the 256-ID limit.
+
+The registered desktop response adds an optional observation, allowing existing
+consumers to continue using durable status alone. This surface does not change
+the wire protocol, persisted journals, receipt validation, retry timing, socket
+budgets or attachment-byte confirmation. Visible delivery disclosure is a
+separate consumer of this evidence contract.
+
 ## 3. Design philosophy and invariants
 
 1. **Local first.** Direct communication works without a post office whenever a permitted authenticated route exists. Relay sending/receiving is optional per device.

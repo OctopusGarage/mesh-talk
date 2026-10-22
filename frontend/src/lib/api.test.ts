@@ -369,3 +369,29 @@ it("carries the expected owner on all linked synchronization commands", async ()
     owner: "owner-a",
   });
 });
+
+describe("optional delivery scheduling observations", () => {
+  it.each([
+    { id: "message", status: "awaiting" },
+    {
+      id: "message",
+      status: "awaiting",
+      observation: { kind: "attempting", age_ms: 12 },
+    },
+    {
+      id: "message",
+      status: "awaiting",
+      observation: { kind: "retry_scheduled", age_ms: 120 },
+    },
+  ])("preserves additive and older host responses: %j", async (row) => {
+    invoke.mockResolvedValueOnce([row]);
+    expect(await chat.deliveryStatuses("alice", "peer", ["message"])).toEqual([
+      row,
+    ]);
+    expect(invoke).toHaveBeenCalledWith("owner_delivery_statuses", {
+      owner: "alice",
+      account: "peer",
+      ids: ["message"],
+    });
+  });
+});

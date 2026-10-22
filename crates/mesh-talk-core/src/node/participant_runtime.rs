@@ -329,6 +329,7 @@ impl ParticipantRuntime {
     /// blocking work. Externally held Node handles remain the host's responsibility.
     pub async fn stop(mut self) {
         self.node.runtime_work.close();
+        self.node.clear_delivery_observations();
         for owner in &mut self.graceful_host_tasks {
             if let Some(shutdown) = owner.shutdown.take() {
                 let _ = shutdown.send(());
@@ -350,6 +351,7 @@ impl ParticipantRuntime {
 impl Drop for ParticipantRuntime {
     fn drop(&mut self) {
         self.node.runtime_work.close();
+        self.node.clear_delivery_observations();
         for owner in &mut self.graceful_host_tasks {
             if let Some(shutdown) = owner.shutdown.take() {
                 let _ = shutdown.send(());

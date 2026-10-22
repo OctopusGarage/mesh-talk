@@ -7798,3 +7798,364 @@ async fn automatic_send_collects_receipt_when_recipient_can_only_serve_inbound_c
         "an accepted outgoing message must collect its authenticated receipt over the reachable path without requiring a reverse dial or unrelated background history sweep"
     );
 }
+
+#[tokio::test]
+async fn delivery_observation_tracks_exact_worker_retry_and_cancellation() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_account = Account::generate();
+    let proof = Announce::new_with_account(
+        &DeviceIdentity::generate(),
+        &peer_account,
+        "Recipient",
+        listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let account = peer_account.account_id();
+    let id = sender
+        .enqueue_to_account(&account, b"observe scheduling", None)
+        .await
+        .unwrap();
+    let worker = tokio::spawn(sender.clone().run_delivery_loop());
+    let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = sender.account_delivery_observations(&account, &[id]);
+    assert_eq!(
+        snapshot[0].2.unwrap().kind,
+        DeliveryObservationKind::Attempting
+    );
+    assert!(
+        sender
+            .account_delivery_observations(&sender.account_id(), &[id])
+            .is_empty()
+    );
+    assert!(
+        sender
+            .account_delivery_observations(&"11".repeat(16), &[id])
+            .is_empty()
+    );
+    assert!(
+        sender
+            .account_delivery_observations(&account, &[EventId::new([7; 32])])
+            .is_empty()
+    );
+    drop(stream);
+    drop(listener);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if sender.account_delivery_observations(&account, &[id])[0]
+                .2
+                .is_some_and(|hint| hint.kind == DeliveryObservationKind::RetryScheduled)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(sender.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    worker.abort();
+    let _ = worker.await;
+    assert!(
+        sender.account_delivery_observations(&account, &[id])[0]
+            .2
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn delivery_observation_confirmation_and_generation_override_late_completion() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let proof = Announce::new_with_account(&DeviceIdentity::generate(), &account, "Recipient", 9);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let id = sender
+        .enqueue_to_account(&account.account_id(), b"confirmed", None)
+        .await
+        .unwrap();
+    let destination = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations[0]
+        .clone();
+    let token = sender.begin_delivery_observation(id, &destination).unwrap();
+    sender.privacy.generation.fetch_add(1, Ordering::SeqCst);
+    sender.finish_delivery_observation(token);
+    assert!(
+        sender.account_delivery_observations(&account.account_id(), &[id])[0]
+            .2
+            .is_none()
+    );
+    let token = sender.begin_delivery_observation(id, &destination).unwrap();
+    // Receipt signature/binding validation has its own production protocol tests.
+    // This reproduces its durable commit before a worker's late completion.
+    sender
+        .delivery
+        .lock()
+        .unwrap()
+        .mark_delivered_for(id, destination.event.id)
+        .unwrap();
+    sender.finish_delivery_observation(token);
+    let snapshot = sender.account_delivery_observations(&account.account_id(), &[id]);
+    assert_eq!(snapshot[0].1, DeliveryStatus::Delivered);
+    assert!(snapshot[0].2.is_none());
+    assert_eq!(
+        sender.account_delivery_statuses(&account.account_id(), &[id]),
+        vec![(id, DeliveryStatus::Delivered)]
+    );
+}
+
+#[tokio::test]
+async fn delivery_observation_projection_excludes_incoming_siblings_erased_and_retired_work() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
+    let (sender, _) = node(ad.path(), alice, aa, &bp);
+    let (recipient, _) = node(bd.path(), bob, bob_account, &ap);
+    let sibling = Announce::new_with_account(
+        &DeviceIdentity::generate(),
+        &sender.account,
+        "Own sibling",
+        9,
+    );
+    sender.roster.lock().unwrap().update(
+        &sibling,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    let account = recipient.account_id();
+    let id = sender
+        .enqueue_to_account(&account, b"outgoing", None)
+        .await
+        .unwrap();
+    let destinations = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations
+        .clone();
+    let external = destinations
+        .iter()
+        .find(|d| d.account.as_deref() == Some(account.as_str()))
+        .unwrap();
+    let own = destinations
+        .iter()
+        .find(|d| d.account.as_deref() == Some(sender.account_id().as_str()))
+        .unwrap();
+    let token = sender.begin_delivery_observation(id, external).unwrap();
+    assert!(sender.begin_delivery_observation(id, own).is_none());
+    assert_eq!(
+        sender.account_delivery_observations(&account, &[id])[0]
+            .2
+            .unwrap()
+            .kind,
+        DeliveryObservationKind::Attempting
+    );
+    assert_eq!(
+        sender
+            .account_delivery_observations(&account, &vec![id; 257])
+            .len(),
+        256
+    );
+    let incoming = recipient
+        .enqueue_to_account(&sender.account_id(), b"incoming", None)
+        .await
+        .unwrap();
+    let event = recipient
+        .delivery
+        .lock()
+        .unwrap()
+        .message(incoming)
+        .unwrap()
+        .destinations[0]
+        .event
+        .clone();
+    sender
+        .log
+        .lock()
+        .unwrap()
+        .append_durable(event.clone())
+        .unwrap();
+    sender.emit_new_messages(event.conversation_id);
+    assert!(
+        sender
+            .account_delivery_observations(&account, &[incoming])
+            .is_empty()
+    );
+    sender.delete_account_message(&account, id).unwrap();
+    sender.finish_delivery_observation(token);
+    assert!(
+        sender
+            .account_delivery_observations(&account, &[id])
+            .is_empty()
+    );
+    let expired = sender
+        .enqueue_to_account(&account, b"expire", None)
+        .await
+        .unwrap();
+    let destination = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(expired)
+        .unwrap()
+        .destinations
+        .iter()
+        .find(|d| d.account.as_deref() == Some(account.as_str()))
+        .unwrap()
+        .clone();
+    let token = sender
+        .begin_delivery_observation(expired, &destination)
+        .unwrap();
+    sender.prune_older_than(u64::MAX).unwrap();
+    sender.finish_delivery_observation(token);
+    assert!(
+        sender
+            .account_delivery_observations(&account, &[expired])
+            .is_empty()
+    );
+    let retained = sender
+        .enqueue_to_account(&account, b"retire", None)
+        .await
+        .unwrap();
+    let destination = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(retained)
+        .unwrap()
+        .destinations
+        .iter()
+        .find(|d| d.account.as_deref() == Some(account.as_str()))
+        .unwrap()
+        .clone();
+    sender
+        .begin_delivery_observation(retained, &destination)
+        .unwrap();
+    sender.runtime_work.close();
+    assert!(
+        sender.account_delivery_observations(&account, &[retained])[0]
+            .2
+            .is_none()
+    );
+    assert!(
+        sender
+            .begin_delivery_observation(retained, &destination)
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn delivery_observation_authenticated_receipt_removes_pending_hint() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
+    let (sender, _) = node(ad.path(), alice, aa, &bp);
+    let (recipient, _) = node(bd.path(), bob, bob_account, &ap);
+    let account = recipient.account_id();
+    let id = sender
+        .enqueue_to_account(&account, b"receipt overrides scheduling", None)
+        .await
+        .unwrap();
+    let destination = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations[0]
+        .clone();
+    let token = sender.begin_delivery_observation(id, &destination).unwrap();
+    recipient
+        .log
+        .lock()
+        .unwrap()
+        .append_durable(destination.event.clone())
+        .unwrap();
+    recipient.emit_new_messages(destination.event.conversation_id);
+    let receipt = recipient.delivery.lock().unwrap().retry_receipts(1)[0]
+        .destination
+        .event
+        .clone();
+    sender.process_delivery_control(&receipt, &bp, &mut sender.delivery.lock().unwrap());
+    sender.finish_delivery_observation(token);
+    let snapshot = sender.account_delivery_observations(&account, &[id]);
+    assert_eq!(snapshot[0].1, DeliveryStatus::Delivered);
+    assert!(snapshot[0].2.is_none());
+}
+
+#[tokio::test]
+async fn delivery_observation_cancelled_before_first_poll_releases_exact_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let proof = Announce::new_with_account(&DeviceIdentity::generate(), &account, "Recipient", 9);
+    let (sender, _) = node(
+        dir.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    let id = sender
+        .enqueue_to_account(&account.account_id(), b"queued worker", None)
+        .await
+        .unwrap();
+    let destination = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations[0]
+        .clone();
+    let attempt = super::delivery_runtime::ObservationAttempt {
+        node: sender.clone(),
+        token: sender.begin_delivery_observation(id, &destination),
+    };
+    assert!(
+        sender.account_delivery_observations(&account.account_id(), &[id])[0]
+            .2
+            .is_some()
+    );
+    let worker = tokio::spawn(sender.runtime_work.admit().unwrap().track(async move {
+        let mut attempt = attempt;
+        std::future::pending::<()>().await;
+        let _ = attempt.token.take();
+    }));
+    worker.abort();
+    assert!(worker.await.unwrap_err().is_cancelled());
+    assert!(
+        sender.account_delivery_observations(&account.account_id(), &[id])[0]
+            .2
+            .is_none()
+    );
+}

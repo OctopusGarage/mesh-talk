@@ -68,6 +68,13 @@ impl RuntimeWork {
         Some(WorkPermit(self.clone()))
     }
 
+    pub(super) fn is_closed(&self) -> bool {
+        self.state
+            .lock()
+            .expect("runtime work lock not poisoned")
+            .closed
+    }
+
     pub(super) fn close(&self) {
         self.state
             .lock()

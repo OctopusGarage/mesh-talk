@@ -966,6 +966,7 @@ Search hits carry their verified account binding from the scan's own roster snap
 so a device leaving the live roster cannot expose a hidden account's search results.
 Last-known names are display metadata: control characters are removed and names are
 bounded before saving, so an abusive peer name cannot prevent hiding its account.
+
 The hidden-contact tests also exercise actual registered Tauri command dispatch through
 the headless mock runtime, including persisted hide and restoration after stopping the node.
 An additional real-mesh regression keeps authenticated discovery and encrypted delivery
@@ -974,6 +975,63 @@ The `native-contact-eval` example uses the same desktop builder with isolated da
 roots and a dev-only embedded WebDriver. The normal entry point has no driver plugin or
 storage override. Three-platform native scenarios and the usability rubric are documented
 in [platform validation](platform-validation.md).
+
+### Recent search references
+
+The opt-in core `Node::search_recent` query returns `RecentSearchResults`: matches
+with a `SearchReference` and an explicit `per_conversation_limit` of 2,000.
+Eligibility reuses the existing search owner: available human device proofs,
+durable account conversations, and locally available channels; relay-only
+accounts and current relay devices remain excluded. The desktop hidden-contact
+preference remains a separate presentation filter.
+
+Each reference names its conversation kind and canonical message ID. Account
+references use the envelope's logical ID and account-history deduplication;
+channel references use event IDs, including original IDs preserved by recovery;
+legacy device references stay device-scoped even when a verified account binding
+is available for filtering. Unresolved zero-sentinel IDs become `None`, never an
+exact target. Display text, sender and timestamp cannot substitute for identity.
+A reference carries no read authority: future context/IPC consumers must recheck
+the current owner, conversation access and expiry/recall policy at read time.
+
+The query searches the latest 2,000 canonical history entries per conversation,
+using account/device history order and channel causal order to select that window.
+Files and recall tombstones occupy window slots; only current text is matched,
+case-insensitively. Accepted pending transactions and sibling-copy deduplication
+follow the owning history projection. Returned matches sort newest wall-clock
+first; ties within a conversation retain reverse canonical history order.
+Missing matches do not establish absence from all retained or remote history.
+Canonical history currently materializes retained rows before truncation, so the
+window bounds result projection, not input memory or execution time. This is not
+a paged or complete retained-history search.
+
+`Node::search_context` resolves an exact reference through the same conversation
+eligibility and canonical history owners. Missing, zero, expired or recalled
+targets are unavailable. A found context contains the target and up to 25
+neighbors on each side in canonical order, plus the number of entries after the
+target. Recalled neighbors retain only their tombstone; their re-edit plaintext
+is omitted. Context reads do not change cache coverage, unread state or delivery.
+The output window is bounded; retained input materialization has the same cost
+limitation as recent search.
+
+Desktop `owner_search_recent` and `owner_search_context` capture explicit session
+ownership before queued work and recheck it before publication. References are
+validated at the host boundary: account/device targets are 32 hex characters,
+channel and message IDs are 64; invalid shapes have structured input errors.
+Queries accept at most 4,096 UTF-8 bytes. Search returns a newest-first prefix
+with at most 200 hits and 1 MiB of serialized output, setting `truncated` when
+either result budget omits matches. Context returns at most 51 rows and 1 MiB;
+a response exceeding its byte budget becomes unavailable with no rows. Limits
+do not establish complete retained-history coverage. Keys, raw errors and
+message content do not enter diagnostics.
+
+The new owner-scoped commands provide a query surface for future desktop
+adoption. The current SearchDialog and legacy desktop `search` command retain
+their existing behavior. Frontend adoption requires typed adapters, exact-ID
+selection, explicit unavailable outcomes, and read-only bounded context that
+does not replace the live cache or commit reception/unread coverage. A failed
+exact reference must never fall back to matching text and timestamps.
+
 
 ### Manual encrypted backup and recovery
 
