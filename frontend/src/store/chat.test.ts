@@ -373,6 +373,44 @@ it("shows a newly discovered peer on the next two-second roster poll", async () 
   }
 });
 
+it("bounds stalled startup reads to thirty seconds and allows retry without restart", async () => {
+  vi.useFakeTimers();
+  const pending: (() => void)[] = [];
+  let stop: (() => void) | undefined;
+  try {
+    let available = false;
+    invoke.mockImplementation((command: string) => {
+      if (command === "owner_node_identity") {
+        const identity = {
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+        };
+        return available
+          ? Promise.resolve(identity)
+          : new Promise((resolve) => pending.push(() => resolve(identity)));
+      }
+      return Promise.resolve([]);
+    });
+    stop = useChat.getState().start();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(useChat.getState().bootFailed).toBe(true);
+    expect(useChat.getState().bootBusy).toBe(false);
+    available = true;
+    pending.forEach((finish) => finish());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().ready).toBe(false);
+    useChat.getState().retryBoot();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().ready).toBe(true);
+    expect(useChat.getState().bootFailed).toBe(false);
+  } finally {
+    stop?.();
+    pending.forEach((finish) => finish());
+    vi.useRealTimers();
+  }
+});
+
 it("keeps a failed startup visible instead of starting another silent poll", async () => {
   vi.useFakeTimers();
   let stop: (() => void) | undefined;

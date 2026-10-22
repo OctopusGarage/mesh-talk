@@ -285,7 +285,9 @@
       "delivered": "已送達",
       "help": "目標帳戶的自動回執，不代表已讀。",
       "fileHelp": "檔案卡片已送達，檔案下載與閱讀另行進行。",
-      "metadataPending": "等待檔案資訊"
+      "metadataPending": "等待檔案資訊",
+      "fileAwaiting": "等待接收方收到檔案邀請",
+      "fileDelivered": "接收方已收到檔案邀請"
     },
     "custody": {
       "local": "尚未確認成員副本",
@@ -318,7 +320,7 @@
   },
   "transfer": {
     "preparing": "正在準備檔案…",
-    "awaitingRecipient": "正在等待接收方…",
+    "awaitingRecipient": "正在等待檔案傳輸開始…",
     "awaitingApproval": "等待接收方批准…",
     "recipientDeclined": "接收方已拒絕此附件",
     "confirming": "正在確認接收…",

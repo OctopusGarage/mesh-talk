@@ -50,7 +50,11 @@ export function DeliveryFooter({
     !message.failed
       ? message.delivery
       : undefined;
-  const label = delivery ? t(`message.delivery.${delivery}`) : "";
+  const label = delivery
+    ? t(
+        `message.delivery.${message.file ? (delivery === "delivered" ? "fileDelivered" : "fileAwaiting") : delivery}`,
+      )
+    : "";
   const detail = delivery
     ? t(`message.delivery.${message.file ? "fileHelp" : "help"}`)
     : "";
@@ -126,7 +130,9 @@ export function DeliveryFooter({
           data-delivery={delivery}
         >
           <span aria-hidden="true">{delivery === "delivered" ? "✓" : "◷"}</span>
-          {delivery === "awaiting" && <span aria-hidden="true">{label}</span>}
+          {(delivery === "awaiting" || message.file) && (
+            <span aria-hidden="true">{label}</span>
+          )}
           <span
             id={tooltip}
             role="tooltip"

@@ -285,7 +285,9 @@
       "delivered": "Delivered",
       "help": "Automatic receipt from the target account. Not a read receipt.",
       "fileHelp": "File card delivered. File download and reading are separate.",
-      "metadataPending": "File details pending"
+      "metadataPending": "File details pending",
+      "fileAwaiting": "Awaiting file offer receipt",
+      "fileDelivered": "File offer received"
     },
     "custody": {
       "local": "No member copy confirmed",
@@ -318,7 +320,7 @@
   },
   "transfer": {
     "preparing": "Preparing file…",
-    "awaitingRecipient": "Waiting for recipient…",
+    "awaitingRecipient": "Waiting for file transfer to start…",
     "awaitingApproval": "Waiting for recipient approval…",
     "recipientDeclined": "Recipient declined this attachment",
     "confirming": "Confirming receipt…",

@@ -57,6 +57,10 @@ Blocking operations retain runtime lifecycle and matching session authority unti
 completion, even when their IPC waiter is cancelled. Asynchronous producers use
 guarded core commit seams; plaintext queries recheck the originating admission
 before returning results. A cloned node handle alone conveys no session authority.
+The installed runtime slot uses shared operation leases and exclusive replacement
+access. Network waits in one producer must not serialize identity, presence,
+history or unrelated sends. Retirement still waits for every admitted lease;
+session authorization continues to enclose synchronous commits.
 
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 

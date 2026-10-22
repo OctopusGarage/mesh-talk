@@ -4,21 +4,21 @@ use serde::Serialize;
 
 #[tauri::command]
 pub async fn my_id(state: tauri::State<'_, NodeState>) -> Result<String, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt.user_id().to_string())
 }
 
 #[tauri::command]
 pub async fn list_peers(state: tauri::State<'_, NodeState>) -> Result<Vec<PeerInfo>, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt.peers().into_iter().map(PeerInfo::from).collect())
 }
 
 #[tauri::command]
 pub async fn account_id(state: tauri::State<'_, NodeState>) -> Result<String, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt.account_id().to_string())
 }
@@ -55,7 +55,7 @@ pub async fn publish_avatar(
 pub async fn peer_avatars(
     state: tauri::State<'_, NodeState>,
 ) -> Result<std::collections::HashMap<String, Option<String>>, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt
         .peer_profile_states()
@@ -153,7 +153,7 @@ pub async fn list_accounts(
         if let Some(entered) = captured.lock().unwrap().as_ref() {
             let _ = entered.send("contact-runtime-wait");
         }
-        let guard = node.0.blocking_lock();
+        let guard = node.0.blocking_read();
         policy.transaction_for_lease(&app, &lease, || {
             node.check_installation(&lease)
                 .map_err(|error| error.to_string())?;

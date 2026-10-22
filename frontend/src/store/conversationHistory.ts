@@ -1,4 +1,5 @@
 import { chat } from "@/lib/api/chat";
+import { readWithDeadline } from "@/lib/readDeadline";
 import type { HistoryItem } from "@/lib/types";
 import { captureChatOwner } from "./ownership";
 import {
@@ -149,8 +150,10 @@ export async function reloadConversation(
   });
   try {
     const [items, reacts] = await Promise.all([
-      historyFor(c, lease.owner!, get().historyLimits[key]),
-      reactionsFor(c),
+      readWithDeadline(() =>
+        historyFor(c, lease.owner!, get().historyLimits[key]),
+      ),
+      readWithDeadline(() => reactionsFor(c)),
     ]);
     if (
       !current() ||

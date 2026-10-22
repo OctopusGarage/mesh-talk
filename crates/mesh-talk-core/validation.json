@@ -387,6 +387,10 @@
           {
             "name": "Directory freshness, recovery membership and presentation lifetimes are distinct; healthy five-second refresh waves progress beside stalled queries with eight global slots and cancellation ownership",
             "reference": "docs/network-design-reference.md#person-presence-contract"
+          },
+          {
+            "name": "Direct channel image bytes progress before optional relay custody without bypassing attachment consent; local previews preserve bounded original signed chunks for other members",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           }
         ],
         "guide": "docs/ARCHITECTURE.md"

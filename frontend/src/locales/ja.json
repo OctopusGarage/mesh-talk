@@ -285,7 +285,9 @@
       "delivered": "配信済み",
       "help": "宛先アカウントからの自動受領確認です。既読確認ではありません。",
       "fileHelp": "ファイルカードの配信完了。ダウンロードや閲覧とは別です。",
-      "metadataPending": "ファイル情報を確認中"
+      "metadataPending": "ファイル情報を確認中",
+      "fileAwaiting": "ファイルの案内の受領待ち",
+      "fileDelivered": "ファイルの案内を受領済み"
     },
     "custody": {
       "local": "メンバーの複製は未確認",
@@ -318,7 +320,7 @@
   },
   "transfer": {
     "preparing": "ファイルを準備中…",
-    "awaitingRecipient": "受信者を待っています…",
+    "awaitingRecipient": "ファイル転送の開始を待っています…",
     "awaitingApproval": "受信者の承認を待っています…",
     "recipientDeclined": "受信者が添付ファイルを拒否しました",
     "confirming": "受信を確認中…",

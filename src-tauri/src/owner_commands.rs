@@ -508,7 +508,7 @@ mod tests {
             }
             .unwrap();
             drop(reservation);
-            *node.0.blocking_lock() = Some(runtime);
+            *node.0.blocking_write() = Some(runtime);
             Self {
                 root,
                 app_state,
@@ -544,7 +544,7 @@ mod tests {
         }
 
         fn sync_documents(&self) -> [Vec<u8>; 2] {
-            let guard = self.node.0.blocking_lock();
+            let guard = self.node.0.blocking_write();
             let runtime = guard.as_ref().unwrap();
             let directory = self
                 .root
@@ -572,7 +572,7 @@ mod tests {
                     while self
                         .node
                         .0
-                        .lock()
+                        .write()
                         .await
                         .as_ref()
                         .unwrap()
@@ -627,7 +627,7 @@ mod tests {
             1,
         ));
         let legacy_id = tauri::async_runtime::block_on(async {
-            let guard = fixture.node.0.lock().await;
+            let guard = fixture.node.0.write().await;
             let rt = guard.as_ref().unwrap();
             rt.handle()
                 .send_dm(
@@ -668,7 +668,7 @@ mod tests {
                 .signed_announce("Sender", remote.listen_tcp_port()),
         );
         let (announce, account, device) = {
-            let guard = fixture.node.0.blocking_lock();
+            let guard = fixture.node.0.blocking_write();
             let rt = guard.as_ref().unwrap();
             (
                 rt.handle().signed_announce("Alice", rt.listen_tcp_port()),
@@ -700,7 +700,7 @@ mod tests {
                 while fixture
                     .node
                     .0
-                    .lock()
+                    .write()
                     .await
                     .as_ref()
                     .unwrap()
@@ -727,7 +727,7 @@ mod tests {
 
     impl Drop for Fixture {
         fn drop(&mut self) {
-            let runtime = self.node.0.blocking_lock().take();
+            let runtime = self.node.0.blocking_write().take();
             if let Some(runtime) = runtime {
                 tauri::async_runtime::block_on(runtime.stop());
             }
@@ -874,7 +874,7 @@ mod tests {
             );
             assert_eq!(result.unwrap_err()["kind"], "authorization");
         }
-        let guard = fixture.node.0.blocking_lock();
+        let guard = fixture.node.0.blocking_write();
         let node = guard.as_ref().unwrap().handle();
         assert!(node.device_sync_policy().history);
         assert!(
@@ -918,7 +918,7 @@ mod tests {
             path.exists(),
             "ordinary user source files must remain intact"
         );
-        let runtime = fixture.node.0.blocking_lock();
+        let runtime = fixture.node.0.blocking_write();
         assert_eq!(
             runtime
                 .as_ref()
@@ -956,7 +956,7 @@ mod tests {
             let result = fixture.invoke(command, body);
             assert_eq!(result.unwrap_err()["kind"], "authorization", "{command}");
         }
-        let runtime = fixture.node.0.blocking_lock();
+        let runtime = fixture.node.0.blocking_write();
         assert!(
             runtime
                 .as_ref()
@@ -994,7 +994,7 @@ mod tests {
             pending.abort();
             assert!(pending.await.unwrap_err().is_cancelled());
             assert!(
-                fixture.node.0.try_lock().is_err(),
+                fixture.node.0.try_write().is_err(),
                 "retirement must wait for the real writer after cancellation"
             );
             release.send(()).unwrap();
@@ -1002,7 +1002,7 @@ mod tests {
         done.recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         // The writer releases session and runtime guards before retirement proceeds.
-        drop(fixture.node.0.blocking_lock());
+        drop(fixture.node.0.blocking_write());
     }
 
     #[test]
@@ -1128,7 +1128,7 @@ mod tests {
                 fixture.app_state.app_lock().clear();
                 let (entered_tx, entered_rx) = std::sync::mpsc::channel();
                 *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
-                let lifecycle = fixture.node.0.blocking_lock();
+                let lifecycle = fixture.node.0.blocking_write();
                 let webview = fixture.webview.clone();
                 let command = *command;
                 let body = body.clone();
@@ -1162,7 +1162,7 @@ mod tests {
                     fixture
                         .node
                         .0
-                        .blocking_lock()
+                        .blocking_write()
                         .as_ref()
                         .unwrap()
                         .list_channels()
@@ -1242,7 +1242,7 @@ mod tests {
         let own_id = fixture
             .node
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .account_id()
@@ -1342,7 +1342,7 @@ mod tests {
                     .set("entry".into(), user("alice"), "pw".into());
                 let (entered, captured) = std::sync::mpsc::channel();
                 *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
-                let lifecycle = fixture.node.0.blocking_lock();
+                let lifecycle = fixture.node.0.blocking_write();
                 let webview = fixture.webview.clone();
                 let pending = std::thread::spawn(move || invoke(&webview, command, body));
                 let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
@@ -1430,7 +1430,7 @@ mod tests {
                     .set("entry".into(), user("alice"), "pw".into());
                 let (entered, captured) = std::sync::mpsc::channel();
                 *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
-                let lifecycle = fixture.node.0.blocking_lock();
+                let lifecycle = fixture.node.0.blocking_write();
                 let webview = fixture.webview.clone();
                 let pending = std::thread::spawn(move || invoke(&webview, command, body));
                 let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
@@ -1526,7 +1526,7 @@ mod tests {
         for (command, body) in cases {
             let (entered_tx, entered_rx) = std::sync::mpsc::channel();
             *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
-            let lifecycle = fixture.node.0.blocking_lock();
+            let lifecycle = fixture.node.0.blocking_write();
             let webview = fixture.webview.clone();
             let pending = std::thread::spawn(move || invoke(&webview, command, body));
             entered_rx
@@ -1542,7 +1542,7 @@ mod tests {
             assert_eq!(error["kind"], "authorization", "queued {command}");
             *fixture.app_state.owner_command_captured.lock().unwrap() = None;
         }
-        let guard = fixture.node.0.blocking_lock();
+        let guard = fixture.node.0.blocking_write();
         let node = guard.as_ref().unwrap().handle();
         assert!(node.device_sync_policy().history);
         assert!(
@@ -1577,7 +1577,7 @@ mod tests {
                     .set("a".into(), user("alice"), "pw".into());
                 let (entered_tx, entered_rx) = std::sync::mpsc::channel();
                 *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
-                let lifecycle = fixture.node.0.blocking_lock();
+                let lifecycle = fixture.node.0.blocking_write();
                 let webview = fixture.webview.clone();
                 let command = *command;
                 let body = body.clone();
@@ -1603,7 +1603,7 @@ mod tests {
                 *fixture.app_state.owner_command_captured.lock().unwrap() = None;
             }
         }
-        let guard = fixture.node.0.blocking_lock();
+        let guard = fixture.node.0.blocking_write();
         let node = guard.as_ref().unwrap().handle();
         assert!(node.device_sync_policy().history);
         assert!(
@@ -1647,7 +1647,7 @@ mod tests {
             fixture
                 .node
                 .0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .handle()
@@ -1684,7 +1684,7 @@ mod tests {
         fixture
             .node
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .handle()
@@ -1694,7 +1694,7 @@ mod tests {
         for (command, body) in privacy_requests(&account) {
             let (entered, captured) = std::sync::mpsc::channel();
             *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
-            let lifecycle = fixture.node.0.blocking_lock();
+            let lifecycle = fixture.node.0.blocking_write();
             let webview = fixture.webview.clone();
             let pending = std::thread::spawn(move || invoke(&webview, command, body));
             captured
@@ -1740,7 +1740,7 @@ mod tests {
         let lease = fixture.app_state.session().capture().unwrap();
         let owner = lease.owner().to_owned();
         let account = fixture.offline_peer();
-        let node = fixture.node.0.blocking_lock().as_ref().unwrap().handle();
+        let node = fixture.node.0.blocking_write().as_ref().unwrap().handle();
         node.cached_peer_snapshot().unwrap();
         let directory = fixture.root.path().join("accounts").join(&owner);
         let metadata = || {
@@ -1870,7 +1870,7 @@ mod tests {
             // Capture precedes the runtime mutex. Wait until the detached IPC
             // owns that mutex and is queued behind the actual core policy gate.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while fixture.node.0.try_lock().is_ok() {
+            while fixture.node.0.try_write().is_ok() {
                 assert!(
                     std::time::Instant::now() < deadline,
                     "privacy never retained lifecycle"
@@ -2017,7 +2017,7 @@ mod tests {
             request.abort();
             assert!(request.await.is_err());
             assert!(
-                fixture.node.0.try_lock().is_err(),
+                fixture.node.0.try_write().is_err(),
                 "dropping IPC must not detach the file writer from lifecycle admission"
             );
             fixture.app_state.session().clear();
@@ -2026,7 +2026,7 @@ mod tests {
                 .session()
                 .set("new".into(), user("bob"), "pw".into());
             release_tx.send(()).unwrap();
-            let mut guard = fixture.node.0.lock().await;
+            let mut guard = fixture.node.0.write().await;
             let old = guard.take().unwrap();
             assert!(
                 old.account_history(&account, 10).is_empty(),
@@ -2048,7 +2048,7 @@ mod tests {
             )
             .await
             .unwrap();
-            *fixture.node.0.lock().await = Some(replacement);
+            *fixture.node.0.write().await = Some(replacement);
         });
         let identity = fixture
             .invoke("owner_node_identity", serde_json::json!({"owner":"bob"}))
@@ -2111,7 +2111,7 @@ mod tests {
             )
             .await
             .unwrap();
-            *node.0.lock().await = Some(rt);
+            *node.0.write().await = Some(rt);
         });
         let identity = invoke("alice").expect(
             "owner-sensitive identity command is registered and returns the actual runtime",
@@ -2128,7 +2128,7 @@ mod tests {
             "Session B must never observe still-installed runtime A"
         );
         tauri::async_runtime::block_on(async {
-            node.0.lock().await.take().unwrap().stop().await;
+            node.0.write().await.take().unwrap().stop().await;
         });
     }
 }

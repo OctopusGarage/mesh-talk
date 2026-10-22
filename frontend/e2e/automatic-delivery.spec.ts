@@ -61,6 +61,10 @@ test("text, sticker and file card stay Awaiting until explicit authoritative moc
     .getByTestId("message-bubble")
     .filter({ hasText: "card.txt" })
     .locator('[data-delivery="delivered"]');
+  await expect(cardReceipt).toHaveAccessibleName("File offer received");
+  await expect(
+    cardReceipt.getByText("File offer received", { exact: true }),
+  ).toBeVisible();
   await cardReceipt.focus();
   await expect(cardReceipt.getByRole("tooltip")).toBeVisible();
   await expect(cardReceipt.getByRole("tooltip")).toContainText(

@@ -1196,6 +1196,37 @@ impl Node {
             .await;
     }
 
+    /// Finish direct offer/chunk fanout before optional relay custody. Waiting
+    /// for a relay after the offer but before the chunks strands live receivers
+    /// at "receiving" despite an available direct application route.
+    pub(in crate::node) async fn distribute_channel_file(
+        &self,
+        channel: ConversationId,
+        file: ConversationId,
+        members: &[PublicIdentity],
+        automatic_inline: bool,
+    ) {
+        self.distribute_channel_targets(channel, members, None, false)
+            .await;
+        if automatic_inline {
+            self.distribute_channel_targets(file, members, None, false)
+                .await;
+        }
+        let recipients: Vec<_> = members
+            .iter()
+            .filter(|member| member.user_id() != self.user_id())
+            .cloned()
+            .collect();
+        let _ = self
+            .replicate_to_post_office_targets(channel, recipients.clone())
+            .await;
+        if automatic_inline {
+            let _ = self
+                .replicate_to_post_office_targets(file, recipients)
+                .await;
+        }
+    }
+
     /// For a large channel, seed a few replicas and let member gossip plus
     /// anti-entropy complete the distribution. Small channels retain direct fanout.
     pub(in crate::node) async fn distribute_channel_message(

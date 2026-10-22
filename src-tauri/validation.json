@@ -58,6 +58,10 @@
           {
             "name": "Runtime replacement awaits prior runtime retirement",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Stalled network producers allow observations and unrelated sends while blocking runtime retirement",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       }

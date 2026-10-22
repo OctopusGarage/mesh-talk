@@ -173,7 +173,7 @@ mod tests {
         )
         .await
         .unwrap();
-        *managed.0.lock().await = Some(runtime);
+        *managed.0.write().await = Some(runtime);
 
         // A webview command queued by a previous login must not borrow the
         // replacement account's runtime, even when it starts after the switch.
@@ -284,6 +284,6 @@ mod tests {
             .await
             .is_err()
         );
-        managed.0.lock().await.take().unwrap().stop().await;
+        managed.0.write().await.take().unwrap().stop().await;
     }
 }

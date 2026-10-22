@@ -882,10 +882,13 @@ impl Node {
         // their own receive policy permits it; pushing the chunk conversation here
         // would transmit the bytes before they could approve. Inline media keeps
         // the existing automatic transfer behavior.
-        self.distribute_channel(channel, &members).await;
-        if crate::node::media_store::automatic_inline_image(&outgoing_manifest(&manifest)) {
-            self.distribute_channel(file_conv, &members).await;
-        }
+        self.distribute_channel_file(
+            channel,
+            file_conv,
+            &members,
+            crate::node::media_store::automatic_inline_image(&outgoing_manifest(&manifest)),
+        )
+        .await;
         Ok(file_conv)
     }
 

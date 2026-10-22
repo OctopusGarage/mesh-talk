@@ -745,7 +745,7 @@ mod tests {
             .await
             .unwrap();
             let handle = runtime.handle();
-            *node.0.lock().await = Some(runtime);
+            *node.0.write().await = Some(runtime);
             let state = SettingsState::default();
             state.0.lock().unwrap().owner = Some("settings-owner".into());
             state
@@ -786,7 +786,7 @@ mod tests {
                 !handle.physical_lan_only(),
                 "obsolete settings cannot commit runtime policy or reach retention pruning"
             );
-            node.0.lock().await.take().unwrap().stop().await;
+            node.0.write().await.take().unwrap().stop().await;
         }
     }
 
@@ -826,7 +826,7 @@ mod tests {
             .await
             .unwrap();
             let handle = runtime.handle();
-            *node.0.lock().await = Some(runtime);
+            *node.0.write().await = Some(runtime);
             let state = SettingsState::default();
             state.0.lock().unwrap().owner = Some("settings-owner".into());
             state
@@ -852,7 +852,7 @@ mod tests {
             });
             held.recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap();
-            let runtime_guard = node.0.lock().await;
+            let runtime_guard = node.0.write().await;
             let runtime = runtime_guard.as_ref().unwrap();
             let result = {
                 let pending = apply_relay_settings(
@@ -906,7 +906,7 @@ mod tests {
                 change == "current",
                 "startup policy for {change}"
             );
-            node.0.lock().await.take().unwrap().stop().await;
+            node.0.write().await.take().unwrap().stop().await;
         }
     }
 

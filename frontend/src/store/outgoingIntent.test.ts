@@ -208,6 +208,81 @@ it("polls an accepted fallback without recursively polling through reload", asyn
   expect(store.getState().statusBusy).toBe(false);
 });
 
+it("continues polling file approval and bytes after the file offer is delivered", async () => {
+  const store = session();
+  store.setState({
+    messages: {
+      [key]: [
+        {
+          ...row("file-offer"),
+          delivery: "awaiting",
+          file: {
+            fileConv: "file",
+            name: "photo.png",
+            size: 10,
+            mime: "image/png",
+            media: true,
+          },
+        },
+        { ...row("text"), delivery: "delivered" },
+      ],
+    },
+  });
+  invoke
+    .mockResolvedValueOnce([
+      {
+        id: "file-offer",
+        status: "delivered",
+        file_progress: {
+          done: 0,
+          total: 10,
+          delivered: false,
+          consent: "pending",
+        },
+      },
+    ])
+    .mockResolvedValueOnce([
+      {
+        id: "file-offer",
+        status: "delivered",
+        file_progress: {
+          done: 5,
+          total: 10,
+          delivered: false,
+          consent: "accepted",
+        },
+      },
+    ])
+    .mockResolvedValueOnce([
+      {
+        id: "file-offer",
+        status: "delivered",
+        file_progress: {
+          done: 10,
+          total: 10,
+          delivered: true,
+          consent: "accepted",
+        },
+      },
+    ]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages[key][0].delivery).toBe("delivered");
+  expect(useTransfers.getState().transfers["file-offer"]?.consent).toBe(
+    "pending",
+  );
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(useTransfers.getState().transfers["file-offer"]).toMatchObject({
+    consent: "accepted",
+    done: 5,
+  });
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(useTransfers.getState().transfers["file-offer"]?.delivered).toBe(true);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(invoke).toHaveBeenCalledTimes(3);
+  for (const [, args] of invoke.mock.calls)
+    expect(args.ids).toEqual(["file-offer"]);
+});
+
 it("keeps the original deadline on an optimistic expiring send", async () => {
   const store = session();
   invoke.mockReturnValue(new Promise(() => {}));

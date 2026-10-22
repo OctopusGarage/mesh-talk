@@ -36,6 +36,23 @@ const render = (m: ChatMessage, isChannel = false, isPersonal = false) =>
   );
 
 describe("automatic delivery footer", () => {
+  it("visibly identifies a received file offer instead of claiming file delivery", async () => {
+    await i18n.changeLanguage("en");
+    const html = render({
+      ...base,
+      delivery: "delivered",
+      file: {
+        fileConv: "file",
+        name: "photo.png",
+        size: 12,
+        mime: "image/png",
+        media: true,
+      },
+    });
+    expect(html).toContain('aria-label="File offer received"');
+    expect(html).toContain('aria-hidden="true">File offer received</span>');
+    expect(html).not.toContain('aria-label="Delivered"');
+  });
   it("distinguishes personal file metadata from bytes and external upload progress", async () => {
     await i18n.changeLanguage("en");
     const html = render(
@@ -117,6 +134,8 @@ describe("automatic delivery footer", () => {
         "delivered",
         "help",
         "fileHelp",
+        "fileAwaiting",
+        "fileDelivered",
         "metadataPending",
       ])
         expect(

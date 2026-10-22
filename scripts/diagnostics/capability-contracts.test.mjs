@@ -82,6 +82,10 @@ test("outgoing capability selects tests for acceptance projection and retired fr
       "Retired frontend owners cannot publish send completion",
       "ignores acceptance completed after its owner generation retires",
     ],
+    [
+      "File offer receipt does not stop approval and byte-progress refresh",
+      "continues polling file approval and bytes after the file offer is delivered",
+    ],
   ]);
   assert.deepEqual(
     owner("frontend-outgoing").capability.invariants.map(({ name }) => name),
@@ -119,6 +123,11 @@ test("session capability retains executable generation and retirement obligation
       "Runtime replacement awaits prior runtime retirement",
       "commands::tests::replacement_begin_awaits_real_host_stop_and_latest_same_owner_ticket_wins",
       "src-tauri/src/commands.rs",
+    ],
+    [
+      "Stalled network producers allow observations and unrelated sends while blocking runtime retirement",
+      "runtime_admission::integration_lease_tests::stalled_producer_allows_observation_but_prevents_runtime_retirement",
+      "src-tauri/src/runtime_admission.rs",
     ],
   ];
   assert.deepEqual(

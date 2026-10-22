@@ -285,7 +285,9 @@
       "delivered": "Entregado",
       "help": "Recibo automático de la cuenta destinataria. No confirma lectura.",
       "fileHelp": "Tarjeta del archivo entregada. La descarga y la lectura son independientes.",
-      "metadataPending": "Detalles del archivo pendientes"
+      "metadataPending": "Detalles del archivo pendientes",
+      "fileAwaiting": "Esperando confirmación de la oferta de archivo",
+      "fileDelivered": "Oferta de archivo recibida"
     },
     "custody": {
       "local": "Ninguna copia de miembro confirmada",
@@ -318,7 +320,7 @@
   },
   "transfer": {
     "preparing": "Preparando archivo…",
-    "awaitingRecipient": "Esperando al destinatario…",
+    "awaitingRecipient": "Esperando que comience la transferencia…",
     "awaitingApproval": "Esperando la aprobación del destinatario…",
     "recipientDeclined": "El destinatario rechazó este archivo",
     "confirming": "Confirmando la recepción…",

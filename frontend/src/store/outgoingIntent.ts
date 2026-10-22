@@ -170,7 +170,14 @@ export async function refreshDeliveryStatuses(
             .filter((i) => convKey(i.conversation) === key)
             .map((i) => i.message),
         ]
-          .filter((m) => m.fromMe && m.id && m.delivery !== "delivered")
+          .filter(
+            (m) =>
+              m.fromMe &&
+              m.id &&
+              (m.delivery !== "delivered" ||
+                (m.file &&
+                  !useTransfers.getState().transfers[m.id]?.delivered)),
+          )
           .map((m) => m.id!),
       ),
     ];

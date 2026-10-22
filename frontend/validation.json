@@ -34,16 +34,23 @@
         "frontend/src/store/conversationHistory.ts",
         "frontend/src/store/conversationHistory.test.ts"
       ],
-      "frontend": ["src/store/conversationHistory.test.ts"],
+      "frontend": [
+        "src/store/conversationHistory.test.ts",
+        "src/lib/readDeadline.test.ts"
+      ],
       "consumers": ["frontend-chat"]
     },
     {
       "id": "frontend-outgoing",
       "paths": [
         "frontend/src/store/outgoingIntent.ts",
-        "frontend/src/store/outgoingIntent.test.ts"
+        "frontend/src/store/outgoingIntent.test.ts",
+        "frontend/e2e/file-send-progress.spec.ts"
       ],
       "frontend": ["src/store/outgoingIntent.test.ts"],
+      "escalation": [
+        "File approval/progress changes require e2e/file-send-progress.spec.ts, including file-offer receipt before approval and byte completion."
+      ],
       "consumers": ["frontend-chat"],
       "capability": {
         "summary": "Own optimistic outgoing intents and project backend acceptance within the current frontend owner lifetime.",
@@ -60,6 +67,10 @@
           {
             "name": "Retired frontend owners cannot publish send completion",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "File offer receipt does not stop approval and byte-progress refresh",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       }
@@ -82,6 +93,16 @@
         "frontend/src/store/rosterRefresh.ts"
       ],
       "frontend": ["src/store/chat.test.ts"],
+      "capability": {
+        "summary": "Bound identity startup waits and expose retry while retaining owner and runtime authority.",
+        "guide": "docs/module-boundaries.md#coordinated-state-owners",
+        "invariants": [
+          {
+            "name": "The thirty-second identity boot window includes native read waits",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
       "escalation": [
         "Changed visible interaction or native IPC behavior requires relevant browser/native scenarios; unit reachability does not prove runtime wiring."
       ]

@@ -661,7 +661,7 @@ pub async fn rename_account(
                 let _ = release.await;
             }
         }
-        let mut guard = node_state.0.lock().await;
+        let mut guard = node_state.0.write().await;
         app_state
             .session()
             .matching(&lease, |info| {
@@ -746,7 +746,7 @@ mod tests {
                 |_| {},
             ))
             .unwrap();
-            *node.0.blocking_lock() = Some(runtime);
+            *node.0.blocking_write() = Some(runtime);
             let settings =
                 crate::settings::SettingsState::isolated(root.path().join("settings.json"));
             let mut value = settings.get();
@@ -822,7 +822,7 @@ mod tests {
     impl Drop for AuthFixture {
         fn drop(&mut self) {
             let _startup = self.node.test_startup_gate().blocking_lock();
-            let old = self.node.0.blocking_lock().take();
+            let old = self.node.0.blocking_write().take();
             if let Some(old) = old {
                 tauri::async_runtime::block_on(old.stop());
             }
@@ -842,7 +842,7 @@ mod tests {
         tauri::async_runtime::block_on(async {
             // Bind this manually opened fixture through the production install
             // interface before checking the installation's session generation.
-            let runtime = fixture.node.0.lock().await.take().unwrap();
+            let runtime = fixture.node.0.write().await.take().unwrap();
             let authority = crate::chat_commands::RuntimeAuthority::request(
                 session.clone(),
                 session.capture().unwrap(),
@@ -850,7 +850,7 @@ mod tests {
             )
             .unwrap();
             assert!(authority.begin().await.unwrap().install(runtime).await);
-            let guard = fixture.node.0.lock().await;
+            let guard = fixture.node.0.write().await;
             let pending = fixture.node.node_for_owner(session, &owner);
             tokio::pin!(pending);
             // Poll the real interface into its runtime wait, without sleeps.
@@ -1070,7 +1070,7 @@ mod tests {
         let raw = fixture
             .node
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .restart_password()
@@ -1140,7 +1140,7 @@ mod tests {
         let old_device = fixture
             .node
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .user_id()
@@ -1181,7 +1181,7 @@ mod tests {
             fixture
                 .node
                 .0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .restart_password(),
@@ -1214,7 +1214,7 @@ mod tests {
             fixture
                 .node
                 .0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .restart_password(),
@@ -1229,7 +1229,7 @@ mod tests {
         let original_device = fixture
             .node
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .user_id()
@@ -1253,7 +1253,7 @@ mod tests {
             .await
             .unwrap();
         });
-        let runtime = fixture.node.0.blocking_lock();
+        let runtime = fixture.node.0.blocking_write();
         assert_eq!(runtime.as_ref().unwrap().user_id(), original_device);
         assert_eq!(runtime.as_ref().unwrap().restart_password(), " password-a ");
     }
@@ -1276,7 +1276,7 @@ mod tests {
         assert!(fixture.app_state.session().get().is_none());
         assert!(crate::session_store::load(&fixture.alice).is_none());
         assert!(fixture.settings.get().last_user.is_none());
-        assert!(fixture.node.0.blocking_lock().is_none());
+        assert!(fixture.node.0.blocking_write().is_none());
         assert_eq!(fixture.node.test_lifecycle_ticket(), ticket);
     }
 
@@ -1352,7 +1352,7 @@ mod tests {
             .await
         });
         tauri::async_runtime::block_on(entered_rx).unwrap();
-        assert!(fixture.node.0.blocking_lock().is_none());
+        assert!(fixture.node.0.blocking_write().is_none());
         caller.abort();
         assert!(tauri::async_runtime::block_on(caller).is_err());
         let signed_in = tauri::async_runtime::block_on(login_impl(
@@ -1435,7 +1435,7 @@ mod tests {
             fixture
                 .node
                 .0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .display_name(),
@@ -1448,7 +1448,7 @@ mod tests {
         let fixture = AuthFixture::new("rename");
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
-        let mut lifecycle = fixture.node.0.blocking_lock();
+        let mut lifecycle = fixture.node.0.blocking_write();
         let webview = fixture.webview.clone();
         let rename = std::thread::spawn(move || {
             invoke_auth(
@@ -1493,7 +1493,7 @@ mod tests {
             fixture
                 .node
                 .0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .display_name(),
@@ -1549,7 +1549,7 @@ mod tests {
             Some(fixture.bob.as_str())
         );
         assert!(
-            fixture.node.0.blocking_lock().is_some(),
+            fixture.node.0.blocking_write().is_some(),
             "stale logout must not retire any runtime"
         );
     }
@@ -1691,7 +1691,7 @@ mod tests {
             }
             release_tx.send(()).unwrap();
             assert!(prepare.await.unwrap().is_err());
-            assert!(node.0.lock().await.is_none());
+            assert!(node.0.write().await.is_none());
             drop(permit);
             assert!(node.test_startup_gate().try_lock().is_ok());
         }
@@ -1729,7 +1729,7 @@ mod tests {
         .await
         .unwrap();
         let port = runtime.listen_tcp_port();
-        let guard = node.0.lock().await;
+        let guard = node.0.write().await;
         let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
         let install = tokio::spawn(async move {
             queued_tx.send(()).unwrap();
@@ -1742,7 +1742,7 @@ mod tests {
         drop(guard);
         assert!(!install.await.unwrap());
         assert!(node.test_startup_gate().try_lock().is_ok());
-        assert!(node.0.lock().await.is_none());
+        assert!(node.0.write().await.is_none());
         assert!(
             tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
                 .await
@@ -1771,16 +1771,16 @@ mod tests {
         .await
         .unwrap();
         let port = old.listen_tcp_port();
-        *node.0.lock().await = Some(old);
+        *node.0.write().await = Some(old);
         let stale =
             RuntimeAuthority::request(session.clone(), lease.clone(), node.clone()).unwrap();
         let latest = RuntimeAuthority::request(session.clone(), lease, node.clone()).unwrap();
         assert!(stale.begin().await.is_err());
-        assert!(node.0.lock().await.is_some());
+        assert!(node.0.write().await.is_some());
         let permit = latest.begin().await.unwrap();
         // Actual production coordinator + actual NodeRuntime::stop. Core retirement
         // tests independently prove blocked writers drain inside that awaited stop.
-        assert!(node.0.lock().await.is_none());
+        assert!(node.0.write().await.is_none());
         assert!(
             tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
                 .await
@@ -1814,10 +1814,10 @@ mod tests {
         session.set_display_name("renamed before install".into());
         assert!(permit.install(runtime).await);
         assert_eq!(
-            node.0.lock().await.as_ref().unwrap().display_name(),
+            node.0.write().await.as_ref().unwrap().display_name(),
             "renamed before install"
         );
-        let runtime = node.0.lock().await.take().unwrap();
+        let runtime = node.0.write().await.take().unwrap();
         runtime.stop().await;
     }
     #[test]

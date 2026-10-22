@@ -92,6 +92,16 @@ retry. `reception.ts` owns identity-based receipt/unread decisions, including th
 legacy unread projection. `conversationState.ts` retains cache, deletion and
 optimistic-message reconciliation. History callers do not coordinate those
 internal transitions or import back into the chat composition module at runtime.
+DM file status refresh continues after the file offer's receipt, until the
+separate file-progress projection reaches completion. Receipt of the offer must
+not freeze an earlier approval or byte-progress snapshot on the sender.
+Active history and reaction reads use the shared native-read deadline so a stalled
+IPC request releases the loading indicator into the existing retry state. Late
+results from a timed-out read cannot replace a newer snapshot. The chat identity
+boot window is thirty seconds of elapsed monotonic time, including native waits;
+expiry exposes the existing retry action rather than silently extending startup
+for every slow attempt. These presentation deadlines do not cancel native work
+or establish whether the participant runtime is healthy.
 The history module defines its own state/context interface; `chat.ts` composes it
 and supplies runtime generations plus status refresh. Its patches cannot mutate
 that session context. `conversationModel.ts` owns shared Conversation/message data
@@ -314,6 +324,12 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   authority through the operation. `NodeState::with_session_runtime` owns the
   shared session/installation decision. A raw node handle remains a snapshot,
   not authority for future mutations or plaintext release.
+  Installed-runtime operations hold shared lifecycle leases, allowing network
+  producers, observations and unrelated sends to proceed concurrently. Runtime
+  installation, replacement and removal retain exclusive access and wait for
+  admitted operations. The matching desktop-session guard still encloses each
+  synchronous commit and plaintext observation; shared access does not authorize
+  stale work or allow an old runtime to survive replacement.
   Registered channel, device, file, reaction, recall and call mutations use the
   same entry lease and guarded core commit. Native file writers keep lifecycle
   ownership through cancellation. Search and file/media queries use the same
