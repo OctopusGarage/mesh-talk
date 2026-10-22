@@ -8232,14 +8232,19 @@ async fn delivery_observation_worker_reports_only_an_observed_exchange_timeout()
     let source = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
-    let aa = Account::generate();
+    let alice_account = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
-    let (sender, _) = node(source.path(), alice, aa, &bp);
-    let (receiver, _) = node(target.path(), bob, ba, &ap);
+    let alice_announce = Announce::new_with_account(&alice, &alice_account, "Alice", 9);
+    let bob_announce = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+    );
+    let (sender, _) = node(source.path(), alice, alice_account, &bob_announce);
+    let (receiver, _) = node(target.path(), bob, bob_account, &alice_announce);
     sender.set_post_office_enabled(false);
     let id = sender
         .enqueue_to_account(
@@ -8261,7 +8266,7 @@ async fn delivery_observation_worker_reports_only_an_observed_exchange_timeout()
         .await
         .unwrap()
         .unwrap();
-    let snapshot = sender.account_delivery_observations(&bp.account_id().unwrap(), &[id]);
+    let snapshot = sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id]);
     assert_eq!(
         snapshot[0].2.unwrap().reason,
         None,
@@ -8270,7 +8275,7 @@ async fn delivery_observation_worker_reports_only_an_observed_exchange_timeout()
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(70)).await;
     for _ in 0..100 {
-        if sender.account_delivery_observations(&bp.account_id().unwrap(), &[id])[0]
+        if sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id])[0]
             .2
             .is_some_and(|o| o.reason == Some(DeliveryRecoveryReason::AttemptTimedOut))
         {
@@ -8279,7 +8284,7 @@ async fn delivery_observation_worker_reports_only_an_observed_exchange_timeout()
         tokio::task::yield_now().await;
     }
     assert_eq!(
-        sender.account_delivery_observations(&bp.account_id().unwrap(), &[id])[0]
+        sender.account_delivery_observations(&bob_announce.account_id().unwrap(), &[id])[0]
             .2
             .unwrap()
             .reason,
