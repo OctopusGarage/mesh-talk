@@ -1079,5 +1079,30 @@
     "previousFingerprint": "以前：{{fingerprint}}",
     "currentFingerprint": "現在：{{fingerprint}}",
     "noDeviceChanges": "デバイス変更の記録はありません。"
+  },
+  "notificationPermission": {
+    "denied": "システム設定で通知がブロックされています",
+    "granted": "システムで通知が許可されています",
+    "prompt": "このデバイスで通知を許可",
+    "limited": "通知の表示が制限されています",
+    "unknown": "システムの通知権限を確認できませんでした",
+    "checking": "システムの権限を確認中…",
+    "settingsHint": "設定は保存されています。新着メッセージの通知にはシステムの許可が必要です。",
+    "messageHint": "メッセージは送信できますが、返信の通知を見逃す可能性があります。",
+    "allowedHint": "集中モードや通知の一時停止により、通知が表示されない場合があります。",
+    "openSettings": "システム設定を開く",
+    "checkAgain": "再確認",
+    "allow": "通知を許可",
+    "requesting": "許可を待っています…",
+    "returnHint": "設定を変更したら、ここに戻ってください。権限を自動的に再確認します。",
+    "openFailed": "システム設定を開けませんでした。",
+    "reminder": "通知の権限",
+    "dismiss": "通知の権限に関する案内を閉じる",
+    "instructions": {
+      "macos": "システム設定 → 通知 → Mesh-Talk で「通知を許可」をオンにしてください。",
+      "windows": "設定 → システム → 通知で、通知を有効にし、Mesh-Talk を許可してください。",
+      "linux": "デスクトップの通知設定で Mesh-Talk を許可してください。",
+      "other": "デバイスの通知設定を開き、Mesh-Talk を許可してください。"
+    }
   }
 }

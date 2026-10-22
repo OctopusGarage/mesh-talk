@@ -472,6 +472,41 @@
       "escalation": [
         "Run trust-card browser interaction and native owner/lock/replacement command evidence; JSON parser unit tests alone do not prove runtime wiring."
       ]
+    },
+    {
+      "id": "desktop-notification-permission",
+      "paths": [
+        "src-tauri/src/notifications.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "notifications::tests::"
+          ]
+        }
+      ],
+      "frontend": [
+        "src/lib/notify.test.ts",
+        "src/features/chat/NotificationPermissionHelp.test.ts"
+      ],
+      "capability": {
+        "summary": "Observe real machine notification authorization and offer explicit recovery independently of saved account preferences.",
+        "guide": "docs/settings.md#system-notification-permission",
+        "invariants": [
+          {
+            "name": "Unsupported queries and failed observations are unknown, never assumed authorization",
+            "reference": "docs/settings.md#system-notification-permission"
+          },
+          {
+            "name": "Only explicit actions may prompt or open fixed system-settings destinations",
+            "reference": "docs/settings.md#system-notification-permission"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/notification-permission.spec.ts for UI recovery and nonblocking sends. Packaged macOS and Windows authorization/revocation, system-settings navigation and actual notification delivery require native platform evidence; browser mocks and mapping tests do not certify them."
+      ]
     }
   ],
   "prScenarios": [
@@ -518,6 +553,18 @@
       ],
       "browser": [
         "e2e/trust-cards.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "desktop-notification-permission-acceptance",
+      "paths": [
+        "src-tauri/src/notifications.rs"
+      ],
+      "browser": [
+        "e2e/notification-permission.spec.ts"
       ],
       "native": [
         "host"

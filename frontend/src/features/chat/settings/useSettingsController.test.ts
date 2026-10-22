@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   setAutostart: vi.fn(),
   setPrivacy: vi.fn(),
   setCallsEnabled: vi.fn(),
+  setNotificationsEnabled: vi.fn(),
   setRingtone: vi.fn(),
   auth: { user: { id: "alice" } as { id: string } | null, generation: 0 },
 }));
@@ -98,6 +99,7 @@ it("keeps acknowledged settings until the write and canonical readback finish", 
   expect(controller.savedCategory).toBeNull();
   const canonical: AppSettings = {
     ...initial,
+    notifications: false,
     privacy_level: "strict",
     notification_preview: false,
     auto_lock_seconds: 60,
@@ -113,6 +115,7 @@ it("keeps acknowledged settings until the write and canonical readback finish", 
     await saving;
   });
   expect(controller.settings).toEqual(canonical);
+  expect(mocks.setNotificationsEnabled).toHaveBeenLastCalledWith(false);
   expect(controller.savedCategory).toBe("privacy");
   expect(controller.saving).toBe(false);
   expect(mocks.setPrivacy).toHaveBeenCalledWith({

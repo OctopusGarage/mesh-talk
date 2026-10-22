@@ -1462,6 +1462,17 @@ export const test = base.extend({
           backup_status: () => null,
 
           // settings
+          notification_permission: () => ({
+            status: "granted",
+            platform: "macos",
+            can_open_settings: true,
+          }),
+          request_notification_permission: () => ({
+            status: "granted",
+            platform: "macos",
+            can_open_settings: true,
+          }),
+          open_notification_settings: () => null,
           get_app_settings: () => appSettings,
           set_app_settings: (a) => {
             Object.assign(appSettings, (a.settings as object) ?? {});

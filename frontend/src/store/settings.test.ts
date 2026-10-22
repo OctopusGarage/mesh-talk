@@ -19,7 +19,11 @@ beforeEach(() => {
 });
 
 it("does not install an old owner's delayed settings", async () => {
-  let finish!: (value: { calls_enabled: boolean; ringtone: string }) => void;
+  let finish!: (value: {
+    calls_enabled: boolean;
+    ringtone: string;
+    notifications: boolean;
+  }) => void;
   invoke.mockImplementation(
     () =>
       new Promise((resolve) => {
@@ -32,16 +36,22 @@ it("does not install an old owner's delayed settings", async () => {
     generation: 1,
   });
   useSettings.getState().setOwner("bob");
-  finish({ calls_enabled: true, ringtone: "marimba" });
+  finish({ calls_enabled: true, ringtone: "marimba", notifications: true });
   await pending;
   expect(useSettings.getState().callsEnabled).toBe(false);
   expect(useSettings.getState().ringtone).toBe(DEFAULT_RINGTONE);
+  expect(useSettings.getState().notificationsEnabled).toBeNull();
 });
 
 describe("useSettings.load", () => {
   it("maps calls_enabled and the (valid) ringtone from persisted settings", async () => {
-    invoke.mockResolvedValue({ calls_enabled: true, ringtone: "marimba" });
+    invoke.mockResolvedValue({
+      calls_enabled: true,
+      ringtone: "marimba",
+      notifications: false,
+    });
     await useSettings.getState().load();
+    expect(useSettings.getState().notificationsEnabled).toBe(false);
     expect(useSettings.getState().callsEnabled).toBe(true);
     expect(useSettings.getState().ringtone).toBe("marimba");
   });
