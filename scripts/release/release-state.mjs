@@ -6,11 +6,18 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getReleaseByTag } from "./release-api.mjs";
 
-export function draftSnapshot(release, tag) {
+export function validateReleaseTag(tag, nightly = false) {
+  assert.match(tag, nightly ? /^v\d+\.\d+\.\d+-nightly\.[1-9]\d*\.[1-9]\d*$/ : /^v\d+\.\d+\.\d+$/, "invalid release tag for publication mode");
+}
+
+export function draftSnapshot(release, tag, nightly = false) {
+  validateReleaseTag(tag, nightly);
+  assert.equal(release?.prerelease === true, nightly, "release prerelease state must match publication mode");
   assert.ok(release?.draft === true, "release must still be a draft");
   assert.equal(release.tag_name, tag, "release tag changed");
   assert.ok(Number.isSafeInteger(release.id), "invalid release ID");
   assert.ok(Array.isArray(release.assets), "missing release assets");
+  if (nightly) assert.match(release.target_commitish ?? "", /^[a-f\d]{40}$/, "Nightly release must target an exact source commit");
   const names = new Set();
   const assets = release.assets.map(({ id, name, size, digest }) => {
     assert.ok(Number.isSafeInteger(id) && Number.isSafeInteger(size) && size > 0, "invalid release asset");
@@ -19,11 +26,11 @@ export function draftSnapshot(release, tag) {
     names.add(name);
     return { id, name, size, digest };
   }).sort((a, b) => a.name.localeCompare(b.name));
-  return { id: release.id, tag, assets };
+  return { id: release.id, tag, prerelease: nightly, ...(nightly ? { source: release.target_commitish } : {}), assets };
 }
 
-export function requireSameDraft(release, snapshot) {
-  assert.deepEqual(draftSnapshot(release, snapshot.tag), snapshot, "release or asset identities/digests changed since verification");
+export function requireSameDraft(release, snapshot, nightly = false) {
+  assert.deepEqual(draftSnapshot(release, snapshot.tag, nightly), snapshot, "release or asset identities/digests changed since verification");
 }
 
 async function fileDigest(path) {
@@ -36,17 +43,24 @@ async function main() {
   const [mode, tag, directory, workflowDirectory] = process.argv.slice(2);
   const repo = process.env.SOURCE_REPO;
   assert.match(repo, /^[\w.-]+\/[\w.-]+$/);
-  assert.match(tag, /^v\d+\.\d+\.\d+$/);
+  const nightly = process.env.RELEASE_NIGHTLY === "true";
+  validateReleaseTag(tag, nightly);
   assert.ok(["guard", "record", "verify", "publish"].includes(mode), "unsupported release-state operation");
   const release = getReleaseByTag(repo, tag);
+  if (nightly && release !== null) {
+    assert.equal(release.target_commitish, process.env.SOURCE_SHA, "Nightly release source changed");
+    const ref = JSON.parse(execFileSync("gh", ["api", `repos/${repo}/git/ref/tags/${tag}`], { encoding: "utf8" }));
+    assert.equal(ref.object?.type, "commit", "Nightly tag must point directly to source");
+    assert.equal(ref.object.sha, process.env.SOURCE_SHA, "Nightly tag source changed");
+  }
   if (mode === "guard") {
     if (release === null) return;
-    assert.equal(release.draft, true, "cannot upload to a published release");
+    draftSnapshot(release, tag, nightly);
     return;
   }
   assert.ok(release !== null, "release not found");
   if (mode === "record") {
-    const snapshot = draftSnapshot(release, tag);
+    const snapshot = draftSnapshot(release, tag, nightly);
     assert.deepEqual(snapshot.assets.map((asset) => asset.name).sort(), readdirSync(directory).sort(), "downloaded release asset set changed");
     assert.deepEqual(snapshot.assets.map((asset) => asset.name).sort(), readdirSync(workflowDirectory).sort(), "workflow/release asset sets differ");
     for (const asset of snapshot.assets) {
@@ -61,7 +75,7 @@ async function main() {
   assert.equal(evidence.source, process.env.SOURCE_SHA, "verification source changed");
   assert.equal(evidence.repository, repo, "verification repository changed");
   assert.equal(evidence.snapshot.tag, tag, "verification tag changed");
-  requireSameDraft(release, evidence.snapshot);
+  requireSameDraft(release, evidence.snapshot, nightly);
   if (mode === "verify") {
     assert.deepEqual(evidence.snapshot.assets.map((asset) => asset.name).sort(), readdirSync(directory).sort(), "downloaded release asset set changed");
     for (const asset of evidence.snapshot.assets) {
@@ -69,7 +83,7 @@ async function main() {
     }
     return;
   }
-  execFileSync("gh", ["api", "--method", "PATCH", `repos/${repo}/releases/${evidence.snapshot.id}`, "-F", "draft=false", "-f", "make_latest=true"], { stdio: "inherit" });
+  execFileSync("gh", ["api", "--method", "PATCH", `repos/${repo}/releases/${evidence.snapshot.id}`, "-F", "draft=false", "-F", `prerelease=${nightly}`, "-f", `make_latest=${!nightly}`], { stdio: "inherit" });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

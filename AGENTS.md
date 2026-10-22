@@ -123,6 +123,21 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 
 ## Commit & Pull Request Guidelines
 
+- Before changing product versions or release automation, read [the version lifecycle](docs/updates.md#version-ownership-and-lifecycle).
+  Root `Cargo.toml` `[workspace.package].version` is authoritative. Use
+  `node scripts/release/version.mjs check|sync|prepare VERSION` (the `VERSION` argument belongs
+  to `prepare` only); do not hand-edit generated npm/Cargo lock metadata or introduce another
+  version constant. Root private npm metadata is a checked release-tooling projection;
+  frontend private metadata is versionless and Tauri inherits Cargo. Never broadly replace
+  matching dependency, fixture, history, wire or schema versions. Keep source builds `BASE-dev`,
+  Nightlies `BASE-nightly.RUN.ATTEMPT`, official tagged builds `BASE`, and standard SemVer ordering.
+- Release proposals and next-development-target changes use reviewed PRs. Stable publication
+  remains explicit through the existing verified tagged-release workflow; no direct main push,
+  public empty release, mutable published tag or gate bypass. Nightly publication requires trusted
+  `main` and a target above the latest Stable. Future changes must extend the existing version
+  owner, its tests, standards/CI enforcement and capability contracts together; the owning guide
+  documents permissions, bot-PR checks, dispatch and recovery requirements.
+
 - Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
   `specifications/git_standards.md`. Squash WIP; link issues.
 - Create PRs through `./scripts/create-pr.sh -- <gh pr create options>`.

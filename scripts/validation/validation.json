@@ -24,27 +24,67 @@
       "id": "release-publication",
       "paths": [
         ".github/workflows/release.yml",
+        ".github/workflows/release-maintenance.yml",
+        "release-please-config.json",
+        ".release-please-manifest.json",
+        "CHANGELOG.md",
+        "Cargo.toml",
+        "Cargo.lock",
+        "package.json",
+        "package-lock.json",
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        "src-tauri/tauri.conf.json",
+        ".github/release-notes.md",
         "scripts/release/",
         "scripts/diagnostics/release-assets.test.mjs",
+        "scripts/diagnostics/release-api.test.mjs",
         "scripts/diagnostics/release-gates.test.mjs",
         "scripts/diagnostics/release-preflight.test.mjs",
+        "scripts/diagnostics/release-notes.test.mjs",
         "scripts/diagnostics/release-reuse.test.mjs",
         "scripts/diagnostics/release-state.test.mjs",
         "scripts/diagnostics/release-verifier.test.mjs",
-        "scripts/diagnostics/release-workflow.test.mjs"
+        "scripts/diagnostics/release-workflow.test.mjs",
+        "scripts/diagnostics/version-contract.test.mjs",
+        "scripts/diagnostics/version-automation.test.mjs",
+        "site/index.html",
+        "docs/updates.md"
       ],
       "node": [
         "scripts/diagnostics/release-assets.test.mjs",
+        "scripts/diagnostics/release-api.test.mjs",
         "scripts/diagnostics/release-gates.test.mjs",
         "scripts/diagnostics/release-preflight.test.mjs",
+        "scripts/diagnostics/release-notes.test.mjs",
         "scripts/diagnostics/release-reuse.test.mjs",
         "scripts/diagnostics/release-state.test.mjs",
         "scripts/diagnostics/release-verifier.test.mjs",
-        "scripts/diagnostics/release-workflow.test.mjs"
+        "scripts/diagnostics/release-workflow.test.mjs",
+        "scripts/diagnostics/version-contract.test.mjs",
+        "scripts/diagnostics/version-automation.test.mjs"
       ],
       "escalation": [
-        "Release changes require exact-source hosted CI; signed native builds and publication remain tag-only workflow gates."
-      ]
+        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Both editions and every platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Release-maintenance changes require hosted evidence for bot-PR permissions/checks, unpublished draft-only creation, explicit release build dispatch and reviewed next-target PR creation; local mocks do not prove those settings. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate."
+      ],
+      "capability": {
+        "summary": "Maintain one Cargo product target and reviewed release/next-target PRs, publishing complete exact-source verified Stable releases and immutable automatic main-branch Nightlies.",
+        "guide": "docs/updates.md",
+        "invariants": [
+          {
+            "name": "Stable publication remains explicit; Nightly is opt-in, main-only and never latest, with all platform/edition assets verified before visibility.",
+            "reference": "docs/updates.md"
+          },
+          {
+            "name": "Cargo owns the numeric target; checked projections never rewrite unrelated versions. Source, Nightly and Stable build identities follow SemVer, and Nightly targets exceed published Stable.",
+            "reference": "docs/updates.md#version-ownership-and-lifecycle"
+          },
+          {
+            "name": "Release preparation creates reviewed PRs and unpublished drafts only; explicit build dispatch and next-target PRs preserve the existing final Stable publication gate without direct main pushes.",
+            "reference": "docs/updates.md#automated-release-preparation"
+          }
+        ]
+      }
     },
     {
       "id": "validation-tooling",

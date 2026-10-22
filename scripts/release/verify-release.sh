@@ -10,7 +10,7 @@ source_ref="${5:?source ref required}"
 source_sha="${6:?source commit required}"
 
 [[ "$repository" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]
-[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-ci\.[0-9]+)?$ ]]
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-ci\.[0-9]+|-nightly\.[1-9][0-9]*\.[1-9][0-9]*)?$ ]]
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 [[ "$source_sha" =~ ^[a-f0-9]{40}$ ]]
 [[ "$source_ref" == refs/tags/* || "$source_ref" == refs/heads/* ]]

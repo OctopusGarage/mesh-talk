@@ -9,6 +9,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/error";
+import type { UpdateChannel } from "@/lib/types";
 import { useUpdates } from "@/store/updates";
 
 function readableSize(bytes: number): string {
@@ -19,6 +20,9 @@ export function UpdatePanel() {
   const { t } = useTranslation();
   const {
     phase,
+    channel,
+    currentVersion,
+    setChannel,
     release,
     download,
     progress,
@@ -39,10 +43,10 @@ export function UpdatePanel() {
     }
   };
 
-  const openRelease = async () => {
-    if (!release) return;
+  const openRelease = async (url = release?.release_url) => {
+    if (!url) return;
     try {
-      await openUrl(release.release_url);
+      await openUrl(url);
     } catch (cause) {
       setError(errorMessage(cause));
     }
@@ -83,6 +87,53 @@ export function UpdatePanel() {
           {phase === "checking"
             ? t("about.updates.checking")
             : t("about.updates.check")}
+        </Button>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <label htmlFor="update-channel" className="text-xs font-medium">
+            {t("about.updates.channel")}
+          </label>
+          <select
+            id="update-channel"
+            className="h-8 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            value={channel}
+            disabled={busy}
+            onChange={(event) =>
+              setChannel(event.target.value as UpdateChannel)
+            }
+            aria-describedby="update-channel-help"
+          >
+            <option value="stable">{t("about.updates.stable")}</option>
+            <option value="nightly">{t("about.updates.nightly")}</option>
+          </select>
+        </div>
+        <p
+          id="update-channel-help"
+          className="text-xs leading-relaxed text-muted-foreground"
+        >
+          {channel === "nightly"
+            ? t("about.updates.nightlyWarning")
+            : t("about.updates.stableHelp")}
+        </p>
+        {currentVersion && (
+          <p className="break-words text-xs text-muted-foreground">
+            {t("about.updates.installed", { version: currentVersion })}
+          </p>
+        )}
+        <Button
+          size="sm"
+          variant="link"
+          className="h-auto px-0 text-xs"
+          onClick={() =>
+            void openRelease(
+              "https://github.com/OctopusGarage/mesh-talk/releases/latest",
+            )
+          }
+        >
+          {t("about.updates.stableDownload")}
+          <ExternalLink className="h-3.5 w-3.5" />
         </Button>
       </div>
 

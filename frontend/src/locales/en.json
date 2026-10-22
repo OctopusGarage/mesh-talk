@@ -805,7 +805,7 @@
     "credits": "Animated stickers from Google's Noto Emoji, used under their open-source license.",
     "updates": {
       "title": "Updates",
-      "manual": "Check for a newer stable release. You choose when to download and install it.",
+      "manual": "Check for a newer release in your selected channel. You choose when to download and install it.",
       "check": "Check for updates",
       "checking": "Checking…",
       "current": "You're up to date ({{version}}).",
@@ -822,7 +822,14 @@
         "mac": "Unzip the download, open the DMG, then drag Mesh-Talk to Applications. Quit the current app before replacing it. Your local data stays in place.",
         "windows": "Unzip the download and run the EXE installer (or MSI for managed installs). Close Mesh-Talk first. Your local data stays in place.",
         "linux": "Unzip the download, then install the DEB or RPM package for your distribution, or run the AppImage. Close Mesh-Talk first. Your local data stays in place."
-      }
+      },
+      "channel": "Update channel",
+      "stable": "Stable",
+      "nightly": "Nightly",
+      "nightlyWarning": "Experimental builds may contain bugs. Choose Nightly to try upcoming features.",
+      "stableHelp": "Stable receives official releases. Switching channels never automatically downgrades the app.",
+      "installed": "Installed: {{version}}",
+      "stableDownload": "Download Stable manually"
     }
   },
   "offlineConnect": {

@@ -5,11 +5,14 @@ Check GitHub Releases on demand, then install the downloaded package yourself.
 ## Check and download
 
 1. Open **More → About**.
-2. Choose **Check for updates**. This checks the latest published stable release when you ask.
-3. If a compatible newer package is offered, review its release notes and choose **Download update**.
-4. Wait for verification, then choose **Show in Downloads**.
+2. Choose an **Update channel**: **Stable** is the default; **Nightly** lets you try recent changes that may contain bugs. The choice is saved on this device.
+3. Choose **Check for updates**. Selecting a channel alone does not check or download anything.
+4. If a compatible newer package is offered, review its release notes and choose **Download update**.
+5. Wait for verification, then choose **Show in Downloads**.
 
 The app checks the downloaded archive against published size and SHA-256 metadata. This transfer check does not replace independent release provenance verification.
+
+Switching back to Stable changes future checks; it does not automatically downgrade a Nightly installation. **Download stable release** opens the official Stable download if you want to return manually. Keep a backup before doing so. Stable and Nightly use the same local data directory.
 
 ## Install manually
 

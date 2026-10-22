@@ -805,7 +805,7 @@
     "credits": "动画贴纸来自 Google Noto Emoji,依据其开源许可使用。",
     "updates": {
       "title": "更新",
-      "manual": "检查最新稳定版本。下载安装由你决定。",
+      "manual": "检查所选渠道中的新版本。由你决定何时下载和安装。",
       "check": "检查更新",
       "checking": "正在检查…",
       "current": "已是最新版本（{{version}}）。",
@@ -822,7 +822,14 @@
         "mac": "解压下载文件，打开 DMG，将 Mesh-Talk 拖入“应用程序”。替换前请退出当前应用。本地数据会保留。",
         "windows": "解压下载文件，运行 EXE 安装程序（托管安装可使用 MSI）。请先退出 Mesh-Talk。本地数据会保留。",
         "linux": "解压下载文件，按发行版安装 DEB 或 RPM，或运行 AppImage。请先退出 Mesh-Talk。本地数据会保留。"
-      }
+      },
+      "channel": "更新渠道",
+      "stable": "稳定版",
+      "nightly": "Nightly 预览版",
+      "nightlyWarning": "实验性构建可能包含缺陷。选择 Nightly 可体验即将推出的功能。",
+      "stableHelp": "稳定渠道接收正式版本。切换渠道不会自动降级应用。",
+      "installed": "已安装：{{version}}",
+      "stableDownload": "手动下载稳定版"
     }
   },
   "offlineConnect": {

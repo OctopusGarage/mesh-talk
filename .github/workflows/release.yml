@@ -1,18 +1,24 @@
 name: Tauri Release
 
 on:
+  schedule:
+    - cron: "23 3 * * *"
   push:
     tags:
-      - "v*"  # Triggered when pushing tags
+      - "v*" # Triggered when pushing tags
   workflow_dispatch:
     inputs:
+      publish_nightly:
+        description: Build and publish a verified Nightly prerelease from main
+        type: boolean
+        default: false
       publish_release:
         description: Publish the verified draft (select a version tag, not a branch)
         type: boolean
         default: false
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ (github.event_name == 'schedule' || inputs.publish_nightly) && 'nightly' || github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -24,7 +30,13 @@ env:
 jobs:
   preflight:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+      security-events: read
     outputs:
+      nightly: ${{ steps.inputs.outputs.nightly }}
+      skip: ${{ steps.inputs.outputs.skip }}
       tag: ${{ steps.inputs.outputs.tag }}
       version: ${{ steps.inputs.outputs.version }}
     steps:
@@ -36,18 +48,25 @@ jobs:
         id: inputs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NIGHTLY: ${{ github.event_name == 'schedule' || inputs.publish_nightly }}
           RELEASE_PUBLICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
         run: node scripts/release/preflight.mjs
+      - name: Require successful exact-source CI before Nightly compilation
+        if: steps.inputs.outputs.nightly == 'true' && steps.inputs.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/release/check-source-checks.mjs "$GITHUB_REPOSITORY" "$GITHUB_SHA"
 
   build-release:
     needs: preflight
-    if: inputs.publish_release != true
+    if: inputs.publish_release != true && needs.preflight.outputs.skip != 'true'
     permissions:
       contents: read
       id-token: write
       attestations: write
     env:
       ARTIFACT_TAG: ${{ needs.preflight.outputs.tag }}
+      MESH_TALK_BUILD_TAG: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/')) && needs.preflight.outputs.tag || format('v{0}-dev', needs.preflight.outputs.version) }}
       MESH_TALK_VARIANT: ${{ matrix.variant }}
     strategy:
       fail-fast: false
@@ -127,7 +146,7 @@ jobs:
             ~/.cargo/git
             src-tauri/target
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      
+
       - name: Install zip on Windows
         if: runner.os == 'Windows'
         run: choco install zip -y
@@ -329,14 +348,17 @@ jobs:
   # Re-download what was actually uploaded; a green build is not release evidence.
   verify-release:
     needs: [preflight, build-release]
-    if: inputs.publish_release != true
+    if: inputs.publish_release != true && needs.preflight.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
       actions: read
       attestations: read
+      checks: read
+      security-events: read
     env:
+      RELEASE_NIGHTLY: ${{ needs.preflight.outputs.nightly }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       ARTIFACT_TAG: ${{ needs.preflight.outputs.tag }}
       RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
@@ -361,27 +383,40 @@ jobs:
       - name: Verify workflow artifacts
         run: bash scripts/release/verify-release.sh workflow-assets "$ARTIFACT_TAG" "$RELEASE_VERSION" "$SOURCE_REPO" "$SOURCE_REF" "$SOURCE_SHA"
       - name: Recheck draft state immediately before the single upload
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || needs.preflight.outputs.nightly == 'true'
         run: node scripts/release/release-state.mjs guard "$ARTIFACT_TAG"
+      - name: Pin immutable Nightly tag to the verified source
+        if: needs.preflight.outputs.nightly == 'true'
+        run: node scripts/release/prepare-nightly.mjs
       - name: Prepare release notes
-        if: startsWith(github.ref, 'refs/tags/')
-        run: sed "s/__TAG__/$ARTIFACT_TAG/g" .github/release-notes.md > release_notes.md
+        if: startsWith(github.ref, 'refs/tags/') || needs.preflight.outputs.nightly == 'true'
+        run: node scripts/release/render-notes.mjs
       - name: Upload all verified platforms to the draft
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || needs.preflight.outputs.nightly == 'true'
         uses: softprops/action-gh-release@v3
         with:
           draft: true
+          prerelease: ${{ needs.preflight.outputs.nightly == 'true' }}
+          make_latest: false
+          target_commitish: ${{ github.sha }}
+          overwrite_files: ${{ needs.preflight.outputs.nightly != 'true' }}
           tag_name: ${{ needs.preflight.outputs.tag }}
           body_path: release_notes.md
           generate_release_notes: true
           files: workflow-assets/*
       - name: Verify actual draft release assets
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || needs.preflight.outputs.nightly == 'true'
         run: |
           mkdir draft-assets
           gh release download "$ARTIFACT_TAG" --repo "$SOURCE_REPO" --dir draft-assets
           bash scripts/release/verify-release.sh draft-assets "$ARTIFACT_TAG" "$RELEASE_VERSION" "$SOURCE_REPO" "$SOURCE_REF" "$SOURCE_SHA"
           node scripts/release/release-state.mjs record "$ARTIFACT_TAG" draft-assets workflow-assets
+      - name: Recheck source and publish the verified Nightly draft
+        if: needs.preflight.outputs.nightly == 'true'
+        run: |
+          node scripts/release/check-source-checks.mjs "$SOURCE_REPO" "$SOURCE_SHA"
+          node scripts/release/release-state.mjs verify "$ARTIFACT_TAG" draft-assets
+          node scripts/release/release-state.mjs publish "$ARTIFACT_TAG"
       - name: Record verification evidence
         run: |
           printf 'Verified source: %s\nArtifact tag: %s\nVersion: %s\n' "$SOURCE_SHA" "$ARTIFACT_TAG" "$RELEASE_VERSION" > verification.txt
@@ -424,7 +459,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.publish_release && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      actions: write
       attestations: read
       contents: write
       checks: read
@@ -506,3 +541,13 @@ jobs:
           sbom: true
       - name: Publish only the verified draft
         run: node scripts/release/release-state.mjs publish "$RELEASE_TAG"
+      - name: Queue the reviewed next-development-target PR
+        id: maintenance
+        continue-on-error: true
+        # GITHUB_TOKEN publication does not emit a cascading release workflow.
+        run: gh api --method POST "repos/$SOURCE_REPO/actions/workflows/release-maintenance.yml/dispatches" -f ref=main -f "inputs[stable_tag]=$RELEASE_TAG"
+      - name: Report maintenance dispatch recovery
+        if: steps.maintenance.outcome == 'failure'
+        run: |
+          echo "::warning::Stable is already published. Run Release Maintenance on main with stable_tag=$RELEASE_TAG to retry development preparation. Do not repeat publication."
+          echo "Stable $RELEASE_TAG was published successfully. Maintenance dispatch failed; run **Release Maintenance** on main with **stable_tag=$RELEASE_TAG**. Do not retry publication." >> "$GITHUB_STEP_SUMMARY"

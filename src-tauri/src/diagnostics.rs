@@ -54,7 +54,7 @@ pub struct EnvInfo {
     pub build_profile: String,
 }
 
-/// Snapshot the static environment facts. `CARGO_PKG_VERSION` / `TARGET` are resolved at
+/// Snapshot the logical build identity and environment facts. `TARGET` is resolved at
 /// compile time; the OS/arch are the runtime constants.
 #[tauri::command]
 pub fn env_info(app_handle: tauri::AppHandle) -> Result<EnvInfo, CommandError> {
@@ -62,7 +62,7 @@ pub fn env_info(app_handle: tauri::AppHandle) -> Result<EnvInfo, CommandError> {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     Ok(EnvInfo {
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        app_version: crate::updates::current_build_version().to_string(),
         data_dir: crate::data_dir().to_string_lossy().into_owned(),
         logs_dir,
         os: std::env::consts::OS.to_string(),

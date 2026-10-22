@@ -154,7 +154,8 @@ Release archives include checksums, signatures, and build provenance instruction
 release page. Current macOS and Windows installers do not carry commercial OS signing,
 so first launch may need the platform's usual downloaded-app confirmation. The app's
 **About → Check for updates** action checks only when requested; it downloads a verified
-archive but leaves installation to you. See the [install and update guide](docs/updates.md)
+archive but leaves installation to you. Stable is the default update channel; opt into Nightly
+in About to try recent main-branch builds without waiting for an official release. See the [install and update guide](docs/updates.md)
 for platform steps and the [troubleshooting guide](specifications/troubleshooting_guide.md)
 for connection issues.
 
@@ -181,6 +182,10 @@ cargo run -p mesh-talk-core --bin mesh-talk-node -- \
 Protect the password file; on Unix, use mode `0600`. For post-office flags, service
 deployment, and release builds, follow the
 [deployment guide](specifications/deployment_guide.md).
+
+Source builds identify themselves as the next target's `-dev` build. Product versions have
+one Cargo owner; release proposals, immutable Nightlies and reviewed next-target updates
+follow the [version and release lifecycle](docs/updates.md#version-ownership-and-lifecycle).
 
 Bots and local AI agents can send through scoped credentials. See the
 [bot integration guide](docs/bot-integrations.md) for desktop and headless setup.

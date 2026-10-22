@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 /** Cheap structural feedback. Does not execute tests or certify correctness. */
+import { existsSync } from "node:fs";
+import { checkVersions } from "../release/version.mjs";
 import { spawnSync } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
@@ -100,6 +102,13 @@ export async function checkStandards(root) {
   } catch (error) {
     issue("contract", error.message);
     return report;
+  }
+  if (existsSync(path.join(root, "Cargo.toml"))) {
+    try {
+      checkVersions(root);
+    } catch (error) {
+      issue("product-version", error.message);
+    }
   }
   for (const contract of contracts) {
     for (const [kind, prefix] of [

@@ -5,7 +5,7 @@ set -euo pipefail
 input_dir="${1:?artifact directory required}"
 evidence="${2:?verification evidence required}"
 tag="${3:?release tag required}"
-[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-ci\.[0-9]+)?$ ]]
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-ci\.[0-9]+|-nightly\.[1-9][0-9]*\.[1-9][0-9]*)?$ ]]
 test -f "$evidence" && test ! -L "$evidence"
 test -d "$input_dir"
 

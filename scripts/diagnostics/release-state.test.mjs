@@ -25,7 +25,7 @@ test("release-state CLI binds downloaded bytes and refuses changed publication e
   const current = { ...release, assets: [{ ...release.assets[0], size: Buffer.byteLength(bytes), digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}` }] };
   const api = join(root, "release.json");
   writeFileSync(api, JSON.stringify(current));
-  writeFileSync(join(root, "bin", "gh"), `#!${process.execPath}\nconst fs = require('node:fs'); const args = process.argv.slice(2); if (args.includes('PATCH')) fs.writeFileSync(process.env.PATCH_LOG, JSON.stringify(args)); else if (args.some(arg => arg.includes('/releases/tags/'))) { console.error('gh: Not Found (HTTP 404)'); process.exit(1); } else process.stdout.write(JSON.stringify([[JSON.parse(fs.readFileSync(process.env.RELEASE_API))]]));\n`, { mode: 0o755 });
+  writeFileSync(join(root, "bin", "gh"), `#!${process.execPath}\nconst fs = require('node:fs'); const args = process.argv.slice(2); if (args.includes('PATCH')) fs.writeFileSync(process.env.PATCH_LOG, JSON.stringify(args)); else if (args.some(arg => arg.includes('/releases/tags/'))) { console.error('gh: Not Found (HTTP 404)'); process.exit(1); } else process.stdout.write(require('node:child_process').execFileSync('jq', ['-cr', args[args.indexOf('--jq') + 1]], {input:JSON.stringify([JSON.parse(fs.readFileSync(process.env.RELEASE_API))]),encoding:'utf8'}));\n`, { mode: 0o755 });
   const script = resolve("scripts/release/release-state.mjs");
   const env = { ...process.env, PATH: `${join(root, "bin")}${delimiter}${process.env.PATH}`, SOURCE_REPO: "owner/repo", SOURCE_SHA: "a".repeat(40), RELEASE_API: api, PATCH_LOG: join(root, "patch.json") };
   const run = (mode, extra = {}) => spawnSync(process.execPath, [script, mode, "v0.1.6", join(root, "draft"), join(root, "workflow")], { cwd: root, env: { ...env, ...extra }, encoding: "utf8" });
@@ -76,4 +76,62 @@ test("publication rejects release state or asset replacement after verification"
     { ...release, assets: [{ ...release.assets[0], id: 2 }] },
     { ...release, assets: [{ ...release.assets[0], digest: `sha256:${"b".repeat(64)}` }] },
   ]) assert.throws(() => requireSameDraft(replacement, snapshot));
+});
+
+
+test("Nightly snapshots require explicit mode and retain prerelease metadata", () => {
+  const tag = "v0.1.6-nightly.123.2";
+  const nightly = { ...release, tag_name: tag, prerelease: true, target_commitish: "a".repeat(40) };
+  assert.throws(() => draftSnapshot(nightly, tag), /tag|Nightly/);
+  const snapshot = draftSnapshot(nightly, tag, true);
+  assert.throws(() => requireSameDraft({ ...nightly, prerelease: false }, snapshot, true), /prerelease|identities/);
+  assert.throws(() => draftSnapshot({ ...release, prerelease: true }, release.tag_name), /prerelease/);
+});
+
+test("technical Nightly tags are pinned to the exact source and never force moved", async () => {
+  const { prepareNightly } = await import("../release/prepare-nightly.mjs");
+  const sha = "a".repeat(40);
+  const calls = [];
+  prepareNightly("owner/repo", "v0.1.6-nightly.123.1", sha, (args) => { calls.push(args); return "{}"; });
+  assert.ok(calls[0].includes(`sha=${sha}`));
+  assert.ok(calls[0].includes("ref=refs/tags/v0.1.6-nightly.123.1"));
+  const existing = (object) => (args) => {
+    if (args.includes("POST")) throw new Error("already exists");
+    assert.equal(args.length, 1, "existing refs must only be read, never updated");
+    return JSON.stringify({ object });
+  };
+  prepareNightly("owner/repo", "v0.1.6-nightly.123.1", sha, existing({ type: "commit", sha }));
+  assert.throws(() => prepareNightly("owner/repo", "v0.1.6-nightly.123.1", sha, existing({ type: "commit", sha: "b".repeat(40) })), /immutable/);
+  assert.throws(() => prepareNightly("owner/repo", "v0.1.6-nightly.123.1", sha, existing({ type: "tag", sha })), /directly/);
+});
+
+test("Nightly CLI publishes only the verified pinned prerelease and never changes latest", { skip: process.platform === "win32" }, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-nightly-state-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const folder of ["bin", "draft", "workflow"]) mkdirSync(join(root, folder));
+  const tag = "v0.1.6-nightly.123.1";
+  const sha = "a".repeat(40);
+  const bytes = "verified nightly package";
+  const current = { ...release, tag_name: tag, prerelease: true, target_commitish: sha, assets: [{ ...release.assets[0], size: Buffer.byteLength(bytes), digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}` }] };
+  const api = join(root, "release.json");
+  writeFileSync(api, JSON.stringify(current));
+  writeFileSync(join(root, "bin", "gh"), `#!${process.execPath}\nconst fs = require('node:fs'); const args = process.argv.slice(2); if (args.includes('PATCH')) fs.writeFileSync(process.env.PATCH_LOG, JSON.stringify(args)); else if (args.some(arg => arg.includes('/git/ref/'))) process.stdout.write(JSON.stringify({object:{type:'commit',sha:process.env.TAG_SHA}})); else process.stdout.write(require('node:child_process').execFileSync('jq', ['-cr', args[args.indexOf('--jq') + 1]], {input:JSON.stringify([JSON.parse(fs.readFileSync(process.env.RELEASE_API))]),encoding:'utf8'}));\n`, { mode: 0o755 });
+  for (const folder of ["draft", "workflow"]) writeFileSync(join(root, folder, "package.zip"), bytes);
+  const env = { ...process.env, PATH: `${join(root, "bin")}${delimiter}${process.env.PATH}`, SOURCE_REPO: "owner/repo", SOURCE_SHA: sha, RELEASE_API: api, PATCH_LOG: join(root, "patch.json"), TAG_SHA: sha, RELEASE_NIGHTLY: "true" };
+  const run = (mode, extra = {}) => spawnSync(process.execPath, [resolve("scripts/release/release-state.mjs"), mode, tag, join(root, "draft"), join(root, "workflow")], { cwd: root, env: { ...env, ...extra }, encoding: "utf8" });
+  assert.notEqual(run("record", { RELEASE_NIGHTLY: "false" }).status, 0);
+  assert.equal(run("record").status, 0);
+  assert.notEqual(run("publish", { TAG_SHA: "b".repeat(40) }).status, 0);
+  writeFileSync(api, JSON.stringify({ ...current, target_commitish: "b".repeat(40) }));
+  assert.notEqual(run("publish").status, 0);
+  writeFileSync(api, JSON.stringify({ ...current, prerelease: false }));
+  assert.notEqual(run("publish").status, 0);
+  assert.equal(existsSync(env.PATCH_LOG), false);
+  writeFileSync(api, JSON.stringify(current));
+  const result = run("publish");
+  assert.equal(result.status, 0, result.stderr);
+  const args = JSON.parse(readFileSync(env.PATCH_LOG, "utf8"));
+  for (const value of ["draft=false", "prerelease=true", "make_latest=false"]) assert.ok(args.includes(value));
+  writeFileSync(api, JSON.stringify({ ...current, draft: false }));
+  assert.notEqual(run("guard").status, 0, "published Nightly identities cannot be overwritten on rerun");
 });

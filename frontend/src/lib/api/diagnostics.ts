@@ -5,6 +5,7 @@ import type {
   EnvInfo,
   PresenceMap,
   UpdateCheck,
+  UpdateChannel,
   DownloadedUpdate,
   DownloadProgress,
 } from "../types";
@@ -33,15 +34,18 @@ export const obs = {
 };
 
 export const updates = {
-  check: () => invoke<UpdateCheck>("check_for_update"),
+  check: (updateChannel: UpdateChannel = "stable") =>
+    invoke<UpdateCheck>("check_for_update", { updateChannel }),
   download: (
     version: string,
     onProgress: (progress: DownloadProgress) => void,
+    updateChannel: UpdateChannel = "stable",
   ) => {
     const channel = new Channel<DownloadProgress>();
     channel.onmessage = onProgress;
     return invoke<DownloadedUpdate>("download_update", {
       version,
+      updateChannel,
       onProgress: channel,
     });
   },

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "draft": true,
+  "force-tag-creation": true,
+  "include-component-in-tag": false,
+  "include-v-in-tag": true,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
+  "pull-request-footer": "Generated release proposal. Follow docs/updates.md: synchronize checked version projections, run required CI and review this PR before merge. Merging prepares a signed, verified DRAFT; Stable publication remains an explicit operation. A maintainer may need to approve bot PR workflows; if required checks are absent, close/reopen this PR as a maintainer to trigger them.",
+  "packages": {
+    ".": {
+      "release-type": "node",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        }
+      ]
+    }
+  }
+}
