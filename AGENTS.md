@@ -136,7 +136,8 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   public empty release, mutable published tag or gate bypass. Nightly publication requires trusted
   `main` and a target above the latest Stable. Future changes must extend the existing version
   owner, its tests, standards/CI enforcement and capability contracts together; the owning guide
-  documents permissions, bot-PR checks, dispatch and recovery requirements.
+  documents permissions, bot-PR checks, dispatch and recovery requirements. The fixed release-history
+  migration floor is historical provenance; never advance it during ordinary version bumps.
 
 - Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with
   `specifications/git_standards.md`. Squash WIP; link issues.

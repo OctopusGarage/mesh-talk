@@ -165,6 +165,18 @@ uses the trusted main-branch version owner to synchronize the validated same-rep
 PR. It never executes code from the bot's proposed branch. Release tracking records the last
 released version; it is not another authority for the current development target.
 
+The fixed release-history migration floor handles the existing `v0.4.3` publication. Its
+published source commit (`9b9f91b`) has exactly the same Git tree as the corresponding
+`main` squash commit (`335a001`), but the tag's commit is not an ancestor of `main`.
+Without a reachable boundary, release-please would count already released historical
+commits again. The top-level `last-release-sha` therefore pins that equivalent main commit
+as a history floor. Before proposing releases, maintenance verifies the immutable legacy
+tag's exact source, tree equivalence and the floor's ancestry on main; a mismatch fails
+closed. Later reachable release commits stop the scan before this floor automatically.
+This is historical provenance, not a current version field: never advance it during
+ordinary version preparation, retag `v0.4.3`, or omit its acceptance checks. Changes require
+a reviewed history migration and regressions for both initial and subsequent releases.
+
 The maintained release PR collects Conventional Commits and proposes a version and changelog.
 Release-please owns the generated root `CHANGELOG.md`; review it in release PRs. Its history
 records released changes and does not define the current product target. The release-publication
