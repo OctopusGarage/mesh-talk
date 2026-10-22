@@ -235,6 +235,8 @@ pub struct MessageStatus {
     id: String,
     status: mesh_talk_core::node::DeliveryStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
+    observation: Option<mesh_talk_core::node::DeliveryObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     file_progress: Option<OutgoingFileStatus>,
 }
 
@@ -270,11 +272,12 @@ pub async fn owner_delivery_statuses(
         .with_runtime(|runtime| {
             Ok(runtime
                 .handle()
-                .account_delivery_statuses(&account, &ids)
+                .account_delivery_observations(&account, &ids)
                 .into_iter()
-                .map(|(id, status)| MessageStatus {
+                .map(|(id, status, observation)| MessageStatus {
                     id: hex::encode(id.as_bytes()),
                     status,
+                    observation,
                     file_progress: runtime.handle().outgoing_file_progress(id).map(|progress| {
                         OutgoingFileStatus {
                             done: progress.done,
@@ -791,6 +794,19 @@ mod tests {
                 .iter()
                 .all(|item| item["status"] == "awaiting")
         );
+        // This fixture owns a live runtime. Local scheduling can run before
+        // this snapshot even though the remote recipient cannot issue a receipt.
+        for item in statuses.as_array().unwrap() {
+            assert!(ids.contains(&item["id"]));
+            if let Some(observation) = item.get("observation") {
+                assert_eq!(observation.as_object().unwrap().len(), 2);
+                assert!(matches!(
+                    observation["kind"].as_str(),
+                    Some("attempting" | "retry_scheduled")
+                ));
+                assert!(observation["age_ms"].as_u64().is_some());
+            }
+        }
         let file_status = statuses
             .as_array()
             .unwrap()
@@ -2130,5 +2146,29 @@ mod tests {
         tauri::async_runtime::block_on(async {
             node.0.lock().await.take().unwrap().stop().await;
         });
+    }
+    #[test]
+    fn delivery_observation_is_optional_and_additive() {
+        let base = super::MessageStatus {
+            id: "message".into(),
+            status: mesh_talk_core::node::DeliveryStatus::Awaiting,
+            observation: None,
+            file_progress: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&base).unwrap(),
+            serde_json::json!({"id":"message", "status":"awaiting"})
+        );
+        let observed = super::MessageStatus {
+            observation: Some(mesh_talk_core::node::DeliveryObservation {
+                kind: mesh_talk_core::node::DeliveryObservationKind::RetryScheduled,
+                age_ms: 42,
+            }),
+            ..base
+        };
+        assert_eq!(
+            serde_json::to_value(&observed).unwrap(),
+            serde_json::json!({"id":"message", "status":"awaiting", "observation":{"kind":"retry_scheduled", "age_ms":42}})
+        );
     }
 }

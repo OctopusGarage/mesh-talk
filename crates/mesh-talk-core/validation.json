@@ -345,6 +345,10 @@
         "summary": "Retry immutable delivery work across routed latency with bounded independent control lanes and cancellation-owned tasks.",
         "invariants": [
           {
+            "name": "Bounded runtime observations describe only exact recipient attempts; stale or missing details never change durable delivery confirmation",
+            "reference": "docs/network-design-reference.md#runtime-delivery-observations"
+          },
+          {
             "name": "Slow destinations cannot monopolize receipt or file scheduling",
             "reference": "docs/ARCHITECTURE.md"
           },
@@ -392,7 +396,8 @@
         "guide": "docs/ARCHITECTURE.md"
       },
       "escalation": [
-        "Node wiring has broad shared state and dynamic consumers: retain conservative Node library coverage; crypto/wire/storage changes need loopback, restart and protocol integration evidence. Runtime/discovery lifecycle changes require focused native acceptance."
+        "Node wiring has broad shared state and dynamic consumers: retain conservative Node library coverage; crypto/wire/storage changes need loopback, restart and protocol integration evidence. Runtime/discovery lifecycle changes require focused native acceptance.",
+        "Delivery observation changes require focused observation-owner and actual worker tests, exact-account/owner isolation, stale completion and recipient confirmation precedence. Host projection also requires typed frontend consumer checks; native acceptance must exercise participant retirement and the registered IPC response."
       ],
       "consumers": [
         "desktop-session",
@@ -550,6 +555,7 @@
         "crates/mesh-talk-core/src/node/session.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-core/src/node/delivery_observation.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime.rs",
         "crates/mesh-talk-core/src/node/session_pool.rs",
         "crates/mesh-talk-core/src/node/route_timing.rs",

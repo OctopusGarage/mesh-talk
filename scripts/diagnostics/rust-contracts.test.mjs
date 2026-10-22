@@ -140,6 +140,21 @@ test("CLI profile ownership changes select explicit binary and restart evidence"
     "specifications/deployment_guide.md#data-directory-ownership");
 });
 
+test("delivery observations retain Node consumers, evidence rules and native acceptance", () => {
+  const selected = plan("crates/mesh-talk-core/src/node/delivery_observation.rs");
+  assert.deepEqual(selected.blockers, []);
+  for (const expected of ["core-node", "desktop-session", "integration-service"]) {
+    assert.ok(selected.owners.some(({ id }) => id === expected), expected);
+  }
+  const owner = selected.owners.find(({ id }) => id === "core-node");
+  assert.ok(owner.capability.invariants.some(({ reference }) =>
+    reference === "docs/network-design-reference.md#runtime-delivery-observations"));
+  assert.match(selected.escalation.join(" "), /observation.*recipient.*confirmation/iu);
+  const scenarios = JSON.parse(read("crates/mesh-talk-core/validation.json")).prScenarios;
+  assert.ok(scenarios.some(({ paths, native }) => native?.includes("host") &&
+    paths.includes("crates/mesh-talk-core/src/node/delivery_observation.rs")));
+});
+
 // Source evidence catches accidental empty/fabricated filters without compiling
 // four crates. Cargo's actual per-platform --list inventory remains authoritative.
 test("every Rust selector has nonignored library test evidence in its owning module", () => {
