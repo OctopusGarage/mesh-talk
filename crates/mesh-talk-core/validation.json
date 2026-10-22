@@ -365,7 +365,7 @@
             "node::node::tests::signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp",
             "node::node::tests::signed_avatar_retries_after_relay_publication_is_reenabled",
             "node::runtime::tests::profile_republish_targets_fires_on_first_sight_and_on_reconnect",
-            "node::opaque_relay::permission_tests::",
+            "node::opaque_relay::",
             "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
             "node::trust_card::tests::",
             "node::node::tests::trust_card_propagates_signed_claims_over_loopback",
