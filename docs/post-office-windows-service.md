@@ -89,33 +89,37 @@ proxy. It preserves the data directory and identity. `-Bridge` alone enables a
 local directory; `-BridgePeer` plus `-BridgePeerId` authenticate a signed remote relay
 and enable the gateway. The manifest names mutually trusted equals. Participating clients enable bridge
 discovery and choose an eligible directly reachable preferred post office in Settings. If it is offline, another
-verified local post office can accept messages. The CLI reclaims a `node.lock` from a
-terminated process on Windows; it refuses a lock held by a live process.
+verified local post office can accept messages. The CLI holds an exclusive OS lock for the data directory and refuses another
+cooperating updated CLI owner. The `node.lock` file remains after exit; its PID
+is diagnostic information, not the lock itself. See
+[data directory ownership](../specifications/deployment_guide.md#data-directory-ownership)
+for the required quiescent upgrade and mixed-version limits.
 
 ## Check and operate
 
 ```bash
 ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).State; (Get-ScheduledTaskInfo -TaskName MeshTalk-PostOffice).LastTaskResult; Get-NetTCPConnection -State Listen -LocalPort 47479,47476 | Select-Object LocalAddress,LocalPort,OwningProcess"'
 ssh windows10 'powershell -NoProfile -Command "(Get-ScheduledTask -TaskName MeshTalk-PostOffice).Principal.UserId; icacls D:\ProgramData\MeshTalk\PostOffice\data\password; icacls D:\ProgramData\MeshTalk\PostOffice\data\identity.keystore"'
-ssh windows10 'powershell -NoProfile -Command "Get-Content D:\ProgramData\MeshTalk\PostOffice\data\node.lock"'
 ssh windows10 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName MeshTalk-PostOffice; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName MeshTalk-PostOffice"'
 ```
 
 The task state should be `Running`, and TCP 47479 should have a listener.
 The task principal must be `SYSTEM`; the password and keystore ACLs must grant
-only `SYSTEM` and `Administrators`. The listener's owning PID should match the
-PID in `node.lock`.
+only `SYSTEM` and `Administrators`. Check the listener's owning PID and executable path with
+`Get-Process -Id <PID> | Select-Object Id,Path`. Windows can prevent reading
+`node.lock` through another handle while the exclusive lock is held; use the
+listener and process inventory to identify the live owner.
 `267009` (`0x41301`) is Task Scheduler's running result. The startup output
 reports the relay device ID; signed discovery can also verify that ID from a
 different LAN node. If a task fails, inspect Task Scheduler history and the
 data directory's access permissions before changing the keystore or password.
 
-After an abrupt task stop, a remaining `node.lock` can be stale. Read its PID
-using the command above, then check `Get-Process -Id <PID>` on Windows. If that
-process is gone, start the task again; the CLI reclaims the stale lock itself.
-If the process is still running, do not remove the lock or start a second node
-against the same data directory. This recovery keeps queued events and the
-relay identity intact.
+After an abrupt task stop, the OS releases the terminated process's lock while
+`node.lock` remains. Check Task Scheduler and the listener/process inventory
+to confirm the owner has actually exited, then start the task again without
+removing the file. If it is still running, stop it before restarting; do not
+remove the lock or start a second node against the same data directory.
+Restarting with the existing data preserves queued events and the relay identity.
 
 ## Cross-machine tests
 

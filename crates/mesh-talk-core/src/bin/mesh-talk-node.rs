@@ -210,59 +210,92 @@ fn emit(line: &str) {
     let _ = out.flush();
 }
 
-/// An advisory lock on a node's data directory: an `O_EXCL` lockfile created on startup
-/// and removed on exit. The GUI is protected from two instances by single_instance; the
-/// CLI is not, so two nodes sharing one keystore dir would both append to one
-/// messages.log/sent.log and clobber records. This makes a second node sharing the dir
-/// fail fast with a clear message instead of silently corrupting the logs.
+/// Exclusive CLI ownership of a node's data directory. The open file retains
+/// the OS lock for the guard's lifetime; its stable path must never be unlinked
+/// on release, since another process may already have that same file open.
 struct DataDirLock {
-    path: std::path::PathBuf,
+    file: std::fs::File,
 }
 
 impl DataDirLock {
-    /// Acquire the lock for `data_dir`, failing if another LIVE node already holds it.
-    /// The lockfile records the holder's PID; a lock left by a crashed/killed process
-    /// (whose Drop never ran) is detected as stale and reclaimed, so a restart of the
-    /// same node isn't blocked by its own previous instance.
     fn acquire(data_dir: &std::path::Path) -> std::io::Result<DataDirLock> {
-        use std::io::Write;
+        use std::io::{Read, Seek, Write};
         std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join("node.lock");
-        loop {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut f) => {
-                    let _ = write!(f, "{}", std::process::id());
-                    return Ok(DataDirLock { path });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // Someone holds (or held) the lock. If the recorded PID is no longer
-                    // alive, the holder crashed/was killed before cleaning up — reclaim
-                    // the stale lock and retry. Otherwise a live node owns it: fail fast.
-                    let holder = std::fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|s| s.trim().parse::<u32>().ok());
-                    if holder.is_none_or(|pid| !pid_is_alive(pid)) {
-                        let _ = std::fs::remove_file(&path);
-                        continue;
-                    }
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        format!(
-                            "data dir {} is locked by another mesh-talk-node (pid {}); \
-                             remove {} if no node is running",
-                            data_dir.display(),
-                            holder.expect("checked Some above"),
-                            path.display()
-                        ),
-                    ));
-                }
-                Err(e) => return Err(e),
+        let busy = || {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "data dir {} is locked by another mesh-talk-node; stop the owning node before retrying",
+                    data_dir.display()
+                ),
+            )
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Nonblocking open also prevents a substituted FIFO from hanging startup.
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_FLAG_OPEN_REPARSE_POINT: inspect the entry itself, not its target.
+            options.custom_flags(0x0020_0000);
+        }
+        let mut file = options.open(&path)?;
+        let metadata = file.metadata()?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            // FILE_ATTRIBUTE_REPARSE_POINT includes symlinks and other redirections.
+            if metadata.file_attributes() & 0x400 != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "node.lock must not be a reparse point",
+                ));
             }
         }
+        if !metadata.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "node.lock must be a regular file",
+            ));
+        }
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Err(busy()),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+        // Old binaries use a bare PID without an OS lock. Retain a live legacy
+        // holder conservatively; this cannot make mixed-version startup race-free.
+        // Limit the diagnostic read even if an unrelated large file is present.
+        let mut diagnostic = Vec::new();
+        Read::by_ref(&mut file)
+            .take(32)
+            .read_to_end(&mut diagnostic)?;
+        let holder = (metadata.len() <= 32)
+            .then(|| {
+                std::str::from_utf8(&diagnostic)
+                    .ok()?
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+            })
+            .flatten();
+        if holder.is_some_and(pid_is_alive) {
+            return Err(busy());
+        }
+        #[cfg(test)]
+        tests::profile_lock_before_publish();
+        file.set_len(0)?;
+        file.rewind()?;
+        write!(file, "{}", std::process::id())?;
+        Ok(DataDirLock { file })
     }
 }
 
@@ -271,6 +304,9 @@ impl DataDirLock {
 /// "alive" and refuse the lock — a safe (conservative) failure, never silent corruption.
 #[cfg(unix)]
 fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 || pid > libc::pid_t::MAX as u32 {
+        return false;
+    }
     // SAFETY: `kill` with signal 0 performs no signal delivery — it only checks whether the
     // process exists / is permitted to be signalled. No memory is touched.
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
@@ -313,7 +349,9 @@ fn pid_is_alive(_pid: u32) -> bool {
 
 impl Drop for DataDirLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // Clear the live PID before releasing ownership, permitting this process
+        // to acquire again. A failed clear leaves conservative legacy detection.
+        let _ = self.file.set_len(0);
     }
 }
 
@@ -1197,25 +1235,173 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Instant;
 
-    #[cfg(windows)]
+    // Only the subprocess helper sets these variables; ordinary test threads do
+    // not mutate the environment or pause acquisitions.
+    pub(super) fn profile_lock_before_publish() {
+        if let Some(ready) = std::env::var_os("MESH_TEST_LOCK_READY") {
+            std::fs::write(ready, b"ready").unwrap();
+            let mut line = String::new();
+            assert!(std::io::stdin().read_line(&mut line).unwrap() > 0);
+        }
+    }
+
+    struct ProfileLockChild(std::process::Child);
+
+    impl ProfileLockChild {
+        fn spawn(root: &std::path::Path) -> Self {
+            Self(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "tests::profile_lock_child", "--nocapture"])
+                    .env("MESH_TEST_LOCK_DIR", root)
+                    .env("MESH_TEST_LOCK_READY", root.join("ready"))
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            )
+        }
+
+        fn wait_for(&mut self, path: &std::path::Path) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !path.exists() {
+                assert!(self.0.try_wait().unwrap().is_none(), "lock child exited");
+                assert!(Instant::now() < deadline, "lock child timed out");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn publish(&mut self) {
+            use std::io::Write;
+            self.0
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"publish\n")
+                .unwrap();
+        }
+    }
+
+    impl Drop for ProfileLockChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     #[test]
-    fn windows_lock_reclaims_dead_pid_but_rejects_live_holder() {
+    fn profile_lock_child() {
+        let Some(root) = std::env::var_os("MESH_TEST_LOCK_DIR") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let _lock = DataDirLock::acquire(&root).unwrap();
+        std::fs::write(root.join("owned"), b"owned").unwrap();
+        let mut line = String::new();
+        assert!(std::io::stdin().read_line(&mut line).unwrap() > 0);
+    }
+
+    #[test]
+    fn profile_lock_excludes_contender_before_pid_publication() {
         let root = tempfile::tempdir().unwrap();
-        let lock_path = root.path().join("node.lock");
-        assert!(pid_is_alive(std::process::id()));
-        assert!(!pid_is_alive(0));
-        std::fs::write(&lock_path, "0").unwrap();
-        let lock = DataDirLock::acquire(root.path()).unwrap();
+        let mut child = ProfileLockChild::spawn(root.path());
+        child.wait_for(&root.path().join("ready"));
         assert_eq!(
-            std::fs::read_to_string(&lock_path).unwrap(),
-            std::process::id().to_string()
+            std::fs::metadata(root.path().join("node.lock"))
+                .unwrap()
+                .len(),
+            0
         );
+        let contender = DataDirLock::acquire(root.path());
+        assert_eq!(
+            contender
+                .err()
+                .expect("second process acquired the same profile")
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        child.publish();
+        child.wait_for(&root.path().join("owned"));
+        assert!(DataDirLock::acquire(root.path()).is_err());
+    }
+
+    #[test]
+    fn profile_lock_releases_after_process_kill() {
+        let root = tempfile::tempdir().unwrap();
+        let mut child = ProfileLockChild::spawn(root.path());
+        child.wait_for(&root.path().join("ready"));
+        child.publish();
+        child.wait_for(&root.path().join("owned"));
+        assert!(DataDirLock::acquire(root.path()).is_err());
+        drop(child);
+        let _lock = DataDirLock::acquire(root.path()).unwrap();
+    }
+
+    #[test]
+    fn profile_lock_reuses_persistent_file_and_releases_on_drop() {
+        for content in ["", "malformed", "4294967295"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("node.lock");
+            std::fs::write(&path, content).unwrap();
+            let original = std::fs::File::open(&path).unwrap();
+            let lock = DataDirLock::acquire(root.path()).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(
+                    original.metadata().unwrap().ino(),
+                    std::fs::metadata(&path).unwrap().ino()
+                );
+            }
+            drop(original);
+            assert!(DataDirLock::acquire(root.path()).is_err());
+            drop(lock);
+            assert!(path.exists());
+            let _next = DataDirLock::acquire(root.path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_lock_rejects_live_legacy_pid() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("node.lock"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
         assert_eq!(
             DataDirLock::acquire(root.path()).err().unwrap().kind(),
             std::io::ErrorKind::AlreadyExists
         );
+    }
+
+    #[test]
+    fn profile_lock_allows_different_directories() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let _first = DataDirLock::acquire(first.path()).unwrap();
+        let _second = DataDirLock::acquire(second.path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_lock_rejects_aliases_and_unsafe_lock_paths() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let alias = root.path().join("alias");
+        symlink(&data, &alias).unwrap();
+        let lock = DataDirLock::acquire(&data).unwrap();
+        assert!(DataDirLock::acquire(&alias).is_err());
         drop(lock);
-        assert!(!lock_path.exists());
+        std::fs::remove_file(data.join("node.lock")).unwrap();
+        let target = root.path().join("target");
+        std::fs::write(&target, b"untouched").unwrap();
+        symlink(&target, data.join("node.lock")).unwrap();
+        assert!(DataDirLock::acquire(&data).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+        std::fs::remove_file(data.join("node.lock")).unwrap();
+        std::fs::create_dir(data.join("node.lock")).unwrap();
+        assert!(DataDirLock::acquire(&data).is_err());
     }
 
     #[test]

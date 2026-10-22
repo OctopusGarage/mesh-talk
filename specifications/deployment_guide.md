@@ -123,6 +123,34 @@ Discovery uses signed UDP **multicast** (group `224.0.0.167`, port 47474 by defa
 peer connections are Noise-encrypted TCP on an OS-assigned (or `--port`) port. The host
 firewall must permit UDP 47474 (multicast 224.0.0.167) and the chosen TCP port.
 
+### Data directory ownership
+
+The headless participant and post office acquire an exclusive OS lock on
+`node.lock` in the keystore's parent directory before opening their identity or
+message stores. Keep each independent node in its own data directory. Cooperating
+updated CLI processes refuse a second owner, including while the first process
+is still starting. The PID written to `node.lock` is diagnostic information;
+file contents alone do not establish ownership.
+
+The file remains after a normal stop or crash. The OS releases ownership when
+the process's lock handle closes, including on termination. Restart the node
+using its existing data directory to preserve its identity and queued events.
+Do not delete or replace `node.lock` to bypass a busy-directory error: another
+process may still hold its original file open. Use the service manager or OS
+process inventory to locate and stop the actual owner first. Windows can block
+reading PID diagnostics through another handle while the lock is held.
+Permission or unsupported-locking errors need their own
+resolution; they are not evidence that the directory is unused.
+
+Stop all older writers before upgrading or downgrading a data directory. An
+updated CLI conservatively refuses a recorded live legacy owner, but older
+PID-file locking does not cooperate fully with OS locking; concurrent mixed
+versions are unsupported. This protection covers updated CLI processes using
+local filesystems. It does not establish cross-process exclusion for desktop,
+bot or arbitrary SDK/store writers, or support for network filesystems. Keep
+those writers on separate profiles until their own shared ownership contract
+is implemented and validated.
+
 ### Installing the node system-wide
 
 #### macOS/Linux

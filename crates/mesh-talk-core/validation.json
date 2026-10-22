@@ -494,7 +494,8 @@
       "paths": [
         "crates/mesh-talk-core/src/bin/",
         "crates/mesh-talk-core/tests/",
-        "crates/mesh-talk-core/examples/"
+        "crates/mesh-talk-core/examples/",
+        "specifications/deployment_guide.md"
       ],
       "rust": [
         {
@@ -505,8 +506,23 @@
         }
       ],
       "escalation": [
-        "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets."
-      ]
+        "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets.",
+        "CLI data-directory ownership changes additionally require cargo test -p mesh-talk-core --features fast-test-kdf --bin mesh-talk-node tests::profile_lock and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart."
+      ],
+      "capability": {
+        "summary": "Exclude cooperating CLI writers before opening participant or post-office stores, retaining the OS lock through the process lifetime.",
+        "guide": "specifications/deployment_guide.md#data-directory-ownership",
+        "invariants": [
+          {
+            "name": "Only one cooperating updated CLI process owns a data directory, including before PID publication",
+            "reference": "specifications/deployment_guide.md#data-directory-ownership"
+          },
+          {
+            "name": "Releasing ownership preserves the lock file and actual process termination permits restart",
+            "reference": "specifications/deployment_guide.md#data-directory-ownership"
+          }
+        ]
+      }
     },
     {
       "id": "core-file-consent-tests",

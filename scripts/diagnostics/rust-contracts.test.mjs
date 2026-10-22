@@ -128,6 +128,18 @@ test("binary, integration harness and native build inputs retain explicit accept
   }
 });
 
+test("CLI profile ownership changes select explicit binary and restart evidence", () => {
+  const selected = plan("crates/mesh-talk-core/src/bin/mesh-talk-node.rs");
+  assert.deepEqual(selected.blockers, []);
+  assert.ok(owners("specifications/deployment_guide.md").includes("core-cli-harness"));
+  const escalation = selected.escalation.join(" ");
+  assert.match(escalation, /--bin mesh-talk-node tests::profile_lock/u);
+  assert.match(escalation, /participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error/u);
+  const owner = selected.owners.find(({ id }) => id === "core-cli-harness");
+  assert.equal(owner?.capability?.guide,
+    "specifications/deployment_guide.md#data-directory-ownership");
+});
+
 // Source evidence catches accidental empty/fabricated filters without compiling
 // four crates. Cargo's actual per-platform --list inventory remains authoritative.
 test("every Rust selector has nonignored library test evidence in its owning module", () => {

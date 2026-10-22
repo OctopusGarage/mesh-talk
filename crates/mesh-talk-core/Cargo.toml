@@ -54,9 +54,8 @@ log = { workspace = true }
 tempfile = { workspace = true }
 tar = "0.4.46"
 
-# Unix-only: a `kill(pid, 0)` liveness probe so the CLI's data-dir lockfile can detect a
-# lock left by a crashed/killed node and reclaim it. Already in the build graph transitively
-# (via socket2/snow), so this adds no new compilation.
+# Unix-only: safe lockfile open flags and a `kill(pid, 0)` probe for conservative
+# legacy CLI lock detection. Already in the build graph via socket2/snow.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
