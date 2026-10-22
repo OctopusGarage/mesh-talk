@@ -31,6 +31,42 @@ describe("settings translations", () => {
         expect(i18n.t(`settings.categories.${key}`).trim()).not.toBe("");
       }
     });
+    it(`provides every notification recovery state in ${path}`, async () => {
+      const i18n = createInstance();
+      await i18n.init({
+        lng: "test",
+        fallbackLng: false,
+        resources: { test: { translation: locale } },
+      });
+      for (const key of [
+        "denied",
+        "granted",
+        "prompt",
+        "limited",
+        "unknown",
+        "checking",
+        "settingsHint",
+        "messageHint",
+        "allowedHint",
+        "openSettings",
+        "checkAgain",
+        "allow",
+        "requesting",
+        "returnHint",
+        "openFailed",
+        "reminder",
+        "dismiss",
+        "instructions.macos",
+        "instructions.windows",
+        "instructions.linux",
+        "instructions.other",
+      ]) {
+        expect(i18n.exists(`notificationPermission.${key}`), key).toBe(true);
+        expect(i18n.t(`notificationPermission.${key}`).trim(), key).not.toBe(
+          "",
+        );
+      }
+    });
     it(`renders saved relay details and local history consequences in ${path}`, async () => {
       const i18n = createInstance();
       await i18n.init({

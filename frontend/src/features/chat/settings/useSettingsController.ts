@@ -64,6 +64,7 @@ export function useSettingsController(open: boolean) {
     const store = useSettings.getState();
     store.setPrivacy(privacyFromSettings(next));
     store.setCallsEnabled(next.calls_enabled);
+    store.setNotificationsEnabled(next.notifications);
     store.setRingtone(asRingtoneId(next.ringtone));
   }, []);
 

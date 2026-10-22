@@ -30,6 +30,7 @@ pub mod favorites;
 mod integrations;
 mod linked_account;
 pub mod logger;
+mod notifications;
 pub mod owner_commands;
 pub mod perf;
 pub mod privacy_commands;
@@ -426,6 +427,9 @@ pub fn run_tauri_configured(
                 crate::chat_commands::set_badge,
                 crate::chat_commands::network_name,
                 crate::events::set_notification_context,
+                crate::notifications::notification_permission,
+                crate::notifications::request_notification_permission,
+                crate::notifications::open_notification_settings,
                 crate::logger::get_logs_dir,
                 crate::logger::get_log_file,
                 crate::logger::read_log_tail,

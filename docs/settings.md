@@ -29,6 +29,50 @@ Before issuing a pairing code, only explicitly saved local appearance choices
 seed missing account preferences. Fresh-device defaults remain local, and
 existing account values are preserved.
 
+## System notification permission
+
+The notification switch saves the signed-in account's preference on this device;
+it does not override operating-system authorization. While enabled, its row shows
+current system permission separately. Turning the switch on checks permission and
+requests access only when the OS has not recorded a decision. Existing denials
+show **Open system settings**, manual instructions and **Check again**. Opening
+settings always requires a click; failures retain the manual recovery path.
+
+Permission is observed when notifications are enabled, when opening their settings
+page, on window focus/visibility restoration, and after submitting an outgoing
+message. Concurrent observations share pending work but settled results are never
+used as permanent authorization. Startup and passive observations do not prompt.
+Closing the originating view or replacing its account invalidates a request that
+has not yet reached native prompting; a system dialog already started cannot be
+recalled by closing the view.
+
+After submitting text, a sticker or a file to another person or group, blocked,
+undecided or limited permission produces a dismissible notice below the
+conversation header. Message admission and delivery never await permission. A
+stalled permission check cannot hold the composer; incoming history and updates
+to an existing outgoing intent do not trigger the reminder. Dismissal lasts for
+the login generation, including conversation changes. Disabling notifications
+hides guidance without changing the saved preview preference. Saved Messages do
+not trigger a reply-notification reminder.
+
+macOS checks the installed application's UserNotifications authorization and alert
+settings; quiet/provisional access is shown as limited. Windows checks the
+installed application's ToastNotifier setting using the same app identifier as
+notification delivery. Native failures, uninstalled development binaries and
+unsupported desktop queries report **couldn't be verified**, never an assumed
+grant or denial. Linux has no portable per-application permission query or
+notification-settings URI, so the row provides manual desktop instructions.
+OS authorization does not prove an alert appeared: Focus, Do Not Disturb, sound,
+badge and presentation choices may independently suppress it.
+
+The native module `src-tauri/src/notifications.rs` owns OS checks, explicit
+permission requests and fixed settings destinations. The typed notification IPC
+adapter and `frontend/src/lib/notify.ts` share observations; the settings controller
+remains the owner of saved preferences. Focused unit and browser tests cover
+state transitions and recovery. Real packaged-app permission dialogs, settings
+navigation and notification presentation still require native platform evidence;
+browser mocks do not certify those boundaries.
+
 ## Saved Messages and linked devices
 
 **Saved Messages** is always available after the account is ready, including when
