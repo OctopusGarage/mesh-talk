@@ -5,6 +5,7 @@ import type {
   DownloadedUpdate,
   DownloadProgress,
   UpdateCheck,
+  UpdateChannel,
 } from "@/lib/types";
 
 export type UpdatePhase =
@@ -12,6 +13,9 @@ export type UpdatePhase =
 
 interface UpdateState {
   phase: UpdatePhase;
+  channel: UpdateChannel;
+  currentVersion: string | null;
+  setChannel: (channel: UpdateChannel) => void;
   release: UpdateCheck | null;
   download: DownloadedUpdate | null;
   progress: DownloadProgress | null;
@@ -23,10 +27,45 @@ interface UpdateState {
   setError: (error: string) => void;
 }
 
+const channelStorageKey = "mesh-talk-update-channel";
+function storedChannel(): UpdateChannel {
+  try {
+    return localStorage.getItem(channelStorageKey) === "nightly"
+      ? "nightly"
+      : "stable";
+  } catch {
+    return "stable";
+  }
+}
+
 let cancelRequested = false;
 
 /** Keep a running download observable when About is closed and reopened. */
 export const useUpdates = create<UpdateState>((set, get) => ({
+  channel: storedChannel(),
+  currentVersion: null,
+  setChannel: (channel) => {
+    if (
+      get().channel === channel ||
+      get().phase === "checking" ||
+      get().phase === "downloading"
+    )
+      return;
+    try {
+      localStorage.setItem(channelStorageKey, channel);
+    } catch {
+      // Storage can be disabled; keep this session's explicit choice usable.
+    }
+    set({
+      channel,
+      phase: "idle",
+      release: null,
+      download: null,
+      progress: null,
+      error: null,
+      canceling: false,
+    });
+  },
   phase: "idle",
   release: null,
   download: null,
@@ -37,15 +76,16 @@ export const useUpdates = create<UpdateState>((set, get) => ({
     if (get().phase === "checking" || get().phase === "downloading") return;
     set({ phase: "checking", error: null, release: null, download: null });
     try {
-      const release = await updates.check();
-      set({ release, phase: "ready" });
+      const release = await updates.check(get().channel);
+      set({ release, currentVersion: release.current_version, phase: "ready" });
     } catch (cause) {
       set({ error: errorMessage(cause), phase: "idle" });
     }
   },
   startDownload: async () => {
     const release = get().release;
-    if (!release?.package_name || get().phase === "downloading") return;
+    if (!release?.is_newer || !release.package_name || get().phase !== "ready")
+      return;
     cancelRequested = false;
     set({
       phase: "downloading",
@@ -57,6 +97,7 @@ export const useUpdates = create<UpdateState>((set, get) => ({
       const download = await updates.download(
         release.latest_version,
         (progress) => set({ progress }),
+        get().channel,
       );
       set({ download, phase: "downloaded", canceling: false });
     } catch (cause) {

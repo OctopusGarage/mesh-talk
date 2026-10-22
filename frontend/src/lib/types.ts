@@ -261,7 +261,10 @@ export interface EnvInfo {
   build_profile: string;
 }
 
+export type UpdateChannel = "stable" | "nightly";
+
 export interface UpdateCheck {
+  channel: UpdateChannel;
   current_version: string;
   latest_version: string;
   is_newer: boolean;

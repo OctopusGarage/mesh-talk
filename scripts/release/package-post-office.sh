@@ -4,7 +4,7 @@ set -euo pipefail
 
 target="${1:?Rust target required}"
 tag="${2:?release tag required}"
-[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-ci\.[0-9]+)?$ ]]
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-ci\.[0-9]+|-nightly\.[1-9][0-9]*\.[1-9][0-9]*)?$ ]]
 
 case "$target" in
   x86_64-apple-darwin) platform=macos_x86_64 ;;

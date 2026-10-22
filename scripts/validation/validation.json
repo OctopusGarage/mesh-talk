@@ -15,7 +15,9 @@
         "scripts/e2e-network-handoff.py",
         "scripts/README.md"
       ],
-      "node": ["scripts/diagnostics/post-office-installer.test.mjs"],
+      "node": [
+        "scripts/diagnostics/post-office-installer.test.mjs"
+      ],
       "escalation": [
         "Network membership mode validates public policy/certificate before installation mutation and persists public files without authority private keys. Policy changes/renewal require restart; startup must bind the certificate to the existing device identity. Windows installer changes require native PowerShell execution in addition to macOS fixtures. Managed services must use main TCP 47479. Managed service discovery must use dedicated UDP 47478 and shared LAN UDP 47474 on all hosts; reject other installer values before mutation. Preserve mesh identity, credentials, custody data and service configuration during updates. macOS local-build updates must retain the installed code-signing identifier and verify the staged signature before replacement; publisher-issued signatures remain intact. See docs/post-office-macos-service.md. Validate real service restart, LAN multicast and routed discovery on the affected host; fixture tests and listener checks do not establish local-network access. Interface handoff changes require the opt-in Docker network-namespace harness: queued and new messages must converge with authenticated receipts without process restart or manual rescan; namespace evidence is separate from physical Wi-Fi hardware."
       ]
@@ -24,27 +26,44 @@
       "id": "release-publication",
       "paths": [
         ".github/workflows/release.yml",
+        ".github/release-notes.md",
         "scripts/release/",
         "scripts/diagnostics/release-assets.test.mjs",
+        "scripts/diagnostics/release-api.test.mjs",
         "scripts/diagnostics/release-gates.test.mjs",
         "scripts/diagnostics/release-preflight.test.mjs",
+        "scripts/diagnostics/release-notes.test.mjs",
         "scripts/diagnostics/release-reuse.test.mjs",
         "scripts/diagnostics/release-state.test.mjs",
         "scripts/diagnostics/release-verifier.test.mjs",
-        "scripts/diagnostics/release-workflow.test.mjs"
+        "scripts/diagnostics/release-workflow.test.mjs",
+        "site/index.html",
+        "docs/updates.md"
       ],
       "node": [
         "scripts/diagnostics/release-assets.test.mjs",
+        "scripts/diagnostics/release-api.test.mjs",
         "scripts/diagnostics/release-gates.test.mjs",
         "scripts/diagnostics/release-preflight.test.mjs",
+        "scripts/diagnostics/release-notes.test.mjs",
         "scripts/diagnostics/release-reuse.test.mjs",
         "scripts/diagnostics/release-state.test.mjs",
         "scripts/diagnostics/release-verifier.test.mjs",
         "scripts/diagnostics/release-workflow.test.mjs"
       ],
       "escalation": [
-        "Release changes require exact-source hosted CI; signed native builds and publication remain tag-only workflow gates."
-      ]
+        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Both editions and every platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate."
+      ],
+      "capability": {
+        "summary": "Publish complete exact-source verified Stable releases and immutable automatic main-branch Nightlies without changing Stable latest.",
+        "guide": "docs/updates.md",
+        "invariants": [
+          {
+            "name": "Stable publication remains explicit; Nightly is opt-in, main-only and never latest, with all platform/edition assets verified before visibility.",
+            "reference": "docs/updates.md"
+          }
+        ]
+      }
     },
     {
       "id": "validation-tooling",
@@ -215,7 +234,10 @@
     },
     {
       "id": "public-help",
-      "paths": ["tools/help/", "docs/help/"],
+      "paths": [
+        "tools/help/",
+        "docs/help/"
+      ],
       "node": [
         "tools/help/corpus.test.mjs",
         "tools/help/help.test.mjs",
@@ -238,7 +260,9 @@
         "docs/evals/prompts/agent-contract-evaluator.md",
         "scripts/test-ai-eval.mjs"
       ],
-      "node": ["scripts/test-ai-eval.mjs"],
+      "node": [
+        "scripts/test-ai-eval.mjs"
+      ],
       "escalation": [
         "Context selection integrity checks validate rubric inputs; they do not execute the evaluated capabilities or establish native evidence."
       ]
@@ -250,7 +274,9 @@
         "scripts/evals/portable-runner.mjs",
         "scripts/diagnostics/browser-eval-report.test.mjs"
       ],
-      "node": ["scripts/diagnostics/browser-eval-report.test.mjs"],
+      "node": [
+        "scripts/diagnostics/browser-eval-report.test.mjs"
+      ],
       "escalation": [
         "Portable browser reporting requires exact scenario identities, unique trace and screenshot evidence, and zero skipped or flaky cases from the configured browser matrix. Diagnostic tests do not establish browser acceptance; see docs/testing-feedback-loop.md."
       ]

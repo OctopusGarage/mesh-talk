@@ -433,6 +433,30 @@
       "escalation": [
         "Native state invalidations require session/installation authority tests and focused browser consumers. Legacy hosts keep polling compatibility; browser mocks do not prove native network liveness."
       ]
+    },
+    {
+      "id": "frontend-updates",
+      "paths": [
+        "frontend/src/store/updates.ts",
+        "frontend/src/store/updates.test.ts",
+        "frontend/src/features/chat/UpdatePanel.tsx",
+        "frontend/src/lib/api/diagnostics.ts",
+        "frontend/e2e/update-flow.spec.ts"
+      ],
+      "frontend": ["src/store/updates.test.ts"],
+      "capability": {
+        "summary": "Persist a device-local explicit update channel and discard prior candidates on channel changes, preserving native release and edition authority.",
+        "guide": "docs/updates.md",
+        "invariants": [
+          {
+            "name": "Channel changes never implicitly check, download or downgrade, and in-flight work prevents selection changes",
+            "reference": "docs/updates.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run the update-flow browser spec for persisted selection, candidate invalidation, lite identity forwarding and manual installation. Signed native downloads require native owner evidence."
+      ]
     }
   ],
   "prScenarios": [
@@ -630,6 +654,18 @@
         "e2e/group-sync.spec.ts",
         "e2e/personal-messages.spec.ts"
       ]
+    },
+    {
+      "id": "frontend-updates-acceptance",
+      "paths": [
+        "frontend/src/store/updates.ts",
+        "frontend/src/store/updates.test.ts",
+        "frontend/src/features/chat/UpdatePanel.tsx",
+        "frontend/src/lib/api/diagnostics.ts",
+        "frontend/e2e/update-flow.spec.ts",
+        "frontend/src/lib/types.ts"
+      ],
+      "browser": ["e2e/update-flow.spec.ts"]
     }
   ]
 }

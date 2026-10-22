@@ -154,7 +154,8 @@ Release archives include checksums, signatures, and build provenance instruction
 release page. Current macOS and Windows installers do not carry commercial OS signing,
 so first launch may need the platform's usual downloaded-app confirmation. The app's
 **About → Check for updates** action checks only when requested; it downloads a verified
-archive but leaves installation to you. See the [install and update guide](docs/updates.md)
+archive but leaves installation to you. Stable is the default update channel; opt into Nightly
+in About to try recent main-branch builds without waiting for an official release. See the [install and update guide](docs/updates.md)
 for platform steps and the [troubleshooting guide](specifications/troubleshooting_guide.md)
 for connection issues.
 

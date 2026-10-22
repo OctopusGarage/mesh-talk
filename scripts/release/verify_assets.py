@@ -277,7 +277,7 @@ def verify_post_office_archive(path, platform, check_binaries):
 
 def verify_directory(root, tag, version, *, check_installers=True):
     root = Path(root)
-    require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-ci\.[0-9]+)?", tag), "invalid artifact tag")
+    require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-ci\.[0-9]+|-nightly\.[1-9][0-9]*\.[1-9][0-9]*)?", tag), "invalid artifact tag")
     require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version), "invalid version")
     expected = {"mesh-talk.cdx.json"}
     for platform in PLATFORMS:

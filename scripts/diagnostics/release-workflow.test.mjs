@@ -72,3 +72,21 @@ test("platform uploads remain drafts until all release artifacts are verified", 
     assert.match(inputs, /^          draft: true\s*$/m, "platform upload must not publish an incomplete release");
   }
 });
+
+
+test("Nightly runs gate main before the shared matrix and publish verified prereleases", () => {
+  assert.match(workflow, /schedule:\n\s+- cron:/);
+  assert.match(workflow, /publish_nightly:/);
+  assert.match(workflow, /group: .*nightly/);
+  const preflight = workflow.split("  preflight:\n")[1].split("  build-release:\n")[0];
+  assert.match(preflight, /check-source-checks\.mjs/);
+  assert.match(preflight, /checks: read/);
+  assert.match(preflight, /security-events: read/);
+  assert.match(workflow, /MESH_TALK_BUILD_TAG: .*outputs.nightly == 'true' && needs.preflight.outputs.tag \|\| format\('v\{0\}'/);
+  const verify = workflow.split("  verify-release:\n")[1].split("  resolve-publication:\n")[0];
+  assert.match(verify, /prepare-nightly\.mjs/);
+  assert.match(verify, /target_commitish: \$\{\{ github.sha \}\}/);
+  assert.match(verify, /prerelease: \$\{\{ needs.preflight.outputs.nightly == 'true' \}\}/);
+  assert.match(verify, /make_latest: false/);
+  assert.ok(verify.indexOf("release-state.mjs record") < verify.indexOf("release-state.mjs publish"));
+});

@@ -182,6 +182,16 @@ consumer validation; runtime/native behavior can require browser or process
 checks. See [change-aware development plans](testing-feedback-loop.md#change-aware-development-plans)
 for preview/run commands, unknown-path handling and the unchanged mandatory gates.
 
+### Desktop update channels
+
+`src-tauri/src/updates/channel.rs` owns channel eligibility and immutable build ordering;
+`updates.rs` owns bounded GitHub discovery, exact-release revalidation and verified manual downloads.
+The frontend update store owns the device-local channel preference and invalidation of checked
+candidates; its IPC adapter forwards the choice without choosing packages. The existing release
+workflow and `scripts/release/` own build identity, publication and provenance. See
+[updates and publication](updates.md) for invariants, triggers and native acceptance requirements.
+Channel choice does not change protocol, account/device identity, data location or edition.
+
 ## 3. Sidebar responsibilities
 
 `ui/features/chat/Sidebar.tsx` is the composition root: it selects application

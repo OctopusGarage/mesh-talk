@@ -21,6 +21,27 @@ fn main() {
         "default"
     };
     println!("cargo:rustc-env=MESH_TALK_VARIANT={variant}");
+    println!("cargo:rerun-if-env-changed=MESH_TALK_BUILD_TAG");
+    let base_tag = format!("v{}", std::env::var("CARGO_PKG_VERSION").unwrap());
+    let build_tag = std::env::var("MESH_TALK_BUILD_TAG").unwrap_or_else(|_| base_tag.clone());
+    let valid_nightly = build_tag
+        .strip_prefix(&format!("{base_tag}-nightly."))
+        .is_some_and(|suffix| {
+            let numbers: Vec<_> = suffix.split('.').collect();
+            numbers.len() == 2
+                && numbers.iter().all(|value| {
+                    value
+                        .parse::<u64>()
+                        .is_ok_and(|number| number > 0 && number.to_string() == *value)
+                })
+        });
+    // Branch-only dry runs retain the base identity; their CI artifact tag is
+    // not a published update channel and must not masquerade as Nightly.
+    assert!(
+        build_tag == base_tag || valid_nightly,
+        "invalid published build identity"
+    );
+    println!("cargo:rustc-env=MESH_TALK_BUILD_TAG={build_tag}");
     let windows_msvc = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
     if windows_msvc {

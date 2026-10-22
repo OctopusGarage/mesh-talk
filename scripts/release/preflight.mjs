@@ -2,12 +2,20 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { getReleaseByTag } from "./release-api.mjs";
+import { getReleaseByTag, getPublishedNightly } from "./release-api.mjs";
 
-export function releaseInputs({ ref, runId, version, desktopVersion, existingRelease, publishRelease = false }) {
+export function releaseInputs({ ref, runId, version, desktopVersion, existingRelease, publishRelease = false, nightly = false, runAttempt }) {
   assert.match(version, /^\d+\.\d+\.\d+$/, "workspace version must be a stable release");
   assert.equal(version, desktopVersion, "workspace and desktop version must match");
   assert.match(runId, /^\d+$/, "invalid workflow run ID");
+  if (nightly) {
+    assert.equal(ref, "refs/heads/main", "Nightly publication requires main");
+    assert.equal(publishRelease, false, "Nightly and stable publication intents are exclusive");
+    assert.match(runId, /^[1-9]\d*$/, "invalid Nightly run ID");
+    assert.match(runAttempt ?? "", /^[1-9]\d*$/, "invalid Nightly run attempt");
+    assert.ok(existingRelease === null || existingRelease.draft === true, "cannot overwrite a published release");
+    return { version, tag: `v${version}-nightly.${runId}.${runAttempt}` };
+  }
   if (ref.startsWith("refs/tags/")) {
     const tag = ref.slice("refs/tags/".length);
     assert.equal(tag, `v${version}`, "tag and application version must match");
@@ -26,6 +34,17 @@ function main() {
   const manifest = readFileSync("Cargo.toml", "utf8").split("[workspace.package]")[1]?.split(/^\[/m)[0];
   const version = manifest?.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
   const desktopVersion = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
+  const nightly = process.env.RELEASE_NIGHTLY === "true";
+  const args = { ref, runId, version, desktopVersion, nightly, runAttempt: process.env.GITHUB_RUN_ATTEMPT, publishRelease: process.env.RELEASE_PUBLICATION === "true" };
+  const candidate = releaseInputs({ ...args, existingRelease: null });
+  if (nightly && process.env.GITHUB_EVENT_NAME === "schedule") {
+    const published = getPublishedNightly(repo, sha);
+    if (published) {
+      appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\ntag=${candidate.tag}\nnightly=true\nskip=true\n`);
+      console.log(`Skipping unchanged source already published as ${published.tag_name}`);
+      return;
+    }
+  }
   let existingRelease = null;
   if (ref.startsWith("refs/tags/")) {
     // Validate ref/version before passing a tag to an external command.
@@ -34,8 +53,9 @@ function main() {
     assert.ok(["identical", "behind"].includes(comparison.status), "release source must already be merged into main");
     existingRelease = getReleaseByTag(repo, ref.slice(10));
   }
-  const result = releaseInputs({ ref, runId, version, desktopVersion, existingRelease, publishRelease: process.env.RELEASE_PUBLICATION === "true" });
-  appendFileSync(process.env.GITHUB_OUTPUT, `version=${result.version}\ntag=${result.tag}\n`);
+  if (nightly) existingRelease = getReleaseByTag(repo, candidate.tag);
+  const result = releaseInputs({ ...args, existingRelease });
+  appendFileSync(process.env.GITHUB_OUTPUT, `version=${result.version}\ntag=${result.tag}\nnightly=${nightly}\nskip=false\n`);
   console.log(`Release preflight passed: ${result.tag}`);
 }
 

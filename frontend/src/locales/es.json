@@ -805,7 +805,7 @@
     "credits": "Stickers animados de Noto Emoji de Google, usados bajo su licencia de código abierto.",
     "updates": {
       "title": "Actualizaciones",
-      "manual": "Busca la última versión estable. Tú decides cuándo descargarla e instalarla.",
+      "manual": "Busca una versión más reciente en el canal seleccionado. Tú decides cuándo descargarla e instalarla.",
       "check": "Buscar actualizaciones",
       "checking": "Buscando…",
       "current": "Ya tienes la versión más reciente ({{version}}).",
@@ -822,7 +822,14 @@
         "mac": "Descomprime la descarga, abre el DMG y arrastra Mesh-Talk a Aplicaciones. Cierra la aplicación actual antes de reemplazarla. Tus datos locales se conservarán.",
         "windows": "Descomprime la descarga y ejecuta el instalador EXE (o MSI para instalaciones administradas). Cierra Mesh-Talk primero. Tus datos locales se conservarán.",
         "linux": "Descomprime la descarga e instala el paquete DEB o RPM de tu distribución, o ejecuta AppImage. Cierra Mesh-Talk primero. Tus datos locales se conservarán."
-      }
+      },
+      "channel": "Canal de actualizaciones",
+      "stable": "Estable",
+      "nightly": "Nightly",
+      "nightlyWarning": "Las compilaciones experimentales pueden contener errores. Elige Nightly para probar las próximas funciones.",
+      "stableHelp": "El canal estable recibe versiones oficiales. Cambiar de canal nunca instala automáticamente una versión anterior.",
+      "installed": "Instalada: {{version}}",
+      "stableDownload": "Descargar la versión estable manualmente"
     }
   },
   "offlineConnect": {

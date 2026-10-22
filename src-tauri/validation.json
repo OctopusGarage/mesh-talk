@@ -298,7 +298,9 @@
     {
       "id": "desktop-updates",
       "paths": [
-        "src-tauri/src/updates.rs"
+        "src-tauri/src/updates.rs",
+        "src-tauri/src/updates/",
+        "docs/updates.md"
       ],
       "rust": [
         {
@@ -309,8 +311,22 @@
         }
       ],
       "escalation": [
-        "Updater/native process and release artifact changes require explicit native/release validation."
-      ]
+        "Updater/native process and release artifact changes require explicit native/release validation; exercise same-base Nightly replacement on each native installer and exact-source hosted signing/publication."
+      ],
+      "capability": {
+        "summary": "Discover explicit update channels and revalidate immutable build identity before verified manual device-matching downloads.",
+        "guide": "docs/updates.md",
+        "invariants": [
+          {
+            "name": "Stable is the default and rejects drafts and all prereleases. Nightly accepts only published canonical Nightly identities or Stable; compare base versions then numeric run/attempt, preserving edition/OS/architecture and never silently downgrading.",
+            "reference": "docs/updates.md"
+          },
+          {
+            "name": "Revalidate the exact canonical release and its channel before downloading; verify size and SHA-256 before exposing the final path. Channel selection never changes identity, local data or installs software.",
+            "reference": "docs/updates.md"
+          }
+        ]
+      }
     },
     {
       "id": "desktop-package",

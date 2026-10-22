@@ -72,6 +72,16 @@ class ReleaseAssetsTests(unittest.TestCase):
         # The CLI's production path always validates native installer metadata.
         return verify_directory(self.root, "v0.1.5", "0.1.5", check_installers=False)
 
+    def test_nightly_identity_keeps_native_base_version_and_full_asset_matrix(self):
+        tag = "v0.1.5-nightly.123.2"
+        for asset in list(self.root.iterdir()):
+            if "v0.1.5" in asset.name:
+                asset.rename(asset.with_name(asset.name.replace("v0.1.5", tag)))
+        self.assertEqual(len(verify_directory(self.root, tag, "0.1.5", check_installers=False)), 18)
+        for invalid in ("v0.1.5-nightly.0.1", "v0.1.5-nightly.123.01", "v0.1.5-beta.1"):
+            with self.assertRaisesRegex(ValueError, "invalid artifact tag"):
+                verify_directory(self.root, invalid, "0.1.5", check_installers=False)
+
     def test_complete_release(self):
         self.assertEqual(len(self.verify()), 18)
 
