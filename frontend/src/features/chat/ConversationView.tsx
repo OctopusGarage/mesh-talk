@@ -533,7 +533,9 @@ export function ConversationView() {
             initialTopMostItemIndex={viewport.initialIndex}
             // Stick to the bottom on new messages only while the user is already there
             // (preserves scroll position when reading history / prepending older items).
-            followOutput={(isAtBottom) => (isAtBottom ? "auto" : false)}
+            followOutput={(isAtBottom) =>
+              !exactContext && isAtBottom ? "auto" : false
+            }
             atBottomStateChange={viewport.atBottomStateChange}
             rangeChanged={({ startIndex }) => viewport.rangeChanged(startIndex)}
             onScroll={viewport.onScroll}

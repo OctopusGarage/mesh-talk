@@ -29,6 +29,7 @@ export function useConversationViewport(
   const [showJump, setShowJump] = useState(false);
   const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
   const [searchMiss, setSearchMiss] = useState(false);
+  const exactSearch = searchTarget?.key === key && "reference" in searchTarget;
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const scrollerRef = useRef<HTMLElement | null>(null);
   const scrollPositions = useRef(new Map<string, number>());
@@ -68,6 +69,7 @@ export function useConversationViewport(
     const scroller = scrollerRef.current;
     if (
       !scroller ||
+      exactSearch ||
       anchors.current.has(key) ||
       pendingUserAnchor.current ||
       pendingScrollIntent.current ||
@@ -85,7 +87,7 @@ export function useConversationViewport(
         behavior: "auto",
       });
     else scroller.scrollTop = top;
-  }, [key]);
+  }, [key, exactSearch]);
   const restoreVisibleAnchor = useCallback(() => {
     const scroller = scrollerRef.current;
     const anchor = anchors.current.get(key);
