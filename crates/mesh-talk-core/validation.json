@@ -397,6 +397,7 @@
       },
       "escalation": [
         "Channel acceptance/custody changes require registered owner enqueue tests, exact-ID frontend reconciliation, and loopback post-office durable-wrapper confirmation evidence.",
+        "Channel media retention/completion changes also require cargo test -p mesh-talk-core --bin mesh-talk-node file_saves:: --features fast-test-kdf; library-only selection cannot exercise delayed CLI export after a non-sharing receiver prunes chunks.",
         "Node wiring has broad shared state and dynamic consumers: retain conservative Node library coverage; crypto/wire/storage changes need loopback, restart and protocol integration evidence. Runtime/discovery lifecycle changes require focused native acceptance."
       ],
       "consumers": [

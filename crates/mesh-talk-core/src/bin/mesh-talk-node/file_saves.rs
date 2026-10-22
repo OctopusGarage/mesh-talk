@@ -240,6 +240,9 @@ mod tests {
         let at = tokio::spawn(a.clone().run_accept_loop(al));
         let bt = tokio::spawn(b.clone().run_accept_loop(bl));
         let channel = a.create_channel("media", vec![bpublic]).await.unwrap();
+        // This fixture exercises the non-sharing receiver's normal prune path.
+        // Sharing members retain ciphertext under the channel replica budget.
+        b.set_channel_replica_enabled(channel, false).await.unwrap();
         let mut bytes = vec![7; 2048];
         bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
         let source = ad.path().join("channel.png");
