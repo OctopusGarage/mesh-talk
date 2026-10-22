@@ -130,7 +130,7 @@ pub use ratchet_sessions::RatchetSessions;
 pub use reaction::{ReactionPayload, ReactionView, aggregate};
 pub use received_log::{ReceivedEntry, ReceivedLog};
 pub use runtime::{NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents, RuntimeNetworkOptions};
-pub use search::{RecentSearchResults, ReferencedSearchHit, SearchReference};
+pub use search::{RecentSearchResults, ReferencedSearchHit, SearchContext, SearchReference};
 
 mod outgoing_message;
 pub use outgoing_message::{MessageAcceptance, MessageDestination, OutgoingMessageRequest};

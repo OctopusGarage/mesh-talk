@@ -33,6 +33,14 @@ pub enum SearchReference {
 pub struct ReferencedSearchHit {
     pub hit: SearchHit,
     pub reference: SearchReference,
+    pub expires_at_ms: Option<u64>,
+}
+
+/// Exact context and the canonical position of its target in retained history.
+/// Position metadata is descriptive and does not grant later read authority.
+pub struct SearchContext {
+    pub messages: Vec<super::HistoryEntry>,
+    pub newer_entries: usize,
 }
 
 /// Matches from a recent canonical-history window in each eligible conversation.
@@ -82,7 +90,6 @@ impl Node {
     ///
     /// History currently materializes retained rows before truncation. The result
     /// window is bounded, but execution/allocations are not a paged retained scan.
-    /// Existing desktop search does not use this API yet.
     pub fn search_recent(&self, query: &str) -> RecentSearchResults {
         let q = query.trim().to_lowercase();
         let mut response = RecentSearchResults {
@@ -128,6 +135,7 @@ impl Node {
                 response.hits.push(ReferencedSearchHit {
                     hit: conversation.hit(entry.from_me, entry.who, entry.text, entry.wall_clock),
                     reference,
+                    expires_at_ms: entry.expires_at_ms,
                 });
             }
         }
@@ -135,6 +143,55 @@ impl Node {
             .hits
             .sort_by_key(|hit| std::cmp::Reverse(hit.hit.wall_clock));
         response
+    }
+
+    /// Resolve an exact reference against currently eligible canonical history.
+    /// Returns at most 25 entries on each side, preserving canonical order. The
+    /// retained history projection materializes its full input before slicing;
+    /// this bounds the response, not retained-history scan time or allocation.
+    pub fn search_context(&self, reference: &SearchReference) -> Option<SearchContext> {
+        let message_id = match reference {
+            SearchReference::Account { message_id, .. }
+            | SearchReference::Channel { message_id, .. }
+            | SearchReference::LegacyDevice { message_id, .. } => (*message_id)?,
+        };
+        if message_id == EventId::new([0; 32]) {
+            return None;
+        }
+        let conversation = self
+            .search_conversations()
+            .into_iter()
+            .find(|conversation| match (reference, &conversation.source) {
+                (SearchReference::Account { account_id, .. }, SearchSource::Account(account)) => {
+                    account_id == account
+                }
+                (SearchReference::Channel { channel_id, .. }, SearchSource::Channel) => {
+                    *channel_id == conversation.id
+                }
+                (
+                    SearchReference::LegacyDevice { device_id, .. },
+                    SearchSource::LegacyDevice(public),
+                ) => *device_id == public.user_id(),
+                _ => false,
+            })?;
+        let mut history = match &conversation.source {
+            SearchSource::Account(account) => self.account_history(account, usize::MAX),
+            SearchSource::Channel => self.channel_history(conversation.id, usize::MAX),
+            SearchSource::LegacyDevice(public) => self.dm_history(public, usize::MAX),
+        };
+        let target = history
+            .iter()
+            .position(|entry| entry.id == message_id && !entry.recalled)?;
+        let newer_entries = history.len() - target - 1;
+        let end = target.saturating_add(26).min(history.len());
+        let mut context: Vec<_> = history.drain(target.saturating_sub(25)..end).collect();
+        for entry in &mut context {
+            entry.recalled_text = None;
+        }
+        Some(SearchContext {
+            messages: context,
+            newer_entries,
+        })
     }
 
     // Candidate eligibility is shared; canonical projection and the legacy fast

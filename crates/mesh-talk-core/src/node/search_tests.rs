@@ -555,3 +555,227 @@ async fn recent_search_includes_durably_accepted_message_before_sidecar_recovery
         .fail_appends_for_test(false)
         .unwrap();
 }
+
+#[test]
+fn search_context_selects_exact_old_account_id_and_bounded_canonical_neighbors() {
+    use crate::{eventlog::event::EventId, node::DmEnvelope};
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let own = node.account_id();
+    let contact = "d".repeat(32);
+    let conversation = account_conversation_id(&own, &contact);
+    for index in 1..=600u64 {
+        let mut id = [1; 32];
+        id[..8].copy_from_slice(&index.to_le_bytes());
+        let envelope = DmEnvelope::new(
+            own.clone(),
+            contact.clone(),
+            id,
+            MessageBody::new(b"equal text".to_vec(), None).encode(),
+        );
+        node.sentlog
+            .lock()
+            .unwrap()
+            .record(conversation, index, index, &envelope.encode())
+            .unwrap();
+    }
+    let history = node.account_history(&contact, usize::MAX);
+    let reference = SearchReference::Account {
+        account_id: contact.clone(),
+        message_id: Some(history[50].id),
+    };
+    let context = node.search_context(&reference).unwrap();
+    assert_eq!(context.newer_entries, 549);
+    assert_eq!(context.messages.len(), 51);
+    assert_eq!(
+        context.messages.iter().map(|e| e.id).collect::<Vec<_>>(),
+        history[25..76].iter().map(|e| e.id).collect::<Vec<_>>()
+    );
+    assert!(context.messages.iter().all(|e| e.recalled_text.is_none()));
+    for message_id in [
+        None,
+        Some(EventId::new([0; 32])),
+        Some(EventId::new([99; 32])),
+    ] {
+        assert!(
+            node.search_context(&SearchReference::Account {
+                account_id: contact.clone(),
+                message_id
+            })
+            .is_none()
+        );
+    }
+    assert!(
+        node.search_context(&SearchReference::Account {
+            account_id: "e".repeat(32),
+            message_id: Some(history[50].id)
+        })
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn search_context_rejects_recall_and_expiry_and_scrubs_neighbor_recalled_text() {
+    use crate::{eventlog::event::EventId, node::DmEnvelope};
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let own = node.account_id();
+    let contact = "c".repeat(32);
+    let conversation = account_conversation_id(&own, &contact);
+    for index in 1..=3u8 {
+        let body = MessageBody::new(b"secret".to_vec(), None).encode();
+        let body = if index == 3 {
+            crate::expiry::wrap(&body, Some(1))
+        } else {
+            body
+        };
+        let envelope = DmEnvelope::new(own.clone(), contact.clone(), [index; 32], body);
+        node.sentlog
+            .lock()
+            .unwrap()
+            .record(
+                conversation,
+                u64::from(index),
+                crate::node::node::now_millis(),
+                &envelope.encode(),
+            )
+            .unwrap();
+    }
+    node.recall_account(&contact, EventId::new([1; 32]))
+        .await
+        .unwrap();
+    for index in [1, 3] {
+        assert!(
+            node.search_context(&SearchReference::Account {
+                account_id: contact.clone(),
+                message_id: Some(EventId::new([index; 32]))
+            })
+            .is_none()
+        );
+    }
+    let context = node
+        .search_context(&SearchReference::Account {
+            account_id: contact,
+            message_id: Some(EventId::new([2; 32])),
+        })
+        .unwrap();
+    assert!(context.messages.iter().any(|e| e.recalled));
+    assert!(context.messages.iter().all(|e| e.recalled_text.is_none()));
+}
+
+#[test]
+fn search_context_preserves_legacy_namespace_after_verified_account_binding() {
+    use crate::eventlog::event::EventId;
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let peer = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    node.roster.lock().unwrap().update(
+        &Announce::new_with_account(&peer, &account, "Legacy", 1),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &node.user_id(),
+    );
+    let conversation = dm_conversation_id(&node.identity.public(), &peer.public());
+    let id = EventId::new([17; 32]);
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            conversation,
+            peer.user_id(),
+            10,
+            &MessageBody::new(b"legacy".to_vec(), None).encode(),
+            id,
+        )
+        .unwrap();
+    assert_eq!(
+        node.search_context(&SearchReference::LegacyDevice {
+            device_id: peer.user_id(),
+            message_id: Some(id)
+        })
+        .unwrap()
+        .messages[0]
+            .text,
+        b"legacy"
+    );
+    assert!(
+        node.search_context(&SearchReference::Account {
+            account_id: account.account_id(),
+            message_id: Some(id)
+        })
+        .is_none()
+    );
+    node.roster.lock().unwrap().update(
+        &Announce::new_post_office_with_account(&peer, &account, "Relay", 1),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &node.user_id(),
+    );
+    assert!(
+        node.search_context(&SearchReference::LegacyDevice {
+            device_id: peer.user_id(),
+            message_id: Some(id)
+        })
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn search_context_channel_uses_canonical_exact_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let channel = node.create_channel("context", vec![]).await.unwrap();
+    for _ in 0..3 {
+        node.send_channel_message(channel, b"duplicate")
+            .await
+            .unwrap();
+    }
+    let history = node.channel_history(channel, 10);
+    let reference = SearchReference::Channel {
+        channel_id: channel,
+        message_id: Some(history[1].id),
+    };
+    assert_eq!(
+        node.search_context(&reference)
+            .unwrap()
+            .messages
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>(),
+        history.iter().map(|e| e.id).collect::<Vec<_>>()
+    );
+    node.recall_channel(channel, history[1].id).await.unwrap();
+    assert!(node.search_context(&reference).is_none());
+}
+
+#[test]
+fn recent_search_preserves_expiry_deadline_from_canonical_history() {
+    use crate::node::DmEnvelope;
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let own = node.account_id();
+    let contact = "b".repeat(32);
+    let deadline = crate::node::node::now_millis() + 60_000;
+    let envelope = DmEnvelope::new(
+        own.clone(),
+        contact.clone(),
+        [42; 32],
+        crate::expiry::wrap(
+            &MessageBody::new(b"expiring token".to_vec(), None).encode(),
+            Some(deadline),
+        ),
+    );
+    node.sentlog
+        .lock()
+        .unwrap()
+        .record(
+            account_conversation_id(&own, &contact),
+            1,
+            crate::node::node::now_millis(),
+            &envelope.encode(),
+        )
+        .unwrap();
+    assert_eq!(
+        node.search_recent("expiring token").hits[0].expires_at_ms,
+        Some(deadline)
+    );
+}

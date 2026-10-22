@@ -404,6 +404,8 @@ pub fn run_tauri_configured(
                 crate::chat_commands::reactions,
                 crate::chat_commands::channel_reactions,
                 crate::chat_commands::search,
+                crate::owner_commands::owner_search_recent,
+                crate::owner_commands::owner_search_context,
                 crate::chat_commands::delete_message,
                 crate::chat_commands::recall_message,
                 crate::chat_commands::clear_conversation,

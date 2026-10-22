@@ -19,7 +19,7 @@
         "core-node"
       ],
       "capability": {
-        "summary": "Return canonical, conversation-scoped recent search references with explicit history-window coverage while retaining legacy search consumers.",
+        "summary": "Return canonical recent search references and bounded exact context through existing history owners, preserving legacy search consumers.",
         "guide": "docs/ARCHITECTURE.md#recent-search-references",
         "invariants": [
           {
@@ -28,6 +28,10 @@
           },
           {
             "name": "Recent search reuses history deduplication, pending acceptance, recovery, expiry and recall; a per-conversation result window does not imply complete retained search or bounded input cost",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          },
+          {
+            "name": "Exact context remains namespace-scoped, caps output at 51 canonical rows and omits recalled re-edit plaintext; missing, recalled or expired targets are unavailable",
             "reference": "docs/ARCHITECTURE.md#recent-search-references"
           }
         ]

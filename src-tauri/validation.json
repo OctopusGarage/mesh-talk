@@ -2,6 +2,45 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-search",
+      "paths": [
+        "src-tauri/src/owner_commands/search.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "owner_commands::tests::registered_search"
+          ]
+        }
+      ],
+      "frontend": [
+        "src/lib/api.test.ts"
+      ],
+      "consumers": [
+        "desktop-session",
+        "frontend-chat",
+        "frontend-owner"
+      ],
+      "capability": {
+        "summary": "Serve exact owner-scoped recent search and bounded read-only message context with validated reference namespaces and explicit coverage.",
+        "guide": "docs/ARCHITECTURE.md#recent-search-references",
+        "invariants": [
+          {
+            "name": "Queued or replaced owners and locked apps cannot publish search or context; malformed references never select an approximate message",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          },
+          {
+            "name": "Search returns at most 200 hits and 1 MiB; context returns at most 51 canonical rows and 1 MiB or an explicit unavailable result",
+            "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          }
+        ]
+      },
+      "escalation": [
+        "Search/context command changes require registered IPC owner/malformed-input/lock tests. Frontend adoption also requires typed adapter parity and exact duplicate/older-context browser scenarios. Headless registered dispatch does not certify real native webview acceptance."
+      ]
+    },
+    {
       "id": "desktop-session",
       "paths": [
         "src-tauri/src/desktop_session.rs",
@@ -424,7 +463,8 @@
         "src-tauri/src/tray.rs",
         "src-tauri/src/session_store.rs",
         "src-tauri/src/session_store/",
-        "src-tauri/tauri.conf.json"
+        "src-tauri/tauri.conf.json",
+        "src-tauri/src/owner_commands/"
       ],
       "native": [
         "host"

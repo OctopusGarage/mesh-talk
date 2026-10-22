@@ -1005,10 +1005,32 @@ Canonical history currently materializes retained rows before truncation, so the
 window bounds result projection, not input memory or execution time. This is not
 a paged or complete retained-history search.
 
-Existing `Node::search`, desktop search IPC and navigation retain their current
-contracts. Desktop adoption requires exact-ID selection, explicit unavailable
-legacy/context outcomes, bounded old-message context and owner-isolation tests;
-a failed exact reference must never fall back to matching text and timestamps.
+`Node::search_context` resolves an exact reference through the same conversation
+eligibility and canonical history owners. Missing, zero, expired or recalled
+targets are unavailable. A found context contains the target and up to 25
+neighbors on each side in canonical order, plus the number of entries after the
+target. Recalled neighbors retain only their tombstone; their re-edit plaintext
+is omitted. Context reads do not change cache coverage, unread state or delivery.
+The output window is bounded; retained input materialization has the same cost
+limitation as recent search.
+
+Desktop `owner_search_recent` and `owner_search_context` capture explicit session
+ownership before queued work and recheck it before publication. References are
+validated at the host boundary: account/device targets are 32 hex characters,
+channel and message IDs are 64; invalid shapes have structured input errors.
+Queries accept at most 4,096 UTF-8 bytes. Search returns a newest-first prefix
+with at most 200 hits and 1 MiB of serialized output, setting `truncated` when
+either result budget omits matches. Context returns at most 51 rows and 1 MiB;
+a response exceeding its byte budget becomes unavailable with no rows. Limits
+do not establish complete retained-history coverage. Keys, raw errors and
+message content do not enter diagnostics.
+
+The new owner-scoped commands provide a query surface for future desktop
+adoption. The current SearchDialog and legacy desktop `search` command retain
+their existing behavior. Frontend adoption requires typed adapters, exact-ID
+selection, explicit unavailable outcomes, and read-only bounded context that
+does not replace the live cache or commit reception/unread coverage. A failed
+exact reference must never fall back to matching text and timestamps.
 
 
 ### Manual encrypted backup and recovery

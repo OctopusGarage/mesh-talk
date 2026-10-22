@@ -9,6 +9,9 @@ use crate::{
 use mesh_talk_core::eventlog::EventId;
 use serde::Serialize;
 
+mod search;
+pub use search::*;
+
 fn parse_id(input: &str) -> Result<EventId, CommandError> {
     let bytes: [u8; 32] = hex::decode(input)
         .map_err(|_| CommandError::InvalidInput("malformed message id".into()))?
@@ -424,6 +427,7 @@ mod tests {
                 ))
                 .invoke_handler(tauri::generate_handler![
                     crate::chat_commands::search,
+                    crate::chat_commands::channel_history,
                     crate::chat_commands::read_file,
                     crate::chat_commands::read_media,
                     crate::trust::mark_verified,
@@ -469,6 +473,8 @@ mod tests {
                     crate::chat_commands::save_file,
                     crate::chat_commands::save_file_to_dir,
                     crate::chat_commands::write_temp_file,
+                    super::owner_search_recent,
+                    super::owner_search_context,
                     super::owner_node_identity,
                     super::owner_enqueue_text,
                     super::owner_enqueue_sticker,
@@ -588,6 +594,301 @@ mod tests {
                 .await
                 .unwrap();
             });
+        }
+    }
+
+    #[test]
+    fn registered_search_recent_and_exact_context_shapes() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let id = fixture
+            .invoke(
+                "owner_enqueue_text",
+                serde_json::json!({"owner":"alice", "account":account, "text":"exact token"}),
+            )
+            .unwrap();
+        let results = fixture
+            .invoke(
+                "owner_search_recent",
+                serde_json::json!({"owner":"alice", "query":"exact token"}),
+            )
+            .unwrap();
+        assert_eq!(
+            results["coverage"],
+            serde_json::json!({"scope":"recent-window","per_conversation_limit":2000,"result_limit":200,"truncated":false})
+        );
+        assert_eq!(results["hits"].as_array().unwrap().len(), 1);
+        let reference = serde_json::json!({"kind":"account", "target":account, "message_id":id});
+        assert_eq!(results["hits"][0]["reference"], reference);
+        assert_eq!(results["hits"][0]["text"], "exact token");
+        let context = fixture
+            .invoke(
+                "owner_search_context",
+                serde_json::json!({"owner":"alice", "reference":reference}),
+            )
+            .unwrap();
+        assert_eq!(context["status"], "found");
+        assert_eq!(context["newer_entries"], 0);
+        assert_eq!(results["hits"][0]["expires_at_ms"], serde_json::Value::Null);
+        assert_eq!(context["reference"], reference);
+        assert_eq!(context["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(context["messages"][0]["id"], id);
+        for message_id in [
+            serde_json::Value::Null,
+            serde_json::json!("00".repeat(32)),
+            serde_json::json!("ff".repeat(32)),
+        ] {
+            let reference =
+                serde_json::json!({"kind":"account", "target":account,"message_id":message_id});
+            assert_eq!(
+                fixture
+                    .invoke(
+                        "owner_search_context",
+                        serde_json::json!({"owner":"alice","reference":reference})
+                    )
+                    .unwrap(),
+                serde_json::json!({"status":"unavailable","reference":reference,"messages":[],"newer_entries":null})
+            );
+        }
+        let channel = fixture
+            .invoke(
+                "create_channel",
+                serde_json::json!({"name":"Search channel", "memberIds":[]}),
+            )
+            .unwrap();
+        fixture
+            .invoke(
+                "send_channel_message",
+                serde_json::json!({"channelId":channel,"text":"channel token"}),
+            )
+            .unwrap();
+        let results = fixture
+            .invoke(
+                "owner_search_recent",
+                serde_json::json!({"owner":"alice","query":"channel token"}),
+            )
+            .unwrap();
+        assert_eq!(results["hits"][0]["reference"]["kind"], "channel");
+        let context = fixture
+            .invoke(
+                "owner_search_context",
+                serde_json::json!({"owner":"alice","reference":results["hits"][0]["reference"]}),
+            )
+            .unwrap();
+        assert_eq!(context["status"], "found");
+    }
+
+    #[test]
+    fn registered_search_validates_inputs_and_explicit_owner() {
+        let fixture = Fixture::new();
+        for kind in ["account", "channel", "legacy-device"] {
+            let length = if kind == "channel" { 32 } else { 16 };
+            for (target, message_id) in [
+                ("gg".repeat(length), serde_json::json!("01".repeat(32))),
+                ("01".repeat(length), serde_json::json!("aa")),
+                ("a".into(), serde_json::Value::Null),
+            ] {
+                assert_eq!(fixture.invoke("owner_search_context", serde_json::json!({"owner":"alice","reference":{"kind":kind,"target":target,"message_id":message_id}})).unwrap_err()["kind"], "invalid-input");
+            }
+            assert_eq!(fixture.invoke("owner_search_context", serde_json::json!({"owner":"bob","reference":{"kind":kind,"target":"01".repeat(length),"message_id":null}})).unwrap_err()["kind"], "authorization");
+        }
+        assert_eq!(
+            fixture
+                .invoke(
+                    "owner_search_recent",
+                    serde_json::json!({"owner":"bob","query":"token"})
+                )
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+        assert_eq!(
+            fixture
+                .invoke(
+                    "owner_search_recent",
+                    serde_json::json!({"owner":"alice","query":"é".repeat(2049)})
+                )
+                .unwrap_err()["kind"],
+            "invalid-input"
+        );
+        assert!(
+            fixture
+                .invoke(
+                    "owner_search_recent",
+                    serde_json::json!({"owner":"alice","query":"é".repeat(2048)})
+                )
+                .is_ok()
+        );
+        for reference in [
+            serde_json::json!({"kind":"other","target":"01".repeat(16),"message_id":null}),
+            serde_json::json!({"kind":"account","message_id":null}),
+            serde_json::json!({"kind":"account","target":"01".repeat(16)}),
+            serde_json::json!({"kind":"account","target":42,"message_id":null}),
+            serde_json::json!({"kind":"account","target":"01".repeat(16),"message_id":42}),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(
+                fixture
+                    .invoke(
+                        "owner_search_context",
+                        serde_json::json!({"owner":"alice","reference":reference})
+                    )
+                    .unwrap_err()["kind"],
+                "invalid-input"
+            );
+        }
+    }
+
+    #[test]
+    fn registered_search_caps_hits_and_context_serialized_bytes() {
+        let fixture = Fixture::new();
+        let channel = fixture
+            .invoke(
+                "create_channel",
+                serde_json::json!({"name":"Caps", "memberIds":[]}),
+            )
+            .unwrap();
+        for _ in 0..201 {
+            fixture
+                .invoke(
+                    "send_channel_message",
+                    serde_json::json!({"channelId":channel,"text":"cap token"}),
+                )
+                .unwrap();
+        }
+        let results = fixture
+            .invoke(
+                "owner_search_recent",
+                serde_json::json!({"owner":"alice","query":"cap token"}),
+            )
+            .unwrap();
+        assert_eq!(results["hits"].as_array().unwrap().len(), 200);
+        assert_eq!(results["coverage"]["truncated"], true);
+        let text = "oversize token ".to_owned() + &"x".repeat(60_000);
+        for _ in 0..20 {
+            fixture
+                .invoke(
+                    "send_channel_message",
+                    serde_json::json!({"channelId":channel,"text":text}),
+                )
+                .unwrap();
+        }
+        let results = fixture
+            .invoke(
+                "owner_search_recent",
+                serde_json::json!({"owner":"alice","query":"oversize token"}),
+            )
+            .unwrap();
+        let reference = results["hits"][0]["reference"].clone();
+        let response = fixture
+            .invoke(
+                "owner_search_context",
+                serde_json::json!({"owner":"alice","reference":reference}),
+            )
+            .unwrap();
+        assert_eq!(
+            response,
+            serde_json::json!({"status":"unavailable","reference":reference,"messages":[],"newer_entries":null})
+        );
+    }
+
+    #[test]
+    fn registered_search_recent_response_byte_cap_keeps_newest_prefix() {
+        let fixture = Fixture::new();
+        let channel = fixture
+            .invoke(
+                "create_channel",
+                serde_json::json!({"name":"Bytes", "memberIds":[]}),
+            )
+            .unwrap();
+        let text = "byte cap token ".to_owned() + &"x".repeat(60_000);
+        for _ in 0..20 {
+            fixture
+                .invoke(
+                    "send_channel_message",
+                    serde_json::json!({"channelId":channel,"text":text}),
+                )
+                .unwrap();
+        }
+        let results = fixture
+            .invoke(
+                "owner_search_recent",
+                serde_json::json!({"owner":"alice","query":"byte cap token"}),
+            )
+            .unwrap();
+        assert!(serde_json::to_vec(&results).unwrap().len() <= 1024 * 1024);
+        assert_eq!(results["coverage"]["truncated"], true);
+        let hits = results["hits"].as_array().unwrap();
+        assert!(!hits.is_empty() && hits.len() < 20);
+        let history = fixture
+            .invoke(
+                "channel_history",
+                serde_json::json!({"channelId":channel,"limit":25}),
+            )
+            .unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit["reference"]["message_id"].clone())
+                .collect::<Vec<_>>(),
+            history
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .take(hits.len())
+                .map(|entry| entry["id"].clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn registered_search_rejects_queued_replaced_owner_and_app_lock() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        for change in ["relogin", "logout", "lock"] {
+            for (command, body) in [
+                (
+                    "owner_search_recent",
+                    serde_json::json!({"owner":"alice","query":"secret"}),
+                ),
+                (
+                    "owner_search_context",
+                    serde_json::json!({"owner":"alice","reference":{"kind":"account","target":"01".repeat(16),"message_id":"01".repeat(32)}}),
+                ),
+            ] {
+                fixture.app_state.app_lock().clear();
+                fixture
+                    .app_state
+                    .session()
+                    .set("entry".into(), user("alice"), "pw".into());
+                let (entered, captured) = std::sync::mpsc::channel();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+                let lifecycle = fixture.node.0.blocking_lock();
+                let webview = fixture.webview.clone();
+                let pending = std::thread::spawn(move || invoke(&webview, command, body));
+                let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
+                match change {
+                    "logout" => fixture.app_state.session().clear(),
+                    "relogin" => fixture.app_state.session().set(
+                        "replacement".into(),
+                        user("alice"),
+                        "pw".into(),
+                    ),
+                    _ => crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap(),
+                }
+                drop(lifecycle);
+                let result = pending.join().unwrap();
+                assert!(captured.is_ok(), "{command} captures before waiting");
+                assert_eq!(
+                    result.unwrap_err()["kind"],
+                    "authorization",
+                    "{command}: {change}"
+                );
+                *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+            }
         }
     }
 
