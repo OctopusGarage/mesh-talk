@@ -14,10 +14,33 @@ import test from "node:test";
 import { buildAffectedPlan } from "../validation/affected.mjs";
 import {
   assertDraftBuild,
+  assertReleaseBaseline,
   nextDevelopmentVersion,
   validateAutomationPR,
 } from "../release/maintenance.mjs";
 import { rustPackages } from "../pr-platform/rust-packages.mjs";
+
+test("legacy release migration requires the exact reachable baseline and unchanged equivalent source trees", () => {
+  const verified = {
+    configuredBaseline: "335a0010812d5367c153fee5d8e40f59a2c9c090",
+    baselineCommit: "335a0010812d5367c153fee5d8e40f59a2c9c090",
+    legacyCommit: "9b9f91b77214bf432814f65a17f806920ffa1541",
+    baselineTree: "11a8bde065f329c8df6a67d75fa57cca015f49c2",
+    legacyTree: "11a8bde065f329c8df6a67d75fa57cca015f49c2",
+    baselineIsAncestor: true,
+  };
+  assert.doesNotThrow(() => assertReleaseBaseline(verified));
+  for (const change of [
+    { configuredBaseline: "a".repeat(40) },
+    { baselineCommit: null },
+    { legacyCommit: "b".repeat(40) },
+    { baselineTree: "c".repeat(40) },
+    { legacyTree: "d".repeat(40) },
+    { baselineIsAncestor: false },
+  ]) {
+    assert.throws(() => assertReleaseBaseline({ ...verified, ...change }));
+  }
+});
 
 test("post-publication development floor advances without downgrading an existing target", () => {
   assert.equal(nextDevelopmentVersion("0.4.3", "v0.4.3"), "0.4.4");
@@ -198,6 +221,10 @@ test("release coordination uses the whole product, draft-only releases and scope
     readFileSync(new URL("../../release-please-config.json", import.meta.url)),
   );
   assert.equal(config.draft, true);
+  assert.equal(
+    config["last-release-sha"],
+    "335a0010812d5367c153fee5d8e40f59a2c9c090",
+  );
   assert.equal(config["force-tag-creation"], true);
   assert.deepEqual(Object.keys(config.packages), ["."]);
   assert.equal(config.packages["."]["release-type"], "node");
@@ -223,6 +250,14 @@ test("release coordination uses the whole product, draft-only releases and scope
     /node scripts\/release\/maintenance\.mjs next-development/,
   );
   assert.match(workflow, /cancel-in-progress: false/);
+  const guard = workflow.indexOf(
+    "node scripts/release/maintenance.mjs check-baseline",
+  );
+  assert.ok(
+    guard >= 0 &&
+      guard < workflow.indexOf("uses: googleapis/release-please-action@"),
+    "validate migration history before release-please can mutate a PR or release",
+  );
   const publisher = readFileSync(
     new URL("../../.github/workflows/release.yml", import.meta.url),
     "utf8",

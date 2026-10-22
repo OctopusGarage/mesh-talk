@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,6 +13,72 @@ import {
 } from "./version.mjs";
 
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+// Historical migration evidence, not the current product-version authority.
+// v0.4.3 was released before its identical source tree was squash-merged.
+const legacyRelease = Object.freeze({
+  tag: "v0.4.3",
+  commit: "9b9f91b77214bf432814f65a17f806920ffa1541",
+  baseline: "335a0010812d5367c153fee5d8e40f59a2c9c090",
+  tree: "11a8bde065f329c8df6a67d75fa57cca015f49c2",
+});
+
+export function assertReleaseBaseline(evidence) {
+  assert.equal(
+    evidence.configuredBaseline,
+    legacyRelease.baseline,
+    "release history migration floor changed",
+  );
+  assert.equal(
+    evidence.baselineCommit,
+    legacyRelease.baseline,
+    "release history baseline commit is unavailable or changed",
+  );
+  assert.equal(
+    evidence.legacyCommit,
+    legacyRelease.commit,
+    "immutable legacy release tag changed",
+  );
+  assert.equal(
+    evidence.baselineTree,
+    legacyRelease.tree,
+    "release history baseline source tree changed",
+  );
+  assert.equal(
+    evidence.legacyTree,
+    evidence.baselineTree,
+    "legacy release and main baseline source trees differ",
+  );
+  assert.equal(
+    evidence.baselineIsAncestor,
+    true,
+    "release history baseline must be an ancestor of main",
+  );
+}
+
+function checkReleaseBaseline() {
+  const config = JSON.parse(readFileSync("release-please-config.json", "utf8"));
+  const ancestry = spawnSync(
+    "git",
+    ["merge-base", "--is-ancestor", legacyRelease.baseline, "HEAD"],
+    { encoding: "utf8" },
+  );
+  assert.ok(
+    ancestry.status === 0 || ancestry.status === 1,
+    ancestry.stderr || "release history baseline is unavailable",
+  );
+  assertReleaseBaseline({
+    configuredBaseline: config["last-release-sha"],
+    baselineCommit: git(["rev-parse", `${legacyRelease.baseline}^{commit}`]),
+    legacyCommit: git(["rev-parse", `refs/tags/${legacyRelease.tag}^{commit}`]),
+    baselineTree: git(["rev-parse", `${legacyRelease.baseline}^{tree}`]),
+    legacyTree: git(["rev-parse", `refs/tags/${legacyRelease.tag}^{tree}`]),
+    baselineIsAncestor: ancestry.status === 0,
+  });
+  console.log(
+    `Verified ${legacyRelease.tag} equivalent-tree migration baseline ${legacyRelease.baseline}`,
+  );
+}
 
 function parts(version) {
   assert.match(version, versionPattern, "expected a numeric product version");
@@ -220,11 +286,12 @@ function main() {
     git(["rev-parse", "refs/remotes/origin/main"]),
     "release maintenance must check out trusted main",
   );
+  if (mode === "check-baseline") return checkReleaseBaseline();
   if (mode === "sync-pr") return syncPullRequest(repo, args[0]);
   if (mode === "draft-build") return dispatchDraftBuild(repo, args[0], args[1]);
   if (mode === "next-development") return prepareDevelopment(repo, args[0]);
   throw new Error(
-    "usage: maintenance.mjs sync-pr NUMBER | draft-build TAG SHA | next-development TAG",
+    "usage: maintenance.mjs check-baseline | sync-pr NUMBER | draft-build TAG SHA | next-development TAG",
   );
 }
 
