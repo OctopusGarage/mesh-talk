@@ -7930,11 +7930,11 @@ async fn delivery_observation_projection_excludes_incoming_siblings_erased_and_r
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (sender, _) = node(ad.path(), alice, aa, &bp);
-    let (recipient, _) = node(bd.path(), bob, ba, &ap);
+    let (recipient, _) = node(bd.path(), bob, bob_account, &ap);
     let sibling = Announce::new_with_account(
         &DeviceIdentity::generate(),
         &sender.account,
@@ -8077,11 +8077,11 @@ async fn delivery_observation_authenticated_receipt_removes_pending_hint() {
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
     let (sender, _) = node(ad.path(), alice, aa, &bp);
-    let (recipient, _) = node(bd.path(), bob, ba, &ap);
+    let (recipient, _) = node(bd.path(), bob, bob_account, &ap);
     let account = recipient.account_id();
     let id = sender
         .enqueue_to_account(&account, b"receipt overrides scheduling", None)

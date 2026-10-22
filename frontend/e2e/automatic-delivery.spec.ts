@@ -224,6 +224,13 @@ test("delivery details close on navigation and app lock, including a late status
       __mockEmit: (event: string, payload: unknown) => void;
       __deliveryDetailsFixture: { release: () => void };
     };
+    // macOS automatically attempts biometric unlock on the lock screen.
+    // Keep this privacy scenario locked by modelling cancelled authentication.
+    const original = scope.__TAURI_INTERNALS__.invoke;
+    scope.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "unlock_app") throw new Error("Authentication cancelled");
+      return original(command, args);
+    };
     await scope.__TAURI_INTERNALS__.invoke("lock_app", {});
     scope.__mockEmit("app-locked", null);
     scope.__deliveryDetailsFixture.release();

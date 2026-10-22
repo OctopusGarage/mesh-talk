@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { loadContracts } from "../validation/contracts.mjs";
 import { buildAffectedPlan } from "../validation/affected.mjs";
 import { buildFrontendGraph } from "../validation/frontend-graph.mjs";
 
@@ -173,21 +175,7 @@ test("mapped source owners with no executable tests cannot produce a successful 
 });
 
 test("repository grant policy expands through service, IPC, client, host and desktop/MCP consumers", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const files = [
-    "../../crates/mesh-talk-integrations/validation.json",
-    "../../crates/mesh-talk-mcp/validation.json",
-    "../../src-tauri/validation.json",
-  ];
-  const registered = (
-    await Promise.all(
-      files.map(
-        async (file) =>
-          JSON.parse(await readFile(new URL(file, import.meta.url), "utf8"))
-            .contracts,
-      ),
-    )
-  ).flat();
+  const registered = await loadContracts(fileURLToPath(new URL("../../", import.meta.url)));
   const plan = buildAffectedPlan(
     ["crates/mesh-talk-integrations/src/policy.rs"],
     { contracts: registered },

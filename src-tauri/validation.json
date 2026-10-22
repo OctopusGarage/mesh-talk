@@ -10,7 +10,11 @@
         {
           "package": "mesh-talk",
           "filters": [
-            "owner_commands::tests::registered_search"
+            "owner_commands::tests::registered_search_recent_and_exact_context_shapes",
+            "owner_commands::tests::registered_search_validates_inputs_and_explicit_owner",
+            "owner_commands::tests::registered_search_caps_hits_and_context_serialized_bytes",
+            "owner_commands::tests::registered_search_recent_response_byte_cap_keeps_newest_prefix",
+            "owner_commands::tests::registered_search_rejects_queued_replaced_owner_and_app_lock"
           ]
         }
       ],

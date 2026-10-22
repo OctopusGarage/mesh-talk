@@ -5,6 +5,7 @@ import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { buildAffectedPlan } from "../validation/affected.mjs";
+import { loadContracts } from "../validation/contracts.mjs";
 
 const rootUrl = new URL("../../", import.meta.url);
 const root = fileURLToPath(rootUrl);
@@ -22,9 +23,7 @@ const sourceFiles = execFileSync("git", ["ls-files", "--cached", "--others", "--
 })
   .split("\0")
   .filter(Boolean);
-const contracts = [...packages.values()].flatMap(
-  (path) => JSON.parse(read(`${path}/validation.json`)).contracts,
-);
+const contracts = await loadContracts(root);
 const plan = (path) => buildAffectedPlan([path], { contracts });
 const owners = (path) => plan(path).owners.map(({ id }) => id);
 
@@ -153,6 +152,15 @@ test("delivery observations retain Node consumers, evidence rules and native acc
   const scenarios = JSON.parse(read("crates/mesh-talk-core/validation.json")).prScenarios;
   assert.ok(scenarios.some(({ paths, native }) => native?.includes("host") &&
     paths.includes("crates/mesh-talk-core/src/node/delivery_observation.rs")));
+});
+
+test("desktop search reaches its session and frontend consumers", () => {
+  const selected = plan("src-tauri/src/owner_commands/search.rs");
+  assert.deepEqual(selected.blockers, []);
+  for (const expected of ["desktop-search", "desktop-session", "frontend-chat", "frontend-owner"]) {
+    assert.ok(selected.owners.some(({ id }) => id === expected), expected);
+  }
+  assert.ok(selected.frontend.includes("src/lib/api.test.ts"));
 });
 
 // Source evidence catches accidental empty/fabricated filters without compiling
