@@ -27,6 +27,7 @@ export function requiredBrowserPaths(tier) {
     paths.push(["automatic-delivery.spec.ts", `delivery details preserve keyboard focus and fit ${size}`]);
   }
   paths.push(
+    ["automatic-delivery.spec.ts", "delivery recovery survives its receipt and returns focus safely, then retires on logout"],
     ["automatic-delivery.spec.ts", "delivery details close on navigation and app lock, including a late status response"],
     ["automatic-delivery.spec.ts", "text, sticker and file card stay Awaiting until explicit authoritative mock projection"],
     ["automatic-delivery.spec.ts", "a native picker completed after conversation navigation cannot send to the new conversation"],
