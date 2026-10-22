@@ -78,6 +78,24 @@ an avatar compatibility update to supersede unseen card metadata. Profile-log
 compaction retains the latest unreferenced leaves per author and every referenced
 card parent; superseded parents become eligible after their old children are
 removed.
+The runtime remembers successful public-profile revisions per present peer.
+Failed direct and relay publication remains eligible on the next bounded poll;
+retries reuse the accepted profile events rather than appending duplicate events.
+At most two profile deliveries run concurrently, with untouched peers ahead of
+retries and older attempts ahead of newer ones. Direct delivery and relay
+publication race within the existing bounded control-exchange deadlines, so an
+unresponsive peer cannot indefinitely stop publication to other contacts. These
+futures remain owned by the runtime task and are dropped during retirement.
+Opaque mailbox pages may deliver an avatar before its required signed-card
+parent. The receiver defers that child for the current mailbox operation, fetches
+later pages, and retries it in a subsequent drain. The child is never accepted or
+marked durably seen until its ordinary parent and signature checks succeed.
+Loopback coverage also requires messages in that mailbox and their authenticated
+recipient receipts to converge without a direct TCP route.
+A newer profile or avatar clear is eligible even if the peer never disconnects.
+Peer disappearance removes its cached publication, so reconnects receive the
+current profile again. Relay permissions and recipient pull authorization remain
+owned by their existing delivery policies.
 Trust cards are an additive capability;
 older clients cannot display their new fields. Portable backup records preserve
 signed public cards without converting private observations into public evidence.

@@ -529,6 +529,11 @@ the message delivery WAL; portable recovery snapshots currently omit reactions.
   in a pairwise opaque mailbox before relay sync. The relay sees mailbox IDs,
   pseudonymous outer headers, size buckets, and traffic timing, but cannot
   open event headers, channel controls, DM text, or file contents.
+  Opaque wrapper IDs do not preserve inner causal order. A received event whose
+  parents are missing is deferred for the current mailbox operation, within the
+  existing 4096-ID transient deferral budget. This lets later pages supply its
+  parents; a subsequent drain retries the child through normal admission. The
+  transient deferral does not enter the node-wide seen cache or change wire data.
 
 Tracked DMs are accepted into an encrypted, bounded transaction journal and
 immutable outbox before transport. Retries reuse the original logical message ID,

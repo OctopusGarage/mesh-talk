@@ -362,6 +362,10 @@
             "node::profile::tests::",
             "node::profile_store::tests::",
             "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
+            "node::node::tests::signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp",
+            "node::node::tests::signed_avatar_retries_after_relay_publication_is_reenabled",
+            "node::runtime::tests::profile_republish_targets_fires_on_first_sight_and_on_reconnect",
+            "node::opaque_relay::permission_tests::",
             "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
             "node::trust_card::tests::",
             "node::node::tests::trust_card_propagates_signed_claims_over_loopback",
@@ -389,6 +393,14 @@
           },
           {
             "name": "Signed latest-per-account claims survive restart and backup with bounded storage",
+            "reference": "docs/peer-trust.md"
+          },
+          {
+            "name": "Failed public profile publication and avatar clears retry without duplicate events, reconnects or blocking behind one unresponsive peer",
+            "reference": "docs/peer-trust.md"
+          },
+          {
+            "name": "Large signed avatars converge across child-first opaque pages while same-mailbox messages and authenticated receipts remain deliverable",
             "reference": "docs/peer-trust.md"
           }
         ]
