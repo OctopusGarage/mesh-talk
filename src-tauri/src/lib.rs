@@ -337,6 +337,7 @@ pub fn run_tauri_configured(
                 commands::register,
                 commands::rename_account,
                 commands::auto_login,
+                commands::retry_saved_session,
                 crate::app_lock::lock_app,
                 crate::app_lock::lock_status,
                 crate::app_lock::unlock_app,

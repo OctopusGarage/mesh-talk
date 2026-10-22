@@ -5,12 +5,10 @@ test("owner can dissolve a channel and keep its history read-only", async ({
   page,
 }) => {
   await page.goto("/");
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill("tester");
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await waitForChatShell(page);
   await page.getByTestId("conversation-row-chan_team_dddd4444").click();
   await page.getByTestId("members-trigger").click();

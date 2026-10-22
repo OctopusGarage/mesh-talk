@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 
@@ -78,3 +79,160 @@ test("a failed stay-signed-in change keeps its saved value", async ({
   await stay.uncheck();
   await expect(stay).not.toBeChecked();
 });
+
+test("an empty password is clear and its visibility can be toggled", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const password = page.getByTestId("login-password");
+  await expect(password).toHaveValue("");
+  await expect(password).toHaveAttribute(
+    "placeholder",
+    "Enter your account password",
+  );
+  await password.fill("a visible password");
+  await page
+    .getByRole("button", { name: "Show password", exact: true })
+    .click();
+  await expect(password).toHaveAttribute("type", "text");
+  await page
+    .getByRole("button", { name: "Hide password", exact: true })
+    .click();
+  await expect(password).toHaveAttribute("type", "password");
+  await page.getByTestId("login-tab-register").click();
+  await expect(password).toHaveValue("");
+  await expect(page.getByTestId("login-stay-signed-in")).toBeVisible();
+});
+
+test("created accounts retry entry without registering or typing their password twice", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const scope = window as unknown as {
+      __mockFailNext: (cmd: string) => void;
+      __registrations: number;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args?: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    const invoke = scope.__TAURI_INTERNALS__.invoke.bind(
+      scope.__TAURI_INTERNALS__,
+    );
+    scope.__registrations = 0;
+    scope.__TAURI_INTERNALS__.invoke = (cmd, args) => {
+      if (cmd === "register") scope.__registrations++;
+      return invoke(cmd, args);
+    };
+    scope.__mockFailNext("login");
+  });
+  await page.getByTestId("login-tab-register").click();
+  await page.getByTestId("login-username").fill("new-account");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
+  await expect(page.getByRole("status")).toContainText(
+    "Your account was created",
+  );
+  await expect(page.getByTestId("login-password")).toHaveValue("password123");
+  await page.getByTestId("login-submit").click();
+  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await expect(page.getByTestId("account-protection")).toContainText(
+    "saved securely",
+  );
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { __registrations: number }).__registrations,
+    ),
+  ).toBe(1);
+  await page.getByRole("button", { name: "I’ll do this later" }).click();
+  await expect(page.getByTestId("account-protection")).toBeHidden();
+});
+
+test("failed credential saving does not block entry and can be retried", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const internals = (
+      window as unknown as {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            cmd: string,
+            args?: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    const invoke = internals.invoke.bind(internals);
+    internals.invoke = async (cmd, args) => {
+      const result = await invoke(cmd, args);
+      if (cmd === "login")
+        return { ...(result as object), saved_session: "failed" };
+      return result;
+    };
+  });
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
+  await expect(page.getByTestId("chat-shell")).toBeVisible();
+  await expect(page.getByTestId("account-protection")).toContainText(
+    "Your login could not be saved",
+  );
+  await page.getByRole("button", { name: "Retry saving login" }).click();
+  await expect(page.getByTestId("account-protection")).toBeHidden();
+});
+
+test("new accounts can open the existing encrypted backup flow or defer it", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("login-tab-register").click();
+  await page.getByTestId("login-username").fill("backup-user");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
+  const notice = page.getByTestId("account-protection");
+  await expect(notice).toContainText("recovery key separately");
+  await notice.getByRole("button", { name: "Create encrypted backup" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "I’ll do this later" }).click();
+  await expect(notice).toBeHidden();
+});
+
+for (const theme of ["light", "dark"]) {
+  test(`password form contrast remains readable in ${theme} mode`, async ({
+    page,
+  }) => {
+    await page.addInitScript(
+      (value) => localStorage.setItem("mesh-talk-theme", value),
+      theme,
+    );
+    await page.goto("/");
+    for (const tab of ["signin", "register"]) {
+      await page.getByTestId(`login-tab-${tab}`).click();
+      const result = await new AxeBuilder({ page })
+        .include('[data-testid="login-form"]')
+        .withRules(["color-contrast"])
+        .analyze();
+      expect(result.violations).toEqual([]);
+    }
+  });
+}
+
+for (const language of ["en", "es", "ja", "zh-Hans", "zh-Hant", "yue"]) {
+  test(`creation action remains visible in a short ${language} window`, async ({
+    page,
+  }) => {
+    await page.addInitScript(
+      (value) => localStorage.setItem("mesh-talk-lang", value),
+      language,
+    );
+    await page.setViewportSize({ width: 760, height: 520 });
+    await page.goto("/");
+    await page.getByTestId("login-tab-register").click();
+    await expect(page.getByTestId("login-submit")).toBeInViewport();
+  });
+}

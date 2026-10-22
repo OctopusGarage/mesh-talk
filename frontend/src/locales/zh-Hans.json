@@ -107,8 +107,8 @@
     "register": "注册",
     "username": "用户名",
     "password": "密码",
-    "usernamePlaceholder": "alice",
-    "passwordPlaceholder": "••••••••",
+    "usernamePlaceholder": "输入用户名",
+    "passwordPlaceholder": "输入账户密码",
     "passwordHint": "至少 8 个字符",
     "createAccount": "创建账户",
     "accountCreated": "账户已创建——现在可以登录了。",
@@ -117,7 +117,27 @@
     "resuming": "正在恢复你的会话…",
     "footer": "你的密钥永远不会离开本设备。对端通过局域网发现。",
     "signingIn": "正在登录…",
-    "creatingIdentity": "正在创建身份…"
+    "creatingIdentity": "正在创建身份…",
+    "newPasswordPlaceholder": "设置账户密码",
+    "passwordGuidance": "至少 8 个字符。继续前可点击眼睛图标检查密码。",
+    "signInGuidance": "输入创建此本地账户时设置的密码。",
+    "showPassword": "显示密码",
+    "hidePassword": "隐藏密码",
+    "createAndEnter": "创建账户并进入",
+    "createdEntryFailed": "账户已创建，但尚未完成登录。请在下方重试登录，无需再次创建账户。",
+    "stayMacDescription": "将登录凭据安全保存到 macOS 钥匙串，下次在这台 Mac 上自动登录。退出登录会移除已保存的凭据。",
+    "stayDescription": "将登录凭据安全保存到此设备的凭据存储中，下次自动登录。退出登录会移除已保存的凭据。",
+    "protectTitle": "保护你的账户",
+    "saveFailed": "未能保存登录凭据。你现在可以使用应用，但下次仍需输入账户密码。",
+    "savedOnDevice": "登录凭据已安全保存在此设备上。下次打开应用时无需重新输入账户密码。",
+    "notSaved": "未保存登录凭据。请妥善保管账户密码，下次仍需使用。",
+    "saveUnknown": "请妥善保管账户密码。目前无法确认登录凭据是否已保存。",
+    "backupGuidance": "保持登录仅方便你使用此设备。若要在其他设备上恢复账户，请创建加密备份，并单独保管恢复密钥。也可稍后在“设置 → 历史与备份”中操作。",
+    "retrySaveFailed": "仍未能保存登录凭据。请妥善保管账户密码，稍后重试。",
+    "retrySave": "重试保存登录凭据",
+    "savingCredential": "正在保存…",
+    "protectLater": "稍后处理",
+    "newUsernamePlaceholder": "设置本地用户名"
   },
   "sidebar": {
     "hideChannel": "隐藏频道",
@@ -917,7 +937,7 @@
     "messagesFiles": "消息与文件",
     "advanced": "高级设置",
     "identityStep": "创建保存在此设备上的身份。",
-    "discoveryStep": "登录后，查找同一本地网络上的其他人。"
+    "discoveryStep": "进入应用，查找同一本地网络上的其他人。"
   },
   "packs": {
     "libraries": "资源库",

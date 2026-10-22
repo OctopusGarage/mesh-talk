@@ -107,8 +107,8 @@
     "register": "Register",
     "username": "Username",
     "password": "Password",
-    "usernamePlaceholder": "alice",
-    "passwordPlaceholder": "••••••••",
+    "usernamePlaceholder": "Enter your username",
+    "passwordPlaceholder": "Enter your account password",
     "passwordHint": "at least 8 characters",
     "createAccount": "Create account",
     "accountCreated": "Account created — you can sign in now.",
@@ -117,7 +117,27 @@
     "resuming": "Resuming your session…",
     "footer": "Your keys never leave this device. Peers are discovered on your LAN.",
     "signingIn": "Signing in…",
-    "creatingIdentity": "Creating identity…"
+    "creatingIdentity": "Creating identity…",
+    "newPasswordPlaceholder": "Choose an account password",
+    "passwordGuidance": "Use at least 8 characters. Check your password with the eye button before continuing.",
+    "signInGuidance": "Enter the password you chose for this local account.",
+    "showPassword": "Show password",
+    "hidePassword": "Hide password",
+    "createAndEnter": "Create account and enter",
+    "createdEntryFailed": "Your account was created, but sign-in did not finish. Try signing in below; you do not need to create it again.",
+    "stayMacDescription": "Save your login securely in macOS Keychain to sign in automatically on this Mac. Signing out removes the saved login.",
+    "stayDescription": "Save your login in this device’s credential store to sign in automatically. Signing out removes the saved login.",
+    "protectTitle": "Keep access to your account",
+    "saveFailed": "Your login could not be saved. You can use the app now, but will need your account password next time.",
+    "savedOnDevice": "Your login was saved securely on this device. You can reopen the app without re-entering your account password.",
+    "notSaved": "Your login is not saved. Keep your account password somewhere safe; you will need it next time.",
+    "saveUnknown": "Keep your account password somewhere safe. Saved-login status could not be confirmed.",
+    "backupGuidance": "Saved login helps on this device only. For recovery on another device, create an encrypted backup and keep its recovery key separately. You can also do this later in Settings → History & backup.",
+    "retrySaveFailed": "Could not save your login. Keep your account password safe and try again.",
+    "retrySave": "Retry saving login",
+    "savingCredential": "Saving login…",
+    "protectLater": "I’ll do this later",
+    "newUsernamePlaceholder": "Choose a local username"
   },
   "sidebar": {
     "hideChannel": "Hide channel",
@@ -917,7 +937,7 @@
     "messagesFiles": "Messages & files",
     "advanced": "Advanced",
     "identityStep": "Create an identity that stays on this device.",
-    "discoveryStep": "Sign in, then find people on the same local network."
+    "discoveryStep": "Enter the app and find people on the same local network."
   },
   "packs": {
     "libraries": "Libraries",

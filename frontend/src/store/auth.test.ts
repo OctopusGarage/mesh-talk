@@ -8,6 +8,9 @@ import { useAuth } from "./auth";
 beforeEach(() => {
   invoke.mockReset();
   useAuth.setState({
+    createdUsername: null,
+    newAccount: false,
+    savedSession: null,
     user: null,
     generation: 0,
     operation: 0,
@@ -239,4 +242,90 @@ describe("auth store", () => {
     expect(useAuth.getState().user).toBeNull();
     expect(useAuth.getState().loggingOut).toBe(false);
   });
+});
+
+it("creates an account and enters through login without another password entry", async () => {
+  const user = { id: "new", username: "alice", display_name: "Alice" };
+  invoke.mockResolvedValueOnce({ success: true, user });
+  invoke.mockResolvedValueOnce({ success: true, user, saved_session: "saved" });
+  expect(await useAuth.getState().register("alice", " raw password ")).toBe(
+    true,
+  );
+  expect(invoke.mock.calls.map(([cmd]) => cmd)).toEqual(["register", "login"]);
+  expect(invoke).toHaveBeenLastCalledWith("login", {
+    username: "alice",
+    password: " raw password ",
+  });
+  expect(useAuth.getState()).toMatchObject({
+    user,
+    newAccount: true,
+    savedSession: "saved",
+    loading: false,
+  });
+});
+
+it("preserves account creation when entering fails and lets login retry independently", async () => {
+  invoke.mockResolvedValueOnce({ success: true });
+  invoke.mockRejectedValueOnce("Startup unavailable");
+  expect(await useAuth.getState().register("alice", "password123")).toBe(false);
+  expect(useAuth.getState()).toMatchObject({
+    user: null,
+    createdUsername: "alice",
+    error: "Startup unavailable",
+    loading: false,
+  });
+  invoke.mockResolvedValueOnce({
+    success: true,
+    user: { id: "new", username: "alice", display_name: "Alice" },
+    saved_session: "failed",
+  });
+  expect(await useAuth.getState().login("alice", "password123")).toBe(true);
+  expect(useAuth.getState()).toMatchObject({
+    newAccount: true,
+    savedSession: "failed",
+    createdUsername: null,
+  });
+  expect(invoke.mock.calls.filter(([cmd]) => cmd === "register")).toHaveLength(
+    1,
+  );
+});
+
+it("does not begin login if registration finishes after logout", async () => {
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementation((cmd: string) =>
+    cmd === "register"
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve(),
+  );
+  const pending = useAuth.getState().register("alice", "password123");
+  await useAuth.getState().logout();
+  finish({ success: true });
+  expect(await pending).toBe(false);
+  expect(invoke.mock.calls.some(([cmd]) => cmd === "login")).toBe(false);
+});
+
+it("a saved-login retry cannot update a replacement session", async () => {
+  let finish!: (status: unknown) => void;
+  useAuth.setState({
+    user: { id: "u1", username: "alice", display_name: "Alice" },
+    savedSession: "failed",
+  });
+  invoke.mockImplementation((cmd: string) =>
+    cmd === "retry_saved_session"
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve(),
+  );
+  const pending = useAuth.getState().retrySavedSession();
+  await useAuth.getState().logout();
+  useAuth.setState({
+    user: { id: "u1", username: "alice", display_name: "new session" },
+    savedSession: "disabled",
+  });
+  finish("saved");
+  expect(await pending).toBe(false);
+  expect(useAuth.getState().savedSession).toBe("disabled");
 });

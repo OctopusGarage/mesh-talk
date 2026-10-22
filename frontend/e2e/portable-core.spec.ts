@@ -192,17 +192,8 @@ test("portable registration sign in and sign out", async ({ page }) => {
   await page.getByTestId("login-username").fill("tester");
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("login-tab-signin")).toHaveAttribute(
-    "data-state",
-    "active",
-  );
-  await expect(
-    page.getByText("Account created — you can sign in now.", { exact: true }),
-  ).toBeVisible();
-  await expect(page.getByTestId("login-password")).toHaveValue("");
-  await expect(page.getByTestId("chat-shell")).toHaveCount(0);
-  await page.getByTestId("login-password").fill("password123");
-  await page.getByTestId("login-submit").click();
+  await expect(page.getByTestId("login-form")).toBeHidden();
+  await expect(page.getByTestId("account-protection")).toBeVisible();
   await waitForChatShell(page);
   await expect(page.getByTestId("sidebar-own-name")).toHaveText("tester");
   await page.getByTestId("sidebar-overflow").click();

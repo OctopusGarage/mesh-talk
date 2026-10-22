@@ -167,6 +167,11 @@ test("session capability retains executable generation and retirement obligation
       "runtime_admission::integration_lease_tests::stalled_producer_allows_observation_but_prevents_runtime_retirement",
       "src-tauri/src/runtime_admission.rs",
     ],
+    [
+      "Saved login requires both credential and resume metadata writes; retry uses the raw native runtime secret under current unlocked session authority",
+      "commands::tests::registered_login_reports_unsaved_when_resume_metadata_cannot_be_written",
+      "src-tauri/src/commands.rs",
+    ],
   ];
   assert.deepEqual(
     owner("desktop-session").capability.invariants.map(({ name }) => name),

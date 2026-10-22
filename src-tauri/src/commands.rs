@@ -168,8 +168,18 @@ impl From<User> for UserInfo {
     }
 }
 
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedSessionStatus {
+    Saved,
+    Failed,
+    Disabled,
+}
+
 #[derive(serde::Serialize)]
 pub struct LoginResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_session: Option<SavedSessionStatus>,
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
@@ -203,7 +213,7 @@ pub async fn login<R: tauri::Runtime>(
     settings_state: tauri::State<'_, crate::settings::SettingsState>,
 ) -> Result<LoginResult, CommandError> {
     let outcome = login_impl(username, password.clone(), app_state.inner()).await?;
-    let result = outcome.result;
+    let mut result = outcome.result;
 
     if result.success {
         app_state
@@ -222,14 +232,14 @@ pub async fn login<R: tauri::Runtime>(
             // "Stay signed in": persist the RAW password (the one the node keystore needs)
             // to the OS keychain so the next launch can auto-unlock; otherwise forget any
             // previously-saved secret. Keyed by the trimmed username the user typed.
-            remember_login(
+            result.saved_session = Some(remember_login(
                 &app_handle,
                 app_state.inner(),
                 settings_state.inner(),
                 &outcome.user,
                 &outcome.lease,
                 &password,
-            )?;
+            )?);
             spawn_node_runtime(
                 app_handle.clone(),
                 outcome.lease,
@@ -356,18 +366,77 @@ fn remember_login<R: tauri::Runtime>(
     user: &User,
     lease: &crate::state::SessionLease,
     raw_password: &str,
-) -> CommandResult<()> {
+) -> CommandResult<SavedSessionStatus> {
     app.session()
         .matching(lease, |_| {
-            if settings.get().stay_signed_in {
-                crate::session_store::save(&user.name, raw_password);
-                crate::settings::record_last_user(handle, settings, Some(user.name.clone()));
-            } else {
-                crate::session_store::clear(&user.name);
-                crate::settings::record_last_user(handle, settings, None);
-            }
+            persist_saved_login(handle, settings, user, raw_password)
         })
         .map_err(CommandError::Authentication)
+}
+
+fn persist_saved_login<R: tauri::Runtime>(
+    handle: &tauri::AppHandle<R>,
+    settings: &crate::settings::SettingsState,
+    user: &User,
+    raw_password: &str,
+) -> SavedSessionStatus {
+    if settings.get().stay_signed_in {
+        if crate::session_store::save(&user.name, raw_password)
+            && crate::settings::record_last_user(handle, settings, Some(user.name.clone()))
+        {
+            SavedSessionStatus::Saved
+        } else {
+            // Never advertise an older or absent credential as a saved login.
+            crate::session_store::clear(&user.name);
+            crate::settings::record_last_user(handle, settings, None);
+            SavedSessionStatus::Failed
+        }
+    } else {
+        crate::session_store::clear(&user.name);
+        crate::settings::record_last_user(handle, settings, None);
+        SavedSessionStatus::Disabled
+    }
+}
+
+/// Retry only from the unlocked, exact current session. The native runtime owns
+/// the raw keystore password; no secret is returned to or retained by the UI.
+#[tauri::command]
+pub async fn retry_saved_session<R: tauri::Runtime>(
+    owner: String,
+    app_handle: tauri::AppHandle<R>,
+    app_state: tauri::State<'_, AppState>,
+    node_state: tauri::State<'_, crate::chat_commands::NodeState>,
+    settings_state: tauri::State<'_, crate::settings::SettingsState>,
+) -> CommandResult<SavedSessionStatus> {
+    let lease = app_state
+        .session()
+        .capture()
+        .map_err(CommandError::Authorization)?;
+    if lease.owner() != owner || app_state.app_lock().is_locked() {
+        return Err(CommandError::Authorization("session unavailable".into()));
+    }
+    #[cfg(test)]
+    if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
+        let _ = entered.send("saved-retry-entry");
+    }
+    let _auth = app_state.auth_operation.lock().await;
+    let runtime = node_state.0.read().await;
+    app_state
+        .session()
+        .matching(&lease, |info| {
+            if app_state.app_lock().is_locked() {
+                return Err(CommandError::Authorization("app is locked".into()));
+            }
+            node_state.check_installation(&lease)?;
+            let runtime = runtime.as_ref().ok_or_else(CommandError::not_started)?;
+            Ok(persist_saved_login(
+                &app_handle,
+                &settings_state,
+                &info.user,
+                runtime.restart_password(),
+            ))
+        })
+        .map_err(CommandError::Authorization)?
 }
 
 /// Called inside successful logout's auth-operation guard.
@@ -431,6 +500,7 @@ async fn login_impl_guarded(
                 user: user.clone(),
                 lease,
                 result: LoginResult {
+                    saved_session: None,
                     success: true,
                     token: Some(token),
                     user: Some(UserInfo::from(user)),
@@ -754,11 +824,14 @@ mod tests {
             settings.set(value);
             let app = tauri::test::mock_builder()
                 .manage(app_state.clone())
+                .manage(app_state.app_lock().clone())
                 .manage(node.clone())
                 .manage(settings.clone())
                 .invoke_handler(tauri::generate_handler![
                     login,
                     auto_login,
+                    retry_saved_session,
+                    crate::app_lock::lock_app,
                     adopt_linked_account,
                     rename_account,
                     logout,
@@ -1135,6 +1208,111 @@ mod tests {
     }
 
     #[test]
+    fn registered_login_reports_unsaved_when_resume_metadata_cannot_be_written() {
+        let fixture = AuthFixture::new("save-metadata-failure");
+        let path = fixture.root.path().join("settings.json");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let result = invoke_auth(
+            &fixture.webview,
+            "login",
+            serde_json::json!({"username": fixture.alice, "password": " password-a "}),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["saved_session"], "failed");
+        assert!(fixture.settings.get().last_user.is_none());
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+    }
+
+    #[test]
+    fn registered_queued_saved_session_retry_cannot_save_after_same_account_relogin() {
+        let fixture = AuthFixture::new("queued-saved-retry");
+        let owner = fixture
+            .app_state
+            .session()
+            .capture()
+            .unwrap()
+            .owner()
+            .to_owned();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+        let auth = fixture.app_state.auth_operation.blocking_lock();
+        let webview = fixture.webview.clone();
+        let retry = std::thread::spawn(move || {
+            invoke_auth(
+                &webview,
+                "retry_saved_session",
+                serde_json::json!({"owner": owner}),
+            )
+        });
+        AuthFixture::wait_phase(&entered_rx, "saved-retry-entry");
+        logout_impl(&fixture.app_state).unwrap();
+        fixture
+            .app_state
+            .auth_service()
+            .login_session(fixture.alice.clone(), "password-a".into())
+            .unwrap();
+        crate::session_store::clear(&fixture.alice);
+        drop(auth);
+        assert!(retry.join().unwrap().is_err());
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+    }
+
+    #[test]
+    fn registered_saved_session_retry_preserves_raw_secret_and_checks_owner_and_preference() {
+        let fixture = AuthFixture::new("saved-retry");
+        let owner = fixture
+            .app_state
+            .session()
+            .capture()
+            .unwrap()
+            .owner()
+            .to_owned();
+        crate::session_store::clear(&fixture.alice);
+        assert!(
+            invoke_auth(
+                &fixture.webview,
+                "retry_saved_session",
+                serde_json::json!({"owner": "wrong"})
+            )
+            .is_err()
+        );
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+        let result = invoke_auth(
+            &fixture.webview,
+            "retry_saved_session",
+            serde_json::json!({"owner": owner}),
+        )
+        .unwrap();
+        assert_eq!(result, "saved");
+        assert_eq!(
+            crate::session_store::load(&fixture.alice).as_deref(),
+            Some(" password-a ")
+        );
+        let mut settings = fixture.settings.get();
+        settings.stay_signed_in = false;
+        fixture.settings.set(settings);
+        let result = invoke_auth(
+            &fixture.webview,
+            "retry_saved_session",
+            serde_json::json!({"owner": owner}),
+        )
+        .unwrap();
+        assert_eq!(result, "disabled");
+        assert!(crate::session_store::load(&fixture.alice).is_none());
+        invoke_auth(&fixture.webview, "lock_app", serde_json::json!({})).unwrap();
+        assert!(
+            invoke_auth(
+                &fixture.webview,
+                "retry_saved_session",
+                serde_json::json!({"owner": owner})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn registered_login_and_auto_login_publish_actual_owner_and_preserve_raw_runtime_password() {
         let fixture = AuthFixture::new("login");
         let old_device = fixture
@@ -1152,6 +1330,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["success"], true);
+        assert_eq!(result["saved_session"], "saved");
         assert_eq!(result["user"]["username"], fixture.alice);
         let wait_installed = || {
             tauri::async_runtime::block_on(async {

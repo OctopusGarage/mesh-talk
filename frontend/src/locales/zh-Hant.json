@@ -107,8 +107,8 @@
     "register": "註冊",
     "username": "使用者名稱",
     "password": "密碼",
-    "usernamePlaceholder": "alice",
-    "passwordPlaceholder": "••••••••",
+    "usernamePlaceholder": "輸入使用者名稱",
+    "passwordPlaceholder": "輸入帳戶密碼",
     "passwordHint": "至少 8 個字元",
     "createAccount": "建立帳號",
     "accountCreated": "帳號已建立——現在可以登入了。",
@@ -117,7 +117,27 @@
     "resuming": "正在恢復你的工作階段…",
     "footer": "你的金鑰永遠不會離開本裝置。對方會透過區域網路探索。",
     "signingIn": "正在登入…",
-    "creatingIdentity": "正在建立身分…"
+    "creatingIdentity": "正在建立身分…",
+    "newPasswordPlaceholder": "設定帳戶密碼",
+    "passwordGuidance": "至少 8 個字元。繼續前可點選眼睛圖示檢查密碼。",
+    "signInGuidance": "輸入建立此本機帳戶時設定的密碼。",
+    "showPassword": "顯示密碼",
+    "hidePassword": "隱藏密碼",
+    "createAndEnter": "建立帳戶並進入",
+    "createdEntryFailed": "帳戶已建立，但尚未完成登入。請在下方重試登入，無須再次建立帳戶。",
+    "stayMacDescription": "將登入憑證安全儲存至 macOS 鑰匙圈，下次在這台 Mac 上自動登入。登出會移除已儲存的憑證。",
+    "stayDescription": "將登入憑證安全儲存至此裝置的憑證儲存區，下次自動登入。登出會移除已儲存的憑證。",
+    "protectTitle": "保護你的帳戶",
+    "saveFailed": "未能儲存登入憑證。你現在可以使用應用程式，但下次仍需輸入帳戶密碼。",
+    "savedOnDevice": "登入憑證已安全儲存在此裝置上。下次開啟時無須重新輸入帳戶密碼。",
+    "notSaved": "未儲存登入憑證。請妥善保管帳戶密碼，下次仍需使用。",
+    "saveUnknown": "請妥善保管帳戶密碼。目前無法確認登入憑證是否已儲存。",
+    "backupGuidance": "保持登入僅方便你使用此裝置。若要在其他裝置上復原帳戶，請建立加密備份，並另外保管復原金鑰。也可稍後在「設定 → 歷史與備份」中操作。",
+    "retrySaveFailed": "仍未能儲存登入憑證。請妥善保管帳戶密碼，稍後重試。",
+    "retrySave": "重試儲存登入憑證",
+    "savingCredential": "正在儲存…",
+    "protectLater": "稍後處理",
+    "newUsernamePlaceholder": "設定本機使用者名稱"
   },
   "sidebar": {
     "hideChannel": "隱藏頻道",
@@ -917,7 +937,7 @@
     "messagesFiles": "訊息與檔案",
     "advanced": "進階設定",
     "identityStep": "建立保存在此裝置上的身分。",
-    "discoveryStep": "登入後，尋找同一本機網路上的其他人。"
+    "discoveryStep": "進入應用程式，尋找同一本機網路上的其他人。"
   },
   "packs": {
     "libraries": "資源庫",

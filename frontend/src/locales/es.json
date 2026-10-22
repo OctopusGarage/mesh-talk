@@ -107,8 +107,8 @@
     "register": "Registrarse",
     "username": "Nombre de usuario",
     "password": "Contraseña",
-    "usernamePlaceholder": "alice",
-    "passwordPlaceholder": "••••••••",
+    "usernamePlaceholder": "Introduce tu nombre de usuario",
+    "passwordPlaceholder": "Introduce la contraseña de tu cuenta",
     "passwordHint": "al menos 8 caracteres",
     "createAccount": "Crear cuenta",
     "accountCreated": "Cuenta creada: ya puedes iniciar sesión.",
@@ -117,7 +117,27 @@
     "resuming": "Reanudando tu sesión…",
     "footer": "Tus claves nunca salen de este dispositivo. Los contactos se descubren en tu red local.",
     "signingIn": "Iniciando sesión…",
-    "creatingIdentity": "Creando identidad…"
+    "creatingIdentity": "Creando identidad…",
+    "newPasswordPlaceholder": "Elige una contraseña para tu cuenta",
+    "passwordGuidance": "Usa al menos 8 caracteres. Comprueba la contraseña con el botón del ojo antes de continuar.",
+    "signInGuidance": "Introduce la contraseña que elegiste para esta cuenta local.",
+    "showPassword": "Mostrar contraseña",
+    "hidePassword": "Ocultar contraseña",
+    "createAndEnter": "Crear cuenta y entrar",
+    "createdEntryFailed": "Tu cuenta se ha creado, pero el inicio de sesión no ha terminado. Inténtalo de nuevo abajo; no necesitas crear otra cuenta.",
+    "stayMacDescription": "Guarda tus credenciales en el Llavero de macOS para iniciar sesión automáticamente en este Mac. Al cerrar sesión se eliminan las credenciales guardadas.",
+    "stayDescription": "Guarda tus credenciales en el almacén seguro de este dispositivo para iniciar sesión automáticamente. Al cerrar sesión se eliminan las credenciales guardadas.",
+    "protectTitle": "Conserva el acceso a tu cuenta",
+    "saveFailed": "No se pudieron guardar tus credenciales. Puedes usar la app ahora, pero necesitarás la contraseña la próxima vez.",
+    "savedOnDevice": "Tus credenciales se han guardado de forma segura en este dispositivo. Podrás volver a abrir la app sin introducir la contraseña.",
+    "notSaved": "Tus credenciales no están guardadas. Conserva la contraseña en un lugar seguro; la necesitarás la próxima vez.",
+    "saveUnknown": "Conserva la contraseña en un lugar seguro. No se pudo confirmar si las credenciales están guardadas.",
+    "backupGuidance": "El inicio de sesión guardado solo sirve en este dispositivo. Para recuperar la cuenta en otro dispositivo, crea una copia cifrada y guarda la clave de recuperación por separado. También puedes hacerlo más tarde en Ajustes → Historial y copias de seguridad.",
+    "retrySaveFailed": "No se pudieron guardar tus credenciales. Conserva la contraseña e inténtalo de nuevo.",
+    "retrySave": "Reintentar guardar credenciales",
+    "savingCredential": "Guardando credenciales…",
+    "protectLater": "Lo haré más tarde",
+    "newUsernamePlaceholder": "Elige un nombre de usuario local"
   },
   "sidebar": {
     "hideChannel": "Ocultar canal",
@@ -917,7 +937,7 @@
     "messagesFiles": "Mensajes y archivos",
     "advanced": "Avanzado",
     "identityStep": "Crea una identidad que permanece en este dispositivo.",
-    "discoveryStep": "Inicia sesión y encuentra personas en la misma red local."
+    "discoveryStep": "Entra en la app y encuentra personas en la misma red local."
   },
   "packs": {
     "libraries": "Bibliotecas",

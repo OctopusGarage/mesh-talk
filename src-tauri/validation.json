@@ -70,7 +70,8 @@
             "runtime_bootstrap::tests::",
             "commands::tests::",
             "owner_commands::tests::",
-            "chat_commands::state::tests::"
+            "chat_commands::state::tests::",
+            "session_store::macos::tests::"
           ]
         }
       ],
@@ -117,6 +118,10 @@
           {
             "name": "Stalled network producers allow observations and unrelated sends while blocking runtime retirement",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Saved login requires both credential and resume metadata writes; retry uses the raw native runtime secret under current unlocked session authority",
+            "reference": "docs/help/topics/first-run.md#keep-access-to-your-account"
           }
         ]
       }
