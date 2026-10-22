@@ -48,6 +48,10 @@
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
         "invariants": [
           {
+            "name": "Signed-card acceptance releases the UI before admitted network fanout completes",
+            "reference": "docs/peer-trust.md"
+          },
+          {
             "name": "Nickname publication does not block observations behind stalled network work",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },

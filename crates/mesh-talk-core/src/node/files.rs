@@ -651,6 +651,35 @@ impl Node {
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<crate::eventlog::EventId, NodeError> {
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        let mut target_account = Some(target_account);
+        let mut accepted = None;
+        authorize(&mut || {
+            let target = target_account
+                .take()
+                .ok_or_else(|| NodeError::Authorization("accept is single-use".into()))?;
+            accepted = Some(self.accept_staged_manifest_authorized(
+                peers,
+                host,
+                target,
+                manifest,
+                expires_at_ms,
+            )?);
+            Ok(())
+        })?;
+        accepted.ok_or_else(|| {
+            NodeError::Authorization("authorization did not execute acceptance".into())
+        })
+    }
+
+    fn accept_staged_manifest_authorized(
+        &self,
+        peers: &[crate::discovery::PeerRecord],
+        host: ConversationId,
+        target_account: Option<String>,
+        manifest: &FileManifestV3,
+        expires_at_ms: Option<u64>,
+    ) -> Result<crate::eventlog::EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
         use super::delivery_store::{DeliveryDestination, OutgoingDelivery};
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut store).map_err(NodeError::Log)?;
@@ -734,7 +763,7 @@ impl Node {
             )
         }
         .map_err(NodeError::Log)?;
-        if self.accept_outgoing_transaction(&mut store, transaction, authorize)? {
+        if self.commit_outgoing_transaction(&mut store, transaction)? {
             let mut book = self.files.lock().expect("files lock not poisoned");
             book.mark_emitted(id);
             book.record_event(

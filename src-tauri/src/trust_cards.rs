@@ -176,19 +176,39 @@ pub async fn publish_trust_card(
     bio: String,
     created_at_ms: Option<u64>,
 ) -> Result<(), CommandError> {
-    RuntimeAdmission::capture(&app, &state, &owner)?
-        .detached(move |runtime, admission| {
-            Box::pin(async move {
-                runtime
-                    .handle()
-                    .publish_trust_card_if(display_name, bio, created_at_ms, |commit| {
-                        admission.authorize_accept(runtime, commit)
-                    })
-                    .await
-                    .map_err(CommandError::from)
+    let admission = RuntimeAdmission::capture(&app, &state, &owner)?;
+    let (completed, response) = tokio::sync::oneshot::channel();
+    let completed = std::sync::Arc::new(std::sync::Mutex::new(Some(completed)));
+    let fallback = completed.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = admission
+            .detached(move |runtime, admission| {
+                Box::pin(async move {
+                    runtime
+                        .handle()
+                        .publish_trust_card_if(display_name, bio, created_at_ms, |commit| {
+                            admission.authorize_accept(runtime, commit)?;
+                            // A signed, durably committed card is published locally.
+                            // Peer/relay fanout retains admission but not the UI reply.
+                            if let Some(completed) =
+                                completed.lock().expect("publication reply lock").take()
+                            {
+                                let _ = completed.send(Ok(()));
+                            }
+                            Ok(())
+                        })
+                        .await
+                        .map_err(CommandError::from)
+                })
             })
-        })
+            .await;
+        if let Some(completed) = fallback.lock().expect("publication reply lock").take() {
+            let _ = completed.send(result);
+        }
+    });
+    response
         .await
+        .map_err(|_| CommandError::Internal("signed-card publication terminated".into()))?
 }
 
 /// Import signatures as evidence only. Manual verification is a separate command.

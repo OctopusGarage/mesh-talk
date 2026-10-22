@@ -10190,3 +10190,63 @@ async fn channel_acceptance_returns_exact_ids_without_waiting_for_network_fanout
     }
     assert!(node.file_progress(file).is_some());
 }
+
+#[tokio::test]
+async fn send_authorization_never_retains_the_delivery_journal_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (files, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_tx,
+        files,
+        &root.path().join("messages.log"),
+        &root.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("Lock ordering", vec![]).await.unwrap();
+    let authorize = |commit: &mut dyn FnMut() -> Result<(), NodeError>| {
+        assert!(
+            node.delivery.try_lock().is_ok(),
+            "requesting host session authority while holding the delivery journal can deadlock signed-card publication"
+        );
+        commit()
+    };
+    node.enqueue_channel_message_reply_expiring_if(channel, b"channel", None, None, authorize)
+        .unwrap();
+    node.enqueue_to_account_if(&node.account_id(), b"self", None, authorize)
+        .await
+        .unwrap();
+    let path = root.path().join("file.txt");
+    std::fs::write(&path, b"file bytes").unwrap();
+    node.enqueue_file_to_account_progress_expiring_if(
+        &node.account_id(),
+        &path,
+        crate::file::FileKind::File,
+        |_| {},
+        None,
+        authorize,
+    )
+    .await
+    .unwrap();
+    let request = OutgoingMessageRequest {
+        request_id: [33; 32],
+        destination: MessageDestination::Channel(channel),
+        text: b"request".to_vec(),
+        reply_to: None,
+        expires_at_ms: None,
+    };
+    node.enqueue_message_once_if(&request, authorize)
+        .await
+        .unwrap();
+    assert!(
+        node.enqueue_message_once_if(&request, authorize)
+            .await
+            .unwrap()
+            .duplicate
+    );
+}

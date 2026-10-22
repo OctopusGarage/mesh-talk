@@ -427,6 +427,11 @@ responsibility. See [help system maintenance](help-system.md).
 
 `core/node/trust_card.rs` owns signed public card and proof validation; its node
 I/O owner owns authenticated publication and encrypted current-card persistence.
+Send preparation and final WAL mutation enter host authority before acquiring the
+delivery journal; cached request lookups release that journal before requesting
+host authority. Profile publication must never be blocked by the opposite order.
+The desktop replies to signed-card publication after durable local acceptance,
+while a detached admitted task finishes best-effort peer/relay fanout.
 `src-tauri/src/trust_cards.rs` adapts admitted commands and bounded versioned JSON.
 `src-tauri/src/trust.rs` owns private first-observed time, device-change history
 and manual verification. Profile renderers must not derive verification from a

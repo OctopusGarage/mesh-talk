@@ -390,6 +390,10 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   for a runtime while holding the session lock: startup installation and admitted
   producers also need that session. Presence and self-contact identity are still
   read inside the authorized policy transaction, with the runtime retained.
+  Local send preparation and journal acceptance always enter host authority
+  before the delivery journal; no producer retains that journal while requesting
+  session authority. This ordering also covers cached retry lookups and prevents
+  concurrent signed-card/legacy-avatar publication from forming a lock cycle.
   Local text/sticker/file
   enqueue keeps that lifecycle admission through privacy updates and staging.
   Waiting for the privacy gate holds no session guard;

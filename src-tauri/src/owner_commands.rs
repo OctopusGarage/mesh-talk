@@ -1449,6 +1449,67 @@ mod tests {
     }
 
     #[test]
+    fn signed_card_publication_returns_after_local_commit_with_a_stalled_peer() {
+        use mesh_talk_core::identity::{account::Account, device::DeviceIdentity};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fixture = Fixture::new();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let release = std::sync::Arc::new(AtomicBool::new(false));
+        let released = release.clone();
+        let stalled = std::thread::spawn(move || {
+            let mut sockets = Vec::new();
+            while !released.load(Ordering::Acquire) {
+                if let Ok((socket, _)) = listener.accept() {
+                    sockets.push(socket);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        let peer = DeviceIdentity::generate();
+        let account = Account::generate();
+        fixture.announce_peer(mesh_talk_core::discovery::Announce::new_with_account(
+            &peer, &account, "Stalled", port,
+        ));
+        fixture.invoke("owner_enqueue_text",serde_json::json!({"owner":"alice","account":account.account_id(),"text":"grant contact","replyTo":null})).unwrap();
+        let own = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let card = fixture
+            .invoke(
+                "get_trust_card",
+                serde_json::json!({"owner":"alice","accountId":own}),
+            )
+            .unwrap();
+        let webview = fixture.webview.clone();
+        let (completed, result) = std::sync::mpsc::channel();
+        let publishing = std::thread::spawn(move || {
+            completed.send(invoke(&webview,"publish_trust_card",serde_json::json!({"owner":"alice","displayName":"Signed locally","bio":"Public profile","createdAtMs":card["created_at_ms"]}))).unwrap();
+        });
+        let accepted = result.recv_timeout(std::time::Duration::from_secs(1));
+        let responsive = fixture
+            .invoke("owner_node_identity", serde_json::json!({"owner":"alice"}))
+            .is_ok();
+        release.store(true, Ordering::Release);
+        stalled.join().unwrap();
+        publishing.join().unwrap();
+        assert!(
+            accepted.is_ok_and(|value| value.is_ok()),
+            "publishing a locally committed signed card must not wait for a peer handshake"
+        );
+        assert!(
+            responsive,
+            "public-card fanout must preserve node observations"
+        );
+    }
+
+    #[test]
     fn registered_trust_card_commands_round_trip_public_evidence_without_verifying() {
         use mesh_talk_core::{
             identity::account::Account,

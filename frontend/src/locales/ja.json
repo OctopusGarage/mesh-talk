@@ -1025,7 +1025,7 @@
     "signedProfileAvatar": "署名付きプロフィールのアバター",
     "accountIDQRCode": "アカウントIDのQRコード",
     "accountIDCopied": "アカウントIDをコピーしました。",
-    "cardPublished": "カードを公開しました。",
+    "cardPublished": "署名済みカードをこのデバイスに保存しました。",
     "signedCardCopied": "署名付きカードをコピーしました。",
     "introductionReadyToExport": "紹介をエクスポートできます。",
     "creationWitnessReadyToExport": "作成に関する立会記録をエクスポートできます。",

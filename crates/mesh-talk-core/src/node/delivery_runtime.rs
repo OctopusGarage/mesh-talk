@@ -458,24 +458,19 @@ impl Node {
 
     /// Authorize one immutable outgoing journal entry, then attempt local replay.
     /// Once the journal accepts it, replay failure must not become a retryable send.
-    pub(in crate::node) fn accept_outgoing_transaction(
+    pub(in crate::node) fn commit_outgoing_transaction(
         &self,
         store: &mut DeliveryStore,
         transaction: DeliveryTransaction,
-        authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<bool, NodeError> {
-        let mut transaction = Some(transaction);
-        authorize(&mut || {
-            self.log
-                .lock()
-                .expect("log lock")
-                .sync()
-                .map_err(NodeError::Log)?;
-            store
-                .begin(transaction.take().expect("accept is single-use"))
-                .map(|_| ())
-                .map_err(NodeError::Log)
-        })?;
+        // The caller encloses preparation and this WAL append in host authority.
+        // Never acquire host authority while retaining the journal mutex.
+        self.log
+            .lock()
+            .expect("log lock")
+            .sync()
+            .map_err(NodeError::Log)?;
+        store.begin(transaction).map_err(NodeError::Log)?;
         let recovered = self.recover_delivery(store).is_ok();
         self.delivery_notify.notify_one();
         Ok(recovered)

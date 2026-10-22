@@ -240,8 +240,36 @@ impl Node {
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
         request: Option<super::delivery_store::RequestRecord>,
     ) -> Result<EventId, NodeError> {
+        authorize(&mut || {
+            let mut store = self.delivery.lock().expect("delivery lock not poisoned");
+            self.recover_delivery(&mut store).map_err(NodeError::Log)
+        })?;
+        let mut inputs = Some((dests, target, plaintext, logical, request));
+        let mut accepted = None;
+        authorize(&mut || {
+            let (dests, target, plaintext, logical, request) = inputs
+                .take()
+                .ok_or_else(|| NodeError::Authorization("accept is single-use".into()))?;
+            accepted =
+                Some(self.enqueue_encoded_authorized(dests, target, plaintext, logical, request)?);
+            Ok(())
+        })?;
+        accepted.ok_or_else(|| {
+            NodeError::Authorization("authorization did not execute acceptance".into())
+        })
+    }
+
+    // Host authority precedes the delivery journal across preparation and WAL.
+    fn enqueue_encoded_authorized(
+        &self,
+        dests: Vec<PeerRecord>,
+        target: Option<String>,
+        plaintext: Vec<u8>,
+        logical: Option<EventId>,
+        request: Option<super::delivery_store::RequestRecord>,
+    ) -> Result<EventId, NodeError> {
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
-        authorize(&mut || self.recover_delivery(&mut store).map_err(NodeError::Log))?;
+        self.recover_delivery(&mut store).map_err(NodeError::Log)?;
         store
             .check_capacity(dests.len(), plaintext.len() as u64)
             .map_err(NodeError::Log)?;
@@ -344,7 +372,7 @@ impl Node {
             transaction
         };
         // WAL acceptance cannot turn into a failed send inviting duplicates.
-        if !self.accept_outgoing_transaction(&mut store, transaction, authorize)? {
+        if !self.commit_outgoing_transaction(&mut store, transaction)? {
             log::warn!("accepted delivery awaits local recovery");
         }
         self.account_sync_notify.notify_one();

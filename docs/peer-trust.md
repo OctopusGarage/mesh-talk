@@ -38,6 +38,12 @@ public card alongside your private first-observed time and device history.
 Account QR codes identify the account; they do not encode verification approval
 or the entire signed profile.
 
+Publishing finishes once the signed card and its outgoing events are committed
+locally. Peer and post-office fanout continues independently; an unavailable
+contact must not hold the profile dialog busy or block unrelated chat commands.
+Local send commits acquire host session authority before the delivery journal so
+concurrent card/legacy-avatar publication cannot reverse that lock order.
+
 Copy or download the signed JSON to share a machine-verifiable artifact. Import
 checks the version, bounds, signatures and account bindings. A card import never
 marks a contact verified. Introductions and witness receipts can be generated for
