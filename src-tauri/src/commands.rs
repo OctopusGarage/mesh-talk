@@ -661,7 +661,7 @@ pub async fn rename_account(
                 let _ = release.await;
             }
         }
-        let mut guard = node_state.0.write().await;
+        let guard = node_state.0.read().await;
         app_state
             .session()
             .matching(&lease, |info| {
@@ -669,7 +669,7 @@ pub async fn rename_account(
                     return;
                 }
                 if let Some(rt) = guard
-                    .as_mut()
+                    .as_ref()
                     .filter(|rt| rt.host_account_id() == Some(lease.owner()))
                 {
                     rt.set_display_name(&info.user.display_name);
@@ -1391,6 +1391,69 @@ mod tests {
         assert!(
             serialization_retained,
             "aborted caller released startup serialization before retirement completed"
+        );
+    }
+
+    #[test]
+    fn nickname_change_during_a_stalled_send_preserves_node_observations() {
+        let fixture = AuthFixture::new("renamestalled");
+        let admission = crate::runtime_admission::RuntimeAdmission::capture_current(
+            &fixture.app_state,
+            &fixture.node,
+        )
+        .unwrap();
+        let observer = admission.clone();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let producer = tauri::async_runtime::spawn(admission.detached(move |_, _| {
+            Box::pin(async move {
+                entered.send(()).unwrap();
+                blocked.await.unwrap();
+                Ok(())
+            })
+        }));
+        tauri::async_runtime::block_on(started).unwrap();
+        let (phase, phases) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(phase);
+        let webview = fixture.webview.clone();
+        let (finished, result) = std::sync::mpsc::channel();
+        let renaming = std::thread::spawn(move || {
+            let value = invoke_auth(
+                &webview,
+                "rename_account",
+                serde_json::json!({"newDisplayName":"New nickname"}),
+            );
+            finished.send(value).unwrap();
+        });
+        AuthFixture::wait_phase(&phases, "rename-published");
+        let renamed_without_send = result.recv_timeout(std::time::Duration::from_secs(1));
+        let observed = tauri::async_runtime::block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                observer.with_runtime(|runtime| Ok(runtime.user_id().to_owned())),
+            )
+            .await
+        });
+        release.send(()).unwrap();
+        tauri::async_runtime::block_on(producer).unwrap().unwrap();
+        renaming.join().unwrap();
+        assert!(
+            renamed_without_send.is_ok_and(|result| result.is_ok()),
+            "nickname changes must not wait behind an unrelated network producer"
+        );
+        assert!(
+            observed.is_ok_and(|result| result.is_ok()),
+            "a nickname update must not queue an exclusive lifecycle writer ahead of node reads"
+        );
+        assert_eq!(
+            fixture
+                .node
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .display_name(),
+            "New nickname"
         );
     }
 

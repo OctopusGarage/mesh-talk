@@ -65,14 +65,19 @@ export function DeliveryFooter({
     !message.file &&
     !message.pending &&
     !message.failed
-      ? Math.min(message.replicas ?? 0, 2)
+      ? Math.min(message.replicas ?? 0, 2) ||
+        ((message.postOfficeCopies ?? 0) > 0 ? 1 : 0)
       : undefined;
+  const postOfficeOnly =
+    (message.replicas ?? 0) === 0 && (message.postOfficeCopies ?? 0) > 0;
   const custodyLabel =
     custody === undefined
       ? ""
-      : t(
-          `message.custody.${custody === 0 ? "local" : custody === 1 ? "one" : "multiple"}`,
-        );
+      : postOfficeOnly
+        ? t("message.custody.postOffice")
+        : t(
+            `message.custody.${custody === 0 ? "local" : custody === 1 ? "one" : "multiple"}`,
+          );
   const saved =
     isPersonal &&
     message.fromMe &&
@@ -154,13 +159,20 @@ export function DeliveryFooter({
           <span aria-hidden="true">
             {custody === 0 ? "◷" : custody === 1 ? "✓" : "✓✓"}
           </span>
-          {custody === 0 && <span aria-hidden="true">{custodyLabel}</span>}
+          {(custody === 0 || postOfficeOnly) && (
+            <span aria-hidden="true">{custodyLabel}</span>
+          )}
           <span
             id={tooltip}
             role="tooltip"
             className="pointer-events-none absolute bottom-full right-0 z-10 mb-1 hidden w-56 rounded border bg-popover p-2 font-sans text-xs text-popover-foreground shadow group-hover:block group-focus:block"
           >
-            {custodyLabel} · {t("message.custody.help")}
+            {custodyLabel} ·{" "}
+            {t(
+              postOfficeOnly
+                ? "message.custody.postOfficeHelp"
+                : "message.custody.help",
+            )}
           </span>
         </span>
       )}

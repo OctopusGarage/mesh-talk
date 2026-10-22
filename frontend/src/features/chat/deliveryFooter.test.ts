@@ -186,3 +186,12 @@ it("shows a countdown for each expiring message, including grouped incoming mess
   expect(html).toContain('data-testid="message-expiry"');
   expect(html).toMatch(/4:5[89]/);
 });
+
+it("shows confirmed post-office custody without claiming member delivery", async () => {
+  await i18n.changeLanguage("en");
+  const html = render({ ...base, replicas: 0, postOfficeCopies: 1 }, true);
+  expect(html).toContain('data-custody="1"');
+  expect(html).toContain("Post office confirmed a stored copy");
+  expect(html).not.toContain("No member copy confirmed");
+  expect(html).not.toContain("sending…");
+});

@@ -1242,11 +1242,11 @@ describe("send", () => {
     stop();
   });
 
-  it("group void completion removes only the exact matching local placeholder", async () => {
-    const finish: Array<() => void> = [];
+  it("channel acceptance settles only the exact matching local placeholder", async () => {
+    const finish: Array<(id: string) => void> = [];
     invoke.mockImplementation((cmd: string) =>
-      cmd === "send_channel_message"
-        ? new Promise<void>((resolve) => {
+      cmd === "owner_enqueue_channel_text"
+        ? new Promise<string>((resolve) => {
             finish.push(resolve);
           })
         : Promise.resolve([]),
@@ -1257,16 +1257,25 @@ describe("send", () => {
     const first = useChat.getState().send("same", null);
     const second = useChat.getState().send("same", null);
     const remaining = useChat.getState().messages["channel:group"][1].clientId;
-    finish[0]();
+    finish[0]("event-a");
     await first;
-    expect(useChat.getState().messages["channel:group"]).toHaveLength(1);
+    expect(useChat.getState().messages["channel:group"]).toHaveLength(2);
     expect(useChat.getState().messages["channel:group"][0]).toMatchObject({
+      id: "event-a",
+      pending: false,
+    });
+    expect(useChat.getState().messages["channel:group"][1]).toMatchObject({
       clientId: remaining,
       pending: true,
     });
-    finish[1]();
+    finish[1]("event-b");
     await second;
-    expect(useChat.getState().messages["channel:group"]).toEqual([]);
+    expect(
+      useChat.getState().messages["channel:group"].map((m) => m.id),
+    ).toEqual(["event-a", "event-b"]);
+    expect(
+      useChat.getState().messages["channel:group"].every((m) => !m.pending),
+    ).toBe(true);
   });
 
   it("sticker retry retains its typed payload and local identity before acceptance only", async () => {
@@ -1352,11 +1361,13 @@ describe("send", () => {
     expect(useChat.getState().error).toContain("disk full");
   });
 
-  it("own-account sparse absence never invents a clock and group legacy void retires only its own intent", async () => {
+  it("own-account sparse absence never invents a clock and channel acceptance retains its exact ID", async () => {
     invoke.mockImplementation((cmd: string) =>
       cmd === "owner_enqueue_text"
         ? Promise.resolve("own-id")
-        : Promise.resolve([]),
+        : cmd === "owner_enqueue_channel_sticker"
+          ? Promise.resolve("channel-sticker")
+          : Promise.resolve([]),
     );
     useChat.setState({
       active: { kind: "account", id: "myacct", name: "Own" },
@@ -1369,8 +1380,11 @@ describe("send", () => {
       .getState()
       .open({ kind: "channel", id: "group", name: "Group" });
     await useChat.getState().sendSticker("sticker", "🙂");
-    expect(useChat.getState().messages["channel:group"]).toEqual([]);
-    expect(Object.values(useChat.getState().intents)).toHaveLength(1); // Own accepted intent, not group placeholder.
+    expect(useChat.getState().messages["channel:group"][0]).toMatchObject({
+      id: "channel-sticker",
+      pending: false,
+    });
+    expect(Object.values(useChat.getState().intents)).toHaveLength(2);
   });
 
   it("keeps two same-content sends distinct across early history and reversed ID completions", async () => {

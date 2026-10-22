@@ -123,6 +123,7 @@ pub async fn set_channel_replica_enabled(
 pub struct ChannelCustodyInfo {
     id: String,
     replicas: usize,
+    post_offices: usize,
 }
 
 /// Historical, authenticated durable-copy confirmations for this device's own
@@ -152,6 +153,9 @@ pub async fn channel_custody_statuses<R: tauri::Runtime>(
                 .map(|replicas| ChannelCustodyInfo {
                     id: id.to_hex(),
                     replicas,
+                    post_offices: node
+                        .channel_post_office_custody_count(channel, id)
+                        .unwrap_or(0),
                 })
         })
         .collect();

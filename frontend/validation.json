@@ -71,6 +71,10 @@
           {
             "name": "File offer receipt does not stop approval and byte-progress refresh",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Channel durable IDs settle acceptance independently of fanout and custody",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       }

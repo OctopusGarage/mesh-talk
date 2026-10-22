@@ -884,6 +884,13 @@ backend acceptance, history loading, and delivery-status queries. `store/convers
 owns cache eviction, deletion protection, exact-ID send completion, and history/status
 state transitions. A late accepted ID after intent removal becomes a deletion tombstone;
 completion never recreates an evicted conversation cache.
+Owner-scoped channel text, sticker and file enqueue commands return exact durable
+IDs before network work; a separate admitted fanout retains runtime retirement
+protection. Nickname publication uses shared runtime admission and synchronized
+metadata, leaving lifecycle replacement exclusive. `NodeRuntime::display_name`
+returns an owned snapshot so concurrent rename never exposes a borrowed mutable
+name. Member and verified opaque post-office custody are separate projections,
+with post-office confirmations never retiring member-copy recovery work.
 `store/chat.ts` exposes the UI-facing state and routes incoming DMs to the sender's
 _account_ (one conversation per multi-device contact). `features/chat/` is a two-pane app (conversation list ·
 message view) with replies, reactions, @mentions, file send + a searchable received-files dialog,

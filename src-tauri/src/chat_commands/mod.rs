@@ -33,7 +33,7 @@ pub use state::NodeState;
 pub(crate) use state::RuntimeAuthority;
 pub use sync::*;
 
-fn parse_channel_id(hex_id: &str) -> Result<ConversationId, CommandError> {
+pub(crate) fn parse_channel_id(hex_id: &str) -> Result<ConversationId, CommandError> {
     let bytes =
         hex::decode(hex_id).map_err(|_| CommandError::Validation("invalid channel id".into()))?;
     let arr: [u8; 32] = bytes

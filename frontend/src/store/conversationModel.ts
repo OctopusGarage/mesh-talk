@@ -21,6 +21,7 @@ export interface ChatMessage {
   arrivalKind?: import("@/lib/types").ArrivalKind;
   delivery?: "awaiting" | "delivered";
   replicas?: number;
+  postOfficeCopies?: number;
   metadataPending?: boolean;
   id: string | null; // hex EventId; null while pending
   fromMe: boolean;

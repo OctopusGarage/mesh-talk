@@ -48,6 +48,14 @@
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
         "invariants": [
           {
+            "name": "Nickname publication does not block observations behind stalled network work",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Channel acceptance returns exact IDs before admitted network fanout finishes",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
             "name": "Replacement and logout invalidate captured session authority",
             "reference": "docs/ARCHITECTURE.md"
           },

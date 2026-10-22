@@ -577,6 +577,15 @@ Membership and key controls are signed authority. Invitations require normal acc
 
 Small groups retain direct fanout. Text/sticker distribution in larger groups seeds a bounded subset and relies on authorized member recovery; membership/key controls retain their broader bounded fanout. File manifests have their own fanout behavior and must not inherit a text-only optimization without an explicit retention/recovery design.
 
+Channel send acceptance returns the exact locally committed event ID before
+network fanout completes. “Sending” describes local acceptance only. Authenticated
+member custody and post-office custody update independently, so a stalled peer or
+optional relay cannot leave an already accepted message pending in the composer.
+A post-office copy requires a positive durable-have response for the exact opaque
+wrapper, not successful sync alone. Its historical confirmation is stored apart
+from member identities in the existing custody journal. Relay copies do not satisfy
+member-replication targets or imply that recipients have received or read content.
+
 Channel file offers reach directly routed members before optional relay custody.
 For automatic inline images, direct chunk fanout follows that offer before any
 relay replication is awaited. A stalled custody path must not strand a reachable

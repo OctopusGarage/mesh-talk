@@ -837,9 +837,32 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
         expires_at_ms: Option<u64>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<ConversationId, NodeError> {
+        let (_, file) = self
+            .enqueue_file_channel_progress_expiring_if(
+                channel,
+                path,
+                kind,
+                on_progress,
+                expires_at_ms,
+                authorize,
+            )
+            .await?;
+        self.flush_channel_file(channel, file).await;
+        Ok(file)
+    }
+
+    pub async fn enqueue_file_channel_progress_expiring_if(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
-    ) -> Result<ConversationId, NodeError> {
+    ) -> Result<(EventId, ConversationId), NodeError> {
         authorize(&mut || Ok(()))?;
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
         {
@@ -853,14 +876,6 @@ impl Node {
         }
         let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
-        let members = self
-            .channels
-            .lock()
-            .expect("channels lock")
-            .state(&channel)
-            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?
-            .members()
-            .to_vec();
         let id = self.enqueue_channel_payload_if(
             channel,
             crate::expiry::wrap(&outgoing_manifest_bytes(&manifest), expires_at_ms),
@@ -878,18 +893,27 @@ impl Node {
         authorize(&mut || {
             self.record_sent_manifest(channel, channel, seq, &manifest, expires_at_ms)
         })?;
-        // A file/folder manifest is an offer. Members pull its chunks only after
-        // their own receive policy permits it; pushing the chunk conversation here
-        // would transmit the bytes before they could approve. Inline media keeps
-        // the existing automatic transfer behavior.
-        self.distribute_channel_file(
-            channel,
-            file_conv,
-            &members,
-            crate::node::media_store::automatic_inline_image(&outgoing_manifest(&manifest)),
-        )
-        .await;
-        Ok(file_conv)
+        Ok((id, file_conv))
+    }
+
+    /// Fan out an already accepted channel offer and its automatically permitted bytes.
+    pub async fn flush_channel_file(&self, channel: ConversationId, file: ConversationId) {
+        let members = self
+            .channels
+            .lock()
+            .expect("channels lock")
+            .state(&channel)
+            .map(|state| state.members().to_vec());
+        let automatic_inline = self
+            .files
+            .lock()
+            .expect("files lock")
+            .manifest(&file)
+            .is_some_and(crate::node::media_store::automatic_inline_image);
+        if let Some(members) = members {
+            self.distribute_channel_file(channel, file, &members, automatic_inline)
+                .await;
+        }
     }
 
     /// Off-reactor wrapper around [`Node::stage_file`]: staging is a synchronous burst of

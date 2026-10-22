@@ -1765,6 +1765,21 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
             .windows(b"relay-secret-room".len())
             .any(|window| window == b"relay-secret-room")
     }));
+    alice_node
+        .send_channel_message(group, b"relay custody")
+        .await
+        .unwrap();
+    let id = alice_node
+        .channel_history(group, 10)
+        .into_iter()
+        .find(|row| row.text == b"relay custody")
+        .unwrap()
+        .id;
+    assert_eq!(alice_node.channel_custody_count(group, id), Some(0));
+    assert_eq!(
+        alice_node.channel_post_office_custody_count(group, id),
+        Some(1)
+    );
     bob_node.drain_from_post_office().await;
     assert!(
         bob_node
@@ -10129,4 +10144,49 @@ async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_pare
     delayed.log.lock().unwrap().append(pair[1].clone()).unwrap();
     // The profile ciphertext is sealed to Bob, so admission proves causality;
     // Bob's real loopback session above proves decryption and metadata convergence.
+}
+
+#[tokio::test]
+async fn channel_acceptance_returns_exact_ids_without_waiting_for_network_fanout() {
+    let root = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (files, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_tx,
+        files,
+        &root.path().join("messages.log"),
+        &root.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("Acceptance", vec![]).await.unwrap();
+    let text = node
+        .enqueue_channel_message_reply_expiring_if(channel, b"kk", None, None, |accept| accept())
+        .unwrap();
+    let sticker = node
+        .enqueue_sticker_channel_expiring_if(channel, "heart", b"heart", None, |accept| accept())
+        .unwrap();
+    let path = root.path().join("photo.png");
+    std::fs::write(&path, b"\x89PNG\r\n\x1a\nphoto").unwrap();
+    let (photo, file) = node
+        .enqueue_file_channel_progress_expiring_if(
+            channel,
+            &path,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let history = node.channel_history(channel, 10);
+    assert_eq!(history.len(), 3);
+    for id in [text, sticker, photo] {
+        assert!(history.iter().any(|row| row.id == id));
+    }
+    assert!(node.file_progress(file).is_some());
 }

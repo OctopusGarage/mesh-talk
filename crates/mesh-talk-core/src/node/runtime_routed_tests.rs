@@ -424,7 +424,7 @@ async fn existing_account_without_creation_evidence_stays_unknown() {
 #[tokio::test]
 async fn set_display_name_updates_advertised_name_and_own_record() {
     let dir = tempfile::tempdir().unwrap();
-    let mut runtime = NodeRuntime::start(
+    let runtime = NodeRuntime::start(
         dir.path(),
         "alice-user-id",
         "Alice",

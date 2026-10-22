@@ -1106,16 +1106,16 @@ impl Node {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
-        super::expiry_policy::validate_outgoing(expires_at_ms)?;
-        self.send_channel_body_if(
+        let id = self.enqueue_channel_message_reply_expiring_if(
             channel,
-            crate::expiry::wrap(
-                &MessageBody::new(text.to_vec(), reply_to).encode(),
-                expires_at_ms,
-            ),
+            text,
+            reply_to,
+            expires_at_ms,
             &mut authorize,
-        )
-        .await
+        )?;
+        self.flush_accepted_message(&MessageDestination::Channel(channel), id)
+            .await;
+        Ok(())
     }
 
     /// Send an animated sticker to a channel: `sticker_id` is the bundled sticker's
@@ -1156,33 +1156,58 @@ impl Node {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
-        super::expiry_policy::validate_outgoing(expires_at_ms)?;
-        self.send_channel_body_if(
+        let id = self.enqueue_sticker_channel_expiring_if(
             channel,
-            crate::expiry::wrap(
-                &MessageBody::sticker(sticker_id.to_string(), fallback.to_vec()).encode(),
-                expires_at_ms,
-            ),
+            sticker_id,
+            fallback,
+            expires_at_ms,
             &mut authorize,
-        )
-        .await
-    }
-
-    /// Seal an already-encoded message body with this node's sender key, append it, record
-    /// a local plaintext copy, and distribute to channel members.
-    async fn send_channel_body_if(
-        &self,
-        channel: ConversationId,
-        wrapped: Vec<u8>,
-        authorize: &mut (
-                 impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send
-             ),
-    ) -> Result<(), NodeError> {
-        let id =
-            self.enqueue_channel_body_if(channel, wrapped, None, &mut |accept| authorize(accept))?;
+        )?;
         self.flush_accepted_message(&MessageDestination::Channel(channel), id)
             .await;
         Ok(())
+    }
+
+    /// Commit a channel message locally without waiting for network fanout.
+    pub fn enqueue_channel_message_reply_expiring_if(
+        &self,
+        channel: ConversationId,
+        text: &[u8],
+        reply_to: Option<EventId>,
+        expires_at_ms: Option<u64>,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        self.enqueue_channel_body_if(
+            channel,
+            crate::expiry::wrap(
+                &MessageBody::new(text.to_vec(), reply_to).encode(),
+                expires_at_ms,
+            ),
+            None,
+            &mut authorize,
+        )
+    }
+
+    /// Commit a channel sticker locally; custody progresses independently.
+    pub fn enqueue_sticker_channel_expiring_if(
+        &self,
+        channel: ConversationId,
+        sticker_id: &str,
+        fallback: &[u8],
+        expires_at_ms: Option<u64>,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        self.enqueue_channel_body_if(
+            channel,
+            crate::expiry::wrap(
+                &MessageBody::sticker(sticker_id.to_owned(), fallback.to_vec()).encode(),
+                expires_at_ms,
+            ),
+            None,
+            &mut authorize,
+        )
     }
 
     /// Push a control event to every known member, including on large channels.
@@ -1267,13 +1292,14 @@ impl Node {
         .into_iter()
         .fold(0u64, u64::saturating_add);
         let _ = self
-            .replicate_to_post_office_targets(
+            .replicate_to_post_office_targets_confirming(
                 channel,
                 members
                     .iter()
                     .filter(|member| member.user_id() != me)
                     .cloned()
                     .collect(),
+                Some(event_id),
             )
             .await;
         #[cfg(test)]
@@ -1328,6 +1354,25 @@ impl Node {
             .expect("channel_custody mutex not poisoned")
             .peers(id);
         Some(confirmed.intersection(&members).count())
+    }
+
+    /// Historical exact-wrapper custody confirmed by post offices, separate
+    /// from member-copy targets used by recovery and replication policy.
+    pub fn channel_post_office_custody_count(
+        &self,
+        channel: ConversationId,
+        id: EventId,
+    ) -> Option<usize> {
+        self.channel_custody_count(channel, id)?;
+        Some(
+            self.channel_custody
+                .lock()
+                .expect("channel custody lock")
+                .peers(id)
+                .iter()
+                .filter(|peer| peer.starts_with("relay:"))
+                .count(),
+        )
     }
 
     async fn sync_and_confirm_custody(

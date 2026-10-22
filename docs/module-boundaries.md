@@ -121,6 +121,17 @@ creates no bubble. An admitted submission clears the input immediately; its bubb
 alone owns pending acceptance, failure and retry. Backend acceptance and recipient
 confirmation remain distinct states, and later completion cannot overwrite a new
 draft or put submitted text back into the composer.
+Channel text, stickers and file offers use owner-scoped acceptance IPC returning
+an exact durable event ID (and file-conversation ID for attachments). Network
+fanout retains its own runtime admission and cannot hold the acceptance response
+open. History merges the accepted ID into the same optimistic bubble; it never
+matches equal content or leaves a second identity-free pending bubble behind.
+Member-copy and post-office-copy status refresh independently of acceptance.
+Nickname publication uses a shared runtime lease and the runtime's small metadata
+lock. It must not enqueue a lifecycle writer behind admitted network work, because
+writer preference would then block identity, presence and history observations.
+Exclusive runtime admission is reserved for installation, retirement and operations
+that actually replace runtime-owned resources.
 
 Account DM arrivals carry the authenticated sender account and the envelope's
 logical message ID from core through desktop IPC. The receipt ledger uses that

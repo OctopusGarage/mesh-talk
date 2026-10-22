@@ -290,6 +290,8 @@
       "fileDelivered": "Oferta de archivo recibida"
     },
     "custody": {
+      "postOfficeHelp": "La oficina de correos confirmó el almacenamiento duradero de este mensaje cifrado. La entrega al destinatario, las descargas y la lectura son independientes.",
+      "postOffice": "La oficina de correos confirmó una copia almacenada",
       "local": "Ninguna copia de miembro confirmada",
       "one": "Última confirmación: 1 copia de un miembro",
       "multiple": "Última confirmación: 2 o más copias de miembros",

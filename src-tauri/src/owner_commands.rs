@@ -129,6 +129,162 @@ pub async fn owner_enqueue_sticker(
         .await
 }
 
+/// Network fanout retains admission, but cannot hold the acceptance IPC open.
+fn flush_channel_acceptance(
+    admission: RuntimeAdmission,
+    channel: mesh_talk_core::eventlog::ConversationId,
+    id: EventId,
+    file: Option<mesh_talk_core::eventlog::ConversationId>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let _ = admission
+            .detached(move |runtime, _| {
+                Box::pin(async move {
+                    let node = runtime.handle();
+                    if let Some(file) = file {
+                        node.flush_channel_file(channel, file).await;
+                    } else {
+                        node.flush_accepted_message(
+                            &mesh_talk_core::node::MessageDestination::Channel(channel),
+                            id,
+                        )
+                        .await;
+                    }
+                    Ok(())
+                })
+            })
+            .await;
+    });
+}
+
+#[tauri::command]
+pub async fn owner_enqueue_channel_text(
+    owner: String,
+    channel_id: String,
+    text: String,
+    reply_to: Option<String>,
+    expires_at_ms: Option<u64>,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<String, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    let channel = crate::chat_commands::parse_channel_id(&channel_id)?;
+    let reply = reply_to.as_deref().map(parse_id).transpose()?;
+    let flush = admission.clone();
+    let id = admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                runtime
+                    .handle()
+                    .enqueue_channel_message_reply_expiring_if(
+                        channel,
+                        text.as_bytes(),
+                        reply,
+                        expires_at_ms,
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
+                    .map_err(CommandError::from)
+            })
+        })
+        .await?;
+    flush_channel_acceptance(flush, channel, id, None);
+    Ok(id.to_hex())
+}
+
+#[tauri::command]
+pub async fn owner_enqueue_channel_sticker(
+    owner: String,
+    channel_id: String,
+    sticker_id: String,
+    fallback: String,
+    expires_at_ms: Option<u64>,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<String, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    let channel = crate::chat_commands::parse_channel_id(&channel_id)?;
+    let flush = admission.clone();
+    let id = admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                runtime
+                    .handle()
+                    .enqueue_sticker_channel_expiring_if(
+                        channel,
+                        &sticker_id,
+                        fallback.as_bytes(),
+                        expires_at_ms,
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
+                    .map_err(CommandError::from)
+            })
+        })
+        .await?;
+    flush_channel_acceptance(flush, channel, id, None);
+    Ok(id.to_hex())
+}
+
+#[tauri::command]
+pub async fn owner_enqueue_channel_file<R: tauri::Runtime>(
+    owner: String,
+    channel_id: String,
+    path: String,
+    media: bool,
+    progress_key: Option<String>,
+    expires_at_ms: Option<u64>,
+    handle: tauri::AppHandle<R>,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<AcceptedFile, CommandError> {
+    let admission = match RuntimeAdmission::capture(&app, &node, &owner) {
+        Ok(admission) => admission,
+        Err(error) => {
+            crate::chat_commands::cleanup_pasted_file(&handle, &path);
+            return Err(error);
+        }
+    };
+    let channel = match crate::chat_commands::parse_channel_id(&channel_id) {
+        Ok(channel) => channel,
+        Err(error) => {
+            crate::chat_commands::cleanup_pasted_file(&handle, &path);
+            return Err(error);
+        }
+    };
+    let flush = admission.clone();
+    let cleanup = handle.clone();
+    let mut progress =
+        crate::events::ProgressThrottle::new(handle, progress_key.unwrap_or(channel_id), "prepare");
+    let (id, file) = admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let kind = if media {
+                    mesh_talk_core::file::FileKind::Media
+                } else {
+                    mesh_talk_core::file::FileKind::File
+                };
+                let result = runtime
+                    .handle()
+                    .enqueue_file_channel_progress_expiring_if(
+                        channel,
+                        std::path::Path::new(&path),
+                        kind,
+                        move |p| progress.emit(p.done, p.total),
+                        expires_at_ms,
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
+                    .await;
+                crate::chat_commands::cleanup_pasted_file(&cleanup, &path);
+                result.map_err(CommandError::from)
+            })
+        })
+        .await?;
+    flush_channel_acceptance(flush, channel, id, Some(file));
+    Ok(AcceptedFile {
+        id: id.to_hex(),
+        file_conv: hex::encode(file.as_bytes()),
+    })
+}
+
 #[derive(Serialize)]
 pub struct AcceptedFile {
     id: String,
@@ -434,6 +590,7 @@ mod tests {
                     crate::chat_commands::send_to_account,
                     crate::chat_commands::send_sticker,
                     crate::chat_commands::create_channel,
+                    crate::chat_commands::channel_history,
                     crate::chat_commands::rescan_peers,
                     crate::chat_commands::probe_peer_endpoint,
                     crate::chat_commands::rename_channel,
@@ -468,6 +625,9 @@ mod tests {
                     crate::chat_commands::write_temp_file,
                     super::owner_node_identity,
                     super::owner_enqueue_text,
+                    super::owner_enqueue_channel_text,
+                    super::owner_enqueue_channel_sticker,
+                    super::owner_enqueue_channel_file,
                     super::owner_enqueue_sticker,
                     super::owner_enqueue_file,
                     super::owner_account_history,
@@ -758,6 +918,62 @@ mod tests {
             },
         )
         .map(|body| body.deserialize::<serde_json::Value>().unwrap())
+    }
+
+    #[test]
+    fn registered_channel_enqueues_return_exact_ids_and_reject_retired_owners() {
+        let fixture = Fixture::new();
+        let channel = fixture
+            .invoke(
+                "create_channel",
+                serde_json::json!({"name":"Acceptance", "memberIds":[]}),
+            )
+            .unwrap();
+        let path = fixture.root.path().join("photo.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nphoto").unwrap();
+        let cases = [
+            (
+                "owner_enqueue_channel_text",
+                serde_json::json!({"owner":"alice","channelId":channel,"text":"kk","replyTo":null}),
+            ),
+            (
+                "owner_enqueue_channel_sticker",
+                serde_json::json!({"owner":"alice","channelId":channel,"stickerId":"heart","fallback":"heart"}),
+            ),
+            (
+                "owner_enqueue_channel_file",
+                serde_json::json!({"owner":"alice","channelId":channel,"path":path,"media":true}),
+            ),
+        ];
+        let mut ids = Vec::new();
+        for (command, body) in cases {
+            let accepted = fixture.invoke(command, body.clone()).unwrap();
+            let id = if command.ends_with("file") {
+                accepted["id"].clone()
+            } else {
+                accepted
+            };
+            assert_eq!(id.as_str().unwrap().len(), 64);
+            ids.push(id);
+            let mut retired = body;
+            retired["owner"] = serde_json::json!("retired");
+            assert!(fixture.invoke(command, retired).is_err());
+        }
+        let history = fixture
+            .invoke(
+                "channel_history",
+                serde_json::json!({"channelId":channel,"limit":10}),
+            )
+            .unwrap();
+        for id in ids {
+            assert!(
+                history
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["id"] == id)
+            );
+        }
     }
 
     #[test]
