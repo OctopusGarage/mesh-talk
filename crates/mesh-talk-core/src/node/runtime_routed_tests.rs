@@ -301,28 +301,81 @@ fn channel_invitees_exclude_post_office_nodes() {
 #[test]
 fn profile_republish_targets_fires_on_first_sight_and_on_reconnect() {
     let bob = fake_peer(false);
-    let mut present = std::collections::HashSet::new();
+    let mut published = std::collections::HashMap::new();
 
     // First sight → publish to Bob.
     assert_eq!(
-        profile_republish_targets(&mut present, std::slice::from_ref(&bob)).len(),
+        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1).len(),
         1
     );
+    // Failed attempts remain eligible; only a successful publication is cached.
+    assert_eq!(
+        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1).len(),
+        1
+    );
+    published.insert(
+        bob.public.user_id(),
+        ProfilePublication {
+            revision: 1,
+            conversation: ConversationId::new([0; 32]),
+            complete: true,
+            last_attempt: None,
+        },
+    );
     // Still present next round → no re-publish (no log churn).
-    assert!(profile_republish_targets(&mut present, std::slice::from_ref(&bob)).is_empty());
+    assert!(profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1).is_empty());
+    assert_eq!(
+        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 2).len(),
+        1,
+        "a newer public profile must reach an already-present peer"
+    );
     // Bob goes offline (evicted from the roster).
-    assert!(profile_republish_targets(&mut present, &[]).is_empty());
+    assert!(profile_republish_targets(&mut published, &[], 1).is_empty());
     // Bob reconnects → published to AGAIN. The old monotonic `seen` set skipped him here,
     // so he kept showing our stale avatar until we manually re-set it.
     assert_eq!(
-        profile_republish_targets(&mut present, std::slice::from_ref(&bob)).len(),
+        profile_republish_targets(&mut published, std::slice::from_ref(&bob), 1).len(),
         1,
         "a reconnecting peer must be re-published to"
     );
 
     // A post office is never a profile target.
-    let mut p2 = std::collections::HashSet::new();
-    assert!(profile_republish_targets(&mut p2, std::slice::from_ref(&fake_peer(true))).is_empty());
+    let mut p2 = std::collections::HashMap::new();
+    assert!(
+        profile_republish_targets(&mut p2, std::slice::from_ref(&fake_peer(true)), 1).is_empty()
+    );
+
+    // A failing older peer cannot keep taking a bounded slot ahead of untouched
+    // peers. Once both were attempted, the older failed attempt gets its turn.
+    let charlie = fake_peer(false);
+    let older = std::time::Instant::now();
+    published.insert(
+        bob.public.user_id(),
+        ProfilePublication {
+            revision: 1,
+            conversation: ConversationId::new([0; 32]),
+            complete: false,
+            last_attempt: Some(older),
+        },
+    );
+    let peers = [bob.clone(), charlie.clone()];
+    assert_eq!(
+        profile_republish_targets(&mut published, &peers, 1)[0].public,
+        charlie.public
+    );
+    published.insert(
+        charlie.public.user_id(),
+        ProfilePublication {
+            revision: 1,
+            conversation: ConversationId::new([1; 32]),
+            complete: false,
+            last_attempt: Some(older + Duration::from_millis(1)),
+        },
+    );
+    assert_eq!(
+        profile_republish_targets(&mut published, &peers, 1)[0].public,
+        bob.public
+    );
 }
 
 #[tokio::test]

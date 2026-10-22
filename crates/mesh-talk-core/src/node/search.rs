@@ -49,7 +49,7 @@ pub struct SearchContext {
 pub struct RecentSearchResults {
     pub hits: Vec<ReferencedSearchHit>,
     /// Window entries include files and recall tombstones, not just text matches.
-    /// This bounds output per conversation, not input allocations or scan time.
+    /// Canonical scans retain O(history) metadata and decode only the window.
     pub per_conversation_limit: usize,
 }
 
@@ -88,15 +88,23 @@ impl Node {
     /// recovered IDs and channel causal ordering. Files and recall tombstones use
     /// window slots; only visible text is matched. A zero sentinel becomes no ID.
     ///
-    /// History currently materializes retained rows before truncation. The result
-    /// window is bounded, but execution/allocations are not a paged retained scan.
+    /// Canonical projection scans retained metadata and decodes only the selected
+    /// window. Scan time and identity/causal metadata remain proportional to history.
     pub fn search_recent(&self, query: &str) -> RecentSearchResults {
+        self.search_recent_limited(query, usize::MAX)
+    }
+
+    /// The newest `limit` matches from the same canonical recent windows as
+    /// [`Node::search_recent`]. Retains at most `limit` accumulated hits between
+    /// conversations, plus the current conversation's 2,000-entry window.
+    /// Metadata scans still cover retained history in every eligible conversation.
+    pub fn search_recent_limited(&self, query: &str, limit: usize) -> RecentSearchResults {
         let q = query.trim().to_lowercase();
         let mut response = RecentSearchResults {
             hits: Vec::new(),
             per_conversation_limit: RECENT_HISTORY_LIMIT,
         };
-        if q.is_empty() {
+        if q.is_empty() || limit == 0 {
             return response;
         }
         for conversation in self.search_conversations() {
@@ -138,6 +146,12 @@ impl Node {
                     expires_at_ms: entry.expires_at_ms,
                 });
             }
+            if limit != usize::MAX {
+                response
+                    .hits
+                    .sort_by_key(|hit| std::cmp::Reverse(hit.hit.wall_clock));
+                response.hits.truncate(limit);
+            }
         }
         response
             .hits
@@ -147,8 +161,8 @@ impl Node {
 
     /// Resolve an exact reference against currently eligible canonical history.
     /// Returns at most 25 entries on each side, preserving canonical order. The
-    /// retained history projection materializes its full input before slicing;
-    /// this bounds the response, not retained-history scan time or allocation.
+    /// retained projection scans identity/order metadata, then decodes only the
+    /// context window. Scan time and metadata still scale with retained history.
     pub fn search_context(&self, reference: &SearchReference) -> Option<SearchContext> {
         let message_id = match reference {
             SearchReference::Account { message_id, .. }
@@ -174,24 +188,15 @@ impl Node {
                 ) => *device_id == public.user_id(),
                 _ => false,
             })?;
-        let mut history = match &conversation.source {
-            SearchSource::Account(account) => self.account_history(account, usize::MAX),
-            SearchSource::Channel => self.channel_history(conversation.id, usize::MAX),
-            SearchSource::LegacyDevice(public) => self.dm_history(public, usize::MAX),
+        let account = match &conversation.source {
+            SearchSource::Account(account) => Some(account.as_str()),
+            _ => None,
         };
-        let target = history
-            .iter()
-            .position(|entry| entry.id == message_id && !entry.recalled)?;
-        let newer_entries = history.len() - target - 1;
-        let end = target.saturating_add(26).min(history.len());
-        let mut context: Vec<_> = history.drain(target.saturating_sub(25)..end).collect();
-        for entry in &mut context {
-            entry.recalled_text = None;
-        }
-        Some(SearchContext {
-            messages: context,
-            newer_entries,
-        })
+        self.project_history(
+            conversation.id,
+            account,
+            super::queries::HistorySelection::Context(message_id),
+        )
     }
 
     // Candidate eligibility is shared; canonical projection and the legacy fast

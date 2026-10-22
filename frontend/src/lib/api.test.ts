@@ -401,3 +401,19 @@ describe("optional delivery scheduling observations", () => {
     });
   });
 });
+
+it("preserves exact search namespaces and owner payloads", async () => {
+  await chat.searchRecent("owner", "needle");
+  expect(invoke).toHaveBeenLastCalledWith("owner_search_recent", {
+    owner: "owner",
+    query: "needle",
+  });
+  for (const kind of ["account", "channel", "legacy-device"] as const) {
+    const reference = { kind, target: "same-bytes", message_id: "canonical" };
+    await chat.searchContext("owner", reference);
+    expect(invoke).toHaveBeenLastCalledWith("owner_search_context", {
+      owner: "owner",
+      reference,
+    });
+  }
+});

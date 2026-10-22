@@ -715,7 +715,8 @@ export const test = base.extend({
             device_id: SELF.device,
             account_id: SELF.account,
           }),
-          owner_account_history: (a) => msgs[`acc:${a.account}`] ?? [],
+          owner_account_history: (a) =>
+            (msgs[`acc:${a.account}`] ?? []).slice(-Number(a.limit ?? 200)),
           owner_delivery_statuses: (a) =>
             (a.ids as string[]).flatMap((id) => {
               const status = delivery[String(a.account)]?.[id];
@@ -1154,11 +1155,51 @@ export const test = base.extend({
             return Array.from(bin, (char) => char.charCodeAt(0));
           },
 
+          // Search contexts remain separate from the normal history cache.
+          owner_search_recent: (a) => ({
+            hits: responses.search(a),
+            coverage: {
+              scope: "recent-window",
+              per_conversation_limit: 500,
+              result_limit: 200,
+              truncated: false,
+            },
+          }),
+          owner_search_context: (a) => {
+            const reference = a.reference as {
+              kind: string;
+              target: string;
+              message_id: string | null;
+            };
+            const key =
+              reference.kind === "channel"
+                ? `ch:${reference.target}`
+                : `acc:${reference.target}`;
+            const rows = msgs[key] ?? [];
+            const index = rows.findIndex(
+              (row) => row.id === reference.message_id,
+            );
+            return {
+              status: index >= 0 ? "found" : "unavailable",
+              reference,
+              messages:
+                index >= 0
+                  ? rows.slice(Math.max(0, index - 25), index + 26)
+                  : [],
+              newer_entries: index >= 0 ? rows.length - index - 1 : null,
+            };
+          },
           // search
           search: (a) => {
             const q = String(a.query ?? "").toLowerCase();
             if (!q) return [];
             const hits: Array<{
+              reference: {
+                kind: string;
+                target: string;
+                message_id: string | null;
+              };
+              expires_at_ms: number | null;
               is_channel: boolean;
               account_id?: string | null;
               target: string;
@@ -1173,6 +1214,12 @@ export const test = base.extend({
                 if (!m.text.toLowerCase().includes(q)) continue;
                 if (k.startsWith("ch:")) {
                   hits.push({
+                    reference: {
+                      kind: "channel",
+                      target: CHANNEL.channel_id,
+                      message_id: m.id,
+                    },
+                    expires_at_ms: m.expires_at_ms ?? null,
                     is_channel: true,
                     target: CHANNEL.channel_id,
                     label: CHANNEL.name,
@@ -1187,6 +1234,12 @@ export const test = base.extend({
                   // device-id target so go() can resolve it to the account
                   const dev = peers.find((p) => p.account_id === acct)?.user_id;
                   hits.push({
+                    reference: {
+                      kind: "account",
+                      target: acct,
+                      message_id: m.id,
+                    },
+                    expires_at_ms: m.expires_at_ms ?? null,
                     is_channel: false,
                     account_id: acct,
                     target: dev ?? acct,

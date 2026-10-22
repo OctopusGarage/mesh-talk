@@ -8539,6 +8539,327 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
     assert_eq!(reopened.conversation_len(&conv), 4);
 }
 
+#[tokio::test]
+async fn signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp() {
+    use crate::identity::account::Account;
+    use crate::postoffice::opaque::RelayMailbox;
+
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let alice_account = Account::generate();
+    let alice_account_id = alice_account.account_id();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = dead.local_addr().unwrap().port();
+    drop(dead);
+    let alice_proof = Announce::new_with_account(&alice, &alice_account, "Alice", dead_port);
+    let bob_proof = Announce::new_with_account(&bob, &bob_account, "Bob", dead_port);
+    let (sender, _, _) = crate::node::test_support::node_with_files(
+        &dir.path().join("alice"),
+        alice,
+        alice_account,
+        &bob_proof,
+    );
+    let (receiver, mut incoming, _) = crate::node::test_support::node_with_files(
+        &dir.path().join("bob"),
+        bob,
+        bob_account,
+        &alice_proof,
+    );
+    sender
+        .initialize_new_trust_card("Alice".into(), crate::node::node::now_millis())
+        .unwrap();
+    let avatar = format!("data:image/jpeg;base64,{}", "A".repeat(32 * 1024)).into_bytes();
+    // No relay is known yet: prepare the signed events without uploading them.
+    sender.set_avatar(Some(avatar.clone())).await.unwrap();
+    let conv = dm_conversation_id(&sender.identity.public(), &receiver.identity.public());
+    let events: Vec<_> = sender
+        .log
+        .lock()
+        .unwrap()
+        .events(&conv)
+        .into_iter()
+        .cloned()
+        .collect();
+    assert_eq!(events.len(), 2);
+    // Opaque IDs conceal causal order. Select a relay salt which puts the child
+    // first, and use large avatars so the two wrappers require separate pages.
+    let relay = (0..32)
+        .find_map(|_| {
+            let candidate = DeviceIdentity::generate();
+            let mailbox = RelayMailbox::new(
+                &sender.identity,
+                &receiver.identity.public(),
+                &candidate.public(),
+            )
+            .unwrap();
+            let parent = mailbox.wrap(&events[0]).unwrap();
+            let child = mailbox.wrap(&events[1]).unwrap();
+            assert!(
+                parent.ciphertext.len() + child.ciphertext.len() > crate::transport::MAX_PLAINTEXT
+            );
+            (child.id < parent.id).then_some(candidate)
+        })
+        .expect("find a child-first opaque mailbox ordering");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (ed, x) = relay.secret_bytes();
+    let relay_announcement =
+        Announce::new_post_office(&relay, "Relay", listener.local_addr().unwrap().port());
+    let relay_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("relay.log"), "pw", relay).unwrap(),
+    ));
+    let relay_task = tokio::spawn(run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(ed, x),
+        listener,
+        relay_store,
+    ));
+    for node in [&sender, &receiver] {
+        node.roster.lock().unwrap().update(
+            &relay_announcement,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &node.user_id(),
+        );
+    }
+    receiver.replace_verified_dm_pull_peers(vec![alice_proof.public().user_id()]);
+    sender.replace_verified_dm_pull_peers(vec![bob_proof.public().user_id()]);
+    // A queued chat message shares this mailbox with the large signed profile.
+    // Child-first profile pages must not starve content or its exact receipt.
+    let message = sender
+        .enqueue_to_account(
+            &receiver.account_id(),
+            b"message behind a large avatar",
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !sender.replicate_to_post_office(conv).await.unwrap_or(false) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the relay must accept the signed profile events");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            receiver.drain_from_post_office().await;
+            if incoming
+                .try_recv()
+                .is_ok_and(|dm| dm.text == b"message behind a large avatar")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("a large avatar must not starve a message in the same relay mailbox");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            receiver.drain_from_post_office().await;
+            if receiver.peer_avatar(&alice_account_id).as_ref() == Some(&avatar)
+                && receiver.log.lock().unwrap().has(&events[1].id)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("child-first relay pages must not prevent receipt of the signed avatar");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            receiver
+                .replicate_to_post_office(crate::node::delivery_receipt::delivery_conversation_id(
+                    &sender.identity.public(),
+                    &receiver.identity.public(),
+                ))
+                .await
+                .unwrap();
+            sender.drain_from_post_office().await;
+            if sender.delivery_status(message) == Some(crate::node::DeliveryStatus::Delivered) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the recipient receipt must return through the relay without direct TCP");
+    assert_eq!(
+        receiver.trust_card(&alice_account_id).unwrap().avatar,
+        Some(avatar)
+    );
+    relay_task.abort();
+}
+
+#[tokio::test]
+async fn signed_avatar_retries_after_relay_publication_is_reenabled() {
+    use crate::identity::account::Account;
+    use crate::node::runtime::NodeRuntime;
+
+    let dir = tempfile::tempdir().unwrap();
+    let discovery = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let discovery_port = discovery.local_addr().unwrap().port();
+    drop(discovery);
+    let runtime = NodeRuntime::start(
+        &dir.path().join("sender"),
+        "alice",
+        "Alice",
+        "pw",
+        discovery_port,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let sender = runtime.handle();
+    sender.set_post_office_permissions(false, true);
+    let avatar = b"data:image/jpeg;base64,QUJD".to_vec();
+    sender.set_avatar(Some(avatar.clone())).await.unwrap();
+
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = dead.local_addr().unwrap().port();
+    drop(dead);
+    let sender_proof =
+        Announce::new_with_account(&sender.identity, &sender.account, "Alice", dead_port);
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let bob_proof = Announce::new_with_account(&bob, &bob_account, "Bob", dead_port);
+    let (receiver, _, _) = crate::node::test_support::node_with_files(
+        &dir.path().join("receiver"),
+        bob,
+        bob_account,
+        &sender_proof,
+    );
+    receiver.replace_verified_dm_pull_peers(vec![sender.user_id()]);
+    let relay = DeviceIdentity::generate();
+    let relay_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_proof = Announce::new_post_office_with_account(
+        &relay,
+        &relay_account,
+        "Relay",
+        listener.local_addr().unwrap().port(),
+    );
+    let (ed, x) = relay.secret_bytes();
+    let relay_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("relay.log"), "pw", relay).unwrap(),
+    ));
+    let relay_task = tokio::spawn(run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(ed, x),
+        listener,
+        relay_store,
+    ));
+    // An older peer authenticates but never answers a sync request. It must not
+    // hold up profile publication to the healthy recipient later in the roster.
+    let stalled_identity = DeviceIdentity::generate();
+    let stalled_account = Account::generate();
+    let stalled_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stalled_proof = Announce::new_with_account(
+        &stalled_identity,
+        &stalled_account,
+        "Stalled",
+        stalled_listener.local_addr().unwrap().port(),
+    );
+    let stalled_task = tokio::spawn(async move {
+        let (stream, _) = stalled_listener.accept().await.unwrap();
+        let _channel = crate::transport::SecureChannel::accept(stream, &stalled_identity)
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    for node in [&sender, &receiver] {
+        node.roster.lock().unwrap().update(
+            &relay_proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &node.user_id(),
+        );
+    }
+    sender.roster.lock().unwrap().update(
+        &stalled_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    sender.roster.lock().unwrap().update(
+        &bob_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    let conv = dm_conversation_id(&sender.identity.public(), &receiver.identity.public());
+    tokio::time::timeout(Duration::from_secs(6), async {
+        while sender.log.lock().unwrap().events(&conv).is_empty() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the runtime must attempt its first profile publication");
+    receiver.drain_from_post_office().await;
+    assert_eq!(receiver.peer_avatar(&sender.account_id()), None);
+    let prepared_ids: Vec<_> = sender
+        .log
+        .lock()
+        .unwrap()
+        .events(&conv)
+        .iter()
+        .map(|event| event.id)
+        .collect();
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert_eq!(
+        sender
+            .log
+            .lock()
+            .unwrap()
+            .events(&conv)
+            .iter()
+            .map(|event| event.id)
+            .collect::<Vec<_>>(),
+        prepared_ids,
+        "failed retries must reuse the accepted profile events without log churn"
+    );
+    sender.set_post_office_permissions(true, true);
+
+    let recovered = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            receiver.drain_from_post_office().await;
+            if receiver.peer_avatar(&sender.account_id()).as_ref() == Some(&avatar) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    if recovered.is_err() {
+        runtime.stop().await;
+        relay_task.abort();
+        stalled_task.abort();
+        panic!("an unchanged peer must receive the pending avatar after relay recovery");
+    }
+
+    // A failed clear is also a pending revision for an already-present peer.
+    sender.set_post_office_permissions(false, true);
+    sender.set_avatar(None).await.unwrap();
+    receiver.drain_from_post_office().await;
+    assert_eq!(receiver.peer_avatar(&sender.account_id()), Some(avatar));
+    sender.set_post_office_permissions(true, true);
+    let cleared = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            receiver.drain_from_post_office().await;
+            if receiver.peer_profile_states().get(&sender.account_id()) == Some(&None) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    runtime.stop().await;
+    relay_task.abort();
+    stalled_task.abort();
+    cleared.expect("a pending clear must propagate without a peer reconnect or another edit");
+}
+
 // Avatar propagation: Alice sets a custom avatar; it must ride the reliable sync to Bob,
 // who ends up holding Alice's avatar bytes keyed by Alice's ACCOUNT id. Mirrors the
 // account-delivery rig.

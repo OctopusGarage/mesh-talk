@@ -694,3 +694,26 @@ it("clears a local observation when send completion itself carries confirmation"
   });
   expect(completion.messages?.[key][0].deliveryObservation).toBeUndefined();
 });
+
+it("projects only recognized recovery reasons from exact local observations", async () => {
+  const store = session();
+  store.setState({ messages: { [key]: [row("event-a")] } });
+  for (const reason of [
+    "post_office_disabled",
+    "no_known_route",
+    "attempt_timed_out",
+    "future_reason",
+  ]) {
+    invoke.mockResolvedValue([
+      {
+        id: "event-a",
+        status: "awaiting",
+        observation: { kind: "retry_scheduled", age_ms: 0, reason },
+      },
+    ]);
+    await refreshDeliveryStatuses(store.setState, store.getState);
+    expect(store.getState().messages[key][0].deliveryObservation?.reason).toBe(
+      reason === "future_reason" ? undefined : reason,
+    );
+  }
+});

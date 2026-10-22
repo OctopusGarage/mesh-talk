@@ -872,6 +872,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     await get().reload();
     if (!lease.current() || get().activeRequest !== request) return;
     if (
+      (!target || !("reference" in target)) &&
       !get().loading &&
       get().historyError !== convKey(c) &&
       isConversationVisible()

@@ -6,7 +6,7 @@
 use super::{ParticipantConfig, ParticipantRuntime, PreparedParticipant};
 use crate::discovery::candidates::CandidateSource;
 use crate::discovery::{PeerRecord, Roster};
-use crate::eventlog::LogError;
+use crate::eventlog::{ConversationId, LogError};
 use crate::identity::account_keystore;
 use crate::identity::device::PublicIdentity;
 use crate::identity::keystore;
@@ -14,16 +14,17 @@ use crate::node::name_directory::NameDirectory;
 use crate::node::{HistoryEntry, Node, NodeError, ReceivedDm};
 #[cfg(test)]
 use crate::transport::net::routed_ipv6_socket;
+use futures_util::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// How often the node checks for freshly-discovered peers and re-publishes its current
-/// avatar to them (so a new contact sees the photo without waiting for the next change).
-/// A no-op when no new peers appeared and when we've never set an avatar.
+/// How often the node checks for new peers and retries pending public profiles.
 const PROFILE_REPUBLISH_INTERVAL_SECS: u64 = 3;
+/// Keep background profile traffic within the shared connection budget.
+const MAX_PROFILE_PUBLICATIONS: usize = 2;
 
 #[cfg(test)]
 type InitializationHook = Box<dyn FnOnce() + Send>;
@@ -32,15 +33,19 @@ static NAMES_OPEN_HOOKS: std::sync::LazyLock<
     Mutex<std::collections::HashMap<std::path::PathBuf, InitializationHook>>,
 > = std::sync::LazyLock::new(Default::default);
 
-/// Which peers to (re)publish our profile to this round: those present now (excluding post
-/// offices, which relay rather than render avatars) that were ABSENT in the previous round.
-/// `present_prev` holds the PREVIOUS round's present set and is updated in place to this
-/// round's. Using a per-round present set — rather than a monotonic "ever seen" set — means a
-/// peer that goes offline (evicted after PEER_TTL) and reconnects is treated as new again and
-/// gets our current avatar, instead of being stuck on whatever it had before it restarted.
+struct ProfilePublication {
+    revision: u64,
+    conversation: ConversationId,
+    complete: bool,
+    last_attempt: Option<std::time::Instant>,
+}
+
+/// Keep publication state only for currently present peers. Missing or
+/// outdated revisions remain eligible until a direct or relay exchange succeeds.
 fn profile_republish_targets(
-    present_prev: &mut std::collections::HashSet<String>,
+    published: &mut std::collections::HashMap<String, ProfilePublication>,
     peers: &[PeerRecord],
+    revision: u64,
 ) -> Vec<PeerRecord> {
     let mut present_now = std::collections::HashSet::new();
     let mut targets = Vec::new();
@@ -49,12 +54,21 @@ fn profile_republish_targets(
             continue;
         }
         let uid = p.public.user_id();
-        if !present_prev.contains(&uid) {
+        if !published
+            .get(&uid)
+            .is_some_and(|publication| publication.revision == revision && publication.complete)
+        {
             targets.push(p.clone());
         }
         present_now.insert(uid);
     }
-    *present_prev = present_now;
+    published.retain(|uid, _| present_now.contains(uid));
+    // Untouched peers precede retries, then the oldest attempt goes first.
+    targets.sort_by_key(|peer| {
+        published
+            .get(&peer.public.user_id())
+            .and_then(|publication| publication.last_attempt)
+    });
     targets
 }
 
@@ -475,51 +489,72 @@ impl NodeRuntime {
                     }
                 }));
             }
-            // Re-publish our signed card or legacy avatar to freshly-discovered peers.
-            // Poll the roster and send each newly present peer our current public profile.
+            // Publish to new peers and retry failed or outdated profile publications.
             // Bounded by the live roster; no-op when neither public profile exists.
             {
                 let node = Arc::clone(&node);
                 let roster = Arc::clone(&roster);
                 let names = Arc::clone(&names);
                 tasks.push(tokio::spawn(async move {
-                    // The set of peers PRESENT in the previous poll — NOT a monotonic "ever seen"
-                    // set. A peer is republished-to when it's present now but was absent last
-                    // round, which covers both first discovery AND a reconnect after the roster
-                    // evicted it (PEER_TTL). A monotonic set would never re-publish to a peer that
-                    // restarted, so it would keep showing our stale avatar until we re-set it.
-                    let mut present_prev: std::collections::HashSet<String> =
-                        std::collections::HashSet::new();
+                    // Futures stay owned by this task, so retirement drops their
+                    // channels together with the rest of the runtime's work.
+                    let mut published: std::collections::HashMap<String, ProfilePublication> =
+                        std::collections::HashMap::new();
+                    let mut in_flight = std::collections::HashSet::new();
+                    let mut attempts: FuturesUnordered<BoxFuture<'static, (String, u64, bool)>> =
+                        FuturesUnordered::new();
+                    let mut poll = tokio::time::interval(Duration::from_secs(PROFILE_REPUBLISH_INTERVAL_SECS));
+                    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
-                        let mut peers: Vec<PeerRecord> = {
-                            let r = roster.lock().expect("roster mutex not poisoned");
-                            r.peers()
-                        };
-                        // Remember every peer's announced name durably, so a member that later
-                        // goes offline (and is evicted from the live roster) still shows a name.
-                        // `record` is a no-op when unchanged, so this doesn't grow the log.
-                        {
-                            let mut dir = names.lock().expect("names mutex not poisoned");
-                            peers.sort_by_key(|peer| peer.last_seen);
-                            for p in &peers {
-                                let _ = dir.record_peer_name(
-                                    &p.public.user_id(),
-                                    if p.post_office {
-                                        None
-                                    } else {
-                                        p.account_id.as_deref()
-                                    },
-                                    &p.name,
-                                );
+                        tokio::select! {
+                            Some((uid, revision, complete)) = attempts.next(), if !attempts.is_empty() => {
+                                in_flight.remove(&uid);
+                                if let Some(publication) = published.get_mut(&uid)
+                                    && publication.revision == revision
+                                {
+                                    publication.complete = complete;
+                                }
+                            }
+                            _ = poll.tick() => {
+                                let mut peers: Vec<PeerRecord> = {
+                                    let r = roster.lock().expect("roster mutex not poisoned");
+                                    r.peers()
+                                };
+                                // Remember names independently of slow network exchanges.
+                                {
+                                    let mut dir = names.lock().expect("names mutex not poisoned");
+                                    peers.sort_by_key(|peer| peer.last_seen);
+                                    for p in &peers {
+                                        let _ = dir.record_peer_name(
+                                            &p.public.user_id(),
+                                            if p.post_office { None } else { p.account_id.as_deref() },
+                                            &p.name,
+                                        );
+                                    }
+                                }
+                                let Some(revision) = node.public_profile_revision() else { continue; };
+                                for peer in profile_republish_targets(&mut published, &peers, revision) {
+                                    if attempts.len() >= MAX_PROFILE_PUBLICATIONS { break; }
+                                    let uid = peer.public.user_id();
+                                    if in_flight.contains(&uid) { continue; }
+                                    let conversation = match published.get(&uid) {
+                                        Some(publication) if publication.revision == revision => publication.conversation,
+                                        _ => {
+                                            let Some(conversation) = node.prepare_current_profile_delivery(&peer) else { continue; };
+                                            published.insert(uid.clone(), ProfilePublication { revision, conversation, complete: false, last_attempt: None });
+                                            conversation
+                                        }
+                                    };
+                                    in_flight.insert(uid.clone());
+                                    published.get_mut(&uid).expect("prepared publication").last_attempt = Some(std::time::Instant::now());
+                                    let node = Arc::clone(&node);
+                                    attempts.push(Box::pin(async move {
+                                        let complete = node.deliver_profile_to(&peer, conversation).await;
+                                        (uid, revision, complete)
+                                    }));
+                                }
                             }
                         }
-                        // Re-publish our public profile to peers that just (re)appeared.
-                        // Bounded by the live roster size.
-                        for peer in profile_republish_targets(&mut present_prev, &peers) {
-                            node.republish_profile_to(&peer).await;
-                        }
-                        tokio::time::sleep(Duration::from_secs(PROFILE_REPUBLISH_INTERVAL_SECS))
-                            .await;
                     }
                 }));
             }

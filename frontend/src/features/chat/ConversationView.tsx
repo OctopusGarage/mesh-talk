@@ -124,7 +124,7 @@ export function ConversationView() {
   }, [key]);
   const drafts = useRef(new ConversationDrafts());
   const draftKey = `${owner}:${authGeneration}:${key}`;
-  const messages = useChat((s) =>
+  const historyMessages = useChat((s) =>
     active ? (s.messages[key] ?? NO_MESSAGES) : NO_MESSAGES,
   );
   const reactions = useChat((s) =>
@@ -138,6 +138,28 @@ export function ConversationView() {
   const loading = useChat((s) => s.loading);
   const historyError = useChat((s) => s.historyError === key);
   const searchTarget = useChat((s) => s.searchTarget);
+  const exactContext =
+    searchTarget?.key === key && "reference" in searchTarget
+      ? searchTarget.context
+      : null;
+  const expiryNow = useChat((s) => s.expiryNow);
+  const deletedContextIds = useChat((s) => s.deleted[key] ?? NO_IDS);
+  const messages = useMemo(
+    () =>
+      exactContext
+        ? exactContext.filter(
+            (message) =>
+              (!message.id || !deletedContextIds.includes(message.id)) &&
+              (message.expiresAtMs == null || message.expiresAtMs > expiryNow),
+          )
+        : historyMessages,
+    [exactContext, historyMessages, deletedContextIds, expiryNow],
+  );
+  const closeSearchContext = () => {
+    useChat.setState({ searchTarget: null });
+    // Let the canonical recent rows replace context before moving their viewport.
+    requestAnimationFrame(() => viewport.jumpToLatest());
+  };
   const ready = useChat((s) => s.ready);
   const bootFailed = useChat((s) => s.bootFailed);
   const myName = useAuth((s) => s.user?.display_name || s.user?.username || "");
@@ -148,7 +170,7 @@ export function ConversationView() {
     loading,
     historyError,
     searchTarget,
-    markMessagesViewed,
+    exactContext ? undefined : markMessagesViewed,
   );
 
   const unreadNavigationRequest = useRef(0);
@@ -328,8 +350,12 @@ export function ConversationView() {
     // getting clipped under the shell's overflow-hidden / behind the sidebar).
     <main
       className="conversation-canvas relative flex min-w-0 flex-1 flex-col"
-      onPointerDownCapture={() => useChat.getState().markLegacyActiveRead()}
-      onFocusCapture={() => useChat.getState().markLegacyActiveRead()}
+      onPointerDownCapture={() => {
+        if (!exactContext) useChat.getState().markLegacyActiveRead();
+      }}
+      onFocusCapture={() => {
+        if (!exactContext) useChat.getState().markLegacyActiveRead();
+      }}
     >
       <AnimatePresence>
         {attachments.dragOver && (
@@ -448,7 +474,18 @@ export function ConversationView() {
             role="status"
             className="absolute inset-x-4 top-3 z-10 mx-auto max-w-[38rem] rounded-md border bg-card px-4 py-2 text-center text-[13px] shadow-elevation"
           >
-            {t("search.outsideRecent")}
+            {t("search.contextUnavailable")}
+          </div>
+        )}
+        {exactContext && (
+          <div className="absolute right-4 top-3 z-10 rounded-md border bg-card px-3 py-2 text-sm shadow-elevation">
+            <button
+              type="button"
+              onClick={closeSearchContext}
+              className="text-signal"
+            >
+              {t("conversation.jumpToLatest")}
+            </button>
           </div>
         )}
         {loading && messages.length === 0 && (
@@ -482,7 +519,7 @@ export function ConversationView() {
             scrollerRef={viewport.scrollerRef}
             // `key` resets all virtualization state (scroll pos, measured heights) when
             // switching conversations — equivalent to the old `[messages.length, key]` reset.
-            key={key}
+            key={exactContext ? `${key}:search:${searchTarget?.request}` : key}
             data={messages}
             // ReceptionStatus batches announcements; row mounts are silent.
             role="log"
@@ -560,7 +597,7 @@ export function ConversationView() {
                     showTime={showTime}
                     isChannel={isChannel}
                     isPersonal={isPersonal}
-                    readOnly={readOnly}
+                    readOnly={readOnly || !!exactContext}
                     authorAvatarId={authorAccount ?? m.who}
                     authorName={authorName}
                     onViewAuthor={() =>
@@ -617,7 +654,10 @@ export function ConversationView() {
               }}
               transition={{ duration: motionOK ? 0.12 : 0.08, ease }}
               aria-label={t("conversation.jumpToLatest")}
-              onClick={viewport.jumpToLatest}
+              onClick={() => {
+                if (exactContext) closeSearchContext();
+                else viewport.jumpToLatest();
+              }}
               className="absolute bottom-3 right-4 z-10 rounded-md border bg-card p-2 shadow-elevation hover:bg-accent"
             >
               <ChevronDown className="h-4 w-4" />

@@ -372,7 +372,8 @@ test("cross-network presence stays online for two minutes with one concise quali
       window as unknown as { __mockPresenceFailure: (failed: boolean) => void }
     ).__mockPresenceFailure(true);
   });
-  await page.clock.runFor(31_000);
+  // Exercise elapsed-time expiry without replaying every background poll.
+  await page.clock.fastForward(31_000);
   await expect(page.getByTestId("conversation-member-profile")).toContainText(
     "Online",
   );
@@ -380,7 +381,7 @@ test("cross-network presence stays online for two minutes with one concise quali
     "Searching",
   );
   await expect(page.getByTestId("stranded-prompt")).toHaveCount(0);
-  await page.clock.runFor(86_000);
+  await page.clock.fastForward(86_000);
   await expect(page.getByTestId("conversation-member-profile")).toContainText(
     "Online",
   );

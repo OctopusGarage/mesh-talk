@@ -301,6 +301,11 @@
   "message": {
     "expiresIn": "傳送後倒數 {{time}}，到期雙方訊息都會消失",
     "delivery": {
+      "postOfficeDisabled": "上次嘗試時，呢部裝置冇已知嘅直接路由，而且郵局傳送已關閉。如要用可信郵局，請檢查連線設定。",
+      "noKnownRoute": "上次嘗試時，呢部裝置冇已知嘅可用路由。請檢查連線診斷、使用嘅網絡同可信郵局。",
+      "attemptTimedOut": "本機嘗試逾時，仲未收到收件確認。請檢查連線診斷；系統仍會自動重試。",
+      "reviewSettings": "檢查傳遞設定",
+      "openDiagnostics": "開啟連線診斷",
       "awaiting": "等候收據",
       "delivered": "已送達",
       "help": "收件帳戶自動發出嘅收據，唔代表已讀。",
@@ -564,7 +569,11 @@
     "noMatches": "找不到符合的結果。",
     "failed": "搜尋未能完成，請再試一次。",
     "outsideRecent": "呢個結果唔喺最近嘅訊息入面。請打開上面嘅聊天記錄搵返。",
-    "empty": "輸入關鍵字即可搜尋對話記錄。"
+    "empty": "輸入關鍵字即可搜尋對話記錄。",
+    "recentCoverage": "搜尋每段對話最近嘅 {{count}} 則訊息。",
+    "truncated": "仲有更多相符結果，請縮窄搜尋範圍。",
+    "contextUnavailable": "呢則訊息已經無法使用。",
+    "legacyUnavailable": "無法從而家嘅聯絡人清單開啟呢段舊格式對話。"
   },
   "history": {
     "trigger": "對話記錄",

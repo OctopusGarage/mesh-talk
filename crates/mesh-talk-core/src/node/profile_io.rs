@@ -80,15 +80,50 @@ impl Node {
         Ok(())
     }
 
-    /// Re-publish our current profile to a single freshly-discovered `peer`, so a new
-    /// contact gets our signed card or legacy avatar without waiting for an edit.
-    /// A no-op when neither public profile exists.
-    pub(in crate::node) async fn republish_profile_to(&self, peer: &PeerRecord) {
-        let Some(conv) = self.prepare_current_profile_delivery(peer) else {
-            return;
+    /// Revision of the current public profile, including an avatar clear.
+    pub(in crate::node) fn public_profile_revision(&self) -> Option<u64> {
+        let card = self
+            .trust_cards
+            .lock()
+            .expect("trust cards mutex not poisoned")
+            .get(&self.account_id())
+            .map(|card| card.revision);
+        let avatar = self
+            .account_profiles
+            .current()
+            .map(|profile| profile.updated_at);
+        card.into_iter().chain(avatar).max()
+    }
+
+    /// Report whether direct reconciliation or relay publication completed, so
+    /// a transient failure remains eligible for a later runtime poll.
+    pub(in crate::node) async fn deliver_profile_to(
+        &self,
+        peer: &PeerRecord,
+        conv: ConversationId,
+    ) -> bool {
+        let direct = async {
+            self.adaptive_control_timeout(&peer.public, self.deliver_direct(peer, conv))
+                .await
+                .is_some_and(|result| result.is_ok())
         };
-        let _ = self.deliver_direct(peer, conv).await;
-        let _ = self.replicate_to_post_office(conv).await;
+        let relay = async {
+            tokio::time::timeout(
+                super::route_timing::MAX_CONTROL_DEADLINE,
+                self.replicate_to_post_office(conv),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false)
+        };
+        tokio::pin!(direct, relay);
+        // Either successful path completes this publication. Dropping the other
+        // future closes its channel; retries reconstruct any round-local state.
+        tokio::select! {
+            delivered = &mut direct => delivered || relay.await,
+            published = &mut relay => published || direct.await,
+        }
     }
 
     /// Every distinct peer DEVICE to publish a profile to: every known peer (any account)

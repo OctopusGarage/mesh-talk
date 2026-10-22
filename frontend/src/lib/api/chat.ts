@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 export interface DeliveryObservation {
   kind: "attempting" | "retry_scheduled";
   age_ms: number;
+  reason?: "post_office_disabled" | "no_known_route" | "attempt_timed_out";
 }
 
 export type SyncCategory =
@@ -41,6 +42,32 @@ import type {
   SearchHitInfo,
   TrustInfo,
 } from "../types";
+
+/** Namespace is part of identity; a legacy device is never an account ID. */
+export interface SearchReference {
+  kind: "account" | "channel" | "legacy-device";
+  target: string;
+  message_id: string | null;
+}
+export interface ReferencedSearchHit extends SearchHitInfo {
+  reference: SearchReference;
+  expires_at_ms: number | null;
+}
+export interface RecentSearch {
+  hits: ReferencedSearchHit[];
+  coverage: {
+    scope: "recent-window";
+    per_conversation_limit: number;
+    result_limit: number;
+    truncated: boolean;
+  };
+}
+export interface SearchContext {
+  status: "found" | "unavailable";
+  reference: SearchReference;
+  messages: HistoryItem[];
+  newer_entries: number | null;
+}
 
 // Preserve order across rapid unread/read updates and webview reloads.
 let lastBadgeRevision = 0;
@@ -400,6 +427,10 @@ export const chat = {
       (b) => new Uint8Array(b),
     ),
   screenshotAvailable: () => invoke<boolean>("screenshot_available"),
+  searchRecent: (owner: string, query: string) =>
+    invoke<RecentSearch>("owner_search_recent", { owner, query }),
+  searchContext: (owner: string, reference: SearchReference) =>
+    invoke<SearchContext>("owner_search_context", { owner, reference }),
   search: (query: string) => invoke<SearchHitInfo[]>("search", { query }),
   startLinking: () => invoke<string>("start_linking"),
   stopLinking: () => invoke<void>("stop_linking"),
