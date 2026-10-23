@@ -2,6 +2,42 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-message-favorites",
+      "paths": [
+        "src-tauri/src/message_favorites.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "owner_commands::tests::registered_message_favorites_validate_owner_and_reject_queued_session_changes",
+            "owner_commands::tests::registered_message_favorites_save_search_edit_remove_and_keep_original",
+            "owner_commands::tests::registered_message_favorite_files_retain_export_and_revoke_access"
+          ]
+        }
+      ],
+      "frontend": [
+        "src/lib/api/messageFavorites.test.ts",
+        "src/lib/attachmentSave.test.ts"
+      ],
+      "consumers": [
+        "frontend-message-favorites"
+      ],
+      "capability": {
+        "summary": "Adapt independent Favorites queries and durable mutations with exact session/runtime authority and explicit retained-file access.",
+        "guide": "docs/favorites.md",
+        "invariants": [
+          {
+            "name": "Queued owner replacement and app lock deny writes and plaintext release; file access requires a live favorite reference",
+            "reference": "docs/favorites.md#ownership-and-acceptance"
+          }
+        ]
+      },
+      "escalation": [
+        "Run registered Favorites IPC tests for save/search/edit/remove, retained-file reads/exports and queued same-owner relogin/logout/app-lock denial. Real native webview and linked-device acceptance remain separate evidence."
+      ]
+    },
+    {
       "id": "desktop-search",
       "paths": [
         "src-tauri/src/owner_commands/search.rs"
