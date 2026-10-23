@@ -8,14 +8,9 @@ import { revealComposerTools } from "./helpers/session";
 import { seedMarketPacks, waitForPackBootstrap } from "./helpers/packs";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 
-test.skip(process.env.MESH_TALK_VARIANT === "lite", "Default build only");
-
-test("a missing bundled ZIP does not hide an installed sticker pack", async ({
+test("installed sticker packs remain available without bundled assets", async ({
   page,
 }) => {
-  await page.route("**/builtin-packs/nature.zip", (route) =>
-    route.fulfill({ status: 404, body: "missing" }),
-  );
   await seedMarketPacks(page, ["google-noto"]);
   await enterChat(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
@@ -28,12 +23,10 @@ test("a missing bundled ZIP does not hide an installed sticker pack", async ({
   ).toBeVisible();
 });
 
-test("a failed bundled ZIP recovers without restoring a removed theme after restart", async ({
+test("installed themes persist without restoring a removed theme after restart", async ({
   page,
 }) => {
-  await page.route("**/builtin-packs/nature.zip", (route) =>
-    route.fulfill({ status: 404, body: "missing" }),
-  );
+  await seedMarketPacks(page, ["nature", "barcelona"]);
   await enterChat(page);
   await waitForPackBootstrap(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
@@ -47,7 +40,6 @@ test("a failed bundled ZIP recovers without restoring a removed theme after rest
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");
   await expect(page.getByTestId("theme-barcelona")).toHaveCount(0);
-  await page.unroute("**/builtin-packs/nature.zip");
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");
@@ -55,12 +47,11 @@ test("a failed bundled ZIP recovers without restoring a removed theme after rest
   await expect(page.getByTestId("theme-barcelona")).toHaveCount(0);
 });
 
-test("default build preinstalls a theme and keeps its removal after restart", async ({
+test("an installed theme keeps its selection and removal after restart", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["barcelona"]);
   await enterChat(page);
-  // Exercise the real bundled installer and await its completion, including
-  // image validation, before checking the installed theme.
   await waitForPackBootstrap(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");

@@ -344,7 +344,15 @@
     },
     {
       "id": "frontend-pack-acceptance",
-      "paths": ["frontend/e2e/packs.spec.ts"],
+      "paths": [
+        "frontend/e2e/packs.spec.ts",
+        "frontend/e2e/packs-empty.spec.ts",
+        "frontend/e2e/stickers.spec.ts",
+        "frontend/e2e/theme-picker.spec.ts",
+        "frontend/e2e/avatar-gallery.spec.ts",
+        "frontend/e2e/avatar-gallery-loading.spec.ts",
+        "frontend/e2e/theme-contrast.spec.ts"
+      ],
       "frontend": ["src/lib/pack.test.ts", "src/lib/stickerPacks.test.ts"],
       "escalation": [
         "Pack browser scenario changes require their complete browser spec; unit tests alone do not prove installation or restart persistence."
@@ -637,7 +645,7 @@
         "src/lib/api/diagnostics.test.ts"
       ],
       "capability": {
-        "summary": "Persist a device-local explicit update channel and discard prior candidates on channel changes, preserving native release and edition authority.",
+        "summary": "Persist a device-local explicit update channel and discard prior candidates on channel changes, preserving native release and platform authority.",
         "guide": "docs/updates.md",
         "invariants": [
           {
@@ -647,7 +655,7 @@
         ]
       },
       "escalation": [
-        "Run the update-flow browser spec for persisted selection, candidate invalidation, lite identity forwarding and manual installation. Signed native downloads require native owner evidence."
+        "Run the update-flow browser spec for persisted selection, candidate invalidation, canonical desktop package forwarding and manual installation. Signed native downloads require native owner evidence."
       ]
     },
     {
@@ -794,6 +802,36 @@
       "id": "frontend-pack-acceptance",
       "paths": ["frontend/e2e/packs.spec.ts"],
       "browser": ["e2e/packs.spec.ts"]
+    },
+    {
+      "id": "frontend-packs-empty-acceptance",
+      "paths": ["frontend/e2e/packs-empty.spec.ts"],
+      "browser": ["e2e/packs-empty.spec.ts"]
+    },
+    {
+      "id": "frontend-stickers-acceptance",
+      "paths": ["frontend/e2e/stickers.spec.ts"],
+      "browser": ["e2e/stickers.spec.ts"]
+    },
+    {
+      "id": "frontend-theme-picker-acceptance",
+      "paths": ["frontend/e2e/theme-picker.spec.ts"],
+      "browser": ["e2e/theme-picker.spec.ts"]
+    },
+    {
+      "id": "frontend-avatar-gallery-acceptance",
+      "paths": ["frontend/e2e/avatar-gallery.spec.ts"],
+      "browser": ["e2e/avatar-gallery.spec.ts"]
+    },
+    {
+      "id": "frontend-avatar-gallery-loading-acceptance",
+      "paths": ["frontend/e2e/avatar-gallery-loading.spec.ts"],
+      "browser": ["e2e/avatar-gallery-loading.spec.ts"]
+    },
+    {
+      "id": "frontend-theme-contrast-acceptance",
+      "paths": ["frontend/e2e/theme-contrast.spec.ts"],
+      "browser": ["e2e/theme-contrast.spec.ts"]
     },
     {
       "id": "frontend-composer-acceptance",

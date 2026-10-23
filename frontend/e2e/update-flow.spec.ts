@@ -184,7 +184,7 @@ test("a long update download can be canceled and retried", async ({ page }) => {
   await expect(page.getByTestId("update-error")).toHaveCount(0);
 });
 
-test("Nightly choice persists, discards candidates and downloads the same lite edition", async ({
+test("Nightly choice persists, discards candidates and downloads the same desktop package", async ({
   page,
 }) => {
   await enterChat(page);
@@ -224,9 +224,9 @@ test("Nightly choice persists, discards candidates and downloads the same lite e
           release_url:
             "https://github.com/OctopusGarage/mesh-talk/releases/tag/v0.4.4-nightly.42.1",
           notes: "Nightly preview",
-          package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
+          package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64.zip",
           package_size: 42,
-          edition: "lite",
+          edition: "default",
         };
       }
       if (cmd === "download_update") {
@@ -237,8 +237,8 @@ test("Nightly choice persists, discards candidates and downloads the same lite e
           channel: args.updateChannel,
         };
         return {
-          path: "/Downloads/mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
-          file_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
+          path: "/Downloads/mesh-talk_v0.4.4-nightly.42.1_linux_x86_64.zip",
+          file_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64.zip",
         };
       }
       return original(cmd, args);
@@ -250,7 +250,7 @@ test("Nightly choice persists, discards candidates and downloads the same lite e
   await page.getByTestId("check-for-updates").click();
   await expect(page.getByText("Installed: 0.4.4-nightly.41.1")).toBeVisible();
   await expect(
-    page.getByText(/mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip/),
+    page.getByText(/mesh-talk_v0.4.4-nightly.42.1_linux_x86_64.zip/),
   ).toBeVisible();
   await choice.selectOption("stable");
   await expect(page.getByTestId("download-update")).toHaveCount(0);

@@ -28,23 +28,21 @@ class ReleaseAssetsTests(unittest.TestCase):
         }.items():
             entries = {f"release/installer 0.1.5.{ext}": b"installer bytes" for ext in extensions}
             self.entries[platform] = entries
-            for variant in ("default", "lite"):
-                self.write_archive(platform, variant=variant)
-                (self.root / (self.name(platform, variant) + ".bundle")).write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
+            self.write_archive(platform)
+            (self.root / (self.name(platform) + ".bundle")).write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
             self.write_post_office_archive(platform)
             (self.root / (self.post_office_name(platform) + ".bundle")).write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
         (self.root / "mesh-talk.cdx.json").write_text(json.dumps({"bomFormat": "CycloneDX", "components": [{"name": "mesh-talk"}]}))
 
     @staticmethod
-    def name(platform, variant="default"):
-        suffix = "_lite" if variant == "lite" else ""
-        return f"mesh-talk_v0.1.5_{platform}{suffix}.zip"
+    def name(platform):
+        return f"mesh-talk_v0.1.5_{platform}.zip"
 
-    def write_archive(self, platform, checksums=None, variant="default"):
+    def write_archive(self, platform, checksums=None):
         entries = self.entries[platform]
         if checksums is None:
             checksums = "".join(f"{hashlib.sha256(data).hexdigest()}  ./{name.removeprefix('release/')}\n" for name, data in entries.items() if name.count("/") == 1)
-        with zipfile.ZipFile(self.root / self.name(platform, variant), "w") as archive:
+        with zipfile.ZipFile(self.root / self.name(platform), "w") as archive:
             for name, data in entries.items():
                 archive.writestr(name, data)
             archive.writestr("release/SHA256SUMS", checksums)
@@ -77,13 +75,13 @@ class ReleaseAssetsTests(unittest.TestCase):
         for asset in list(self.root.iterdir()):
             if "v0.1.5" in asset.name:
                 asset.rename(asset.with_name(asset.name.replace("v0.1.5", tag)))
-        self.assertEqual(len(verify_directory(self.root, tag, "0.1.5", check_installers=False)), 18)
+        self.assertEqual(len(verify_directory(self.root, tag, "0.1.5", check_installers=False)), 12)
         for invalid in ("v0.1.5-nightly.0.1", "v0.1.5-nightly.123.01", "v0.1.5-beta.1"):
             with self.assertRaisesRegex(ValueError, "invalid artifact tag"):
                 verify_directory(self.root, invalid, "0.1.5", check_installers=False)
 
     def test_complete_release(self):
-        self.assertEqual(len(self.verify()), 18)
+        self.assertEqual(len(self.verify()), 12)
 
     def test_macos_archive_needs_only_the_dmg(self):
         for platform in ("macos_arm64", "macos_x86_64"):
@@ -92,7 +90,7 @@ class ReleaseAssetsTests(unittest.TestCase):
                     {name for name in archive.namelist() if not name.endswith("SHA256SUMS")},
                     {"release/installer 0.1.5.dmg"},
                 )
-        self.assertEqual(len(self.verify()), 18)
+        self.assertEqual(len(self.verify()), 12)
 
     def test_missing_post_office_archive(self):
         (self.root / self.post_office_name("linux_x86_64")).unlink()
@@ -152,8 +150,8 @@ class ReleaseAssetsTests(unittest.TestCase):
             output.write(b"tampered")
         self.assertNotEqual(subprocess.run(command, cwd=self.root, capture_output=True).returncode, 0)
 
-    def test_missing_lite_variant(self):
-        (self.root / self.name("windows_arm64", "lite")).unlink()
+    def test_rejects_extra_legacy_edition(self):
+        (self.root / "mesh-talk_v0.1.5_windows_arm64_lite.zip").write_bytes(b"legacy")
         with self.assertRaisesRegex(ValueError, "asset set"):
             self.verify()
 

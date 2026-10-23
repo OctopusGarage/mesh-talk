@@ -165,11 +165,11 @@ test("selected Playwright files require real passing executions, not an all-skip
   const { join } = await import("node:path");
   const directory = await mkdtemp(join(tmpdir(), "mesh-ui-evidence-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const plan = { ...buildPlan(parseFlags(["e2e/privacy.spec.ts", "e2e/packs-lite.spec.ts"]), []), sourceSha: sha, archiveSha: "b".repeat(64) };
+  const plan = { ...buildPlan(parseFlags(["e2e/privacy.spec.ts", "e2e/packs-empty.spec.ts"]), []), sourceSha: sha, archiveSha: "b".repeat(64) };
   const json = status => ({
     config: { rootDir: join(directory, "frontend/e2e") }, errors: [],
     stats: { expected: status === "passed" ? 2 : 0, skipped: status === "passed" ? 1 : 2, unexpected: 0, flaky: 0 },
-    suites: ["privacy.spec.ts", "packs-lite.spec.ts"].map((file, i) => ({
+    suites: ["privacy.spec.ts", "packs-empty.spec.ts"].map((file, i) => ({
       title: file, file, specs: [{ title: "runs or explicitly skips", file, id: `test-${i}`, ok: true,
         tests: [{ projectName: "chromium", expectedStatus: status === "passed" ? "passed" : "skipped", status: status === "passed" ? "expected" : "skipped", results: [{ status, errors: [] }] }],
       }, ...(status === "passed" && i === 0 ? [{ title: "individual conditional skip", file, id: "optional-skip", ok: true,
@@ -189,7 +189,7 @@ test("selected Playwright files require real passing executions, not an all-skip
   assert.equal(passed.ok, true, "real passes plus individual skips are accepted");
   assert.equal(validateGuestReport(passed, plan, process.platform), passed);
   const missing = structuredClone(passed);
-  missing.results.at(-1).ui.tests = missing.results.at(-1).ui.tests.filter(row => row.file !== "e2e/packs-lite.spec.ts");
+  missing.results.at(-1).ui.tests = missing.results.at(-1).ui.tests.filter(row => row.file !== "e2e/packs-empty.spec.ts");
   assert.throws(() => validateGuestReport(missing, plan, process.platform), /Playwright|spec/);
 });
 
@@ -316,7 +316,7 @@ test("all executable targets and package-local compiler configs require Rust sel
 });
 
 test("Tauri native build inputs require host selection and keep documentation outside Rust validation", () => {
-  for (const relative of ["examples/native-contact-eval.rs", "tauri.conf.json", "tauri.conf.lite.json", "tauri.windows.conf.json", "capabilities/default.json", "windows.manifest", "icons/icon.png", "icons/icon.ico", "Info.plist", "entitlements.plist"]) {
+  for (const relative of ["examples/native-contact-eval.rs", "tauri.conf.json", "tauri.conf.custom.json", "tauri.windows.conf.json", "capabilities/default.json", "windows.manifest", "icons/icon.png", "icons/icon.ico", "Info.plist", "entitlements.plist"]) {
     assert.throws(() => buildPlan(parseFlags([]), [`src-tauri/${relative}`]), /--host-filter/);
   }
   for (const relative of ["README.md", "icons/README.md", "validation.json", "gen/schemas/capabilities.json"]) {
