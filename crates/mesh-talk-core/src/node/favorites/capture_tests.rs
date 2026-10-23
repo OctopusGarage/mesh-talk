@@ -606,6 +606,13 @@ async fn protected_text_and_images_cannot_be_saved_in_mixed_favorites() {
             .unwrap()
             .record(conv, 3, 3, &envelope.encode())
             .unwrap();
+        let mut single_text = selected.clone();
+        single_text.message_ids = vec![hex::encode(id)];
+        assert!(
+            node.save_message_favorite_guarded(single_text, Default::default(), |c| c())
+                .is_err()
+        );
+        assert!(node.favorites.lock().unwrap().current.is_empty());
         selected.message_ids.push(hex::encode(id));
         assert!(
             node.save_message_favorite_guarded(selected, Default::default(), |c| c())
@@ -640,6 +647,14 @@ async fn protected_text_and_images_cannot_be_saved_in_mixed_favorites() {
             target: hex::encode(channel.as_bytes()),
             message_ids: vec![ordinary.to_hex(), image.to_hex()],
         };
+        let mut single_image = selection.clone();
+        single_image.message_ids = vec![image.to_hex()];
+        assert!(
+            node.save_message_favorite_guarded(single_image, Default::default(), |c| c())
+                .is_err()
+        );
+        assert!(node.favorites.lock().unwrap().current.is_empty());
+        assert!(!node.favorite_media.contains(file));
         assert!(
             node.save_message_favorite_guarded(selection.clone(), Default::default(), |c| c())
                 .is_err()
@@ -650,6 +665,18 @@ async fn protected_text_and_images_cannot_be_saved_in_mixed_favorites() {
                 .items
                 .is_empty()
         );
+        assert!(!node.favorite_media.contains(file));
+        assert!(node.favorites.lock().unwrap().current.is_empty());
+        let mut single_ordinary = selection;
+        single_ordinary.message_ids = vec![ordinary.to_hex()];
+        let favorite = node
+            .save_message_favorite_guarded(single_ordinary, Default::default(), |c| c())
+            .unwrap();
+        assert_eq!(favorite.messages.len(), 1);
+        assert_eq!(favorite.messages[0].id, ordinary.to_hex());
+        assert_eq!(favorite.messages[0].text, "ordinary");
+        assert!(favorite.messages[0].file.is_none());
+        assert_eq!(node.favorites.lock().unwrap().current.len(), 1);
         assert!(!node.favorite_media.contains(file));
     }
 }
