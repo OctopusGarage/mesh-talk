@@ -151,7 +151,8 @@ alone owns pending acceptance, failure and retry. Backend acceptance and recipie
 confirmation remain distinct states, and later completion cannot overwrite a new
 draft or put submitted text back into the composer.
 
-`ui/store/drafts.ts` owns reactive conversation text and one idle-save coordinator
+`ui/store/drafts.ts` owns reactive conversation text, protection choices, revision-bound
+admission and one idle-save coordinator
 per local user/session; both composer restoration and inactive sidebar previews
 consume it. Typing updates memory without re-rendering the conversation view.
 Persistence coalesces after ten seconds idle, restarting the timer on each edit;
@@ -161,6 +162,11 @@ owns bounded encrypted snapshots, session admission and atomic replacement using
 the core encrypted record-log implementation. Its cached derived key is reused
 until lock/logout; writes never repeat password derivation. Stable conversation
 keys restore across restarts while exact session handles reject retired writes.
+Text and protection metadata share one encrypted snapshot. Legacy text-only maps
+remain readable; reserved policy entries are validated before restoration. Pending
+admission and callbacks stay in memory. Success clears only its originating draft
+revision and flushes that removal; rejection retains the draft as the sole retry
+owner. Protected inactive previews and tooltips conceal draft text.
 See [draft behavior](help/topics/history.md#keep-an-unfinished-message).
 
 Protected text uses durable acceptance before clearing its captured draft, reply
@@ -483,20 +489,22 @@ Markdown rendering, static publication and read-only documentation MCP. These
 modules consume no private messaging state and introduce no core protocol
 responsibility. See [help system maintenance](help-system.md).
 
-### Peer trust evidence
+### Account profiles and private trust
 
-`core/node/trust_card.rs` owns signed public card and proof validation; its node
-I/O owner owns authenticated publication and encrypted current-card persistence.
-Send preparation and final WAL mutation enter host authority before acquiring the
-delivery journal; cached request lookups release that journal before requesting
-host authority. Profile publication must never be blocked by the opposite order.
-The desktop replies to signed-card publication after durable local acceptance,
-while a detached admitted task finishes best-effort peer/relay fanout.
-`src-tauri/src/trust_cards.rs` adapts admitted commands and bounded versioned JSON.
-`src-tauri/src/trust.rs` owns private first-observed time, device-change history
-and manual verification. Profile renderers must not derive verification from a
-valid public signature. The [peer trust guide](peer-trust.md) owns claim meanings
-and evidence limits.
+`identity/account.rs` and `identity/account_keystore.rs` own immutable creation
+metadata persisted with the account key. Pairing and recovery preserve it without
+inferring missing dates. `node/account_profile_data.rs` owns signed bounded
+ordinary profile data and current-profile persistence; `node/account_profile_io.rs`
+owns admitted edits, authenticated reception and legacy compatibility.
+Send preparation enters host authority before acquiring the delivery journal.
+Desktop biography saves reply after durable local acceptance while admitted fanout
+continues independently. The ordinary nickname and bio edit share the publication
+mutex, preventing a stale bio save from undoing a rename.
+`src-tauri/src/account_profile.rs` exposes reads and bio edits, with no caller-supplied
+names, timestamps or public proofs. `src-tauri/src/trust.rs` owns private observation
+history and manual verification. Frontend `store/accountProfiles.ts` shares
+session-bound profile reads and live invalidations across the header and dialogs.
+The [profile and verification guide](peer-trust.md) owns meanings and evidence limits.
 
 ## Google Drive recovery transport
 

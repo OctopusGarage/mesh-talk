@@ -32,8 +32,18 @@ fn valid_history_snapshot_completes() {
     for schema_version in [1, SNAPSHOT_SCHEMA_VERSION] {
         let mut header = header();
         header.schema_version = schema_version;
+        if schema_version >= 4 {
+            header.record_count += 1;
+        }
         let mut validator = SnapshotValidator::new(header).unwrap();
         validator.accept(&received()).unwrap();
+        if schema_version >= 4 {
+            validator
+                .accept(&SnapshotRecordV1::AccountCreation {
+                    created_at_ms: None,
+                })
+                .unwrap();
+        }
         validator.finish().unwrap();
     }
 }
@@ -577,7 +587,7 @@ fn favorite_record(fixture: &FavoriteFixture) -> SnapshotRecordV1 {
 }
 fn favorite_header(count: u64) -> SnapshotHeaderV1 {
     let mut value = header();
-    value.schema_version = SNAPSHOT_SCHEMA_VERSION;
+    value.schema_version = 4;
     value.record_count = count;
     value
 }
@@ -830,4 +840,408 @@ fn removed_favorite_cannot_authorize_retained_attachment_bytes() {
     validator.accept(&descriptor).unwrap();
     validator.accept(&chunk).unwrap();
     assert_eq!(validator.finish(), Err(SnapshotError::InvalidMedia));
+}
+
+#[test]
+fn immutable_creation_metadata_requires_v4_and_rejects_invalid_or_duplicate_dates() {
+    let record = SnapshotRecordV1::AccountCreation {
+        created_at_ms: Some(1_700_000_000_000),
+    };
+    let mut old = header();
+    old.schema_version = 3;
+    assert_eq!(
+        SnapshotValidator::new(old).unwrap().accept(&record),
+        Err(SnapshotError::UnsupportedVersion)
+    );
+    let mut current = header();
+    current.record_count = 2;
+    current.schema_version = SNAPSHOT_SCHEMA_VERSION;
+    let mut validator = SnapshotValidator::new(current.clone()).unwrap();
+    validator.accept(&record).unwrap();
+    assert_eq!(
+        validator.accept(&record),
+        Err(SnapshotError::DuplicateRecord)
+    );
+    for time in [0, 253_402_300_800_000, u64::MAX] {
+        let mut validator = SnapshotValidator::new(current.clone()).unwrap();
+        assert_eq!(
+            validator.accept(&SnapshotRecordV1::AccountCreation {
+                created_at_ms: Some(time)
+            }),
+            Err(SnapshotError::InvalidAccount)
+        );
+    }
+}
+
+#[test]
+fn snapshot_requires_own_profile_to_match_authoritative_creation_metadata() {
+    let account = Account::from_secret_bytes([0x7f; 32]);
+    let mut profile = mesh_talk_core::node::AccountProfile {
+        account_ed25519_pub: account.public().ed25519_pub,
+        revision: 1,
+        display_name: "Alice".into(),
+        bio: String::new(),
+        created_at_ms: Some(1_700_000_000_000),
+        avatar: None,
+        signature: [0; 64],
+    };
+    let mut input = b"mesh-talk-account-profile-v1".to_vec();
+    input.extend(
+        bincode::serialize(&(
+            profile.account_ed25519_pub,
+            profile.revision,
+            &profile.display_name,
+            &profile.bio,
+            profile.created_at_ms,
+            &profile.avatar,
+        ))
+        .unwrap(),
+    );
+    profile.signature = account.sign(&input);
+    assert!(profile.verify());
+    for metadata_first in [true, false] {
+        for creation in [None, Some(1_700_000_000_000), Some(1_700_000_000_001)] {
+            let mut current = header();
+            current.schema_version = SNAPSHOT_SCHEMA_VERSION;
+            current.record_count = 2;
+            let mut validator = SnapshotValidator::new(current).unwrap();
+            let metadata = SnapshotRecordV1::AccountCreation {
+                created_at_ms: creation,
+            };
+            let record = SnapshotRecordV1::AccountProfile {
+                profile: profile.clone(),
+            };
+            let records = if metadata_first {
+                [metadata, record]
+            } else {
+                [record, metadata]
+            };
+            for record in records {
+                validator.accept(&record).unwrap();
+            }
+            assert_eq!(
+                validator.finish(),
+                if creation == profile.created_at_ms {
+                    Ok(())
+                } else {
+                    Err(SnapshotError::InvalidAccount)
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn schema_five_cannot_silently_omit_authoritative_creation_metadata() {
+    let mut current = header();
+    current.schema_version = SNAPSHOT_SCHEMA_VERSION;
+    let mut validator = SnapshotValidator::new(current).unwrap();
+    validator.accept(&received()).unwrap();
+    assert_eq!(validator.finish(), Err(SnapshotError::InvalidAccount));
+}
+
+// Frozen original development schema-4 wire bytes; independent of current enum serialization.
+const LEGACY_FOUR_DRIVE: &str = concat!(
+    "4d54534e415031000000008204007f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f2000",
+    "000000000000393762353461656265396638633837646136636265366133303131376564623301000000000000000101",
+    "010101010101010101010101010101010101010101010101010101010101640000000000000003000000000000000000",
+    "02670c0000005b0200000000000001000000000000004000000000000000346164656535636333626365666339646536",
+    "346663386661386365623464623162653230306432353661343164643234366536356337363165623466316261650700",
+    "0000000000006163636f756e742000000000000000616261626162616261626162616261626162616261626162616261",
+    "626162616201000000000000004000000000000000313331333133313331333133313331333133313331333133313331",
+    "333133313331333133313331333133313331333133313331333133313331333133313331330400000000000000506565",
+    "720000000000000000000000000000000000000000000000000100000000000000400000000000000031333133313331",
+    "333133313331333133313331333133313331333133313331333133313331333133313331333133313331333133313331",
+    "333133313331333133200000000000000061626162616261626162616261626162616261626162616261626162616261",
+    "620400000000000000506565720b00000000000000e4bda0e5a5bd20f09f8c8d01000000000000000000014000000000",
+    "000000316231623162316231623162316231623162316231623162316231623162316231623162316231623162316231",
+    "623162316231623162316231623162316231620c0000000000000072657461696e65642e62696e030000000000000018",
+    "000000000000006170706c69636174696f6e2f6f637465742d73747265616d0001000000000000000100000000000000",
+    "20000000000000006364636463646364636463646364636463646364636463646364636463646364000000004c0d0000",
+    "001b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b0300000000000000ba7816bf8f01cf",
+    "ea414140de5dae2223b00361a396177a9cb410ff61f20015ad000000330e0000001b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+    "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b000000000300000000000000616263",
+);
+
+// Frozen original development schema-4 wire bytes; independent of current enum serialization.
+const LEGACY_FOUR_PROFILES: &str = concat!(
+    "4d54534e415031000000008204007f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f2000",
+    "000000000000393762353461656265396638633837646136636265366133303131376564623301000000000000000101",
+    "010101010101010101010101010101010101010101010101010101010101640000000000000002000000000000000000",
+    "000d0c000000010068e5cf8b0100000000008b0d000000b2a942ff4c98718bed76e255987f6d59b1a72d3b2cd2510003",
+    "e6170ac63a9ffb01000000000000000500000000000000416c6963650000000000000000010068e5cf8b010000003e82",
+    "6114d04c0c98cfd58584ca41f05284a4711beb7b1b26c41f18b69602a5b887e600f6d36cfc59214d55c76e0fc76c31a4",
+    "42ec075c134dc15483772743d007",
+);
+
+#[test]
+fn unified_schema_five_preserves_every_record_discriminant() {
+    use mesh_talk_core::eventlog::event::{ConversationId, Event, EventKind};
+    use mesh_talk_core::identity::device::DeviceIdentity;
+    assert_eq!(SNAPSHOT_SCHEMA_VERSION, 5);
+    let account = Account::from_secret_bytes([0x7f; 32]);
+    let event = Event::new(
+        &DeviceIdentity::generate(),
+        ConversationId::new([3; 32]),
+        1,
+        vec![],
+        1,
+        90,
+        EventKind::Message,
+        vec![],
+    );
+    let mut profile = None;
+    read_snapshot(
+        Cursor::new(hex::decode(LEGACY_FOUR_PROFILES).unwrap()),
+        |record| {
+            if matches!(record, SnapshotRecordV1::AccountProfile { .. }) {
+                profile = Some(record);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    let records = [
+        SnapshotRecordV1::SentDm {
+            conversation: [0; 32],
+            message_id: [0; 32],
+            seq: 0,
+            wall_clock: 0,
+            plaintext: vec![],
+        },
+        received(),
+        SnapshotRecordV1::Recall {
+            conversation: [0; 32],
+            target: [0; 32],
+            wall_clock: 0,
+        },
+        SnapshotRecordV1::Profile {
+            account_id: account.account_id(),
+            updated_at: 0,
+            avatar: None,
+        },
+        SnapshotRecordV1::MediaDescriptor {
+            file_conv: [0; 32],
+            size: 0,
+            sha256: [0; 32],
+        },
+        SnapshotRecordV1::MediaChunk {
+            file_conv: [0; 32],
+            index: 0,
+            bytes: vec![],
+        },
+        SnapshotRecordV1::SignedEvent { event },
+        SnapshotRecordV1::FileCard {
+            conversation: [0; 32],
+            event_id: [0; 32],
+            from: String::new(),
+            wall_clock: 0,
+            manifest: vec![],
+        },
+        SnapshotRecordV1::AccountContact {
+            account_id: account.account_id(),
+        },
+        SnapshotRecordV1::DmLanguageProfile { payload: vec![] },
+        SnapshotRecordV1::DmLanguageDecision {
+            id: [0; 32],
+            hidden: false,
+        },
+        SnapshotRecordV1::PeerTrustCard {
+            card: mesh_talk_core::node::TrustCard::new(
+                &account,
+                1,
+                String::new(),
+                String::new(),
+                None,
+                None,
+            ),
+        },
+        favorite_record(&favorite_fixture()),
+        favorite_media_records()[0].clone(),
+        favorite_media_records()[1].clone(),
+        SnapshotRecordV1::AccountCreation {
+            created_at_ms: None,
+        },
+        profile.unwrap(),
+    ];
+    for (tag, record) in records.into_iter().enumerate() {
+        assert_eq!(
+            &bincode::serialize(&record).unwrap()[..4],
+            &(tag as u32).to_le_bytes()
+        );
+    }
+}
+
+#[test]
+fn legacy_four_frozen_fixtures_decode_both_original_families() {
+    for (fixture, expected) in [(LEGACY_FOUR_DRIVE, 3), (LEGACY_FOUR_PROFILES, 2)] {
+        let bytes = hex::decode(fixture).unwrap();
+        let mut records = Vec::new();
+        let restored = read_snapshot(Cursor::new(bytes), |record| {
+            records.push(record);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(restored.schema_version, 4);
+        assert_eq!(records.len(), expected);
+        if expected == 2 {
+            assert!(matches!(
+                records[0],
+                SnapshotRecordV1::AccountCreation {
+                    created_at_ms: Some(1_700_000_000_000)
+                }
+            ));
+            let SnapshotRecordV1::AccountProfile { profile } = &records[1] else {
+                panic!("legacy profile tag changed")
+            };
+            assert_eq!(profile.display_name, "Alice");
+            assert!(profile.verify());
+            assert_eq!(
+                &bincode::serialize(&records[1]).unwrap()[..4],
+                &16u32.to_le_bytes()
+            );
+        } else {
+            assert!(matches!(records[0], SnapshotRecordV1::Favorite { .. }));
+        }
+    }
+}
+
+fn frozen_records(fixture: &str) -> Vec<Vec<u8>> {
+    let bytes = hex::decode(fixture).unwrap();
+    let header_len = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let mut offset = 12 + header_len;
+    let mut records = Vec::new();
+    while offset < bytes.len() {
+        let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        records.push(bytes[offset..offset + len].to_vec());
+        offset += len;
+    }
+    records
+}
+
+fn raw_record_snapshot(version: u16, records: &[Vec<u8>]) -> Vec<u8> {
+    let mut header = header();
+    header.schema_version = version;
+    header.record_count = records.len() as u64;
+    let header = bincode::serialize(&header).unwrap();
+    let mut bytes = b"MTSNAP1\0".to_vec();
+    bytes.extend((header.len() as u32).to_be_bytes());
+    bytes.extend(header);
+    for record in records {
+        bytes.extend((record.len() as u32).to_be_bytes());
+        bytes.extend(record);
+    }
+    bytes
+}
+
+#[test]
+fn legacy_four_rejects_mixed_families_in_both_orders_and_missing_creation() {
+    let favorites = frozen_records(LEGACY_FOUR_DRIVE);
+    let profiles = frozen_records(LEGACY_FOUR_PROFILES);
+    for records in [
+        vec![favorites[0].clone(), profiles[0].clone()],
+        vec![profiles[0].clone(), favorites[0].clone()],
+        vec![profiles[1].clone(), favorites[0].clone()],
+        vec![favorites[0].clone(), profiles[1].clone()],
+    ] {
+        assert_eq!(
+            read_snapshot(Cursor::new(raw_record_snapshot(4, &records)), |_| Ok(())).unwrap_err(),
+            SnapshotError::InvalidEncoding
+        );
+    }
+    assert_eq!(
+        read_snapshot(Cursor::new(raw_record_snapshot(4, &profiles[1..])), |_| Ok(
+            ()
+        ))
+        .unwrap_err(),
+        SnapshotError::InvalidAccount
+    );
+}
+
+#[test]
+fn legacy_four_rejects_trailing_corrupt_and_unknown_extension_encodings() {
+    for fixture in [LEGACY_FOUR_DRIVE, LEGACY_FOUR_PROFILES] {
+        let mut bytes = hex::decode(fixture).unwrap();
+        bytes.push(0);
+        assert_eq!(
+            read_snapshot(Cursor::new(bytes), |_| Ok(())).unwrap_err(),
+            SnapshotError::InvalidEncoding
+        );
+        let mut records = frozen_records(fixture);
+        records[0].push(0);
+        assert!(read_snapshot(Cursor::new(raw_record_snapshot(4, &records)), |_| Ok(())).is_err());
+        let mut records = frozen_records(fixture);
+        records[0].truncate(4);
+        assert!(read_snapshot(Cursor::new(raw_record_snapshot(4, &records)), |_| Ok(())).is_err());
+    }
+    let mut invalid_creation = 12u32.to_le_bytes().to_vec();
+    invalid_creation.push(1);
+    invalid_creation.extend(0u64.to_le_bytes());
+    assert_eq!(
+        read_snapshot(
+            Cursor::new(raw_record_snapshot(4, &[invalid_creation])),
+            |_| Ok(())
+        )
+        .unwrap_err(),
+        SnapshotError::InvalidAccount
+    );
+    let modern_creation = bincode::serialize(&SnapshotRecordV1::AccountCreation {
+        created_at_ms: None,
+    })
+    .unwrap();
+    assert_eq!(
+        read_snapshot(
+            Cursor::new(raw_record_snapshot(4, &[modern_creation])),
+            |_| Ok(())
+        )
+        .unwrap_err(),
+        SnapshotError::UnsupportedVersion
+    );
+    let mut profiles = frozen_records(LEGACY_FOUR_PROFILES);
+    *profiles[1].last_mut().unwrap() ^= 1;
+    assert_eq!(
+        read_snapshot(Cursor::new(raw_record_snapshot(4, &profiles)), |_| Ok(())).unwrap_err(),
+        SnapshotError::InvalidEncoding
+    );
+}
+
+#[test]
+fn unified_schema_five_combines_both_collections_without_legacy_tag_guessing() {
+    let mut records = Vec::new();
+    for fixture in [LEGACY_FOUR_DRIVE, LEGACY_FOUR_PROFILES] {
+        read_snapshot(Cursor::new(hex::decode(fixture).unwrap()), |record| {
+            records.push(record);
+            Ok(())
+        })
+        .unwrap();
+    }
+    let mut header = header();
+    header.schema_version = SNAPSHOT_SCHEMA_VERSION;
+    header.record_count = records.len() as u64;
+    let mut bytes = Vec::new();
+    write_snapshot(&mut bytes, &header, records.clone()).unwrap();
+    let mut restored = Vec::new();
+    read_snapshot(Cursor::new(bytes), |record| {
+        restored.push(record);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(restored, records);
+    assert!(
+        read_snapshot(
+            Cursor::new(raw_record_snapshot(
+                5,
+                &frozen_records(LEGACY_FOUR_PROFILES)
+            )),
+            |_| Ok(())
+        )
+        .is_err()
+    );
+    for version in 1..=3 {
+        let bytes = raw_record_snapshot(version, &[bincode::serialize(&received()).unwrap()]);
+        assert!(read_snapshot(Cursor::new(bytes), |_| Ok(())).is_ok());
+    }
+    let bytes = raw_record_snapshot(4, &[bincode::serialize(&received()).unwrap()]);
+    assert!(read_snapshot(Cursor::new(bytes), |_| Ok(())).is_ok());
 }

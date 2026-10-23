@@ -1,5 +1,6 @@
-import { TrustCardPanel } from "./TrustCardPanel";
-import { useEffect, useState } from "react";
+import { captureRuntimeOwner } from "@/store/ownership";
+import { AccountProfilePanel } from "./AccountProfilePanel";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ShieldCheck,
@@ -46,6 +47,8 @@ export function VerifyContactDialog({
 }) {
   const { t } = useTranslation();
   const owner = useAuth((s) => s.user?.id);
+  const sessionGeneration = useAuth((s) => s.generation);
+  const requestGeneration = useRef(0);
   const motionOK = useMotionOK();
   const peers = useChat((s) => s.peers);
   const presence = usePresenceFor(accountId);
@@ -57,17 +60,21 @@ export function VerifyContactDialog({
   const [open, setOpen] = useState(false);
   const [trustState, setTrustState] = useState<{
     owner: string;
+    sessionGeneration: number;
     accountId: string;
     fingerprint: string;
     value: TrustInfo;
   } | null>(null);
   const [safetyState, setSafetyState] = useState<{
     owner: string;
+    sessionGeneration: number;
     fingerprint: string;
     value: SafetyNumberInfo;
   } | null>(null);
   const trust =
-    trustState?.owner === owner &&
+    trustState !== null &&
+    trustState.owner === owner &&
+    trustState.sessionGeneration === sessionGeneration &&
     trustState?.accountId === accountId &&
     trustState.fingerprint === fingerprint
       ? trustState.value
@@ -75,6 +82,7 @@ export function VerifyContactDialog({
   const sn =
     safetyState !== null &&
     safetyState.owner === owner &&
+    safetyState.sessionGeneration === sessionGeneration &&
     safetyState.fingerprint === fingerprint
       ? safetyState.value
       : null;
@@ -86,52 +94,78 @@ export function VerifyContactDialog({
   // WITHOUT having to open the dialog first. (`open` is a dep only to refresh on open.)
   useEffect(() => {
     if (!owner) return;
+    const lease = captureRuntimeOwner();
     let active = true;
     void chat
       .getTrust(owner, accountId, fingerprint)
       .then((tr) => {
-        if (active) setTrustState({ owner, accountId, fingerprint, value: tr });
+        if (active && lease.current())
+          setTrustState({
+            owner,
+            sessionGeneration,
+            accountId,
+            fingerprint,
+            value: tr,
+          });
       })
       .catch(() => {});
     return () => {
       active = false;
     };
-  }, [owner, accountId, fingerprint, open]);
+  }, [owner, sessionGeneration, accountId, fingerprint, open]);
 
   // The safety number is only shown inside the open dialog, so fetch it lazily.
   useEffect(() => {
     if (!open || !fingerprint || !owner) return;
+    const lease = captureRuntimeOwner();
     let active = true;
     setErr(null);
     void chat
       .safetyNumber(fingerprint)
       .then((s) => {
-        if (active) setSafetyState({ owner, fingerprint, value: s });
+        if (active && lease.current())
+          setSafetyState({ owner, sessionGeneration, fingerprint, value: s });
       })
       .catch((e) => {
-        if (active) setErr(errorMessage(e));
+        if (active && lease.current()) setErr(errorMessage(e));
       });
     return () => {
       active = false;
     };
-  }, [open, owner, fingerprint]);
+  }, [open, owner, sessionGeneration, fingerprint]);
 
+  useEffect(() => {
+    const epoch = ++requestGeneration.current;
+    setBusy(false);
+    setErr(null);
+    return () => {
+      requestGeneration.current = epoch + 1;
+    };
+  }, [owner, sessionGeneration, accountId, fingerprint, open]);
   const verify = async () => {
+    const lease = captureRuntimeOwner();
+    const epoch = requestGeneration.current;
+    const current = () =>
+      lease.current() && epoch === requestGeneration.current;
     if (!fingerprint || !owner) return;
     setBusy(true);
     setErr(null);
     try {
       await chat.markVerified(owner, accountId, fingerprint);
+      if (!current()) return;
+      const value = await chat.getTrust(owner, accountId, fingerprint);
+      if (!current()) return;
       setTrustState({
         owner,
+        sessionGeneration,
         accountId,
         fingerprint,
-        value: await chat.getTrust(owner, accountId, fingerprint),
+        value,
       });
     } catch (e) {
-      setErr(errorMessage(e));
+      if (current()) setErr(errorMessage(e));
     } finally {
-      setBusy(false);
+      if (current()) setBusy(false);
     }
   };
 
@@ -261,15 +295,15 @@ export function VerifyContactDialog({
           {trust && (
             <details className="text-sm">
               <summary className="cursor-pointer py-1 font-medium">
-                {t("trustCard.privateHistory")}
+                {t("verify.privateHistory")}
               </summary>
               <div className="mt-2 space-y-2 text-xs text-muted-foreground">
-                <p>{t("trustCard.privateHistoryHint")}</p>
+                <p>{t("verify.privateHistoryHint")}</p>
                 <p>
-                  {t("trustCard.firstSeen", {
+                  {t("verify.firstSeen", {
                     date:
                       trust.first_seen_at_ms == null
-                        ? t("trustCard.unknown")
+                        ? t("verify.unknown")
                         : new Date(trust.first_seen_at_ms).toLocaleString(),
                   })}
                 </p>
@@ -277,26 +311,26 @@ export function VerifyContactDialog({
                   <div key={index} className="space-y-1 border-t pt-2">
                     <p>{new Date(change.observed_at_ms).toLocaleString()}</p>
                     <p className="break-all font-mono">
-                      {t("trustCard.previousFingerprint", {
+                      {t("verify.previousFingerprint", {
                         fingerprint: change.previous_fingerprint,
                       })}
                     </p>
                     <p className="break-all font-mono">
-                      {t("trustCard.currentFingerprint", {
+                      {t("verify.currentFingerprint", {
                         fingerprint: change.current_fingerprint,
                       })}
                     </p>
                   </div>
                 ))}
                 {!trust.device_changes?.length && (
-                  <p>{t("trustCard.noDeviceChanges")}</p>
+                  <p>{t("verify.noDeviceChanges")}</p>
                 )}
               </div>
             </details>
           )}
 
           {open && (
-            <TrustCardPanel
+            <AccountProfilePanel
               key={`${owner}:${accountId}`}
               accountId={accountId}
             />

@@ -55,23 +55,31 @@ and previous identity cannot be recovered by a password reset.
 
 ## Snapshot compatibility
 
-New backups use snapshot schema 4; this build also accepts schemas 1, 2 and 3.
-Schema 4 adds logical Favorites records and separately encrypted-on-install
-retained attachments. It preserves removal tombstones and expiry restrictions;
-restoring does not revive removed entries or grant access to expired content.
-Only already retained, live referenced Favorite files are exported, with the
-existing 64 MiB per-file retention limit. Ordinary media and Favorite files share
-the snapshot's 8 GiB aggregate media limit. Each attachment is checked for its
-declared size, chunk order and SHA-256 digest before the restored profile is
-published. Restore opens staged attachment files only while writing or installing
-them, so large collections do not require one open handle per retained file.
-Older snapshots contain no Favorites; their existing record tags and
-the outer encrypted archive format remain unchanged.
+New backups use snapshot schema 5 and retain the released schemas 1–3 record tags.
+Schema 5 combines logical Favorites and independently retained attachments with
+signed account profiles and a required immutable account-creation metadata record.
+The restored key and creation metadata are installed together before the account
+opens. A backup creation date never becomes an account creation date.
 
-Schema 3 preserves signed public [trust cards](peer-trust.md), including their
-self-declared creation claims and attached proofs. Older snapshots contain no
-trust-card evidence and never gain an inferred creation date. Private relationship
-observations are not included in public card records. The retired
+The reader also accepts both earlier development schema-4 formats: Favorites-only
+and account-profile/creation metadata. Their colliding extension tags are decoded
+strictly with bounded exact encodings; a snapshot cannot mix the two families.
+Missing authoritative creation metadata remains unknown. Schema 5 keeps Favorites
+at tags 12–14 and appends creation metadata and profiles at tags 15–16; new exports
+always use schema 5. The outer authenticated archive format is unchanged.
+
+Favorites preserve removal tombstones and expiry restrictions. Only already
+retained, live referenced files are exported, with the existing 64 MiB per-file
+limit. Canonical-known protected Favorites are excluded as a single eligibility
+projection for records, counts and attachments; ordinary Favorites remain portable
+after their original history is cleared. Ordinary and Favorite media share the
+8 GiB aggregate media limit. Size, chunk order and SHA-256 are checked before
+publication. Staged attachment files open only while writing or installing, so
+large collections do not require one handle per retained file.
+
+Schema 3 signed public trust cards and proofs remain compatible, but manually
+declared dates never become system-recorded creation metadata. Private relationship
+observations are not included in public profile records. The retired
 message-language metadata in older schema 2 backups is validated for format and
 authenticity but does not restore restrictions or hidden-message decisions.
 New backups omit that metadata. Display-language preferences remain ordinary

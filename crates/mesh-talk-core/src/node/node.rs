@@ -65,6 +65,7 @@ pub struct ReceivedDm {
 pub struct LinkedAccount {
     pub secret: [u8; 32],
     pub account_id: String,
+    pub created_at_ms: Option<u64>,
 }
 
 /// A channel summary for listing in the UI.
@@ -370,6 +371,7 @@ pub struct Node {
     pub(in crate::node) recalls: Mutex<crate::node::recall::RecallLog>,
     /// Owns profile journals, local publication and coordinated account transitions.
     pub(in crate::node) trust_cards: Mutex<super::trust_card::TrustCardStore>,
+    pub(in crate::node) profiles: Mutex<super::account_profile_data::AccountProfileStore>,
     pub(in crate::node) account_profiles: super::account_profile::AccountProfiles,
     /// Live stream of received peer profiles (avatar updates), surfaced to the app. The
     /// node owns BOTH ends (created in `open_with_account`) so the constructor signature
@@ -541,6 +543,10 @@ impl Node {
         let account_profiles = super::account_profile::AccountProfiles::new(&account, profiles);
         let trust_cards = Mutex::new(super::trust_card::TrustCardStore::open(
             &dir.join("trust-cards.log"),
+            password,
+        )?);
+        let profiles = Mutex::new(super::account_profile_data::AccountProfileStore::open(
+            &dir.join("account-profiles.log"),
             password,
         )?);
         let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -771,6 +777,7 @@ impl Node {
             account_sync_status: Mutex::new(std::collections::HashMap::new()),
             account_profiles,
             trust_cards,
+            profiles,
             profile_incoming: profile_tx,
             profile_rx: Mutex::new(Some(profile_rx)),
             call_signal_incoming: call_signal_tx,
@@ -843,8 +850,9 @@ impl Node {
             recalls: Mutex::new(recalls),
             my_dm_reactions: Mutex::new(my_dm_reactions),
         });
-        node.reconcile_trust_profiles_on_open()
-            .map_err(|error| LogError::CorruptFile(format!("trust card projection: {error}")))?;
+        node.reconcile_account_profiles_on_open().map_err(|error| {
+            LogError::CorruptFile(format!("account profile projection: {error}"))
+        })?;
         node.prune_expired_received_on_open()
             .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
         node.queue_approved_incomplete_files();

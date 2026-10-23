@@ -1197,13 +1197,15 @@ discovered from durable account history.
 
 Snapshots include visible plaintext history, signed event provenance, file cards,
 managed media referenced by visible cards, received peer avatars, signed public
-trust cards and their attached proofs, recall marks, and account-owned Favorites
-with their metadata, notes and independently retained attachment bytes.
-Schema 4 appends Favorites records without changing earlier positional tags;
-schemas 1–3 remain readable. The Favorites owner validates logical records and
-retains removal generations/tombstones. Expired content is withheld, and retained
-file records must match a live collection reference. Favorite media has a separate
-namespace from ordinary media and shares the archive's aggregate byte budget.
+account profiles, immutable account creation metadata, legacy compatibility records,
+recall marks, and account-owned Favorites with their metadata, notes and independently
+retained attachment bytes. Schema 5 combines these records without changing the
+released positional tags. Readers preserve schemas 1–3 and strictly distinguish the
+two draft schema-4 extension families; mixed or malformed extensions are rejected.
+The Favorites owner applies one eligible record projection to archive count, record
+encoding and retained-file authorization. Expired and canonical protected Favorite
+content is withheld, while removal generations/tombstones remain. Favorite media
+has a separate namespace from ordinary media and shares the archive's byte budget.
 Verified peer recall marks are persisted before export so a restored device does not
 redisplay recalled plaintext it cannot decrypt from the old device's events. A
 password-encrypted local index retains original IDs for restored outgoing messages;
@@ -1330,9 +1332,10 @@ Messages have no content-language restrictions. The core does not bundle languag
 models, classify message text, or persist language-based visibility decisions.
 Display-language localization remains a device preference.
 
-Avatar compatibility publications use `MTPF1`; accounts with a signed trust card
-publish the `MTC1` card first, then its `MTPF1` avatar under the same publication
-lock. The avatar event requires the card event as a causal parent.
+Avatar compatibility publications use `MTPF1`; ordinary account profiles publish
+`MTP3` first, then the compatibility avatar under the same publication lock. The
+avatar event requires the profile event as a causal parent. Frozen `MTC1` cards
+remain readable without promoting their manually declared creation dates.
 Decoding still authenticates existing
 `MTPF2` signatures so retained avatar events and linked devices remain readable;
 retired metadata is ignored and never re-emitted as a preference. Snapshot schema 2
@@ -1340,16 +1343,23 @@ retains the positional tags of its two retired metadata records for old-backup
 compatibility. Imports validate those records without installing filtering state;
 new exports omit them. Existing `language.log` sidecars are not opened or applied.
 
-## Signed peer trust cards
+## Account profiles and creation metadata
 
-Account-signed trust cards add public presentation claims and optional creation
-evidence without changing account IDs, device certificates or manual verification
-authority. The core validates separately domain-separated card, introduction and
-creation-witness signatures, bounded fields and subject bindings. Revisioned cards
-are persisted encrypted and propagated only through authenticated profile paths.
-An imported signature never authorizes verified-contact DM pulls. Desktop IPC
-retains exact-session admission at local mutation, while private first-observed
-and device-change records remain in the owner-scoped trust store.
+Ordinary profile editing owns one nickname, an optional biography and an avatar.
+Signing and authenticated replication are automatic. Public introduction,
+creation-witness and JSON artifact workflows are retired. Private first-observed
+history and device verification remain distinct from public presentation data.
+The conversation header and contact details read the same biography; session-bound
+caches reject retired results and refresh on profile invalidations.
 
-The [peer trust guide](peer-trust.md) owns timestamp semantics and evidence limits;
-creation claims and witness clocks are explicitly distinct from trusted time.
+Account creation metadata is generated with the key and installed atomically in a
+strict versioned encrypted keystore. New pairing negotiation transfers it without
+changing legacy encodings or history-sharing policy. Snapshot schema 4 appends
+creation and current-profile records, validates their consistency and restores
+metadata before opening the account. Legacy schemas preserve unknown dates.
+Profile edits accept no timestamps, and old self-declared card dates never become
+system-recorded creation metadata. Local clocks and account signatures do not
+establish independently trusted wall time or human identity.
+
+The [profile and verification guide](peer-trust.md) owns the complete lifecycle,
+resource limits, compatibility and delivery invariants.

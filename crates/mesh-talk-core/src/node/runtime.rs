@@ -331,18 +331,16 @@ impl NodeRuntime {
         // The two keystore unlocks run sequential 600k-PBKDF2/Argon2 KDFs (~seconds of CPU,
         // the bulk of cold start). Offload them to the blocking pool so they don't monopolize
         // a tokio worker; the result is identical (same files, same ordering).
-        let (identity, account, account_created_at_ms) = {
+        let (identity, account) = {
             let identity_path = dir.join("identity.keystore");
             let account_path = dir.join("account.keystore");
             let password = password.to_string();
             tokio::task::spawn_blocking(move || {
                 let identity = keystore::load_or_create(&identity_path, &password)
                     .map_err(|e| RuntimeError::Open(e.into()))?;
-                let new_account = !account_path.try_exists()?;
                 let account = account_keystore::load_or_create(&account_path, &password)
                     .map_err(|e| RuntimeError::Open(e.into()))?;
-                let created_at_ms = new_account.then(super::node::now_millis);
-                Ok::<_, RuntimeError>((identity, account, created_at_ms))
+                Ok::<_, RuntimeError>((identity, account))
             })
             .await
             .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??
@@ -399,12 +397,10 @@ impl NodeRuntime {
                     &sent_log,
                     &password,
                 )?;
-                // Only this branch knows it just generated a mesh account. Existing
-                // keystores, restored accounts and local login dates prove no age.
-                if let Some(created_at_ms) = account_created_at_ms {
-                    node.initialize_new_trust_card(initial_display_name, created_at_ms)
-                        .map_err(|e| LogError::Io(std::io::Error::other(e.to_string())))?;
-                }
+                // The keystore already durably records creation metadata. Repeating
+                // initialization after a failed launch cannot invent or lose a date.
+                node.set_profile_display_name(&initial_display_name)
+                    .map_err(|e| LogError::Io(std::io::Error::other(e.to_string())))?;
                 Ok::<_, LogError>(node)
             })
             .await
@@ -575,7 +571,20 @@ impl NodeRuntime {
                 password: password.to_string(),
             }
         });
-        authorize_launch(&mut |name| launch.take().expect("runtime launch is single-use")(name))
+        let runtime = authorize_launch(&mut |name| {
+            launch.take().expect("runtime launch is single-use")(name)
+        })?;
+        // Authorization may supply a name changed while stores were opening.
+        if let Err(error) = runtime
+            .node
+            .set_profile_display_name(&runtime.display_name())
+        {
+            runtime.stop().await;
+            return Err(RuntimeError::Open(LogError::Io(std::io::Error::other(
+                error.to_string(),
+            ))));
+        }
+        Ok(runtime)
     }
 
     /// This node's own user-id fingerprint.
@@ -614,11 +623,19 @@ impl NodeRuntime {
     /// so it resolves consistently. Fires an immediate re-announce so peers converge fast.
     /// `account_id`/`user_id` are unchanged — only the human-readable name moves.
     pub fn set_display_name(&self, display_name: &str) {
-        let mut current = self.display_name.lock().expect("display name lock");
-        if self.participant.set_display_name(display_name).is_err() {
-            log::warn!("Unable to update node presence");
-            return;
+        if let Err(error) = self.try_set_display_name(display_name) {
+            log::warn!("Unable to update account profile: {error}");
         }
+    }
+
+    pub fn try_set_display_name(&self, display_name: &str) -> Result<(), NodeError> {
+        let mut current = self.display_name.lock().expect("display name lock");
+        self.node.set_profile_display_name(display_name)?;
+        self.participant
+            .set_display_name(display_name)
+            .map_err(|error| {
+                NodeError::InvalidInput(format!("unable to update presence: {error}"))
+            })?;
         *current = display_name.to_string();
         // Keep our own name in the durable directory too (it otherwise only tracks peers),
         // so `display_name_for(own_id)` stays consistent. A no-op when unchanged.
@@ -627,6 +644,7 @@ impl NodeRuntime {
             .lock()
             .expect("names mutex not poisoned")
             .record(&self.user_id, display_name);
+        Ok(())
     }
 
     /// The local TCP port the node's accept loop is listening on.
@@ -914,7 +932,11 @@ impl NodeRuntime {
             .link_to_device_if(peer.addr, &peer.public, code, &mut authorize)
             .await?;
         authorize(&mut || {
-            let account = crate::identity::account::Account::from_secret_bytes(linked.secret);
+            let account = crate::identity::account::Account::from_secret_bytes_with_created_at(
+                linked.secret,
+                linked.created_at_ms,
+            )
+            .ok_or_else(|| NodeError::InvalidInput("invalid linked creation metadata".into()))?;
             let device_dir = self
                 .account_path
                 .parent()

@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Domain separator for the device-certificate signed message.
+pub const MAX_ACCOUNT_CREATED_AT_MS: u64 = 253_402_300_799_999;
+
 const CERT_DOMAIN: &[u8] = b"mesh-talk-device-cert-v1";
 
 /// serde helper for the 64-byte signature (serde derives arrays only up to len 32,
@@ -77,23 +79,49 @@ impl AccountPublic {
     }
 }
 
-/// A user's account secret (Ed25519). Held in memory; persisted via the keystore
-/// (a later plan). Shared across the user's devices.
+/// A user's account secret and immutable creation metadata, persisted together
+/// in the encrypted account keystore and shared across linked devices.
 pub struct Account {
     signing_key: SigningKey,
+    created_at_ms: Option<u64>,
 }
 
 impl Account {
     pub fn generate() -> Self {
         Account {
             signing_key: random_signing_key(),
+            created_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+                .filter(|time| (1..=MAX_ACCOUNT_CREATED_AT_MS).contains(time)),
         }
     }
 
     pub fn from_secret_bytes(ed25519_secret: [u8; 32]) -> Self {
         Account {
             signing_key: SigningKey::from_bytes(&ed25519_secret),
+            created_at_ms: None,
         }
+    }
+
+    /// Restore authoritative metadata alongside its secret. Legacy secrets retain
+    /// an unknown timestamp; dates are never inferred from login or file times.
+    pub fn from_secret_bytes_with_created_at(
+        ed25519_secret: [u8; 32],
+        created_at_ms: Option<u64>,
+    ) -> Option<Self> {
+        if created_at_ms.is_some_and(|time| time == 0 || time > MAX_ACCOUNT_CREATED_AT_MS) {
+            return None;
+        }
+        Some(Self {
+            signing_key: SigningKey::from_bytes(&ed25519_secret),
+            created_at_ms,
+        })
+    }
+
+    pub fn created_at_ms(&self) -> Option<u64> {
+        self.created_at_ms
     }
 
     pub fn secret_bytes(&self) -> [u8; 32] {
@@ -173,6 +201,29 @@ impl DeviceCertificate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creation_metadata_is_recorded_once_and_unknown_for_legacy_secrets() {
+        let account = Account::generate();
+        assert!(account.created_at_ms().is_some());
+        assert_eq!(
+            Account::from_secret_bytes(account.secret_bytes()).created_at_ms(),
+            None
+        );
+        let restored = Account::from_secret_bytes_with_created_at(
+            account.secret_bytes(),
+            account.created_at_ms(),
+        )
+        .unwrap();
+        assert_eq!(restored.created_at_ms(), account.created_at_ms());
+        assert_eq!(restored.account_id(), account.account_id());
+        for invalid in [0, MAX_ACCOUNT_CREATED_AT_MS + 1, u64::MAX] {
+            assert!(
+                Account::from_secret_bytes_with_created_at(account.secret_bytes(), Some(invalid))
+                    .is_none()
+            );
+        }
+    }
 
     #[test]
     fn account_certifies_a_device_and_verifies() {

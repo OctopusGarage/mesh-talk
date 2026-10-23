@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use zeroize::Zeroize;
 
-pub const SNAPSHOT_SCHEMA_VERSION: u16 = 4;
+pub const SNAPSHOT_SCHEMA_VERSION: u16 = 5;
 const MAGIC: &[u8; 8] = b"MTSNAP1\0";
 const MAX_RECORDS: u64 = 10_000_000;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
@@ -132,6 +132,13 @@ pub enum SnapshotRecordV1 {
         index: u32,
         bytes: Vec<u8>,
     },
+    /// Schema 5 appends authoritative metadata after the frozen Favorites tags.
+    AccountCreation {
+        created_at_ms: Option<u64>,
+    },
+    AccountProfile {
+        profile: crate::node::AccountProfile,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,9 +211,21 @@ impl<W: Write> SnapshotWriter<W> {
 
     pub fn push(&mut self, record: &SnapshotRecordV1) -> Result<(), SnapshotError> {
         self.validator.accept(record)?;
-        let encoded = codec()
+        let mut encoded = codec()
             .serialize(record)
             .map_err(|_| SnapshotError::InvalidEncoding)?;
+        // Explicit legacy writers retain each original schema-4 family's tags.
+        // Production exports always use SNAPSHOT_SCHEMA_VERSION.
+        if self.validator.schema_version == 4 {
+            let tag: Option<u32> = match record {
+                SnapshotRecordV1::AccountCreation { .. } => Some(12),
+                SnapshotRecordV1::AccountProfile { .. } => Some(13),
+                _ => None,
+            };
+            if let Some(tag) = tag {
+                encoded[..4].copy_from_slice(&tag.to_le_bytes());
+            }
+        }
         if encoded.len() > MAX_ENCODED_RECORD_BYTES {
             return Err(SnapshotError::SizeLimit);
         }
@@ -279,10 +298,7 @@ pub fn read_snapshot<R: Read>(
         source
             .read_exact(&mut bytes)
             .map_err(|_| SnapshotError::InvalidEncoding)?;
-        let record: SnapshotRecordV1 = codec()
-            .with_limit(MAX_ENCODED_RECORD_BYTES as u64)
-            .deserialize(&bytes)
-            .map_err(|_| SnapshotError::InvalidEncoding)?;
+        let record = decode_record(header.schema_version, &bytes)?;
         validator.accept(&record)?;
         on_record(record)?;
     }
@@ -294,12 +310,53 @@ pub fn read_snapshot<R: Read>(
     Ok(header)
 }
 
+// Original development schema 4 assigned tags 12/13 twice. The exact encodings
+// are disjoint: AccountCreation is 5 or 13 bytes including its tag, while a valid
+// Favorite contains a much larger bounded journal record. Favorite descriptors
+// are exactly 76 bytes; even an empty signed AccountProfile needs 126 bytes.
+// Decode only the selected exact shape, never retry a failed semantic validation.
+fn decode_record(schema: u16, bytes: &[u8]) -> Result<SnapshotRecordV1, SnapshotError> {
+    let tag = bytes.get(..4).ok_or(SnapshotError::InvalidEncoding)?;
+    let tag = u32::from_le_bytes(tag.try_into().map_err(|_| SnapshotError::InvalidEncoding)?);
+    if schema == 4 {
+        match tag {
+            12 if matches!(bytes.len(), 5 | 13) => {
+                let (_, created_at_ms): (u32, Option<u64>) = codec()
+                    .with_limit(MAX_ENCODED_RECORD_BYTES as u64)
+                    .deserialize(bytes)
+                    .map_err(|_| SnapshotError::InvalidEncoding)?;
+                return Ok(SnapshotRecordV1::AccountCreation { created_at_ms });
+            }
+            13 if bytes.len() != 76 => {
+                let (_, profile): (u32, crate::node::AccountProfile) = codec()
+                    .with_limit(MAX_ENCODED_RECORD_BYTES as u64)
+                    .deserialize(bytes)
+                    .map_err(|_| SnapshotError::InvalidEncoding)?;
+                return Ok(SnapshotRecordV1::AccountProfile { profile });
+            }
+            15.. => return Err(SnapshotError::UnsupportedVersion),
+            _ => {}
+        }
+    }
+    codec()
+        .with_limit(MAX_ENCODED_RECORD_BYTES as u64)
+        .deserialize(bytes)
+        .map_err(|_| SnapshotError::InvalidEncoding)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyFourFamily {
+    Favorites,
+    Profiles,
+}
+
 impl std::error::Error for SnapshotError {}
 
 #[derive(Debug)]
 pub struct SnapshotValidator {
     own_account_id: String,
     schema_version: u16,
+    legacy_four_family: Option<LegacyFourFamily>,
     language_profiles: HashSet<String>,
     language_decisions: HashSet<[u8; 32]>,
     expected: u64,
@@ -309,6 +366,10 @@ pub struct SnapshotValidator {
     recalls: HashSet<([u8; 32], [u8; 32])>,
     profiles: HashSet<String>,
     trust_cards: HashSet<String>,
+    current_profiles: HashSet<String>,
+    current_profile_bytes: usize,
+    account_created_at_ms: Option<Option<u64>>,
+    own_profile_created_at_ms: Option<Option<u64>>,
     trust_card_bytes: usize,
     account_contacts: HashSet<String>,
     event_ids: HashMap<[u8; 32], SignedEventInfo>,
@@ -371,6 +432,7 @@ impl SnapshotValidator {
         Ok(Self {
             own_account_id: header.account_id.clone(),
             schema_version: header.schema_version,
+            legacy_four_family: None,
             language_profiles: HashSet::new(),
             language_decisions: HashSet::new(),
             expected: header.record_count,
@@ -380,6 +442,10 @@ impl SnapshotValidator {
             recalls: HashSet::new(),
             profiles: HashSet::new(),
             trust_cards: HashSet::new(),
+            current_profiles: HashSet::new(),
+            current_profile_bytes: 0,
+            account_created_at_ms: None,
+            own_profile_created_at_ms: None,
             trust_card_bytes: 0,
             account_contacts: HashSet::new(),
             event_ids: HashMap::new(),
@@ -395,6 +461,22 @@ impl SnapshotValidator {
     pub fn accept(&mut self, record: &SnapshotRecordV1) -> Result<(), SnapshotError> {
         if self.accepted >= self.expected {
             return Err(SnapshotError::RecordCount);
+        }
+        if self.schema_version == 4 {
+            let family = match record {
+                SnapshotRecordV1::Favorite { .. }
+                | SnapshotRecordV1::FavoriteMediaDescriptor { .. }
+                | SnapshotRecordV1::FavoriteMediaChunk { .. } => Some(LegacyFourFamily::Favorites),
+                SnapshotRecordV1::AccountCreation { .. }
+                | SnapshotRecordV1::AccountProfile { .. } => Some(LegacyFourFamily::Profiles),
+                _ => None,
+            };
+            if let Some(family) = family {
+                if self.legacy_four_family.is_some_and(|old| old != family) {
+                    return Err(SnapshotError::InvalidEncoding);
+                }
+                self.legacy_four_family = Some(family);
+            }
         }
         match record {
             SnapshotRecordV1::SentDm {
@@ -444,6 +526,45 @@ impl SnapshotValidator {
                 }
                 if !self.profiles.insert(account_id.clone()) {
                     return Err(SnapshotError::DuplicateRecord);
+                }
+            }
+            SnapshotRecordV1::AccountCreation { created_at_ms } => {
+                if self.schema_version < 4 {
+                    return Err(SnapshotError::UnsupportedVersion);
+                }
+                if crate::identity::account::Account::from_secret_bytes_with_created_at(
+                    [0; 32],
+                    *created_at_ms,
+                )
+                .is_none()
+                {
+                    return Err(SnapshotError::InvalidAccount);
+                }
+                if self.account_created_at_ms.is_some() {
+                    return Err(SnapshotError::DuplicateRecord);
+                }
+                self.account_created_at_ms = Some(*created_at_ms);
+            }
+            SnapshotRecordV1::AccountProfile { profile } => {
+                if self.schema_version < 4 {
+                    return Err(SnapshotError::UnsupportedVersion);
+                }
+                if !profile.verify() {
+                    return Err(SnapshotError::InvalidEncoding);
+                }
+                if profile.account_id() == self.own_account_id {
+                    self.own_profile_created_at_ms = Some(profile.created_at_ms);
+                }
+                if !self.current_profiles.insert(profile.account_id()) {
+                    return Err(SnapshotError::DuplicateRecord);
+                }
+                self.current_profile_bytes = self
+                    .current_profile_bytes
+                    .saturating_add(profile.encode().len());
+                if self.current_profiles.len() > 1024
+                    || self.current_profile_bytes > 32 * 1024 * 1024
+                {
+                    return Err(SnapshotError::SizeLimit);
                 }
             }
             SnapshotRecordV1::PeerTrustCard { card } => {
@@ -658,6 +779,16 @@ impl SnapshotValidator {
     pub fn finish(self) -> Result<(), SnapshotError> {
         if self.accepted != self.expected {
             return Err(SnapshotError::RecordCount);
+        }
+        if (self.schema_version >= 5 || self.legacy_four_family == Some(LegacyFourFamily::Profiles))
+            && self.account_created_at_ms.is_none()
+        {
+            return Err(SnapshotError::InvalidAccount);
+        }
+        if self.own_profile_created_at_ms.is_some()
+            && self.own_profile_created_at_ms != self.account_created_at_ms
+        {
+            return Err(SnapshotError::InvalidAccount);
         }
         for ((favorite, file_conv), progress) in &self.media {
             if (*favorite && self.favorite_files.get(file_conv) != Some(&progress.size))

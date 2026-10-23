@@ -1,3 +1,4 @@
+import { ConversationBio } from "./ConversationHeaders";
 import { useMessageCollection } from "./favorites/useMessageCollection";
 import {
   CollectionToolbar,
@@ -478,7 +479,11 @@ export function ConversationView() {
         ) : (
           <DmHeader id={active.id} name={headerName} />
         )}
-        <div className="flex-1" />
+        {active.kind === "account" && !isPersonal ? (
+          <ConversationBio accountId={active.id} />
+        ) : (
+          <div className="flex-1" />
+        )}
         <ConversationHistoryDialog
           conversation={{ ...active, name: headerName }}
         />

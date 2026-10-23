@@ -48,7 +48,7 @@ descriptions, message notes and independently retained attachment bytes, even
 after source history has been cleared. Both destinations use the same encrypted
 recovery archive; Google sign-in does not replace its separate recovery key.
 
-Snapshot schema 4 carries logical collection records, including durable removal
+Snapshot schema 5 carries logical collection records, including durable removal
 tombstones. Restore retains the account identity, generates a fresh device, and
 re-encrypts the collection and retained files under the new local password.
 Expired message content and file access stay unavailable, and removal records

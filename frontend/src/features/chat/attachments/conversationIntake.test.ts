@@ -79,6 +79,7 @@ vi.mock("../ScreenshotEditor", () => ({
   },
 }));
 vi.mock("../ConversationHeaders", () => ({
+  ConversationBio: () => null,
   ChannelHeader: () => null,
   DmHeader: () => null,
 }));

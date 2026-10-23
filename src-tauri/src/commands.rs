@@ -737,16 +737,18 @@ pub async fn rename_account(
             .session()
             .matching(&lease, |info| {
                 if node_state.check_installation(&lease).is_err() {
-                    return;
+                    return Ok::<_, CommandError>(());
                 }
                 if let Some(rt) = guard
                     .as_ref()
                     .filter(|rt| rt.host_account_id() == Some(lease.owner()))
                 {
-                    rt.set_display_name(&info.user.display_name);
+                    rt.try_set_display_name(&info.user.display_name)
+                        .map_err(CommandError::from)?;
                 }
+                Ok(())
             })
-            .map_err(CommandError::Authentication)?;
+            .map_err(CommandError::Authentication)??;
     }
 
     Ok(UserInfo::from(updated))

@@ -80,9 +80,7 @@
         "frontend/src/features/chat/ComposerScreenshot.test.ts",
         "frontend/e2e/screenshot-portable.spec.ts"
       ],
-      "frontend": [
-        "src/features/chat/ComposerScreenshot.test.ts"
-      ],
+      "frontend": ["src/features/chat/ComposerScreenshot.test.ts"],
       "capability": {
         "summary": "Send a staged screenshot with Enter even when native capture leaves focus on the page background.",
         "guide": "docs/help/topics/screenshots.md",
@@ -254,9 +252,7 @@
         "src/store/conversationHistory.test.ts",
         "src/lib/readDeadline.test.ts"
       ],
-      "consumers": [
-        "frontend-chat"
-      ]
+      "consumers": ["frontend-chat"]
     },
     {
       "id": "frontend-outgoing",
@@ -265,15 +261,11 @@
         "frontend/src/store/outgoingIntent.test.ts",
         "frontend/e2e/file-send-progress.spec.ts"
       ],
-      "frontend": [
-        "src/store/outgoingIntent.test.ts"
-      ],
+      "frontend": ["src/store/outgoingIntent.test.ts"],
       "escalation": [
         "File approval/progress changes require e2e/file-send-progress.spec.ts, including file-offer receipt before approval and byte completion."
       ],
-      "consumers": [
-        "frontend-chat"
-      ],
+      "consumers": ["frontend-chat"],
       "capability": {
         "summary": "Own optimistic outgoing intents and project backend acceptance within the current frontend owner lifetime.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
@@ -307,13 +299,8 @@
         "frontend/src/store/conversationState.ts",
         "frontend/src/store/conversationModel.ts"
       ],
-      "consumers": [
-        "frontend-history",
-        "frontend-outgoing"
-      ],
-      "frontend": [
-        "src/store/reception.test.ts"
-      ]
+      "consumers": ["frontend-history", "frontend-outgoing"],
+      "frontend": ["src/store/reception.test.ts"]
     },
     {
       "id": "frontend-chat",
@@ -324,9 +311,7 @@
         "frontend/src/store/rosterRefresh.ts",
         "frontend/e2e/connection-recovery.spec.ts"
       ],
-      "frontend": [
-        "src/store/chat.test.ts"
-      ],
+      "frontend": ["src/store/chat.test.ts"],
       "capability": {
         "summary": "Bound identity startup waits and recover automatically after transient identity failures while retaining owner and runtime authority.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
@@ -347,13 +332,8 @@
         "frontend/src/store/ownership.ts",
         "frontend/src/store/ownership.test.ts"
       ],
-      "frontend": [
-        "src/store/ownership.test.ts"
-      ],
-      "consumers": [
-        "frontend-history",
-        "frontend-outgoing"
-      ]
+      "frontend": ["src/store/ownership.test.ts"],
+      "consumers": ["frontend-history", "frontend-outgoing"]
     },
     {
       "id": "frontend-channel-actions",
@@ -361,12 +341,8 @@
         "frontend/src/store/channelActions.ts",
         "frontend/src/store/channelActions.test.ts"
       ],
-      "frontend": [
-        "src/store/channelActions.test.ts"
-      ],
-      "consumers": [
-        "frontend-chat"
-      ],
+      "frontend": ["src/store/channelActions.test.ts"],
+      "consumers": ["frontend-chat"],
       "escalation": [
         "Protocol membership and native admission remain authoritative; changing those requires their focused Rust and loopback evidence."
       ]
@@ -422,9 +398,7 @@
     },
     {
       "id": "frontend-chat-shell",
-      "paths": [
-        "frontend/src/features/chat/ChatApp.tsx"
-      ],
+      "paths": ["frontend/src/features/chat/ChatApp.tsx"],
       "frontend": [
         "src/store/chat.test.ts",
         "src/store/presence.test.ts",
@@ -436,12 +410,8 @@
     },
     {
       "id": "frontend-window-controls",
-      "paths": [
-        "frontend/src/components/WindowControls.tsx"
-      ],
-      "frontend": [
-        "src/lib/platform.test.ts"
-      ],
+      "paths": ["frontend/src/components/WindowControls.tsx"],
+      "frontend": ["src/lib/platform.test.ts"],
       "escalation": [
         "Platform predicate unit tests do not execute OS window actions; required browser window-control scenarios and real affected native platform evidence remain necessary."
       ]
@@ -457,10 +427,7 @@
         "frontend/e2e/avatar-gallery-loading.spec.ts",
         "frontend/e2e/theme-contrast.spec.ts"
       ],
-      "frontend": [
-        "src/lib/pack.test.ts",
-        "src/lib/stickerPacks.test.ts"
-      ],
+      "frontend": ["src/lib/pack.test.ts", "src/lib/stickerPacks.test.ts"],
       "escalation": [
         "Pack browser scenario changes require their complete browser spec; unit tests alone do not prove installation or restart persistence."
       ]
@@ -506,13 +473,8 @@
     },
     {
       "id": "frontend-browser-fixture",
-      "paths": [
-        "frontend/e2e/tauri-mock.ts"
-      ],
-      "frontend": [
-        "src/lib/events.test.ts",
-        "src/store/chat.test.ts"
-      ],
+      "paths": ["frontend/e2e/tauri-mock.ts"],
+      "frontend": ["src/lib/events.test.ts", "src/store/chat.test.ts"],
       "escalation": [
         "Shared mocked IPC changes require affected browser scenarios; mocks do not prove native transport or persistent cleanup."
       ]
@@ -546,9 +508,7 @@
     },
     {
       "id": "frontend-dm-reception-acceptance",
-      "paths": [
-        "frontend/e2e/unread-badge.spec.ts"
-      ],
+      "paths": ["frontend/e2e/unread-badge.spec.ts"],
       "frontend": [
         "src/store/chat.test.ts",
         "src/store/reception.test.ts",
@@ -610,44 +570,6 @@
       ]
     },
     {
-      "id": "frontend-trust-cards",
-      "paths": [
-        "frontend/src/features/chat/TrustCardPanel.tsx",
-        "frontend/src/lib/api/trustCards.ts",
-        "frontend/src/lib/trustCard.ts",
-        "frontend/src/lib/trustCard.test.ts",
-        "frontend/e2e/trust-cards.spec.ts",
-        "frontend/src/features/chat/TrustCardPanel.test.ts",
-        "frontend/src/locales/en.json",
-        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png"
-      ],
-      "frontend": [
-        "src/lib/trustCard.test.ts",
-        "src/features/chat/VerifyContactDialog.test.ts",
-        "src/features/chat/TrustCardPanel.test.ts"
-      ],
-      "consumers": [
-        "frontend-chat"
-      ],
-      "capability": {
-        "summary": "Present signed public profiles and explicit proofs separately from device-local verification and observation history.",
-        "guide": "docs/ARCHITECTURE.md",
-        "invariants": [
-          {
-            "name": "Signed statements do not automatically verify people or export local trust",
-            "reference": "docs/ARCHITECTURE.md"
-          },
-          {
-            "name": "Creation dates remain unknown until explicitly declared",
-            "reference": "docs/ARCHITECTURE.md"
-          }
-        ]
-      },
-      "escalation": [
-        "Run e2e/trust-cards.spec.ts for publish/import/export/proof controls. Native signatures, persistence and transport require owning Rust evidence."
-      ]
-    },
-    {
       "id": "frontend-channel-refresh",
       "paths": [
         "frontend/src/store/channelRefresh.ts",
@@ -659,9 +581,7 @@
         "src/store/chat.test.ts",
         "src/lib/events.test.ts"
       ],
-      "consumers": [
-        "frontend-chat"
-      ],
+      "consumers": ["frontend-chat"],
       "capability": {
         "summary": "Coalesce scoped group invalidations and keep group details consistent with bounded fallback queries.",
         "guide": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery",
@@ -827,9 +747,7 @@
         "frontend/src/lib/api/recovery.ts",
         "frontend/e2e/recovery.spec.ts"
       ],
-      "frontend": [
-        "src/features/recovery/GoogleDriveConnection.test.ts"
-      ],
+      "frontend": ["src/features/recovery/GoogleDriveConnection.test.ts"],
       "capability": {
         "summary": "Explicitly connect Google Drive, confirm a separate recovery key and upload or download encrypted archives through the existing recovery dialogs.",
         "guide": "docs/backup-recovery.md#google-drive-backup-and-restore",
@@ -960,10 +878,7 @@
         "src/features/chat/attachments/conversationIntake.test.ts",
         "src/lib/automaticDownloads.test.ts"
       ],
-      "consumers": [
-        "frontend-chat",
-        "frontend-history"
-      ],
+      "consumers": ["frontend-chat", "frontend-history"],
       "capability": {
         "summary": "Protected text and raster images use owner-scoped reveal, local temporary plaintext and revocable image URLs, fresh verification and concealed shared projections.",
         "guide": "docs/privacy-controls.md#protected-messages",
@@ -977,6 +892,53 @@
       "escalation": [
         "Run frontend/e2e/protected-messages.spec.ts and e2e/ui-visual-regression.spec.ts for affected conversation layouts. Verify real macOS system authentication and Windows/Linux password verification, including prompt focus restoration, app lock and conversation switching. Mocked browser evidence does not establish native authentication behavior."
       ]
+    },
+    {
+      "id": "frontend-account-profile",
+      "paths": [
+        "frontend/src/features/chat/TrustCardPanel.tsx",
+        "frontend/src/lib/api/trustCards.ts",
+        "frontend/src/lib/trustCard.ts",
+        "frontend/src/lib/trustCard.test.ts",
+        "frontend/e2e/trust-cards.spec.ts",
+        "frontend/src/features/chat/TrustCardPanel.test.ts",
+        "frontend/src/locales/en.json",
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png",
+        "frontend/src/features/chat/AccountProfilePanel.tsx",
+        "frontend/src/features/chat/AccountProfilePanel.test.ts",
+        "frontend/src/lib/api/accountProfile.ts",
+        "frontend/src/lib/accountProfile.test.ts",
+        "frontend/src/store/accountProfiles.ts",
+        "frontend/src/store/accountProfiles.test.ts",
+        "frontend/e2e/account-profiles.spec.ts",
+        "frontend/src/features/chat/ConversationHeadersSession.test.ts"
+      ],
+      "frontend": [
+        "src/lib/accountProfile.test.ts",
+        "src/features/chat/VerifyContactDialog.test.ts",
+        "src/features/chat/AccountProfilePanel.test.ts",
+        "src/store/accountProfiles.test.ts",
+        "src/features/chat/ConversationHeaders.test.ts",
+        "src/features/chat/ConversationHeadersSession.test.ts"
+      ],
+      "consumers": ["frontend-chat"],
+      "capability": {
+        "summary": "Edit one ordinary profile and show the same About text in conversation headers and contact details with session-bound refresh.",
+        "guide": "docs/peer-trust.md",
+        "invariants": [
+          {
+            "name": "Creation dates are read-only metadata; legacy unknown dates stay unknown",
+            "reference": "docs/peer-trust.md"
+          },
+          {
+            "name": "Retired asynchronous reads cannot populate a replacement account or contact; accepted profile changes refresh visible biographies",
+            "reference": "docs/peer-trust.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/account-profiles.spec.ts for ordinary profile editing, read-only dates, removed proof controls and header/detail biography consistency. Native identity, persistence and transport require owning Rust evidence."
+      ]
     }
   ],
   "prScenarios": [
@@ -987,9 +949,7 @@
         "frontend/src/features/chat/ComposerScreenshot.test.ts",
         "frontend/e2e/screenshot-portable.spec.ts"
       ],
-      "browser": [
-        "e2e/screenshot-portable.spec.ts"
-      ]
+      "browser": ["e2e/screenshot-portable.spec.ts"]
     },
     {
       "id": "frontend-local-agent-acceptance",
@@ -1003,9 +963,7 @@
         "e2e/local-agent-access.spec.ts",
         "e2e/settings-categories.spec.ts"
       ],
-      "native": [
-        "host"
-      ]
+      "native": ["host"]
     },
     {
       "id": "frontend-exact-search-acceptance",
@@ -1019,10 +977,7 @@
         "crates/mesh-talk-core/src/node/search.rs",
         "crates/mesh-talk-core/src/node/queries.rs"
       ],
-      "browser": [
-        "e2e/chat.spec.ts",
-        "e2e/hidden-contacts.spec.ts"
-      ]
+      "browser": ["e2e/chat.spec.ts", "e2e/hidden-contacts.spec.ts"]
     },
     {
       "id": "frontend-delivery-details-acceptance",
@@ -1036,9 +991,7 @@
         "frontend/src/store/outgoingIntent.ts",
         "frontend/e2e/automatic-delivery.spec.ts"
       ],
-      "browser": [
-        "e2e/automatic-delivery.spec.ts"
-      ]
+      "browser": ["e2e/automatic-delivery.spec.ts"]
     },
     {
       "id": "frontend-presence-acceptance",
@@ -1049,9 +1002,7 @@
         "frontend/src/features/chat/ChatApp.tsx",
         "frontend/e2e/person-presence.spec.ts"
       ],
-      "browser": [
-        "e2e/person-presence.spec.ts"
-      ]
+      "browser": ["e2e/person-presence.spec.ts"]
     },
     {
       "id": "frontend-saved-devices",
@@ -1060,9 +1011,7 @@
         "frontend/src/features/chat/PersonalDevices.test.ts",
         "frontend/src/features/chat/ConversationHeaders.tsx"
       ],
-      "browser": [
-        "e2e/personal-messages.spec.ts"
-      ]
+      "browser": ["e2e/personal-messages.spec.ts"]
     },
     {
       "id": "frontend-visual",
@@ -1074,9 +1023,7 @@
         "frontend/src/lib/theme.ts",
         "frontend/src/store/theme.ts"
       ],
-      "browser": [
-        "e2e/ui-visual-regression.spec.ts"
-      ]
+      "browser": ["e2e/ui-visual-regression.spec.ts"]
     },
     {
       "id": "frontend-bootstrap-acceptance",
@@ -1087,10 +1034,7 @@
         "frontend/src/vite-env.d.ts",
         "frontend/src/components/ErrorBoundary.tsx"
       ],
-      "browser": [
-        "e2e/chat.spec.ts",
-        "e2e/ui-visual-regression.spec.ts"
-      ]
+      "browser": ["e2e/chat.spec.ts", "e2e/ui-visual-regression.spec.ts"]
     },
     {
       "id": "frontend-auth-screens-acceptance",
@@ -1099,101 +1043,57 @@
         "frontend/src/features/auth/RestoreBackup.tsx",
         "frontend/src/components/ui/label.tsx"
       ],
-      "browser": [
-        "e2e/chat.spec.ts",
-        "e2e/recovery.spec.ts"
-      ]
+      "browser": ["e2e/chat.spec.ts", "e2e/recovery.spec.ts"]
     },
     {
       "id": "frontend-chat-shell-acceptance",
-      "paths": [
-        "frontend/src/features/chat/ChatApp.tsx"
-      ],
-      "browser": [
-        "e2e/chat.spec.ts",
-        "e2e/message-lifecycle.spec.ts"
-      ]
+      "paths": ["frontend/src/features/chat/ChatApp.tsx"],
+      "browser": ["e2e/chat.spec.ts", "e2e/message-lifecycle.spec.ts"]
     },
     {
       "id": "frontend-window-controls-acceptance",
-      "paths": [
-        "frontend/src/components/WindowControls.tsx"
-      ],
-      "browser": [
-        "e2e/window-controls.spec.ts"
-      ]
+      "paths": ["frontend/src/components/WindowControls.tsx"],
+      "browser": ["e2e/window-controls.spec.ts"]
     },
     {
       "id": "frontend-pack-acceptance",
-      "paths": [
-        "frontend/e2e/packs.spec.ts"
-      ],
-      "browser": [
-        "e2e/packs.spec.ts"
-      ]
+      "paths": ["frontend/e2e/packs.spec.ts"],
+      "browser": ["e2e/packs.spec.ts"]
     },
     {
       "id": "frontend-packs-empty-acceptance",
-      "paths": [
-        "frontend/e2e/packs-empty.spec.ts"
-      ],
-      "browser": [
-        "e2e/packs-empty.spec.ts"
-      ]
+      "paths": ["frontend/e2e/packs-empty.spec.ts"],
+      "browser": ["e2e/packs-empty.spec.ts"]
     },
     {
       "id": "frontend-stickers-acceptance",
-      "paths": [
-        "frontend/e2e/stickers.spec.ts"
-      ],
-      "browser": [
-        "e2e/stickers.spec.ts"
-      ]
+      "paths": ["frontend/e2e/stickers.spec.ts"],
+      "browser": ["e2e/stickers.spec.ts"]
     },
     {
       "id": "frontend-theme-picker-acceptance",
-      "paths": [
-        "frontend/e2e/theme-picker.spec.ts"
-      ],
-      "browser": [
-        "e2e/theme-picker.spec.ts"
-      ]
+      "paths": ["frontend/e2e/theme-picker.spec.ts"],
+      "browser": ["e2e/theme-picker.spec.ts"]
     },
     {
       "id": "frontend-avatar-gallery-acceptance",
-      "paths": [
-        "frontend/e2e/avatar-gallery.spec.ts"
-      ],
-      "browser": [
-        "e2e/avatar-gallery.spec.ts"
-      ]
+      "paths": ["frontend/e2e/avatar-gallery.spec.ts"],
+      "browser": ["e2e/avatar-gallery.spec.ts"]
     },
     {
       "id": "frontend-avatar-gallery-loading-acceptance",
-      "paths": [
-        "frontend/e2e/avatar-gallery-loading.spec.ts"
-      ],
-      "browser": [
-        "e2e/avatar-gallery-loading.spec.ts"
-      ]
+      "paths": ["frontend/e2e/avatar-gallery-loading.spec.ts"],
+      "browser": ["e2e/avatar-gallery-loading.spec.ts"]
     },
     {
       "id": "frontend-theme-contrast-acceptance",
-      "paths": [
-        "frontend/e2e/theme-contrast.spec.ts"
-      ],
-      "browser": [
-        "e2e/theme-contrast.spec.ts"
-      ]
+      "paths": ["frontend/e2e/theme-contrast.spec.ts"],
+      "browser": ["e2e/theme-contrast.spec.ts"]
     },
     {
       "id": "frontend-composer-acceptance",
-      "paths": [
-        "frontend/e2e/ui-audit-composer.spec.ts"
-      ],
-      "browser": [
-        "e2e/ui-audit-composer.spec.ts"
-      ]
+      "paths": ["frontend/e2e/ui-audit-composer.spec.ts"],
+      "browser": ["e2e/ui-audit-composer.spec.ts"]
     },
     {
       "id": "frontend-composer-input-acceptance",
@@ -1202,9 +1102,7 @@
         "frontend/src/features/chat/ComposerAdmission.test.ts",
         "frontend/e2e/composer-layout.spec.ts"
       ],
-      "browser": [
-        "e2e/composer-layout.spec.ts"
-      ]
+      "browser": ["e2e/composer-layout.spec.ts"]
     },
     {
       "id": "frontend-message-expiry-acceptance",
@@ -1218,9 +1116,7 @@
         "frontend/e2e/message-expiry.spec.ts",
         "frontend/e2e/tauri-mock.ts"
       ],
-      "browser": [
-        "e2e/message-expiry.spec.ts"
-      ]
+      "browser": ["e2e/message-expiry.spec.ts"]
     },
     {
       "id": "frontend-text-submission-acceptance",
@@ -1228,9 +1124,7 @@
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/e2e/automatic-delivery.spec.ts"
       ],
-      "browser": [
-        "e2e/automatic-delivery.spec.ts"
-      ]
+      "browser": ["e2e/automatic-delivery.spec.ts"]
     },
     {
       "id": "frontend-dm-unread-acceptance",
@@ -1243,9 +1137,7 @@
         "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs"
       ],
-      "browser": [
-        "e2e/unread-badge.spec.ts"
-      ]
+      "browser": ["e2e/unread-badge.spec.ts"]
     },
     {
       "id": "frontend-identity-recovery-acceptance",
@@ -1254,9 +1146,7 @@
         "frontend/src/store/chat.test.ts",
         "frontend/e2e/connection-recovery.spec.ts"
       ],
-      "browser": [
-        "e2e/connection-recovery.spec.ts"
-      ]
+      "browser": ["e2e/connection-recovery.spec.ts"]
     },
     {
       "id": "frontend-presence-recovery-acceptance",
@@ -1274,26 +1164,7 @@
         "e2e/person-presence.spec.ts",
         "e2e/connection-recovery.spec.ts"
       ],
-      "native": [
-        "host"
-      ]
-    },
-    {
-      "id": "frontend-trust-cards-acceptance",
-      "paths": [
-        "frontend/src/features/chat/TrustCardPanel.tsx",
-        "frontend/src/lib/api/trustCards.ts",
-        "frontend/src/lib/trustCard.ts",
-        "frontend/src/lib/trustCard.test.ts",
-        "frontend/e2e/trust-cards.spec.ts",
-        "frontend/src/features/chat/ProfileDialog.tsx",
-        "frontend/src/features/chat/VerifyContactDialog.tsx",
-        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png"
-      ],
-      "browser": [
-        "e2e/trust-cards.spec.ts",
-        "e2e/ui-audit-dialogs.spec.ts"
-      ]
+      "native": ["host"]
     },
     {
       "id": "group-sync",
@@ -1303,10 +1174,7 @@
         "frontend/src/lib/events.ts",
         "frontend/e2e/group-sync.spec.ts"
       ],
-      "browser": [
-        "e2e/group-sync.spec.ts",
-        "e2e/channel-lifecycle.spec.ts"
-      ]
+      "browser": ["e2e/group-sync.spec.ts", "e2e/channel-lifecycle.spec.ts"]
     },
     {
       "id": "frontend-state-push",
@@ -1358,9 +1226,7 @@
         "frontend/e2e/update-flow.spec.ts",
         "frontend/src/lib/types.ts"
       ],
-      "browser": [
-        "e2e/update-flow.spec.ts"
-      ]
+      "browser": ["e2e/update-flow.spec.ts"]
     },
     {
       "id": "frontend-notification-permission-acceptance",
@@ -1389,10 +1255,7 @@
         "frontend/src/features/auth/RestoreBackup.tsx",
         "frontend/e2e/google-drive-backup.spec.ts"
       ],
-      "browser": [
-        "e2e/google-drive-backup.spec.ts",
-        "e2e/recovery.spec.ts"
-      ]
+      "browser": ["e2e/google-drive-backup.spec.ts", "e2e/recovery.spec.ts"]
     },
     {
       "id": "frontend-channel-join-history-acceptance",
@@ -1402,9 +1265,7 @@
         "frontend/src/lib/api/chat.ts",
         "frontend/e2e/channel-history.spec.ts"
       ],
-      "browser": [
-        "e2e/channel-history.spec.ts"
-      ]
+      "browser": ["e2e/channel-history.spec.ts"]
     },
     {
       "id": "protected-message-acceptance",
@@ -1443,8 +1304,34 @@
         "e2e/protected-messages.spec.ts",
         "e2e/ui-visual-regression.spec.ts"
       ],
-      "native": [
-        "host"
+      "native": ["host"]
+    },
+    {
+      "id": "frontend-account-profile-acceptance",
+      "paths": [
+        "frontend/src/features/chat/TrustCardPanel.tsx",
+        "frontend/src/lib/api/trustCards.ts",
+        "frontend/src/lib/trustCard.ts",
+        "frontend/src/lib/trustCard.test.ts",
+        "frontend/e2e/trust-cards.spec.ts",
+        "frontend/src/features/chat/ProfileDialog.tsx",
+        "frontend/src/features/chat/VerifyContactDialog.tsx",
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png",
+        "frontend/src/features/chat/AccountProfilePanel.tsx",
+        "frontend/src/features/chat/AccountProfilePanel.test.ts",
+        "frontend/src/lib/api/accountProfile.ts",
+        "frontend/src/lib/accountProfile.test.ts",
+        "frontend/src/store/accountProfiles.ts",
+        "frontend/src/store/accountProfiles.test.ts",
+        "frontend/e2e/account-profiles.spec.ts",
+        "frontend/src/features/chat/ConversationHeaders.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/MemberProfileDialog.tsx"
+      ],
+      "browser": [
+        "e2e/account-profiles.spec.ts",
+        "e2e/ui-audit-dialogs.spec.ts",
+        "e2e/ui-visual-regression.spec.ts"
       ]
     }
   ]

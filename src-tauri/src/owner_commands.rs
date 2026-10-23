@@ -626,11 +626,8 @@ mod tests {
                     crate::chat_commands::read_media,
                     crate::trust::mark_verified,
                     crate::trust::get_trust,
-                    crate::trust_cards::get_trust_card,
-                    crate::trust_cards::publish_trust_card,
-                    crate::trust_cards::import_trust_artifact,
-                    crate::trust_cards::create_trust_introduction,
-                    crate::trust_cards::witness_trust_creation,
+                    crate::account_profile::get_account_profile,
+                    crate::account_profile::save_account_bio,
                     crate::chat_commands::send_file_to_account,
                     crate::chat_commands::send_to_account,
                     crate::chat_commands::send_sticker,
@@ -2525,50 +2522,28 @@ mod tests {
         }
     }
 
-    fn trust_card_command_cases(owner: &str) -> Vec<(&'static str, serde_json::Value)> {
-        let account = mesh_talk_core::identity::account::Account::generate();
-        let card = mesh_talk_core::node::TrustCard::new(
-            &account,
-            1,
-            "Imported peer".into(),
-            String::new(),
-            None,
-            None,
-        );
-        let artifact = serde_json::json!({"schema":1,"kind":"card","payload":card}).to_string();
+    fn account_profile_command_cases(owner: &str) -> Vec<(&'static str, serde_json::Value)> {
         vec![
             (
-                "get_trust_card",
+                "get_account_profile",
                 serde_json::json!({"owner":owner,"accountId":"00".repeat(16)}),
             ),
             (
-                "publish_trust_card",
-                serde_json::json!({"owner":owner,"displayName":"Alice","bio":"Hello","createdAtMs":null}),
-            ),
-            (
-                "import_trust_artifact",
-                serde_json::json!({"owner":owner,"json":artifact}),
-            ),
-            (
-                "create_trust_introduction",
-                serde_json::json!({"owner":owner,"accountId":"00".repeat(16),"note":"Met in person"}),
-            ),
-            (
-                "witness_trust_creation",
-                serde_json::json!({"owner":owner,"accountId":"00".repeat(16)}),
+                "save_account_bio",
+                serde_json::json!({"owner":owner,"bio":"Hello"}),
             ),
         ]
     }
 
     #[test]
-    fn registered_trust_card_commands_reject_wrong_owner_and_locked_app() {
+    fn registered_account_profile_commands_reject_wrong_owner_and_locked_app() {
         use tauri::Manager;
         let fixture = Fixture::new();
-        for (command, body) in trust_card_command_cases("bob") {
-            assert_eq!(
-                fixture.invoke(command, body).unwrap_err()["kind"],
-                "authorization",
-                "{command} must reject another owner before parsing or reading artifacts"
+        for (command, body) in account_profile_command_cases("bob") {
+            let response = fixture.invoke(command, body);
+            assert!(
+                matches!(response, Err(ref error) if error["kind"] == "authorization"),
+                "profile commands must reject another owner before reading profiles"
             );
         }
         crate::app_lock::lock_app(
@@ -2576,17 +2551,17 @@ mod tests {
             fixture.webview.state::<crate::app_lock::AppLock>(),
         )
         .unwrap();
-        for (command, body) in trust_card_command_cases("alice") {
-            assert_eq!(
-                fixture.invoke(command, body).unwrap_err()["kind"],
-                "authorization",
-                "{command} must reject a locked app before reading or mutating artifacts"
+        for (command, body) in account_profile_command_cases("alice") {
+            let response = fixture.invoke(command, body);
+            assert!(
+                matches!(response, Err(ref error) if error["kind"] == "authorization"),
+                "profile commands must reject a locked app before reading or saving profiles"
             );
         }
     }
 
     #[test]
-    fn signed_card_publication_returns_after_local_commit_with_a_stalled_peer() {
+    fn account_profile_save_returns_after_local_commit_with_a_stalled_peer() {
         use mesh_talk_core::identity::{account::Account, device::DeviceIdentity};
         use std::sync::atomic::{AtomicBool, Ordering};
         let fixture = Fixture::new();
@@ -2618,16 +2593,22 @@ mod tests {
             .unwrap()
             .account_id()
             .to_owned();
-        let card = fixture
+        let _card = fixture
             .invoke(
-                "get_trust_card",
+                "get_account_profile",
                 serde_json::json!({"owner":"alice","accountId":own}),
             )
             .unwrap();
         let webview = fixture.webview.clone();
         let (completed, result) = std::sync::mpsc::channel();
         let publishing = std::thread::spawn(move || {
-            completed.send(invoke(&webview,"publish_trust_card",serde_json::json!({"owner":"alice","displayName":"Signed locally","bio":"Public profile","createdAtMs":card["created_at_ms"]}))).unwrap();
+            completed
+                .send(invoke(
+                    &webview,
+                    "save_account_bio",
+                    serde_json::json!({"owner":"alice","bio":"Public profile"}),
+                ))
+                .unwrap();
         });
         let accepted = result.recv_timeout(std::time::Duration::from_secs(1));
         let responsive = fixture
@@ -2638,117 +2619,67 @@ mod tests {
         publishing.join().unwrap();
         assert!(
             accepted.is_ok_and(|value| value.is_ok()),
-            "publishing a locally committed signed card must not wait for a peer handshake"
+            "saving a locally committed profile must not wait for a peer handshake"
         );
-        assert!(
-            responsive,
-            "public-card fanout must preserve node observations"
-        );
+        assert!(responsive, "profile fanout must preserve node observations");
     }
 
     #[test]
-    fn registered_trust_card_commands_round_trip_public_evidence_without_verifying() {
-        use mesh_talk_core::{
-            identity::account::Account,
-            node::{Introduction, TimestampWitness, TrustCard},
-        };
+    fn registered_account_profile_commands_save_bio_without_accepting_identity_edits() {
         let fixture = Fixture::new();
         let own_id = fixture
             .node
             .0
-            .blocking_write()
+            .blocking_read()
             .as_ref()
             .unwrap()
             .account_id()
             .to_owned();
-        let get = |account: &str| {
+        let get = || {
             fixture
                 .invoke(
-                    "get_trust_card",
-                    serde_json::json!({"owner":"alice","accountId":account}),
+                    "get_account_profile",
+                    serde_json::json!({"owner":"alice","accountId":own_id}),
                 )
                 .unwrap()
         };
-        let initial = get(&own_id);
-        let created = initial["created_at_ms"].as_u64().unwrap();
-        fixture.invoke("publish_trust_card", serde_json::json!({"owner":"alice","displayName":"Alice signed","bio":"Public bio","createdAtMs":created})).unwrap();
-        assert_eq!(get(&own_id)["display_name"], "Alice signed");
-
-        let peer = Account::generate();
-        let peer_id = peer.account_id();
-        let import = |kind: &str, payload: serde_json::Value| {
-            fixture.invoke("import_trust_artifact", serde_json::json!({"owner":"alice","json":serde_json::json!({"schema":1,"kind":kind,"payload":payload}).to_string()}))
-        };
-        let card = TrustCard::new(&peer, 1, "Bob".into(), "Peer bio".into(), Some(42), None);
-        import("card", serde_json::to_value(card).unwrap()).unwrap();
-        assert_eq!(get(&peer_id)["display_name"], "Bob");
-        let trust = fixture
-            .invoke(
-                "get_trust",
-                serde_json::json!({"owner":"alice","accountId":peer_id,"currentFingerprint":""}),
-            )
-            .unwrap();
-        assert_eq!(trust["verified"], false);
-        assert_eq!(trust["known"], false);
-
-        let intro = fixture
-            .invoke(
-                "create_trust_introduction",
-                serde_json::json!({"owner":"alice","accountId":peer_id,"note":"Met independently"}),
-            )
-            .unwrap();
-        let envelope: serde_json::Value = serde_json::from_str(intro.as_str().unwrap()).unwrap();
-        let intro: Introduction = serde_json::from_value(envelope["payload"].clone()).unwrap();
-        assert!(intro.verify());
-        assert_eq!(intro.subject_account_id, peer_id);
-        let witness = fixture
-            .invoke(
-                "witness_trust_creation",
-                serde_json::json!({"owner":"alice","accountId":peer_id}),
-            )
-            .unwrap();
-        let envelope: serde_json::Value = serde_json::from_str(witness.as_str().unwrap()).unwrap();
-        let witness: TimestampWitness =
-            serde_json::from_value(envelope["payload"].clone()).unwrap();
-        assert!(witness.verify());
-
-        import(
-            "introduction",
-            serde_json::to_value(Introduction::new(
-                &peer,
-                own_id.clone(),
-                "Known colleague".into(),
-                created,
-            ))
-            .unwrap(),
-        )
-        .unwrap();
-        import(
-            "witness",
-            serde_json::to_value(TimestampWitness::new(
-                &peer,
-                own_id.clone(),
-                created,
-                created + 1,
-            ))
-            .unwrap(),
-        )
-        .unwrap();
-        let own = get(&own_id);
-        assert_eq!(own["introductions"][0]["issuer_account_id"], peer_id);
-        assert_eq!(own["witnesses"][0]["issuer_verified"], false);
-        let json = own["signed_json"].as_str().unwrap();
-        assert!(!json.contains("issuer_verified"));
-        assert!(!json.contains("first_seen"));
-        assert!(!json.contains("device_changes"));
+        let initial = get();
+        fixture.invoke("save_account_bio", serde_json::json!({"owner":"alice","bio":"Public bio","displayName":"Forged name","createdAtMs":42})).unwrap();
+        let saved = get();
+        assert_eq!(saved["bio"], "Public bio");
+        assert_eq!(saved["display_name"], initial["display_name"]);
+        assert_eq!(saved["created_at_ms"], initial["created_at_ms"]);
+        for field in [
+            "signed_json",
+            "introductions",
+            "witnesses",
+            "revision",
+            "avatar",
+        ] {
+            assert!(saved.get(field).is_none(), "retired field: {field}");
+        }
+        for command in [
+            "get_trust_card",
+            "publish_trust_card",
+            "import_trust_artifact",
+            "create_trust_introduction",
+            "witness_trust_creation",
+        ] {
+            assert!(
+                fixture
+                    .invoke(command, serde_json::json!({"owner":"alice"}))
+                    .is_err(),
+                "retired command: {command}"
+            );
+        }
     }
 
     #[test]
-    fn registered_trust_card_commands_reject_replaced_queued_authority() {
+    fn registered_account_profile_commands_reject_replaced_queued_authority() {
         use tauri::Manager;
         let fixture = Fixture::new();
         for change in ["relogin", "logout", "lock"] {
-            for (command, body) in trust_card_command_cases("alice") {
+            for (command, body) in account_profile_command_cases("alice") {
                 fixture.app_state.app_lock().clear();
                 fixture
                     .app_state
@@ -2777,12 +2708,11 @@ mod tests {
                 let result = pending.join().unwrap();
                 assert!(
                     captured.is_ok(),
-                    "{command} must capture authority before waiting"
+                    "profile commands must capture authority before waiting"
                 );
-                assert_eq!(
-                    result.unwrap_err()["kind"],
-                    "authorization",
-                    "{command}: {change}"
+                assert!(
+                    matches!(result, Err(ref error) if error["kind"] == "authorization"),
+                    "profile commands must reject retired authority after {change}"
                 );
                 *fixture.app_state.owner_command_captured.lock().unwrap() = None;
             }
