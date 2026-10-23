@@ -147,3 +147,43 @@ applicability
 with the model provider described above. Model review complements executable
 regressions and hosted checks; it cannot certify timing improvements or replace
 required platform/native evidence.
+
+## Desktop local agent access
+
+The [local agent access suite](local-agent-access-ai-eval-suite.json) evaluates
+short-prompt discovery, public-help privacy, HTTP admission and resource limits,
+scoped sends and retirement, instruction-file ownership, and settings recovery.
+Model source review complements real loopback and browser assertions; it does not
+prove native webview behavior or recipient delivery.
+
+```bash
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/local-agent-access-ai-eval-suite.json --report target/ai-eval/local-agent-access-report.json
+```
+
+The normal Rust suite runs `deterministic_provider_exercises_help_retry_and_disabled_service`
+through a Node.js HTTP fixture and the same provider process/evidence harness used
+by the model test. It discovers operations and credentials through help, verifies
+actual accepted history and retry identity, and requires connection refusal after
+disable. This proves the executable scenario and harness; it is not a model-backed
+result. Node.js is required for this desktop test, as in the full repository gates.
+Deterministic evidence uses `target/ai-eval/local-agent-deterministic/` so it cannot
+overwrite real-model evidence.
+
+The opt-in desktop behavioral test starts an isolated temporary account and the
+real local HTTP service, supplies only the rendered bootstrap plus a user task
+to a configured model, and verifies the actual core history after an idempotent
+retry, an unavailable destination, and a disabled-service attempt:
+
+```bash
+AI_EVAL_COMMAND='<absolute-path non-interactive model command>' cargo test -p mesh-talk --lib real_model_uses_only_help_to_send_retry_and_observe_disabled_access -- --ignored --nocapture
+```
+
+The command reads its prompt from stdin and must return only the requested JSON
+object. It runs from an isolated temporary directory, so use absolute executable
+or script paths. The fixture provides `MESH_AGENT_EVAL_SECRET` to the provider
+wrapper solely for transcript-leak detection; remove it before launching the
+model process and never include it in a prompt. Final output is checked for
+credential disclosure, evidence is sanitized under `target/ai-eval/local-agent-live/`,
+and test identities never use the real desktop profile or user instruction file.
+A passing send proves durable local acceptance and retry behavior; this fixture
+does not prove delivery to a second device or native settings interaction.

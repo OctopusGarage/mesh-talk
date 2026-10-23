@@ -56,8 +56,9 @@ independent witness receipts and private relationship evidence.
 ## Bots and local agents
 
 [Bot integrations](bot-integrations.md) explains the dedicated headless bot host,
-opt-in desktop delegation, scoped CLI credentials and local MCP tools. Text/reply
-sending is implemented; interactive subscriptions and HTTP ingress are later stages.
+the desktop local-agent switch and self-describing loopback HTTP API, scoped CLI
+credentials and local MCP tools. Text/reply sending is implemented; interactive
+subscriptions and incoming HTTP webhooks are later stages.
 
 ## Contributor workflow and design
 

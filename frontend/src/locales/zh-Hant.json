@@ -1104,6 +1104,25 @@
       "other": "開啟裝置的通知設定並允許 Mesh-Talk。"
     }
   },
+  "agentAccess": {
+    "title": "本機 Agent 存取",
+    "description": "允許本機 Agent 使用目前登入的帳號傳送文字及回覆。",
+    "selectFirst": "請先選擇至少一個對話，再開啟存取。",
+    "running": "執行中 · 本機 Agent 可呼叫",
+    "unavailable": "已開啟 · 服務暫時無法使用",
+    "off": "已關閉",
+    "conversations": "允許存取的對話",
+    "noConversations": "聯絡人及已加入的群組會顯示在這裡。",
+    "unavailableConversation": "暫時無法使用的對話 · {{id}}",
+    "scopeHint": "最多選擇 16 個對話。Agent 無法讀取聊天記錄。",
+    "fileHint": "開啟後會向 {{path}} 寫入簡短說明；關閉時只移除 Mesh-Talk 管理的部分。",
+    "showInstructions": "展開 Agent 使用說明",
+    "copy": "複製說明",
+    "copied": "已複製",
+    "copyFailed": "複製失敗，請選取上方說明並手動複製。",
+    "group": "群組",
+    "person": "聯絡人"
+  },
   "messageFavorites": {
     "title": "收藏夾",
     "add": "加入收藏夾",

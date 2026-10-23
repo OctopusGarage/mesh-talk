@@ -211,6 +211,7 @@ export function useSettingsController(open: boolean) {
     update,
     setAutostartEnabled,
     chooseDownloadDir,
+    runSettingAction: save,
   };
 }
 

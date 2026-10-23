@@ -1104,6 +1104,25 @@
       "other": "デバイスの通知設定を開き、Mesh-Talk を許可してください。"
     }
   },
+  "agentAccess": {
+    "title": "ローカルエージェント連携",
+    "description": "ログイン中のアカウントで、ローカルエージェントがテキストや返信を送信できます。",
+    "selectFirst": "有効にする前に、会話を1つ以上選択してください。",
+    "running": "稼働中 · ローカルエージェントが利用可能",
+    "unavailable": "有効 · サービスを利用できません",
+    "off": "無効",
+    "conversations": "許可する会話",
+    "noConversations": "連絡先と参加済みグループがここに表示されます。",
+    "unavailableConversation": "利用できない会話 · {{id}}",
+    "scopeHint": "最大16件の会話を選択できます。エージェントはチャット履歴を読めません。",
+    "fileHint": "有効にすると {{path}} に短い案内を追加します。無効にすると Mesh-Talk の部分だけを削除します。",
+    "showInstructions": "エージェント向け案内を表示",
+    "copy": "案内をコピー",
+    "copied": "コピーしました",
+    "copyFailed": "コピーできませんでした。上の案内を選択して手動でコピーしてください。",
+    "group": "グループ",
+    "person": "連絡先"
+  },
   "messageFavorites": {
     "title": "お気に入り",
     "add": "お気に入りに追加",

@@ -447,6 +447,8 @@ pub fn run_tauri_configured(
                 crate::updates::check_for_update,
                 crate::updates::download_update,
                 crate::updates::cancel_update_download,
+                crate::integrations::local_access::get_local_agent_access,
+                crate::integrations::local_access::set_local_agent_access,
                 crate::settings::get_app_settings,
                 crate::settings::set_app_settings,
                 crate::trust::get_trust,

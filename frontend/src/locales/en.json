@@ -1104,6 +1104,25 @@
       "other": "Open your device’s notification settings and allow Mesh-Talk."
     }
   },
+  "agentAccess": {
+    "title": "Local agent access",
+    "description": "Let local agents send text and replies through your signed-in account.",
+    "selectFirst": "Select at least one conversation before enabling access.",
+    "running": "Running · available to local agents",
+    "unavailable": "Enabled · service unavailable",
+    "off": "Off",
+    "conversations": "Allowed conversations",
+    "noConversations": "Your contacts and joined groups will appear here.",
+    "unavailableConversation": "Unavailable conversation · {{id}}",
+    "scopeHint": "Choose up to 16 conversations. Agents cannot read chat history.",
+    "fileHint": "Enabling adds a short hint to {{path}}. Disabling removes only Mesh-Talk’s section.",
+    "showInstructions": "View agent instructions",
+    "copy": "Copy instructions",
+    "copied": "Copied",
+    "copyFailed": "Could not copy. Select the instructions above and copy them manually.",
+    "group": "Group",
+    "person": "Person"
+  },
   "messageFavorites": {
     "title": "Favorites",
     "add": "Add to Favorites",

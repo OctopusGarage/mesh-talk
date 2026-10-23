@@ -1,4 +1,5 @@
 //! Closed application API shared by trusted host adapters and local transports.
+use crate::model::StatusRequest;
 use crate::policy::{Grant, GrantRegistry, equal_hash, token_hash};
 use crate::{Destination, GrantSpec, IntegrationError, SendMessage};
 use mesh_talk_core::node::{MessageAcceptance, Node, NodeError, OutgoingMessageRequest};
@@ -65,11 +66,6 @@ pub struct IntegrationService {
     registry: Arc<Mutex<GrantRegistry>>,
     admin_hash: [u8; 32],
     pending: tokio::sync::Semaphore,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StatusRequest {
-    idempotency_key: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
