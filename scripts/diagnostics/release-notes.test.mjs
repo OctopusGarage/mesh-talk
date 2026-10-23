@@ -213,7 +213,7 @@ test("Stable notes require curated highlights while Nightly never borrows anothe
     /missing/i,
   );
   const notes = renderReleaseNotes(template, { ...stable, changelog });
-  assert.match(notes, /### Release highlights\n\n- Curated release benefit/);
+  assert.match(notes, /- Curated release benefit/);
   assert.doesNotMatch(
     notes,
     /Older benefit|Open the exact message selected in search/,
@@ -250,4 +250,18 @@ test("template controls cannot be supplied by curated text and unknown tokens st
     () => renderReleaseNotes(`${template}\n__UNKNOWN_TOKEN__`, options),
     /unknown release notes placeholder/,
   );
+});
+
+test("curated category headings are the release structure without an extra generated wrapper", () => {
+  const body =
+    "### Added\n\n- Keep drafts.\n\n### Fixed\n\n- Recover transient failures.";
+  const notes = renderReleaseNotes(template, {
+    ...source,
+    tag: "v0.1.6",
+    ref: "refs/tags/v0.1.6",
+    changelog: `## 0.1.6\n\n${body}`,
+  });
+  assert.ok(notes.includes(body));
+  assert.doesNotMatch(notes, /### Release highlights/);
+  assert.match(notes, /### Downloads/);
 });

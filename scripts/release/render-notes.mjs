@@ -130,9 +130,7 @@ export function renderReleaseNotes(
     /STABLE_ONLY/,
     "unclosed release notes conditional",
   );
-  notes = notes.replace(highlightsMarker, () =>
-    highlights ? `### Release highlights\n\n${highlights}` : "",
-  );
+  notes = notes.replace(highlightsMarker, () => highlights);
   if (nightly) {
     notes = `> **Nightly preview — experimental**\n> This build may contain unfinished features or regressions. Back up important data before trying it.\n> Source: [${sha}](https://github.com/${repository}/commit/${sha}) · [Build ${runId}, attempt ${runAttempt}](https://github.com/${repository}/actions/runs/${runId}/attempts/${runAttempt})\n\n${notes}`;
   }
