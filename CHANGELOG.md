@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.5](https://github.com/OctopusGarage/mesh-talk/compare/v0.4.4...v0.4.5) (2026-10-23)
+
+
+### Features
+
+* add message Favorites with searchable notes ([254be2e](https://github.com/OctopusGarage/mesh-talk/commit/254be2e48ad7aee4145b2c37e64870b0959ec7e8))
+* identify presence sources and adapt relay selection ([#270](https://github.com/OctopusGarage/mesh-talk/issues/270)) ([a2698a5](https://github.com/OctopusGarage/mesh-talk/commit/a2698a58d2b5390f0984b564e8b6700b4dec85ee))
+* integrate messaging, profiles, recovery and local agent access ([#278](https://github.com/OctopusGarage/mesh-talk/issues/278)) ([1bb6483](https://github.com/OctopusGarage/mesh-talk/commit/1bb6483d3e5c9db093ca3f5760970460c6653b01))
+* make lightweight desktop packages the default ([#267](https://github.com/OctopusGarage/mesh-talk/issues/267)) ([222388f](https://github.com/OctopusGarage/mesh-talk/commit/222388fa8e0f7405bb10295db3c569021a75089d))
+
+
+### Bug Fixes
+
+* **chat:** send staged screenshots after capture loses focus ([#266](https://github.com/OctopusGarage/mesh-talk/issues/266)) ([7c88ee7](https://github.com/OctopusGarage/mesh-talk/commit/7c88ee7756de9f1fa4b0bcaefd425937552953ec))
+* **release:** harden draft preparation and state reads ([#263](https://github.com/OctopusGarage/mesh-talk/issues/263)) ([cf91e4c](https://github.com/OctopusGarage/mesh-talk/commit/cf91e4ce6a56d8c5ae83ffe83563a31ddd97aeb5))
+* **ui:** guide users through system notification permission ([#262](https://github.com/OctopusGarage/mesh-talk/issues/262)) ([6e7cde3](https://github.com/OctopusGarage/mesh-talk/commit/6e7cde3e7329875b4efa356ca009ae023549d2df))
+
 ## [0.4.4](https://github.com/OctopusGarage/mesh-talk/compare/v0.4.3...v0.4.4) (2026-10-22)
 
 
