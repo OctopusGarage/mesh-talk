@@ -75,8 +75,16 @@ export function ConversationRow({
       ? (s.texts[convKey(conv)] ?? "")
       : "",
   );
-  const showDraft = !isActive && !prioritizeSubtitle && !!draft.trim();
-  const draftPreview = draft.replace(/\s+/g, " ").trim();
+  const draftProtection = useDrafts((s) =>
+    s.owner === owner && s.generation === generation
+      ? s.protections[convKey(conv)]
+      : undefined,
+  );
+  const showDraft =
+    !isActive && !prioritizeSubtitle && (!!draft.trim() || !!draftProtection);
+  const draftPreview = draftProtection
+    ? t("protectedMessage.label")
+    : draft.replace(/\s+/g, " ").trim();
   // Presence is read from the isolated store and keyed by id, so a presence tick only
   // re-renders the rows whose snapshot actually changed.
   const presence = usePresenceFor(conv.id);
@@ -88,7 +96,11 @@ export function ConversationRow({
       ? groupPresenceLabel(presence, t)
       : prioritizeSubtitle
         ? subtitle
-        : (latest?.text ? latest.text : "") ||
+        : (latest?.protection
+            ? t("protectedMessage.label")
+            : latest?.text
+              ? latest.text
+              : "") ||
           latest?.file?.name ||
           (personal
             ? subtitle

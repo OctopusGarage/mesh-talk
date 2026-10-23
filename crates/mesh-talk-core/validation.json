@@ -39,6 +39,10 @@
           {
             "name": "V3 sync gates new event kinds, replay/restart deduplicates original IDs and shared copies arrive as silent history",
             "reference": "docs/help/topics/channels.md#history-for-new-members"
+          },
+          {
+            "name": "Protected rows do not consume invitation history budgets or become ordinary snapshots, and incoming protected copies retain concealed projections",
+            "reference": "docs/privacy-controls.md#protected-messages"
           }
         ]
       },
@@ -73,6 +77,10 @@
         "guide": "docs/favorites.md",
         "invariants": [
           {
+            "name": "Protected text and images are excluded atomically from capture; retained canonical protection also blocks snapshot presentation, file reads/exports, certified-sibling exchange and portable Favorites export without changing the Favorites wire layout",
+            "reference": "docs/privacy-controls.md#protected-messages"
+          },
+          {
             "name": "Canonical source resolution and atomic grouped capture never accept caller-claimed source plaintext; ordinary retention does not erase favorites",
             "reference": "docs/favorites.md#collection-and-metadata"
           },
@@ -99,13 +107,18 @@
       "id": "core-search-references",
       "paths": [
         "crates/mesh-talk-core/src/node/search.rs",
-        "crates/mesh-talk-core/src/node/search_tests.rs"
+        "crates/mesh-talk-core/src/node/search_tests.rs",
+        "crates/mesh-talk-core/src/node/message.rs",
+        "crates/mesh-talk-core/src/protection.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
-            "node::search::tests::"
+            "node::search::tests::",
+            "node::delivery_runtime_tests::protected_account_message_arrives_redacted_and_exact_reveal_expires",
+            "node::message::tests::",
+            "node::delivery_runtime_tests::protected_image_loopback_retains_policy_and_blocks_ordinary_receive_reads"
           ]
         }
       ],
@@ -129,6 +142,14 @@
           {
             "name": "Exact context remains namespace-scoped, caps output at 51 canonical rows and omits recalled re-edit plaintext; missing, recalled or expired targets are unavailable",
             "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          },
+          {
+            "name": "Protected text remains absent from default history, search and context; explicit exact lookup rechecks namespace, recall and expiry",
+            "reference": "docs/ARCHITECTURE.md#protected-messages"
+          },
+          {
+            "name": "Protected raster images use existing encrypted transfer while exact authorized reveals preserve policy, retention, recall and expiry; ordinary reads and exports reject them and missing manifest metadata never grants media access",
+            "reference": "docs/ARCHITECTURE.md#protected-messages"
           }
         ]
       },
@@ -363,7 +384,7 @@
         "guide": "docs/backup-recovery.md",
         "invariants": [
           {
-            "name": "Schema 4 appends bounded Favorites and retained-file tags while preserving schema 1\u20133 compatibility and existing archive authentication",
+            "name": "Schema 4 appends bounded Favorites and retained-file tags while preserving schema 1–3 compatibility and existing archive authentication",
             "reference": "docs/backup-recovery.md#snapshot-compatibility"
           },
           {
@@ -524,6 +545,10 @@
         "summary": "Retry immutable delivery work across routed latency with bounded independent control lanes and cancellation-owned tasks.",
         "invariants": [
           {
+            "name": "Accepted channel files retain one durable event identity and their protected manifest across failed sidecar projection, lock transitions and restart; recovery never requests send authorization again",
+            "reference": "docs/ARCHITECTURE.md#protected-messages"
+          },
+          {
             "name": "Bounded runtime observations describe only exact recipient attempts; stale or missing details never change durable delivery confirmation",
             "reference": "docs/network-design-reference.md#runtime-delivery-observations"
           },
@@ -583,6 +608,7 @@
         "guide": "docs/ARCHITECTURE.md"
       },
       "escalation": [
+        "Channel file acceptance and projection changes require accepted_channel_file_sidecar_failure_recovers_same_identity_and_protection and channel_file_authorization_rejects_before_staging_or_wal_acceptance, covering ordinary and protected images, pending canonical history, live recovery and restart.",
         "Channel acceptance/custody changes require registered owner enqueue tests, exact-ID frontend reconciliation, and loopback post-office durable-wrapper confirmation evidence.",
         "Producer/session lock-order changes require send_authorization_never_retains_the_delivery_journal_lock plus concurrent signed-card publication and account/channel send evidence.",
         "Channel media retention/completion changes also require cargo test -p mesh-talk-core --bin mesh-talk-node file_saves:: --features fast-test-kdf; library-only selection cannot exercise delayed CLI export after a non-sharing receiver prunes chunks.",

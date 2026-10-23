@@ -281,7 +281,11 @@ export function beginSendIntent(
   get: Get,
   c: Conversation,
   payload: SendPayload,
-  options: { waitForHydration?: boolean } = {},
+  options: {
+    waitForHydration?: boolean;
+    onAccepted?: () => void;
+    retainFailure?: boolean;
+  } = {},
 ): Promise<boolean> | null {
   if (Object.keys(get().intents).length >= SEND_INTENT_CAP) {
     get().setError(
@@ -297,11 +301,14 @@ export function beginSendIntent(
     who: get().myId,
     text:
       payload.kind === "text"
-        ? payload.text
+        ? payload.protection
+          ? ""
+          : payload.text
         : payload.kind === "sticker"
           ? payload.fallback
           : "",
     replyTo: payload.kind === "text" ? payload.replyTo : null,
+    protection: payload.kind !== "sticker" ? payload.protection : null,
     wallClock: Date.now(),
     expiresAtMs: payload.expiresAtMs,
     pending: true,
@@ -318,7 +325,12 @@ export function beginSendIntent(
           }
         : null,
   };
-  const intent = { conversation: { ...c }, payload, message };
+  const intent = {
+    conversation: { ...c },
+    payload,
+    message,
+    onAccepted: options.onAccepted,
+  };
   const key = convKey(c);
   set((s) => ({
     intents: { ...s.intents, [clientId]: intent },
@@ -331,7 +343,10 @@ export async function dispatchIntent(
   set: Set,
   get: Get,
   intent: SendIntent,
-  { waitForHydration = true }: { waitForHydration?: boolean } = {},
+  {
+    waitForHydration = true,
+    retainFailure = true,
+  }: { waitForHydration?: boolean; retainFailure?: boolean } = {},
 ): Promise<boolean> {
   const lease = captureChatOwner(get);
   const guarded: Set = (partial) => {
@@ -364,6 +379,7 @@ export async function dispatchIntent(
             payload.text,
             payload.replyTo,
             payload.expiresAtMs,
+            payload.protection,
           ),
           pending: false,
         };
@@ -387,6 +403,7 @@ export async function dispatchIntent(
           payload.media,
           clientId,
           payload.expiresAtMs,
+          payload.protection,
         );
         accepted = {
           ...message,
@@ -411,6 +428,7 @@ export async function dispatchIntent(
             payload.text,
             payload.replyTo,
             payload.expiresAtMs,
+            payload.protection,
           ),
           pending: false,
         };
@@ -434,6 +452,7 @@ export async function dispatchIntent(
           payload.media,
           clientId,
           payload.expiresAtMs,
+          payload.protection,
         );
         accepted = {
           ...message,
@@ -450,6 +469,7 @@ export async function dispatchIntent(
     }
     if (!lease.current()) return false;
     if (accepted?.id) {
+      intent.onAccepted?.();
       // The durable ID settles admission. Optional UI hydration must not hold the draft.
       const hydration =
         get().active && convKey(get().active!) === key
@@ -469,6 +489,11 @@ export async function dispatchIntent(
     // Durable acceptance survives hydration failure, even if history already removed the intent.
     if (admitted) return true;
     if (payload.kind === "file") useTransfers.getState().clear(clientId);
+    // A durable protected-text composer retains its rejected draft and sole retry ownership.
+    if (!retainFailure) {
+      update(null);
+      return false;
+    }
     update({
       ...message,
       pending: false,

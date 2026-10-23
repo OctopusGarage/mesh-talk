@@ -37,7 +37,8 @@ separate encrypted copy; old sender-chain keys are never distributed. The copy
 keeps original message IDs, attribution and timestamps, and arrives silently as
 history. The owner attests to copied content; it is not a new message signed by
 the original sending device. Attachment/file contents are not included in this
-initial history mechanism, and reply previews do not unlock messages outside the
+initial history mechanism. Protected text and images are excluded before applying
+message-count and transfer limits. Reply previews do not unlock messages outside the
 selected copy.
 
 Copies are bounded to 100 text messages and 24 KiB of encrypted row data; the

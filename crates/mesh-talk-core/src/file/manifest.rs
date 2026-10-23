@@ -211,6 +211,10 @@ pub enum AnyManifest {
     V2(FileManifestV2),
     V3(FileManifestV3),
     V4(FileManifestV4),
+    Protected {
+        protection: crate::protection::MessageProtection,
+        inner: Box<AnyManifest>,
+    },
 }
 
 /// Decode a manifest of either version, sniffing the `MFM2` magic. Fails gracefully
@@ -218,6 +222,29 @@ pub enum AnyManifest {
 /// don't parse simply don't interoperate.
 pub fn decode_manifest(bytes: &[u8]) -> Option<AnyManifest> {
     let (_, bytes) = crate::expiry::split(bytes)?;
+    if let Some(rest) = bytes.strip_prefix(b"MFP1") {
+        let (protection, body): (crate::protection::MessageProtection, Vec<u8>) =
+            bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_limit(bytes.len() as u64)
+                .reject_trailing_bytes()
+                .deserialize(rest)
+                .ok()?;
+        if body.starts_with(b"MFP") || body.starts_with(b"MTEX") {
+            return None;
+        }
+        let inner = decode_manifest(&body)?;
+        if inner.kind() != Some(FileKind::Media) || !inner.mime().starts_with("image/") {
+            return None;
+        }
+        return Some(AnyManifest::Protected {
+            protection,
+            inner: Box::new(inner),
+        });
+    }
+    if bytes.starts_with(b"MFP") {
+        return None;
+    }
     if let Some(v4) = FileManifestV4::decode(bytes) {
         return Some(AnyManifest::V4(v4));
     }
@@ -230,9 +257,39 @@ pub fn decode_manifest(bytes: &[u8]) -> Option<AnyManifest> {
     FileManifest::decode(bytes).map(AnyManifest::V1)
 }
 
+/// Versioned protected image envelope; ordinary manifests keep their deployed bytes.
+pub(crate) fn protect_image_manifest(
+    bytes: Vec<u8>,
+    protection: crate::protection::MessageProtection,
+) -> Vec<u8> {
+    let mut out = b"MFP1".to_vec();
+    out.extend(
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .serialize(&(protection, bytes))
+            .expect("protected manifest serializes"),
+    );
+    out
+}
+
 impl AnyManifest {
+    pub fn protection(&self) -> Option<crate::protection::MessageProtection> {
+        match self {
+            Self::Protected { protection, .. } => Some(*protection),
+            _ => None,
+        }
+    }
+
+    pub fn unprotected(&self) -> &Self {
+        match self {
+            Self::Protected { inner, .. } => inner,
+            _ => self,
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
+            AnyManifest::Protected { inner, .. } => inner.name(),
             AnyManifest::V1(m) => &m.name,
             AnyManifest::V2(m) => &m.name,
             AnyManifest::V3(m) => &m.v2.name,
@@ -241,6 +298,7 @@ impl AnyManifest {
     }
     pub fn size(&self) -> u64 {
         match self {
+            AnyManifest::Protected { inner, .. } => inner.size(),
             AnyManifest::V1(m) => m.size,
             AnyManifest::V2(m) => m.size,
             AnyManifest::V3(m) => m.v2.size,
@@ -249,6 +307,7 @@ impl AnyManifest {
     }
     pub fn mime(&self) -> &str {
         match self {
+            AnyManifest::Protected { inner, .. } => inner.mime(),
             AnyManifest::V1(m) => &m.mime,
             AnyManifest::V2(m) => &m.mime,
             AnyManifest::V3(m) => &m.v2.mime,
@@ -257,6 +316,7 @@ impl AnyManifest {
     }
     pub fn file_conv(&self) -> ConversationId {
         match self {
+            AnyManifest::Protected { inner, .. } => inner.file_conv(),
             AnyManifest::V1(m) => m.file_conv,
             AnyManifest::V2(m) => m.file_conv,
             AnyManifest::V3(m) => m.v2.file_conv,
@@ -265,6 +325,7 @@ impl AnyManifest {
     }
     pub fn chunk_count(&self) -> u32 {
         match self {
+            AnyManifest::Protected { inner, .. } => inner.chunk_count(),
             AnyManifest::V1(m) => m.chunk_count,
             AnyManifest::V2(m) => m.chunk_count,
             AnyManifest::V3(m) => m.v2.chunk_count,
@@ -273,6 +334,7 @@ impl AnyManifest {
     }
     pub fn checksum(&self) -> [u8; 32] {
         match self {
+            AnyManifest::Protected { inner, .. } => inner.checksum(),
             AnyManifest::V1(m) => m.checksum,
             AnyManifest::V2(m) => m.checksum,
             AnyManifest::V3(m) => m.v2.checksum,
@@ -283,6 +345,7 @@ impl AnyManifest {
     /// manifests — callers fall back to a filename heuristic for those.
     pub fn kind(&self) -> Option<FileKind> {
         match self {
+            AnyManifest::Protected { inner, .. } => inner.kind(),
             AnyManifest::V1(_) | AnyManifest::V2(_) => None,
             AnyManifest::V3(m) => Some(m.kind),
             AnyManifest::V4(m) => Some(m.v3.kind),
@@ -299,6 +362,7 @@ pub fn open_chunk_for(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, FileError> {
     match manifest {
+        AnyManifest::Protected { inner, .. } => open_chunk_for(inner, index, ciphertext),
         AnyManifest::V1(m) => open_chunk(&m.key(), ciphertext),
         AnyManifest::V2(m) => open_chunk_v2(m, index, ciphertext),
         AnyManifest::V3(m) => open_chunk_v2(&m.v2, index, ciphertext),

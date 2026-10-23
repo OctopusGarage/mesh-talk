@@ -702,3 +702,333 @@ fn encrypted_recovery_preserves_favorites_after_source_history_is_cleared() {
         assert_eq!(Sha256::digest(&bytes), Sha256::digest(expected));
     }
 }
+
+#[tokio::test]
+async fn protected_text_and_images_cannot_be_saved_in_mixed_favorites() {
+    for mode in [
+        super::super::MessageProtection::Click,
+        super::super::MessageProtection::Authenticate,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let node = open(dir.path(), &Account::generate());
+        let mut selected = source(&node);
+        let conv = super::super::conversation::account_conversation_id(
+            &node.account_id(),
+            &selected.target,
+        );
+        let id = [3; 32];
+        let envelope = super::super::DmEnvelope::new(
+            node.account_id(),
+            selected.target.clone(),
+            id,
+            super::super::MessageBody::protected(b"private text".to_vec(), None, mode).encode(),
+        );
+        node.sentlog
+            .lock()
+            .unwrap()
+            .record(conv, 3, 3, &envelope.encode())
+            .unwrap();
+        let mut single_text = selected.clone();
+        single_text.message_ids = vec![hex::encode(id)];
+        assert!(
+            node.save_message_favorite_guarded(single_text, Default::default(), |c| c())
+                .is_err()
+        );
+        assert!(node.favorites.lock().unwrap().current.is_empty());
+        selected.message_ids.push(hex::encode(id));
+        assert!(
+            node.save_message_favorite_guarded(selected, Default::default(), |c| c())
+                .is_err()
+        );
+        assert!(
+            node.list_message_favorites("", 0, 10)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        let channel = node.create_channel("private", vec![]).await.unwrap();
+        let ordinary = node
+            .enqueue_channel_message_reply_expiring_if(channel, b"ordinary", None, None, |c| c())
+            .unwrap();
+        let path = dir.path().join("private.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nprivate pixels").unwrap();
+        let (image, file) = node
+            .enqueue_protected_file_channel_progress_expiring_if(
+                channel,
+                &path,
+                crate::file::FileKind::Media,
+                |_| {},
+                None,
+                mode,
+                |c| c(),
+            )
+            .await
+            .unwrap();
+        let selection = FavoriteSource {
+            kind: "channel".into(),
+            target: hex::encode(channel.as_bytes()),
+            message_ids: vec![ordinary.to_hex(), image.to_hex()],
+        };
+        let mut single_image = selection.clone();
+        single_image.message_ids = vec![image.to_hex()];
+        assert!(
+            node.save_message_favorite_guarded(single_image, Default::default(), |c| c())
+                .is_err()
+        );
+        assert!(node.favorites.lock().unwrap().current.is_empty());
+        assert!(!node.favorite_media.contains(file));
+        assert!(
+            node.save_message_favorite_guarded(selection.clone(), Default::default(), |c| c())
+                .is_err()
+        );
+        assert!(
+            node.list_message_favorites("", 0, 10)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(!node.favorite_media.contains(file));
+        assert!(node.favorites.lock().unwrap().current.is_empty());
+        let mut single_ordinary = selection;
+        single_ordinary.message_ids = vec![ordinary.to_hex()];
+        let favorite = node
+            .save_message_favorite_guarded(single_ordinary, Default::default(), |c| c())
+            .unwrap();
+        assert_eq!(favorite.messages.len(), 1);
+        assert_eq!(favorite.messages[0].id, ordinary.to_hex());
+        assert_eq!(favorite.messages[0].text, "ordinary");
+        assert!(favorite.messages[0].file.is_none());
+        assert_eq!(node.favorites.lock().unwrap().current.len(), 1);
+        assert!(!node.favorite_media.contains(file));
+    }
+}
+
+#[tokio::test]
+async fn existing_favorite_cannot_expose_a_canonical_protected_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(dir.path(), &account);
+    let ordinary = source(&node);
+    let mut record = node
+        .save_message_favorite_guarded(ordinary, Default::default(), |c| c())
+        .unwrap();
+    let channel = node.create_channel("private", vec![]).await.unwrap();
+    let path = dir.path().join("private.png");
+    let bytes = b"\x89PNG\r\n\x1a\nprivate pixels";
+    std::fs::write(&path, bytes).unwrap();
+    let (id, file) = node
+        .enqueue_protected_file_channel_progress_expiring_if(
+            channel,
+            &path,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            super::super::MessageProtection::Click,
+            |c| c(),
+        )
+        .await
+        .unwrap();
+    record.source = FavoriteSource {
+        kind: "channel".into(),
+        target: hex::encode(channel.as_bytes()),
+        message_ids: vec![id.to_hex()],
+    };
+    record.messages.truncate(1);
+    record.messages[0].id = id.to_hex();
+    record.messages[0].text = "private imported content".into();
+    record.messages[0].file = Some(FavoriteFile {
+        file_conv: hex::encode(file.as_bytes()),
+        name: "private.png".into(),
+        size: bytes.len() as u64,
+        mime: "image/png".into(),
+        media: true,
+    });
+    record.revision += 1;
+    node.favorites
+        .lock()
+        .unwrap()
+        .merge(FavoriteRecord {
+            generation: 1,
+            favorite: record.clone(),
+            removed: false,
+        })
+        .unwrap();
+    // Model a retained copy written before the current protection-aware client.
+    node.favorite_media
+        .store_bytes(file, "private.png", bytes)
+        .unwrap();
+    assert!(
+        node.list_message_favorites("", 0, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        node.inspect_message_favorites(&record.source)
+            .unwrap()
+            .existing
+            .is_none()
+    );
+    assert!(!node.favorite_file_available(file));
+    assert!(node.read_favorite_file(file).is_none());
+    assert!(
+        node.save_favorite_file(file, &dir.path().join("export.png"))
+            .is_err()
+    );
+    assert!(!dir.path().join("export.png").exists());
+    assert!(
+        node.edit_message_favorite_guarded(
+            &record.id,
+            record.revision,
+            &record.device_id,
+            Default::default(),
+            |c| c()
+        )
+        .is_err()
+    );
+    drop(node);
+    let reopened = open(dir.path(), &account);
+    assert!(
+        reopened
+            .list_message_favorites("", 0, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(reopened.read_favorite_file(file).is_none());
+}
+
+#[tokio::test]
+async fn encrypted_recovery_excludes_canonical_protected_favorites() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(dir.path(), &account);
+    let ordinary = source(&node);
+    let ordinary_target = ordinary.target.clone();
+    let mut record = node
+        .save_message_favorite_guarded(ordinary, Default::default(), |c| c())
+        .unwrap();
+    let ordinary_file = ConversationId::new([74; 32]);
+    let ordinary_bytes = b"ordinary independently retained bytes";
+    record.messages[0].file = Some(FavoriteFile {
+        file_conv: hex::encode(ordinary_file.as_bytes()),
+        name: "ordinary.txt".into(),
+        size: ordinary_bytes.len() as u64,
+        mime: "text/plain".into(),
+        media: false,
+    });
+    record.revision += 1;
+    node.favorite_media
+        .store_bytes(ordinary_file, "ordinary.txt", ordinary_bytes)
+        .unwrap();
+    node.favorites
+        .lock()
+        .unwrap()
+        .merge(FavoriteRecord {
+            generation: 1,
+            favorite: record.clone(),
+            removed: false,
+        })
+        .unwrap();
+    let channel = node.create_channel("private", vec![]).await.unwrap();
+    let path = dir.path().join("private.png");
+    let bytes = b"\x89PNG\r\n\x1a\nprivate pixels";
+    std::fs::write(&path, bytes).unwrap();
+    let (id, file) = node
+        .enqueue_protected_file_channel_progress_expiring_if(
+            channel,
+            &path,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            super::super::MessageProtection::Click,
+            |c| c(),
+        )
+        .await
+        .unwrap();
+    record.source = FavoriteSource {
+        kind: "channel".into(),
+        target: hex::encode(channel.as_bytes()),
+        message_ids: vec![id.to_hex()],
+    };
+    record.messages.truncate(1);
+    record.messages[0].id = id.to_hex();
+    record.messages[0].text = "private imported content".into();
+    record.messages[0].file = Some(FavoriteFile {
+        file_conv: hex::encode(file.as_bytes()),
+        name: "private.png".into(),
+        size: bytes.len() as u64,
+        mime: "image/png".into(),
+        media: true,
+    });
+    record.id = super::recovery::canonical_id(&node.account_id(), &record.source).unwrap();
+    record.metadata.title = "protected metadata sentinel".into();
+    record.revision += 1;
+    node.favorites
+        .lock()
+        .unwrap()
+        .merge(FavoriteRecord {
+            generation: 1,
+            favorite: record.clone(),
+            removed: false,
+        })
+        .unwrap();
+    // Model a retained copy written before the current protection-aware client.
+    node.favorite_media
+        .store_bytes(file, "private.png", bytes)
+        .unwrap();
+    node.clear_account_conversation(&ordinary_target).unwrap();
+    let key = crate::recovery::key::RecoveryKey::generate();
+    let mut current = node;
+    for generation in 0..2 {
+        let mut snapshot = Vec::new();
+        current
+            .write_recovery_snapshot(&mut snapshot, now_millis())
+            .unwrap();
+        let mut exported = Vec::new();
+        crate::recovery::snapshot::read_snapshot(std::io::Cursor::new(snapshot), |row| {
+            if let crate::recovery::snapshot::SnapshotRecordV1::Favorite { payload } = row {
+                exported.push(bincode::deserialize::<FavoriteRecord>(&payload).unwrap());
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            exported.len(),
+            1,
+            "protected Favorite must not enter snapshot"
+        );
+        assert_ne!(exported[0].favorite.id, record.id);
+        let mut archive = Vec::new();
+        current
+            .write_encrypted_recovery_archive(&mut archive, &key, now_millis())
+            .unwrap();
+        let destination = dir.path().join(format!("restore-{generation}"));
+        let (restored, preview) = Node::install_encrypted_recovery_archive(
+            std::io::Cursor::new(archive),
+            &key,
+            dir.path(),
+            &destination,
+            "fresh-password",
+        )
+        .unwrap();
+        assert_eq!(preview.favorites, 1);
+        assert_eq!(preview.favorite_files, 1);
+        assert_eq!(
+            restored.read_favorite_file(ordinary_file).unwrap(),
+            ordinary_bytes
+        );
+        assert!(!restored.favorite_media.contains(file));
+        restored.clear_conversation(channel).unwrap();
+        assert_eq!(
+            restored
+                .list_message_favorites("", 0, 10)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        drop(restored);
+        current = Node::open_recovery_profile(&destination, "fresh-password").unwrap();
+    }
+}

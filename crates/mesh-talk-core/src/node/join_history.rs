@@ -378,6 +378,7 @@ fn select_history(
         .rev()
         .filter(|row| {
             row.file.is_none()
+                && row.protection.is_none()
                 && !row.recalled
                 && row
                     .expires_at_ms
@@ -462,6 +463,7 @@ impl Node {
                     text: row.text,
                     reply_to: row.reply_to,
                     sticker: row.sticker,
+                    protection: None,
                 }
                 .encode();
                 let body = crate::expiry::wrap(&body, row.expires_at_ms);
@@ -854,6 +856,7 @@ pub(super) fn received(
                 channel_name: current.name().to_string(),
                 from: original.author.user_id(),
                 text: body.text,
+                protection: body.protection,
                 reply_to: body.reply_to,
                 event_id: row.id,
                 wall_clock: original.wall_clock,

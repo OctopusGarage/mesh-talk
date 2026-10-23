@@ -184,7 +184,7 @@ test("source rubric cases include the owners of delegated guarantees", () => {
   contracts.push(
     ["base", "MT-AI-007", ["scripts/install-post-office-macos.sh", "scripts/e2e-post-office-lan.py", "scripts/e2e-four-machine-tailnet.py", "scripts/e2e-federation-recovery.py", "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs", "crates/mesh-talk-core/src/node/files.rs", "crates/mesh-talk-core/examples/network-acceptance.rs"]],
     ["base", "MT-AI-008", ["scripts/install-post-office-windows.ps1", "crates/mesh-talk-core/src/bin/mesh-talk-node.rs", "scripts/e2e-post-office-lan.py", "scripts/e2e-four-machine-tailnet.py", "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs"]],
-    ["base", "MT-AI-010", ["docs/network-design-reference.md", "docs/post-office-federation.md", "scripts/e2e-four-machine-tailnet.py", "scripts/e2e-federation-recovery.py"]],
+    ["base", "MT-AI-010", ["docs/network-design-reference.md", "docs/post-office-federation.md", "scripts/e2e-four-machine-tailnet.py", "scripts/e2e-federation-recovery.py", "crates/mesh-talk-core/src/node/postbox.rs", "crates/mesh-talk-core/src/node/bridge_directory.rs", "crates/mesh-talk-core/src/postoffice/mod.rs", "crates/mesh-talk-core/src/postoffice/network.rs", "crates/mesh-talk-core/src/discovery/roster.rs", "crates/mesh-talk-core/src/discovery/announce.rs"]],
     ["group-reception", "MT-GROUP-UX-004", ["frontend/src/store/chat.ts", "frontend/src/store/reception.ts", "frontend/src/store/conversationHistory.ts", "frontend/src/store/conversationState.ts"]],
     ["group-reception", "MT-GROUP-UX-005", ["frontend/src/locales/en.json", "frontend/src/features/chat/ReceiveProgress.tsx", "frontend/src/features/chat/TransferBar.tsx", "frontend/src/store/conversationHistory.ts", "frontend/src/store/ownership.ts", "src-tauri/src/chat_commands/files.rs", "crates/mesh-talk-core/src/node/files.rs"]],
     ["group-reception", "MT-GROUP-UX-006", ["crates/mesh-talk-core/src/storage/record_log.rs", "crates/mesh-talk-core/src/node/expiry_policy.rs", "crates/mesh-talk-core/src/expiry.rs"]],
@@ -224,4 +224,12 @@ test("source rubric cases include the owners of delegated guarantees", () => {
     const entry = suite.cases.find(entry => entry.id === id);
     for (const owner of owners) assert.ok(entry?.context_files?.includes(owner), `${id} cannot verify delegated guarantees without ${owner}`);
   }
+});
+
+test("federation source context stays within the model input budget", () => {
+  const suite = JSON.parse(readFileSync(new URL("../docs/evals/ai-eval-suite.json", import.meta.url), "utf8"));
+  const entry = suite.cases.find(entry => entry.id === "MT-AI-010");
+  const sources = [entry.subject_file, ...entry.context_files];
+  const bytes = sources.reduce((total, path) => total + readFileSync(new URL(path, ROOT)).byteLength, 0);
+  assert.ok(bytes < 1024 * 1024, `MT-AI-010 supplied sources exceed 1 MiB: ${bytes} bytes`);
 });

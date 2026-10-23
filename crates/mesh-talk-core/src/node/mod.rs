@@ -114,10 +114,10 @@ pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;
 pub use filebook::{FileBook, ReceivedFile};
 pub use files::{FileProgress, OutgoingFileProgress};
-pub use message::MessageBody;
+pub use message::{MessageBody, MessageProtection};
 pub use node::{
-    ChannelSummary, HistoryEntry, LinkedAccount, Node, NodeError, ReceivedDm, ReceivedProfile,
-    SearchHit,
+    ChannelSummary, FileHistoryInfo, HistoryEntry, LinkedAccount, Node, NodeError, ReceivedDm,
+    ReceivedProfile, SearchHit,
 };
 pub use pairing::{BackfillRecord, PairingCode, PairingRequest, PairingResponse};
 pub use participant_runtime::{

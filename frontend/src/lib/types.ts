@@ -1,3 +1,5 @@
+export type MessageProtection = "click" | "authenticate";
+
 // TypeScript mirrors of the Rust IPC structs (serde serializes field names as-is,
 // so these are snake_case). Keep in sync with src-tauri/src/chat_commands.rs + events.rs.
 
@@ -48,6 +50,7 @@ export interface HistoryFileInfo {
 }
 
 export interface HistoryItem {
+  protection?: MessageProtection | null;
   expires_at_ms?: number | null;
   id: string | null; // null when there is no stable event id yet
   from_me: boolean;
@@ -333,6 +336,7 @@ export interface FavoriteInfo {
 // --- Tauri events (src-tauri/src/events.rs) ---
 
 export interface DmReceivedEvent {
+  protection?: MessageProtection | null;
   /** Logical account message ID, matching history; legacy hosts may omit it. */
   message_id?: string | null;
   /** Account binding verified by the core, independent of roster arrival order. */
@@ -358,6 +362,7 @@ export interface ReceptionMetadata {
 }
 
 export interface ChannelMessageEvent extends ReceptionMetadata {
+  protection?: MessageProtection | null;
   channel_id: string;
   channel_name: string;
   from: string;
@@ -373,6 +378,7 @@ export interface IntegrationMessageAcceptedEvent {
 }
 
 export interface FileReceivedEvent extends ReceptionMetadata {
+  protection?: MessageProtection | null;
   expires_at_ms?: number | null;
   conv: string;
   is_channel: boolean; // emitted by the same installed native app, not over the network

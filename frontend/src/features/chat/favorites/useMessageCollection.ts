@@ -82,6 +82,7 @@ export function useMessageCollection(
     if (
       !conversation ||
       !messages.length ||
+      messages.some((message) => !canCollect(message)) ||
       current.inspecting ||
       !lease.owner ||
       !lease.current()

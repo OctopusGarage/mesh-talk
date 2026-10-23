@@ -18,11 +18,15 @@
         "src/features/chat/ComposerAdmission.test.ts"
       ],
       "capability": {
-        "summary": "Preserve encrypted local conversation text drafts with idle batching and inactive sidebar previews.",
+        "summary": "Preserve encrypted local conversation text and protection choices with idle batching, revision-bound admission and concealed inactive previews.",
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
         "invariants": [
           {
             "name": "Ten-second idle saves serialize snapshots without periodic writes during typing; retired sessions cannot release or overwrite draft text",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Protected text and policy restore atomically; accepted sends clear only their originating revision and rejected sends preserve their sole draft retry owner",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
@@ -526,11 +530,11 @@
         "src/store/drafts.test.ts"
       ],
       "capability": {
-        "summary": "Move submitted text from the composer into one owner-scoped outgoing intent immediately, retaining draft text only when local admission refuses.",
+        "summary": "Give each text submission one retry owner: ordinary text transfers immediately to its outgoing intent; protected text retains its captured composer draft until durable acceptance and removes a rejected temporary intent.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
         "invariants": [
           {
-            "name": "Submitted content is owned by its outgoing bubble, independently of backend acceptance and recipient confirmation",
+            "name": "Each submission has one retry owner; acceptance and recipient confirmation remain separate",
             "reference": "CONTEXT.md#acceptance-and-delivery"
           },
           {
@@ -909,6 +913,69 @@
       },
       "escalation": [
         "Check mention-prefix visibility and preview truncation in light/dark sidebar layouts; browser acceptance includes e2e/unread-badge.spec.ts and e2e/ui-visual-regression.spec.ts."
+      ]
+    },
+    {
+      "id": "frontend-protected-messages",
+      "paths": [
+        "frontend/src/features/chat/ProtectedMessage.tsx",
+        "frontend/src/features/chat/protectedReveal.ts",
+        "frontend/src/features/chat/protectedReveal.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ComposerAdmission.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/protectedMessages.test.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/api.test.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/e2e/protected-messages.spec.ts",
+        "frontend/e2e/tauri-mock.ts",
+        "frontend/src/store/drafts.ts",
+        "frontend/src/store/drafts.test.ts",
+        "frontend/src/features/chat/protectedImage.ts",
+        "frontend/src/features/chat/protectedImage.test.ts",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/src/lib/automaticDownloads.ts",
+        "frontend/src/lib/automaticDownloads.test.ts",
+        "frontend/src/lib/mediaTypes.ts",
+        "frontend/src/features/chat/mediaFile.tsx"
+      ],
+      "frontend": [
+        "src/features/chat/protectedReveal.test.ts",
+        "src/store/protectedMessages.test.ts",
+        "src/features/chat/ComposerAdmission.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/outgoingIntent.test.ts",
+        "src/lib/api.test.ts",
+        "src/store/drafts.test.ts",
+        "src/features/chat/protectedImage.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts",
+        "src/lib/automaticDownloads.test.ts"
+      ],
+      "consumers": [
+        "frontend-chat",
+        "frontend-history"
+      ],
+      "capability": {
+        "summary": "Protected text and raster images use owner-scoped reveal, local temporary plaintext and revocable image URLs, fresh verification and concealed shared projections.",
+        "guide": "docs/privacy-controls.md#protected-messages",
+        "invariants": [
+          {
+            "name": "Protected content never enters ordinary history, sidebar, reply quotes, accepted intents or accessible summaries; each reveal expires after thirty visible seconds and closes on lifetime or foreground changes",
+            "reference": "docs/privacy-controls.md#protected-messages"
+          }
+        ]
+      },
+      "escalation": [
+        "Run frontend/e2e/protected-messages.spec.ts and e2e/ui-visual-regression.spec.ts for affected conversation layouts. Verify real macOS system authentication and Windows/Linux password verification, including prompt focus restoration, app lock and conversation switching. Mocked browser evidence does not establish native authentication behavior."
       ]
     }
   ],
@@ -1337,6 +1404,47 @@
       ],
       "browser": [
         "e2e/channel-history.spec.ts"
+      ]
+    },
+    {
+      "id": "protected-message-acceptance",
+      "paths": [
+        "frontend/src/features/chat/ProtectedMessage.tsx",
+        "frontend/src/features/chat/protectedReveal.ts",
+        "frontend/src/features/chat/protectedReveal.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ComposerAdmission.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/protectedMessages.test.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/api.test.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/e2e/protected-messages.spec.ts",
+        "frontend/e2e/tauri-mock.ts",
+        "frontend/src/store/drafts.ts",
+        "frontend/src/store/drafts.test.ts",
+        "frontend/src/features/chat/protectedImage.ts",
+        "frontend/src/features/chat/protectedImage.test.ts",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/src/lib/automaticDownloads.ts",
+        "frontend/src/lib/automaticDownloads.test.ts",
+        "frontend/src/lib/mediaTypes.ts",
+        "frontend/src/features/chat/mediaFile.tsx"
+      ],
+      "browser": [
+        "e2e/protected-messages.spec.ts",
+        "e2e/ui-visual-regression.spec.ts"
+      ],
+      "native": [
+        "host"
       ]
     }
   ]

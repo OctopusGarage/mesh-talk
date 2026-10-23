@@ -886,6 +886,18 @@ impl DeliveryStore {
                 }
                 if events.last().is_some_and(|e| e.kind == EventKind::Message) {
                     sent.record_durable(entry)?;
+                } else if let Some(event) = events.last()
+                    && event.kind == EventKind::FileManifest
+                {
+                    files
+                        .ok_or_else(|| invalid("file recovery adapter required"))?
+                        .record_durable(&ReceivedEntry {
+                            event_id: event.id,
+                            conversation: entry.conversation,
+                            from: event.author.user_id(),
+                            wall_clock: entry.wall_clock,
+                            plaintext: entry.plaintext.clone(),
+                        })?;
                 }
             }
             DeliveryTransaction::Outgoing {
@@ -2553,6 +2565,8 @@ impl DeliveryStore {
                         ) && !super::join_history::valid_invitation_transaction(events)
                             || e.conversation_id != sent.conversation
                             || e.seq != sent.seq
+                            || (e.kind == EventKind::FileManifest
+                                && super::files::validated_manifest(&sent.plaintext).is_none())
                     })
                     || events.iter().any(|e| {
                         !e.verify_signature()

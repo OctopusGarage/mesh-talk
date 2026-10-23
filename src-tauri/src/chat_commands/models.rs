@@ -45,6 +45,7 @@ pub struct HistoryFileInfo {
 /// One merged history line (sent or received) for display.
 #[derive(Serialize)]
 pub struct HistoryItem {
+    pub protection: Option<mesh_talk_core::node::MessageProtection>,
     pub expires_at_ms: Option<u64>,
     pub id: Option<String>, // hex EventId; null when there is no stable id (see From impl)
     pub from_me: bool,
@@ -69,24 +70,36 @@ impl From<mesh_talk_core::node::HistoryEntry> for HistoryItem {
             Some(hex::encode(h.id.as_bytes()))
         };
         HistoryItem {
+            protection: h.protection,
             expires_at_ms: h.expires_at_ms,
             id,
             from_me: h.from_me,
             who: h.who,
-            text: String::from_utf8_lossy(&h.text).into_owned(),
+            text: if h.protection.is_some() {
+                String::new()
+            } else {
+                String::from_utf8_lossy(&h.text).into_owned()
+            },
             wall_clock: h.wall_clock,
             reply_to: h.reply_to.map(|id| hex::encode(id.as_bytes())),
             file: h.file.map(|f| HistoryFileInfo {
                 file_conv: hex::encode(f.file_conv.as_bytes()),
-                name: f.name,
+                name: if h.protection.is_some() {
+                    "Protected image".into()
+                } else {
+                    f.name
+                },
                 size: f.size,
                 mime: f.mime,
                 media: f.media,
             }),
             recalled: h.recalled,
-            recalled_text: h
-                .recalled_text
-                .map(|t| String::from_utf8_lossy(&t).into_owned()),
+            recalled_text: if h.protection.is_some() {
+                None
+            } else {
+                h.recalled_text
+                    .map(|t| String::from_utf8_lossy(&t).into_owned())
+            },
             sticker: h.sticker,
         }
     }
@@ -172,5 +185,41 @@ mod tests {
             .unwrap();
             assert_eq!(value["history_policy"], expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod protected_projection_tests {
+    use super::*;
+
+    #[test]
+    fn protected_history_redacts_live_and_recalled_text_defensively() {
+        let item = HistoryItem::from(mesh_talk_core::node::HistoryEntry {
+            expires_at_ms: None,
+            id: mesh_talk_core::eventlog::EventId::new([1; 32]),
+            from_me: true,
+            who: "me".into(),
+            text: b"protected secret".to_vec(),
+            protection: Some(mesh_talk_core::node::MessageProtection::Authenticate),
+            wall_clock: 1,
+            reply_to: None,
+            file: Some(mesh_talk_core::node::FileHistoryInfo {
+                file_conv: mesh_talk_core::eventlog::ConversationId::new([2; 32]),
+                name: "sensitive-private-image.png".into(),
+                size: 12,
+                mime: "image/png".into(),
+                media: true,
+            }),
+            recalled: true,
+            recalled_text: Some(b"protected secret".to_vec()),
+            sticker: None,
+        });
+        let json = serde_json::to_value(item).unwrap();
+        assert_eq!(json["text"], "");
+        assert!(json["recalled_text"].is_null());
+        assert_eq!(json["protection"], "authenticate");
+        assert!(!json.to_string().contains("protected secret"));
+        assert_eq!(json["file"]["name"], "Protected image");
+        assert!(!json.to_string().contains("sensitive-private-image.png"));
     }
 }

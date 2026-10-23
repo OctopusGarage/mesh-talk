@@ -196,7 +196,13 @@
         "crates/mesh-talk-core/src/postoffice/federation.rs",
         "crates/mesh-talk-core/src/postoffice/opaque.rs",
         "crates/mesh-talk-core/src/node/file_consent.rs",
-        "crates/mesh-talk-core/src/node/file_completion.rs"
+        "crates/mesh-talk-core/src/node/file_completion.rs",
+        "crates/mesh-talk-core/src/node/postbox.rs",
+        "crates/mesh-talk-core/src/node/bridge_directory.rs",
+        "crates/mesh-talk-core/src/postoffice/mod.rs",
+        "crates/mesh-talk-core/src/postoffice/network.rs",
+        "crates/mesh-talk-core/src/discovery/roster.rs",
+        "crates/mesh-talk-core/src/discovery/announce.rs"
       ]
     }
   ]

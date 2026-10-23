@@ -68,6 +68,7 @@ impl Node {
                 for (_, record) in store
                     .current
                     .range::<String, _>((after.as_ref().map_or(Unbounded, Excluded), Unbounded))
+                    .filter(|(_, record)| !node.favorite_has_protected_content(&record.favorite))
                     .take(PAGE + 1)
                 {
                     records.push(record.clone());
@@ -231,6 +232,10 @@ impl Node {
                                 "favorites sync policy changed".into(),
                             ));
                         }
+                        let records: Vec<_> = records
+                            .into_iter()
+                            .filter(|record| !node.favorite_has_protected_content(&record.favorite))
+                            .collect();
                         let mut store = node.favorites.lock().expect("favorites mutex");
                         let mut changed = false;
                         for record in records {
@@ -391,6 +396,7 @@ impl Node {
                                 .current
                                 .values()
                                 .filter(|r| !r.removed)
+                                .filter(|r| !node.favorite_has_protected_content(&r.favorite))
                                 .flat_map(|r| &r.favorite.messages)
                                 .filter(|m| {
                                     m.expires_at_ms.is_none_or(|end| end > node.expiry_now())
@@ -424,6 +430,106 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::super::selection_tests::{sibling_nodes, sibling_peer};
+    #[tokio::test]
+    async fn favorites_sync_excludes_known_protected_sources_on_send_and_receive() {
+        for protect_sender in [true, false] {
+            let (_dir, source, receiver) = sibling_nodes();
+            for node in [&source, &receiver] {
+                node.set_device_sync_category(super::SyncCategory::History, true)
+                    .unwrap();
+            }
+            let peer = "ab".repeat(16);
+            let conv = super::super::super::conversation::account_conversation_id(
+                &source.account_id(),
+                &peer,
+            );
+            let envelope = super::super::super::DmEnvelope::new(
+                source.account_id(),
+                peer.clone(),
+                [8; 32],
+                super::super::super::MessageBody::new(b"ordinary".to_vec(), None).encode(),
+            );
+            source
+                .sentlog
+                .lock()
+                .unwrap()
+                .record(conv, 1, 1, &envelope.encode())
+                .unwrap();
+            let mut favorite = source
+                .save_message_favorite_guarded(
+                    crate::node::FavoriteSource {
+                        kind: "account".into(),
+                        target: peer.clone(),
+                        message_ids: vec![hex::encode([8; 32])],
+                    },
+                    Default::default(),
+                    |c| c(),
+                )
+                .unwrap();
+            let protected_node = if protect_sender { &source } else { &receiver };
+            let envelope = super::super::super::DmEnvelope::new(
+                source.account_id(),
+                peer.clone(),
+                [9; 32],
+                super::super::super::MessageBody::protected(
+                    b"private".to_vec(),
+                    None,
+                    crate::node::MessageProtection::Authenticate,
+                )
+                .encode(),
+            );
+            protected_node
+                .sentlog
+                .lock()
+                .unwrap()
+                .record(conv, 2, 2, &envelope.encode())
+                .unwrap();
+            favorite.source.message_ids = vec![hex::encode([9; 32])];
+            favorite.messages[0].id = hex::encode([9; 32]);
+            favorite.messages[0].text = "private".into();
+            favorite.revision += 1;
+            source
+                .favorites
+                .lock()
+                .unwrap()
+                .merge(super::FavoriteRecord {
+                    generation: 1,
+                    favorite,
+                    removed: false,
+                })
+                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let peer = sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+            let server_node = source.clone();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let node = server_node.clone();
+                    tokio::spawn(async move {
+                        let channel = node.privacy_accept(stream).await.unwrap();
+                        node.serve_connection(channel).await;
+                    });
+                }
+            });
+            receiver
+                .pull_message_favorites_page(&peer, None)
+                .await
+                .unwrap();
+            assert!(
+                receiver.favorites.lock().unwrap().current.is_empty(),
+                "protected snapshot must not enter sibling store"
+            );
+            assert!(
+                receiver
+                    .list_message_favorites("private", 0, 10)
+                    .unwrap()
+                    .items
+                    .is_empty()
+            );
+            server.abort();
+            let _ = server.await;
+        }
+    }
     #[tokio::test]
     async fn favorite_sync_catches_up_edits_and_tombstones_without_source_history() {
         let (_dir, source, receiver) = sibling_nodes();

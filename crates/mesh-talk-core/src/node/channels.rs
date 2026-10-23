@@ -1205,6 +1205,27 @@ impl Node {
         )
     }
 
+    pub fn enqueue_protected_channel_message_reply_expiring_if(
+        &self,
+        channel: ConversationId,
+        text: &[u8],
+        reply_to: Option<EventId>,
+        expires_at_ms: Option<u64>,
+        protection: super::MessageProtection,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        self.enqueue_channel_body_if(
+            channel,
+            crate::expiry::wrap(
+                &MessageBody::protected(text.to_vec(), reply_to, protection).encode(),
+                expires_at_ms,
+            ),
+            None,
+            &mut authorize,
+        )
+    }
+
     /// Commit a channel sticker locally; custody progresses independently.
     pub fn enqueue_sticker_channel_expiring_if(
         &self,

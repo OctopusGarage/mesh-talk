@@ -97,6 +97,7 @@ export type {
 const INCOMING_FILES_CAP = 300;
 
 export interface IncomingFile {
+  protection?: import("@/lib/types").MessageProtection | null;
   expiresAtMs?: number | null;
   fromName: string;
   name: string;
@@ -283,11 +284,13 @@ export interface ChatState
     text: string,
     replyTo: string | null,
     expiresAtMs?: number | null,
+    protection?: import("@/lib/types").MessageProtection | null,
   ) => Promise<boolean>;
   admitText: (
     text: string,
     replyTo: string | null,
     expiresAtMs?: number | null,
+    protection?: import("@/lib/types").MessageProtection | null,
   ) => boolean;
   retry: (clientId: string) => Promise<void>;
   sendFile: (
@@ -295,6 +298,12 @@ export interface ChatState
     media: boolean,
     expiresAtMs?: number | null,
   ) => Promise<void>;
+  admitImage: (
+    path: string,
+    protection: import("@/lib/types").MessageProtection,
+    expiresAtMs?: number | null,
+    onAccepted?: () => void,
+  ) => Promise<"refused" | "failed" | "accepted">;
   saveFile: (fileConv: string, dest: string) => Promise<void>;
   toggleReaction: (target: string, emoji: string) => Promise<void>;
   /** Delete one message from this device only (local). */
@@ -997,7 +1006,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
   // The composer needs an immediate admission answer so it never clears a draft that
   // could not enter the local optimistic queue. Delivery still settles asynchronously.
-  admitText: (text, replyTo, expiresAtMs) => {
+  admitText: (text, replyTo, expiresAtMs, protection) => {
     const lease = captureChat(get);
     if (!lease.current()) return false;
     const c = get().active;
@@ -1011,6 +1020,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         text,
         replyTo,
         expiresAtMs,
+        protection,
       },
     );
     if (!dispatch) return false;
@@ -1019,7 +1029,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   },
 
   // Account composers retain the draft until the core has durably accepted it.
-  admitTextAndWait: async (text, replyTo, expiresAtMs) => {
+  admitTextAndWait: async (text, replyTo, expiresAtMs, protection) => {
     const lease = captureChat(get);
     if (!lease.current()) return false;
     const c = get().active;
@@ -1034,8 +1044,9 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           text,
           replyTo,
           expiresAtMs,
+          protection,
         },
-        { waitForHydration: false },
+        { waitForHydration: false, retainFailure: !protection },
       ) ?? false
     );
   },
@@ -1077,6 +1088,21 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     await dispatchIntent(set, get, { ...intent, message: pending });
   },
 
+  admitImage: async (path, protection, expiresAtMs, onAccepted) => {
+    const lease = captureChat(get);
+    const c = get().active;
+    if (!lease.current() || !get().ready || !c) return "refused";
+    const admission = beginSendIntent(
+      guardedSet(rawSet, lease.current),
+      get,
+      c,
+      { kind: "file", path, media: true, expiresAtMs, protection },
+      { waitForHydration: false, onAccepted },
+    );
+    if (!admission) return "refused";
+    // Local transfer gives the bubble sole retry ownership, including native failure.
+    return (await admission) ? "accepted" : "failed";
+  },
   sendFile: async (path, media, expiresAtMs) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
@@ -1421,6 +1447,7 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
           mime: e.mime,
           fileConv: e.file_conv,
           media: e.media,
+          protection: e.protection,
         },
         ...state.incomingFiles,
       ].slice(0, INCOMING_FILES_CAP),

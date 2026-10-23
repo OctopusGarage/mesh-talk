@@ -1206,5 +1206,23 @@
     "loading": "Cargando copias…",
     "selected": "Copia seleccionada",
     "source": "Origen de la copia"
+  },
+  "protectedMessage": {
+    "label": "Mensaje protegido",
+    "nextSend": "Próximo mensaje",
+    "normal": "Normal",
+    "open": "Haz clic para ver",
+    "modeVerify": "Verificar para ver",
+    "verify": "Verificar y ver",
+    "duration": "Se oculta automáticamente tras 30 segundos.",
+    "textOnly": "Texto e imágenes · se oculta tras 30 segundos",
+    "remaining": "Se oculta en {{count}} s",
+    "hide": "Ocultar",
+    "opening": "Abriendo…",
+    "failed": "No se pudo abrir el mensaje. Inténtalo de nuevo.",
+    "image": "Imagen protegida",
+    "unsupported": "Los mensajes protegidos solo admiten texto e imágenes. Elige Normal para enviar vídeos, archivos o stickers.",
+    "imageNotAccepted": "Imagen no aceptada. La protección sigue igual.",
+    "imageTooLarge": "Las imágenes protegidas deben ocupar como máximo 16 MiB."
   }
 }

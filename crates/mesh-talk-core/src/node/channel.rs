@@ -150,17 +150,18 @@ pub(in crate::node) const CHANNEL_PENDING_BYTES: usize = 8 * 1024 * 1024;
 /// event's id + wall-clock and the decoded plaintext body so the node can persist it
 /// to the received store (sender-key wire keys are single-use, so history is served
 /// from the store, not by re-opening the event).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReceivedChannelMessage {
     pub channel_id: ConversationId,
     pub channel_name: String,
     pub from: String,
     pub text: Vec<u8>,
+    pub protection: Option<super::MessageProtection>,
     pub reply_to: Option<EventId>,
     pub event_id: EventId,
     pub wall_clock: u64,
     /// The wrapped `MessageBody` plaintext (text + reply_to), for the received store.
-    pub wrapped: Vec<u8>,
+    pub(in crate::node) wrapped: Vec<u8>,
     /// Local first successful decryption observation; not persisted in signed events.
     pub received_at: u64,
     pub arrival_kind: &'static str,
@@ -172,6 +173,15 @@ pub struct ReceivedChannelMessage {
     pub reception_only: bool,
 }
 
+impl std::fmt::Debug for ReceivedChannelMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceivedChannelMessage")
+            .field("event_id", &self.event_id)
+            .field("protection", &self.protection)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ReceivedChannelMessage {
     pub(in crate::node) fn terminal(&self, batch_id: Option<String>, batch_size: usize) -> Self {
         Self {
@@ -179,6 +189,7 @@ impl ReceivedChannelMessage {
             channel_name: self.channel_name.clone(),
             from: self.from.clone(),
             text: Vec::new(),
+            protection: None,
             reply_to: None,
             event_id: self.event_id,
             wall_clock: self.wall_clock,
@@ -954,6 +965,7 @@ impl ChannelBook {
                             channel_name: state.name().to_string(),
                             from: event.author.user_id(),
                             text: body.text,
+                            protection: body.protection,
                             reply_to: body.reply_to,
                             event_id: event.id,
                             wall_clock: event.wall_clock,

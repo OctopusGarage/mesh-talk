@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import i18n from "@/lib/i18n";
 import { useChat } from "@/store/chat";
+import { useDrafts } from "@/store/drafts";
+import { useAuth } from "@/store/auth";
 import { emptyReception, viewIdentities } from "@/store/reception";
 import { ConversationRow } from "./ConversationRow";
 
@@ -32,14 +34,15 @@ beforeEach(async () => {
 afterEach(async () => {
   await act(async () => root.unmount());
   host.remove();
+  useDrafts.getState().reset();
 });
-async function render() {
+async function render(prioritizeSubtitle = true) {
   await act(async () =>
     root.render(
       createElement(ConversationRow, {
         conv: { kind: "channel", id: "team", name: "Team" },
         subtitle: "Latest ordinary message",
-        prioritizeSubtitle: true,
+        prioritizeSubtitle,
         channel: true,
         pinned: false,
         onTogglePin: () => {},
@@ -69,4 +72,28 @@ it("keeps the prefix in Chinese with no cached messages", async () => {
   await i18n.changeLanguage("zh-Hans");
   await render();
   expect(host.textContent).toContain("[有人@我]");
+});
+
+it("conceals protected draft text and title while preserving the mention indicator", async () => {
+  useAuth.setState({
+    user: { id: "owner", username: "alice", display_name: "Alice" },
+  });
+  useDrafts.setState({
+    owner: "owner",
+    generation: useAuth.getState().generation,
+    loaded: true,
+    texts: { [key]: "never show this secret" },
+    protections: { [key]: "authenticate" },
+  });
+  await render(false);
+  const row = host.querySelector('[data-testid="conversation-row-team"]')!;
+  expect(row.textContent).toContain("[Mentioned you]");
+  expect(row.textContent).toContain("[Draft]");
+  expect(row.textContent).toContain("Protected message");
+  expect(row.innerHTML).not.toContain("never show this secret");
+  await act(async () =>
+    useChat.setState((s) => viewIdentities(s, key, ["mention"])),
+  );
+  expect(row.textContent).not.toContain("[Mentioned you]");
+  expect(row.textContent).toContain("[Draft]");
 });

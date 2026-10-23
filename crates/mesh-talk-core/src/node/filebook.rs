@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 /// A received file announcement, surfaced to the application.
 #[derive(Debug, Clone)]
 pub struct ReceivedFile {
+    pub protection: Option<super::MessageProtection>,
     /// Absolute authenticated send-time deadline, if selected.
     pub expires_at_ms: Option<u64>,
     /// The DM/channel conversation the manifest arrived in.

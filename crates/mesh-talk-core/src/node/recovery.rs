@@ -670,6 +670,12 @@ impl Node {
     ) -> Result<(), SnapshotError> {
         let own_account = self.account_id();
         let candidate_contacts = self.known_account_ids();
+        let now = self.expiry_now();
+        let favorites = self.favorites.lock().expect("favorites mutex");
+        // Protection projection reads canonical history. Resolve it before taking
+        // the snapshot's history locks, then reuse it for records, files and count.
+        let portable_favorites = favorites.portable_projection(self);
+        let favorite_files = portable_favorites.portable_files(now)?;
         let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
         let received = self.received.lock().expect("received mutex not poisoned");
         let log = self.log.lock().expect("event log mutex not poisoned");
@@ -740,9 +746,6 @@ impl Node {
             .lock()
             .expect("recalls mutex not poisoned")
             .snapshot_marks();
-        let now = self.expiry_now();
-        let favorites = self.favorites.lock().expect("favorites mutex");
-        let favorite_files = favorites.portable_files(now)?;
         let profiles = self.account_profiles.snapshot();
         let trust_cards = self
             .trust_cards
@@ -758,7 +761,7 @@ impl Node {
                 .and_then(|count| count.checked_add(event_count))
                 .and_then(|count| count.checked_add(file_count))
                 .and_then(|count| count.checked_add(file_contacts.len()))
-                .and_then(|count| count.checked_add(favorites.current.len()))
+                .and_then(|count| count.checked_add(portable_favorites.len()))
                 .ok_or(SnapshotError::SizeLimit)?,
         )
         .map_err(|_| SnapshotError::SizeLimit)?;
@@ -923,7 +926,7 @@ impl Node {
         for card in trust_cards {
             writer.push(&SnapshotRecordV1::PeerTrustCard { card })?;
         }
-        for payload in favorites.portable_records(&own_account, now) {
+        for payload in portable_favorites.portable_records(&own_account, now) {
             writer.push(&SnapshotRecordV1::Favorite { payload: payload? })?;
         }
         for (favorite, file_conv, size, digest) in media {

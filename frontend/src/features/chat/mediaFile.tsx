@@ -14,7 +14,12 @@ import {
 } from "lucide-react";
 import { chat } from "@/lib/api";
 import { isDirectoryAttachment } from "@/lib/directoryAttachment";
-import { isImage, isVideo, mediaMimeFromName } from "@/lib/mediaTypes";
+import {
+  IMAGE_INLINE_CAP,
+  isImage,
+  isVideo,
+  mediaMimeFromName,
+} from "@/lib/mediaTypes";
 import { useAuth } from "@/store/auth";
 import { useChat, captureChatOwnership } from "@/store/chat";
 
@@ -40,7 +45,7 @@ export function blobMime(
 // Only fetch the whole file into memory for inline rendering when it's small enough.
 // `read_file` decrypts and returns the entire file (bounded only by the 4 GiB hard cap),
 // so we gate on the manifest-reported size before pulling bytes through IPC.
-const IMAGE_INLINE_CAP = 16 * 1024 * 1024; // 16 MB
+
 const VIDEO_INLINE_CAP = 50 * 1024 * 1024; // 50 MB
 
 /** Whether an image/video of `size` bytes is small enough to fetch + render inline. */

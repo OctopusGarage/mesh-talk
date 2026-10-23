@@ -3,11 +3,13 @@ use crate::{
     commands::CommandError,
     state::{AppState, SessionLease},
 };
-use mesh_talk_core::storage::record_log::EncryptedRecordLog;
+use mesh_talk_core::{node::MessageProtection, storage::record_log::EncryptedRecordLog};
 use serde::Serialize;
 use std::{collections::BTreeMap, path::Path};
 
 type Texts = BTreeMap<String, String>;
+type Protections = BTreeMap<String, MessageProtection>;
+const PROTECTION_PREFIX: &str = "protection:";
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 
 pub(crate) struct DraftStorage {
@@ -21,24 +23,94 @@ pub(crate) struct DraftStorage {
 pub struct DraftSnapshot {
     session: String,
     drafts: Texts,
+    protections: Protections,
 }
 
+fn valid_key(key: &str) -> bool {
+    (key.starts_with("account:") || key.starts_with("channel:"))
+        && key.len() <= 256
+        && !key.ends_with(':')
+}
+
+fn protection(value: &str) -> Result<MessageProtection, CommandError> {
+    match value {
+        "click" => Ok(MessageProtection::Click),
+        "authenticate" => Ok(MessageProtection::Authenticate),
+        _ => Err(CommandError::Validation("invalid draft protection".into())),
+    }
+}
+
+// Keep MTDR01's bincode map-of-strings layout. Reserved metadata entries let legacy
+// text-only snapshots decode unchanged, and text/policy share one atomic rewrite.
 fn validate(texts: &Texts) -> Result<(), CommandError> {
     let bytes: usize = texts.iter().map(|(key, text)| key.len() + text.len()).sum();
-    if texts.len() > 1000
-        || bytes > MAX_BYTES
-        || texts.iter().any(|(key, text)| {
-            !(key.starts_with("account:") || key.starts_with("channel:"))
-                || key.len() > 256
-                || key.ends_with(':')
-                || text.is_empty()
-        })
-    {
+    let mut conversations = std::collections::BTreeSet::new();
+    if bytes > MAX_BYTES {
         return Err(CommandError::Validation(
-            "draft storage limit or invalid conversation".into(),
+            "draft storage limit exceeded".into(),
+        ));
+    }
+    for (key, text) in texts {
+        let conversation = if let Some(key) = key.strip_prefix(PROTECTION_PREFIX) {
+            protection(text)?;
+            key
+        } else {
+            if text.is_empty() {
+                return Err(CommandError::Validation("empty draft text".into()));
+            }
+            key
+        };
+        if !valid_key(conversation) {
+            return Err(CommandError::Validation(
+                "invalid draft conversation".into(),
+            ));
+        }
+        conversations.insert(conversation);
+    }
+    if conversations.len() > 1000 {
+        return Err(CommandError::Validation(
+            "draft storage limit exceeded".into(),
         ));
     }
     Ok(())
+}
+
+fn decode(texts: &Texts) -> Result<(Texts, Protections), CommandError> {
+    validate(texts)?;
+    let mut drafts = Texts::new();
+    let mut protections = Protections::new();
+    for (key, value) in texts {
+        if let Some(key) = key.strip_prefix(PROTECTION_PREFIX) {
+            protections.insert(key.into(), protection(value)?);
+        } else {
+            drafts.insert(key.clone(), value.clone());
+        }
+    }
+    Ok((drafts, protections))
+}
+
+fn encode(mut drafts: Texts, protections: Protections) -> Result<Texts, CommandError> {
+    if drafts
+        .keys()
+        .chain(protections.keys())
+        .any(|key| !valid_key(key))
+    {
+        return Err(CommandError::Validation(
+            "invalid draft conversation".into(),
+        ));
+    }
+    for (key, mode) in protections {
+        drafts.insert(
+            format!("{PROTECTION_PREFIX}{key}"),
+            match mode {
+                MessageProtection::Click => "click",
+                MessageProtection::Authenticate => "authenticate",
+            }
+            .into(),
+        );
+    }
+    validate(&drafts)?;
+    Ok(drafts)
 }
 
 fn authorize(app: &AppState, lease: &SessionLease) -> Result<(), CommandError> {
@@ -90,9 +162,12 @@ fn load(app: &AppState, lease: &SessionLease, root: &Path) -> Result<DraftSnapsh
             if app.app_lock().is_locked() {
                 return Err(CommandError::Authorization("app locked".into()));
             }
+            let storage = cache.as_ref().unwrap();
+            let (drafts, protections) = decode(&storage.texts)?;
             Ok(DraftSnapshot {
-                session: cache.as_ref().unwrap().writer.clone(),
-                drafts: cache.as_ref().unwrap().texts.clone(),
+                session: storage.writer.clone(),
+                drafts,
+                protections,
             })
         })
         .map_err(CommandError::Authorization)?
@@ -160,7 +235,9 @@ pub async fn save_conversation_drafts(
     owner: String,
     session: String,
     drafts: Texts,
+    protections: Option<Protections>,
 ) -> Result<(), CommandError> {
+    let drafts = encode(drafts, protections.unwrap_or_default())?;
     let lease = capture(&app, &owner)?;
     let app = app.inner().clone();
     tauri::async_runtime::spawn_blocking(move || save(&app, &lease, &session, drafts))
@@ -217,6 +294,7 @@ mod tests {
         let lease = capture(&restarted, "alice").unwrap();
         let snapshot = load(&restarted, &lease, root.path()).unwrap();
         assert_eq!(snapshot.drafts, texts);
+        assert!(snapshot.protections.is_empty());
         save(&restarted, &lease, &snapshot.session, Texts::new()).unwrap();
         drop(restarted);
         let restarted = fixture(root.path());
@@ -313,6 +391,14 @@ mod tests {
             .unwrap()["drafts"]["account:bob"],
             "keep"
         );
+        invoke("save_conversation_drafts", serde_json::json!({"owner":"alice", "session": snapshot["session"], "drafts":{"account:bob":"private"}, "protections":{"account:bob":"authenticate"}})).unwrap();
+        let protected = invoke(
+            "load_conversation_drafts",
+            serde_json::json!({"owner":"alice"}),
+        )
+        .unwrap();
+        assert_eq!(protected["drafts"]["account:bob"], "private");
+        assert_eq!(protected["protections"]["account:bob"], "authenticate");
         invoke("lock_app", serde_json::json!({})).unwrap();
         assert!(state.drafts.lock().unwrap().is_none());
         assert!(
@@ -341,6 +427,48 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn protected_policy_uses_the_existing_encrypted_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let app = fixture(root.path());
+        let lease = capture(&app, "alice").unwrap();
+        let snapshot = load(&app, &lease, root.path()).unwrap();
+        let stored = Texts::from([
+            ("account:bob".into(), "secret".into()),
+            ("protection:account:bob".into(), "authenticate".into()),
+            ("protection:channel:team".into(), "click".into()),
+        ]);
+        save(&app, &lease, &snapshot.session, stored).unwrap();
+        drop(app);
+        let restarted = fixture(root.path());
+        let snapshot = load(
+            &restarted,
+            &capture(&restarted, "alice").unwrap(),
+            root.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.drafts,
+            Texts::from([("account:bob".into(), "secret".into())])
+        );
+        assert_eq!(
+            snapshot.protections.get("account:bob"),
+            Some(&MessageProtection::Authenticate)
+        );
+        assert_eq!(
+            snapshot.protections.get("channel:team"),
+            Some(&MessageProtection::Click)
+        );
+        assert!(
+            validate(&Texts::from([(
+                "protection:account:bob".into(),
+                "unknown".into()
+            )]))
+            .is_err()
+        );
+        assert!(validate(&Texts::from([("protection:wrong".into(), "click".into())])).is_err());
+    }
+
     #[test]
     fn invalid_and_oversized_snapshots_are_rejected() {
         assert!(validate(&Texts::from([("wrong".into(), "text".into())])).is_err());

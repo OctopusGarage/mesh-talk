@@ -91,14 +91,38 @@ pub(crate) fn validate(
     Ok(summary(record))
 }
 
+/// One eligibility selection feeds record count, record encoding and file authorization.
+/// The caller keeps the store locked while exporting this borrowed projection.
+pub(in crate::node) struct PortableFavorites<'a> {
+    records: Vec<&'a FavoriteRecord>,
+}
+
 impl FavoriteStore {
+    pub(in crate::node) fn portable_projection(&self, node: &Node) -> PortableFavorites<'_> {
+        PortableFavorites {
+            records: self
+                .current
+                .values()
+                .filter(|record| {
+                    record.removed || !node.favorite_has_protected_content(&record.favorite)
+                })
+                .collect(),
+        }
+    }
+}
+
+impl PortableFavorites<'_> {
+    pub(in crate::node) fn len(&self) -> usize {
+        self.records.len()
+    }
+
     pub(in crate::node) fn portable_records<'a>(
         &'a self,
         account_id: &'a str,
         now: u64,
     ) -> impl Iterator<Item = Result<Vec<u8>, SnapshotError>> + 'a {
-        self.current.values().map(move |record| {
-            let record = portable_record(record.clone(), now);
+        self.records.iter().map(move |record| {
+            let record = portable_record((*record).clone(), now);
             let payload =
                 bincode::serialize(&record).map_err(|_| SnapshotError::InvalidEncoding)?;
             validate(&payload, account_id, now)?;
@@ -110,20 +134,16 @@ impl FavoriteStore {
         &self,
         now: u64,
     ) -> Result<HashMap<ConversationId, FavoriteFile>, SnapshotError> {
-        let live = self.live_files(now);
         let mut files: HashMap<ConversationId, FavoriteFile> = HashMap::new();
         for file in self
-            .current
-            .values()
+            .records
+            .iter()
             .filter(|r| !r.removed)
             .flat_map(|r| &r.favorite.messages)
             .filter(|m| m.expires_at_ms.is_none_or(|end| end > now))
             .filter_map(|m| m.file.as_ref())
         {
             let conv = conversation(&file.file_conv).ok_or(SnapshotError::InvalidEncoding)?;
-            if !live.contains(&conv) {
-                continue;
-            }
             if files.get(&conv).is_some_and(|old| old.size != file.size) {
                 return Err(SnapshotError::InvalidMedia);
             }
@@ -131,7 +151,9 @@ impl FavoriteStore {
         }
         Ok(files)
     }
+}
 
+impl FavoriteStore {
     pub(in crate::node) fn restore_portable(
         &mut self,
         payload: &[u8],

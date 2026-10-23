@@ -10,7 +10,9 @@ The message menu offers **Add to Favorites** and **Select messages**. Select up
 to 100 accepted messages from one direct or group conversation and collect them
 as one item. The core resolves exact canonical message IDs and stores their
 snapshots in original conversation order; UI text is never source authority.
-Pending, failed, recalled, unavailable and explicitly expired sources are rejected.
+Pending, failed, recalled, unavailable, explicitly expired and protected sources
+are rejected. Protected text and images cannot be collected or viewed through
+Favorites; see [protected-message privacy controls](privacy-controls.md#protected-messages).
 A multi-message save is atomic: it never silently omits a selected source.
 
 Each item has an optional title (200 Unicode scalar values), overall description

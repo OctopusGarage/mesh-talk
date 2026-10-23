@@ -103,6 +103,13 @@ A local attempt to send content to a conversation before or while acceptance is
 resolved. Its local identity is distinct from an accepted event's identity.
 _Avoid_: delivered message, accepted event before acceptance.
 
+**Protected message**:
+A text or image message carrying an authenticated requirement to conceal its content
+until an explicit local reveal, optionally after the viewer authenticates with
+the application's lock mechanism. Each reveal lasts at most 30 seconds on that
+device. Protection is separate from retention, message expiry and read state.
+_Avoid_: disappearing message, view-once message, password shared by the sender.
+
 **History coverage**:
 What this installation has observed of a conversation's retained events. It is
 not proof of global history completeness or a read position.

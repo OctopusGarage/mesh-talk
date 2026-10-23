@@ -64,6 +64,59 @@ session authorization continues to enclose synchronous commits.
 
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 
+### Protected messages
+
+Text and image messages can carry an authenticated `MessageProtection` policy: explicit
+click-to-view, or authentication with the viewing device's existing app-lock
+mechanism. Core history, search and received-event projections omit protected
+content; explicit exact-message text and image queries are available to authorized
+hosts. Ordinary image read and export APIs reject protected images.
+The encrypted sent/received stores and eligible history replication retain the
+full protected body. Ordinary text/reply and sticker wire layouts stay unchanged.
+
+Protected wire bodies reserve an outer `MTEX1` zero-deadline sentinel, followed
+by an optional ordinary nonzero-deadline frame and the strict versioned `MTPR1`
+body. Existing expiry-aware clients reject the outer zero sentinel before their
+raw-text fallback. The body carries base64 text so even clients predating expiry
+framing do not render literal message text through that fallback. This encoding
+is not encryption or access authorization; existing DM/channel encryption remains
+the confidentiality boundary. Unknown or malformed protected bodies fail closed.
+Updated clients preserve the nested absolute expiry independently of the
+30-second local reveal. Older clients cannot reveal protected messages and may
+display an empty or encoded item; there is no automatic ordinary-text downgrade.
+
+Protected images wrap an existing encrypted file manifest in a strict versioned
+`MFP1` protection envelope. Ordinary file manifests remain byte-compatible; older
+clients cannot decode the protected wrapper and do not receive an ordinary image
+downgrade. File chunks, integrity checks, transfer consent and encrypted media
+persistence keep their existing owners. The canonical file binding retains the
+protection requirement, so another filename or offer cannot grant ordinary access
+to the same protected transfer. The explicit image reveal resolves the retained
+message reference before reading image bytes. Ordinary media reads require a known
+unprotected manifest; retiring metadata before blob cleanup cannot grant access.
+Channel image admission retains the manifest and protection policy in the existing
+delivery WAL. Recovery projects manifest history and retained chunk scope before
+retiring the transaction; projection failure preserves the accepted message ID
+instead of reporting a new send failure.
+
+The desktop reveal command captures `RuntimeAdmission`, validates an exact
+account/channel message reference, and reuses the app-lock credential verifier
+when required. It checks the same desktop session, installed participant runtime,
+lock state and retained message again after authentication. Recall, expiry,
+logout or runtime replacement during the prompt prevents content publication.
+The verifier does not unlock the app and its result is not shared across messages.
+
+The frontend keeps the returned body in temporary message-view state for at most
+30 seconds and clears it when the view, conversation or owner retires, or the app
+loses focus or visibility. Late IPC results cannot restore a retired reveal.
+Image previews use component-local Blob URLs, revoked when concealed or retired,
+and never use the ordinary shared image URL cache.
+Ordinary history IPC, accessibility summaries, notifications, conversation
+previews and reply quotes carry placeholders. This is a supported-client
+presentation control, separate from encryption at rest, message expiry and
+retention; it cannot prevent a recipient from modifying their client or capturing
+already displayed content. See [protected-message behavior](privacy-controls.md#protected-messages).
+
 ### Fixed-deadline messages
 
 The composer optionally selects a per-message duration and computes
@@ -728,8 +781,10 @@ locking, and copying. Rust persists the typed policy and sends one native
 notification for each eligible inbound event. An `AppLock` gate blocks new app
 IPC and plaintext events while keeping the node runtime alive; a native timer
 checks idle and hidden policies even when the webview pauses. Unlock verifies
-the active account with a password or, on macOS when enabled, the existing Touch
-ID protected Keychain credential. Frontend ownership generations discard stale
+the active local user with the Mesh-Talk password on non-macOS platforms;
+macOS uses system device-owner authentication with Touch ID or the Mac login
+password. The same verifier serves individual protected-message reveals.
+Frontend ownership generations discard stale
 UI work. Requests that began before a lock may still deliver a native IPC
 response to the webview; do not treat the lock as a process-memory or OS capture
 boundary.

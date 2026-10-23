@@ -29,7 +29,10 @@ Drafts are encrypted on this device and restore after restarting and signing in
 as the same local user. Saving happens after ten seconds without typing; continued typing restarts
 the idle timer. Switching conversations or leaving the
 window also requests a save. Quitting abruptly can lose recent edits. Drafts do
-not sync to other devices and do not include attachments or reply targets.
+not sync to other devices and do not include attachments or reply targets. Protected
+drafts restore their protection mode with their text and show a concealed sidebar
+preview. Protected text remains a draft until local durable acceptance; a rejected
+send keeps both its text and protection mode for retry.
 Sending or clearing the text removes its draft. A save error keeps your text in
 the current window and offers **Retry**.
 

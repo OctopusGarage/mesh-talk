@@ -56,6 +56,7 @@ pub struct ReceivedDm {
     pub from: UserId,
     pub from_name: String,
     pub text: Vec<u8>,
+    pub protection: Option<super::MessageProtection>,
     pub reply_to: Option<EventId>,
 }
 
@@ -131,6 +132,7 @@ pub struct HistoryEntry {
     pub from_me: bool,
     pub who: String,
     pub text: Vec<u8>,
+    pub protection: Option<super::MessageProtection>,
     pub wall_clock: u64,
     pub reply_to: Option<EventId>,
     /// Present when this entry is a file/media message (a `FileManifest` event) rather

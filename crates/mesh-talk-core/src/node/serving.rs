@@ -622,11 +622,16 @@ impl Node {
                 continue;
             }
             let received = ReceivedFile {
+                protection: manifest.protection(),
                 expires_at_ms: crate::expiry::deadline(&plaintext),
                 conv,
                 is_channel,
                 from: event.author.user_id(),
-                name: manifest.name().to_string(),
+                name: if manifest.protection().is_some() {
+                    "Protected image".into()
+                } else {
+                    manifest.name().to_string()
+                },
                 size: manifest.size(),
                 mime: manifest.mime().to_string(),
                 file_conv: manifest.file_conv(),

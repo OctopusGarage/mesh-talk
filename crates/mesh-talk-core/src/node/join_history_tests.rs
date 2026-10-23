@@ -114,6 +114,7 @@ fn join_history_time_and_count_bounds() {
             from_me: false,
             who: "author".into(),
             text: vec![i],
+            protection: None,
             wall_clock: if i < 3 { now - 4 * DAY_MS } else { now - 1 },
             reply_to: None,
             file: None,
@@ -131,6 +132,149 @@ fn join_history_time_and_count_bounds() {
         12
     );
     assert!(select_history(entries, HistoryPolicy::Off, now).is_empty());
+}
+
+#[test]
+fn join_history_protected_rows_do_not_consume_count_or_byte_budgets() {
+    let ordinary = HistoryEntry {
+        id: EventId::new([1; 32]),
+        from_me: false,
+        who: "author".into(),
+        text: b"eligible ordinary text".to_vec(),
+        protection: None,
+        wall_clock: 1,
+        reply_to: None,
+        file: None,
+        recalled: false,
+        recalled_text: None,
+        sticker: None,
+        expires_at_ms: None,
+    };
+    for mode in [
+        super::super::MessageProtection::Click,
+        super::super::MessageProtection::Authenticate,
+    ] {
+        for policy in [HistoryPolicy::LastTen, HistoryPolicy::LastThreeDays] {
+            let mut entries = vec![ordinary.clone()];
+            for i in 2..=12 {
+                let mut protected = ordinary.clone();
+                protected.id = EventId::new([i; 32]);
+                protected.protection = Some(mode);
+                // Exercise the byte budget as well as default redacted empty rows.
+                if policy == HistoryPolicy::LastThreeDays {
+                    protected.text = vec![b's'; SNAPSHOT_BYTES / 2 - 256];
+                } else {
+                    protected.text.clear();
+                }
+                entries.push(protected);
+            }
+            let selected = select_history(entries, policy, 2);
+            assert_eq!(
+                selected.len(),
+                1,
+                "protected rows are ineligible for history"
+            );
+            assert_eq!(selected[0].id, ordinary.id);
+        }
+    }
+}
+
+#[tokio::test]
+async fn join_history_foreign_protected_offer_preserves_concealed_receiver_projection() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let alice = node(a.path());
+    let bob = node(b.path());
+    let channel = alice
+        .create_channel_invited("foreign history", vec![])
+        .await
+        .unwrap();
+    let root = GroupKey::generate();
+    let mut rows = Vec::new();
+    let mut protections = HashMap::new();
+    for protection in [
+        super::super::MessageProtection::Click,
+        super::super::MessageProtection::Authenticate,
+    ] {
+        let id = alice
+            .enqueue_protected_channel_message_reply_expiring_if(
+                channel,
+                b"foreign protected secret",
+                None,
+                None,
+                protection,
+                |commit| commit(),
+            )
+            .unwrap();
+        let body =
+            MessageBody::protected(b"foreign protected secret".to_vec(), None, protection).encode();
+        protections.insert(id, protection);
+        rows.push(EncryptedRow {
+            id,
+            ciphertext: crate::channel::seal_channel_message(&row_key(&root, id), &body).unwrap(),
+        });
+    }
+    alice
+        .add_channel_member(channel, bob.identity.public())
+        .await
+        .unwrap();
+    let invitation = alice
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .find(|event| {
+            event.kind == EventKind::MembershipChange
+                && crate::channel::ChannelMeta::is_invitation(&event.ciphertext)
+                && crate::channel::ChannelMeta::decode(&event.ciphertext)
+                    .is_some_and(|meta| meta.is_member(&bob.user_id()))
+        })
+        .unwrap()
+        .id;
+    // A foreign owner can create an offer without using this client's selector.
+    let offer = Offer {
+        recipient: bob.user_id(),
+        invitation,
+        policy: HistoryPolicy::LastTenWithinThreeDays,
+        keys: SealedPayload::seal(&alice.identity, &[alice.identity.public()], root.as_bytes())
+            .unwrap(),
+        rows,
+    };
+    alice
+        .append_event(
+            channel,
+            EventKind::ChannelJoinHistory,
+            encode(&HistoryControl::Offer(offer)),
+        )
+        .unwrap();
+    copy(&alice, &bob, channel);
+    bob.accept_channel_invite(channel).await.unwrap();
+    copy(&bob, &alice, channel);
+    alice.retry_join_history().unwrap();
+    copy(&alice, &bob, channel);
+    let log = bob.log.lock().unwrap();
+    let messages = received(&bob.identity, channel, &log.events(&channel));
+    assert_eq!(messages.len(), 2);
+    for message in messages {
+        assert_eq!(
+            message.protection,
+            protections.get(&message.event_id).copied(),
+            "foreign protected copies retain their exact reveal policy"
+        );
+        assert!(
+            message.text.is_empty(),
+            "receiver callbacks never contain protected text"
+        );
+    }
+    drop(log);
+    let history = bob.channel_history(channel, 10);
+    assert_eq!(history.len(), 2);
+    assert!(
+        history
+            .iter()
+            .all(|row| row.protection == protections.get(&row.id).copied() && row.text.is_empty())
+    );
 }
 
 #[tokio::test]
@@ -481,10 +625,62 @@ async fn join_history_round_trip_over_noise_loopback_preserves_silent_provenance
         .send_channel_message(channel, b"earlier over loopback")
         .await
         .unwrap();
+    let mut protected_ids = Vec::new();
+    let image = a.path().join("private-image.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\nprivate image pixels").unwrap();
+    for protection in [
+        super::super::MessageProtection::Click,
+        super::super::MessageProtection::Authenticate,
+    ] {
+        protected_ids.push(
+            alice
+                .enqueue_protected_channel_message_reply_expiring_if(
+                    channel,
+                    b"private history text",
+                    None,
+                    None,
+                    protection,
+                    |commit| commit(),
+                )
+                .unwrap(),
+        );
+        let (id, _) = alice
+            .enqueue_protected_file_channel_progress_expiring_if(
+                channel,
+                &image,
+                crate::file::FileKind::Media,
+                |_| {},
+                None,
+                protection,
+                |commit| commit(),
+            )
+            .await
+            .unwrap();
+        protected_ids.push(id);
+    }
     alice
         .add_channel_member(channel, bob.identity.public())
         .await
         .unwrap();
+    {
+        let log = alice.log.lock().unwrap();
+        let events = log.events(&channel);
+        let view = View::new(&events);
+        let offers = view.offers();
+        assert_eq!(offers.len(), 1);
+        assert_eq!(
+            offers[0].1.rows.len(),
+            1,
+            "only ordinary text enters the encrypted offer"
+        );
+        assert!(
+            offers[0]
+                .1
+                .rows
+                .iter()
+                .all(|row| !protected_ids.contains(&row.id))
+        );
+    }
     assert!(bob.channel_history(channel, 10).is_empty());
     bob.accept_channel_invite(channel).await.unwrap();
     alice.retry_channel_controls().await;
@@ -494,7 +690,16 @@ async fn join_history_round_trip_over_noise_loopback_preserves_silent_provenance
         .unwrap();
     assert_eq!(message.text, b"earlier over loopback");
     assert_eq!(message.arrival_kind, "history_sync");
-    assert_eq!(bob.channel_history(channel, 10)[0].id, message.event_id);
+    let history = bob.channel_history(channel, 10);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, message.event_id);
+    assert_eq!(history[0].protection, None);
+    assert_eq!(message.protection, None);
+    assert!(history.iter().all(|row| !protected_ids.contains(&row.id)));
+    assert!(
+        received.try_recv().is_err(),
+        "protected snapshots never surface as ordinary messages"
+    );
     a_task.abort();
     b_task.abort();
 }
@@ -587,6 +792,7 @@ fn join_history_snapshot_budget_counts_sticker_metadata_and_skips_large_rows() {
         from_me: false,
         who: "author".into(),
         text: b"ok".to_vec(),
+        protection: None,
         wall_clock: 1,
         reply_to: None,
         file: None,

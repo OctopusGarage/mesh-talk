@@ -86,6 +86,34 @@ function mediaBytes(bytes: ArrayBuffer | number[]): ArrayBuffer {
 }
 
 export const chat = {
+  revealMessage: (
+    owner: string,
+    reference: {
+      kind: "account" | "channel";
+      target: string;
+      message_id: string;
+    },
+    password?: string,
+  ) =>
+    invoke<{ text: string; visible_for_ms: number }>("owner_reveal_message", {
+      owner,
+      reference,
+      password: password ?? null,
+    }),
+  revealImage: (
+    owner: string,
+    reference: {
+      kind: "account" | "channel";
+      target: string;
+      message_id: string;
+    },
+    password?: string,
+  ) =>
+    invoke<ArrayBuffer | number[]>("owner_reveal_image", {
+      owner,
+      reference,
+      password: password ?? null,
+    }).then(mediaBytes),
   getDeviceSyncPolicy: (owner: string) =>
     invoke<DeviceSyncPolicy>("get_device_sync_policy", { owner }),
   getDeviceSyncStatus: (owner: string) =>
@@ -128,6 +156,7 @@ export const chat = {
     text: string,
     replyTo: string | null,
     expiresAtMs?: number | null,
+    protection?: import("../types").MessageProtection | null,
   ) =>
     invoke<string>("owner_enqueue_text", {
       owner,
@@ -135,6 +164,7 @@ export const chat = {
       text,
       replyTo,
       expiresAtMs,
+      ...(protection ? { protection } : {}),
     }),
   enqueueSticker: (
     owner: string,
@@ -157,6 +187,7 @@ export const chat = {
     media: boolean,
     progressKey?: string,
     expiresAtMs?: number | null,
+    protection?: import("../types").MessageProtection | null,
   ) =>
     invoke<{ id: string; fileConv: string }>("owner_enqueue_file", {
       owner,
@@ -165,6 +196,7 @@ export const chat = {
       media,
       expiresAtMs,
       ...(progressKey ? { progressKey } : {}),
+      ...(protection ? { protection } : {}),
     }),
   enqueueChannelText: (
     owner: string,
@@ -172,6 +204,7 @@ export const chat = {
     text: string,
     replyTo: string | null,
     expiresAtMs?: number | null,
+    protection?: import("../types").MessageProtection | null,
   ) =>
     invoke<string>("owner_enqueue_channel_text", {
       owner,
@@ -179,6 +212,7 @@ export const chat = {
       text,
       replyTo,
       expiresAtMs,
+      ...(protection ? { protection } : {}),
     }),
   enqueueChannelSticker: (
     owner: string,
@@ -201,6 +235,7 @@ export const chat = {
     media: boolean,
     progressKey: string,
     expiresAtMs?: number | null,
+    protection?: import("../types").MessageProtection | null,
   ) =>
     invoke<{ id: string; fileConv: string }>("owner_enqueue_channel_file", {
       owner,
@@ -209,6 +244,7 @@ export const chat = {
       media,
       progressKey,
       expiresAtMs,
+      ...(protection ? { protection } : {}),
     }),
   ownerHistory: (owner: string, account: string, limit: number) =>
     invoke<HistoryItem[]>("owner_account_history", { owner, account, limit }),

@@ -81,3 +81,48 @@ it.each(["escape", "conversation round trip"])(
     }
   },
 );
+
+it.each(["click", "authenticate"] as const)(
+  "rejects protected %s sources before inspection or snapshot preview",
+  async (protection) => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(createElement(Harness, { scope: "a" })),
+      );
+      const protectedMessage = {
+        id: "protected",
+        fromMe: false,
+        who: "Alice",
+        text: "private text",
+        wallClock: 1,
+        replyTo: null,
+        protection,
+        file: {
+          name: "private.png",
+          size: 1,
+          mime: "image/png",
+          fileConv: "private-file",
+          media: true,
+        },
+      };
+      await act(async () => current.collect([protectedMessage]));
+      expect(inspect).not.toHaveBeenCalled();
+      expect(current.draft).toBeNull();
+      const ordinary = {
+        id: "ordinary",
+        fromMe: false,
+        who: "Alice",
+        text: "public text",
+        wallClock: 1,
+        replyTo: null,
+      };
+      await act(async () => current.collect([ordinary, protectedMessage]));
+      expect(inspect).not.toHaveBeenCalled();
+      expect(current.draft).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  },
+);
