@@ -486,7 +486,7 @@
             "reference": "docs/network-design-reference.md#person-presence-contract"
           },
           {
-            "name": "Member discovery sources retain overlapping local UDP multicast and distinct named introducing post offices only while their own evidence is fresh; discovery is not a delivery path or location.",
+            "name": "Member discovery sources retain local UDP multicast and select the closest identified visible office per device using fresh bounded origin distances; unknown legacy distances do not establish an origin, and source expiry triggers fallback without implying a delivery path or location.",
             "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ]

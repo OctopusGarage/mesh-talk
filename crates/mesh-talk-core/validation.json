@@ -505,6 +505,10 @@
           {
             "name": "Direct channel image bytes progress before optional relay custody without bypassing attachment consent; local previews preserve bounded original signed chunks for other members",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Directory v5 and federation v3 preserve bounded source distances without extending origin expiry; legacy encodings remain unchanged and unknown distance stays unknown. Automatic relay selection reuses expiring measured costs, retains explicit healthy preferences and fairly samples fallback candidates.",
+            "reference": "docs/network-design-reference.md#person-presence-contract"
           }
         ],
         "guide": "docs/ARCHITECTURE.md"
