@@ -157,50 +157,51 @@ workflow checks and owning `validation.json` contracts together. A new product-v
 consumer must derive the existing target or declare a checked projection in that owner;
 it must not introduce another manually maintained version constant.
 
-### Automated release preparation
+### Manual release preparation
 
-The **Release Maintenance** workflow (`release-maintenance.yml`) runs on pushes to `main`
-and on manual dispatch. A pinned release-please action treats the repository as one product,
-using its root private Node manifest to include Rust and frontend commits in the same release
-proposal. Scoped updates change Cargo's canonical field; `scripts/release/maintenance.mjs`
-uses the trusted main-branch version owner to synchronize the validated same-repository bot
-PR. It never executes code from the bot's proposed branch. Release tracking records the last
-released version; it is not another authority for the current development target.
-An absent PR output is expected on idle runs and after a release is created. The
-synchronization environment must tolerate that absence even when its step is skipped,
-so it cannot prevent the subsequent exact tagged draft-build dispatch.
+Ordinary pushes to `main` do not create release proposals, infer versions from commit
+prefixes or generate changelog entries. Prepare a Stable release only when its scope is
+ready. Maintainers own the release decision and product-facing notes:
 
-The fixed release-history migration floor handles the existing `v0.4.3` publication. Its
-published source commit (`9b9f91b`) has exactly the same Git tree as the corresponding
-`main` squash commit (`335a001`), but the tag's commit is not an ancestor of `main`.
-Without a reachable boundary, release-please would count already released historical
-commits again. The top-level `last-release-sha` therefore pins that equivalent main commit
-as a history floor. Before proposing releases, maintenance verifies the immutable legacy
-tag's exact source, tree equivalence and the floor's ancestry on main; a mismatch fails
-closed. Later reachable release commits stop the scan before this floor automatically.
-This is historical provenance, not a current version field: never advance it during
-ordinary version preparation, retag `v0.4.3`, or omit its acceptance checks. Changes require
-a reviewed history migration and regressions for both initial and subsequent releases.
+1. In a normal development branch, use `node scripts/release/version.mjs prepare VERSION`
+   if the intended version differs from Cargo's current target. Do not change version
+   projections by hand. Add the corresponding `## VERSION` section to root `CHANGELOG.md`,
+   describing user-visible changes, compatibility or migration requirements and known
+   limitations. Existing linked version headings remain readable. Keep historical sections.
+2. Review and merge that PR through the normal checks. A Stable draft requires a nonempty,
+   unique changelog section for its exact numeric Cargo version. A different version's
+   section never substitutes for missing notes. Changelog contents are maintained prose,
+   not a generated commit list or a second authority for the product version.
+3. On `main`, run **Prepare Stable Draft** with `tag=vVERSION`, for example `v0.4.5`.
+   The workflow checks out trusted `main`, validates canonical version projections,
+   curated notes, exact-source hosted CI/security and existing tag/release state before
+   changing remote state. The target must exceed the highest published numeric Stable.
+   It creates an immutable exact-source tag and an **unpublished draft**, then explicitly
+   dispatches **Tauri Release** on that tag with both publication flags disabled.
+4. Wait for the complete signed, source-attested and verified asset set. Then select the
+   version tag in **Tauri Release → Run workflow** and enable **publish_release** to use
+   the existing exact-source, downloaded-draft, signature, provenance and container gates.
+   Preparing a draft does not publish Stable. Do not publish an empty draft or move a tag.
 
-The maintained release PR collects Conventional Commits and proposes a version and changelog.
-Release-please owns the generated root `CHANGELOG.md`; review it in release PRs. Its history
-records released changes and does not define the current product target. The release-publication
-validation contract explicitly owns this generated file.
-While the product is `0.x`, ordinary features and fixes propose patch releases and breaking
-changes propose a minor release; entering `1.0` requires an explicit maintainer decision.
-Review compatibility and the intended target rather than accepting a generated number blindly.
+The manual preparation command can resume a same-source unpublished draft or tag. It
+refuses a tag bound to another commit, a published release, a prerelease or a conflicting
+version. It never pushes commits to `main`, changes a tag target or merges a PR.
 
-Merging a release PR permits automation to create an immutable `vX.Y.Z` tag and **unpublished
-draft only**, then explicitly dispatches **Tauri Release** on that tag with both publication
-flags disabled. The existing workflow builds and verifies the complete asset set into the draft.
-Before dispatch, maintenance fills the draft from `.github/release-notes.md` with
-download, installation and verification instructions bound to the exact tag/source.
-The verified build refreshes those notes and adds the changelog; useful draft notes
-must not depend on a successful build or an external attestation request.
-It cannot publish Stable merely because a version PR merged. A maintainer must select the
-version tag in **Tauri Release → Run workflow** and enable **publish_release** for the existing
-exact-source, signatures, provenance, downloaded-draft and container gates to publish it.
-Do not publish an empty draft, move a published tag or replace its assets.
+`CHANGELOG.md` is the sole product-note source. `.github/release-notes.md` provides only the
+shared product, download, installation and verification template; it contains no fixed
+release highlights. Draft preparation and build reruns render the exact tag's curated
+section together with that template. Edit notes in the reviewed source before preparing
+its tag; edits made only in the GitHub draft body are not the maintained input and may be
+replaced by a build rerun. GitHub's additional automatic release-note generation is disabled.
+Nightlies include a manually maintained section only when their current numeric target has
+one; otherwise they omit release highlights, retaining the experimental/source identity
+and download instructions. They never borrow a previous Stable's product notes.
+
+The legacy `v0.4.3` tag remains immutable. Its source commit (`9b9f91b`) has exactly the same
+Git tree as the corresponding reachable `main` squash commit (`335a001`). Manual draft
+preparation still verifies that fixed historical source/tree equivalence and ancestry.
+Removing the commit-scanning proposal generator removes its config/manifest, not this
+provenance check. Never advance the fixed historical boundary during version preparation.
 
 After successful Stable publication, the release workflow explicitly dispatches maintenance
 with `stable_tag=vX.Y.Z`; the published-release event is also supported. Maintenance verifies
@@ -230,10 +231,12 @@ require a write-access maintainer to approve workflow runs; inspect the PR's che
 repository rules before merging. A deliberately configured GitHub App can support unattended
 event chaining if the project later needs it.
 
-For an interrupted release proposal, manually run **Release Maintenance** with `stable_tag`
-empty to reconcile the proposal. If a draft/tag already exists but its build dispatch failed,
-inspect its exact source SHA and manually run **Tauri Release** on that tag with both
-publication flags disabled; an existing draft does not imply the dispatch will repeat.
+If manual draft preparation is interrupted, rerun **Prepare Stable Draft** on `main`
+with the same tag only while main still identifies that exact source. It verifies an
+existing tag/draft rather than replacing it. If main has advanced, inspect the existing
+unpublished tag's exact SHA and manually run **Tauri Release** on that tag with both
+publication flags disabled to resume its build. An existing draft does not imply a
+successful or repeated build dispatch. Correct missing curated notes before tagging.
 If maintenance dispatch fails after Stable publication, the publisher reports a warning and
 recovery instructions while preserving the successful publication result. Do not retry or undo
 publication to repair a follow-up dispatch.
@@ -241,7 +244,7 @@ For a missing next-target PR after publication, run maintenance with the exact p
 `stable_tag`. Inspect Actions logs, release/tag source SHA and the resulting PR; retry the
 owning workflow rather than bypassing version or source checks.
 An incomplete or failed draft stays unpublished. Hosted automation acceptance must establish
-bot-PR permissions/check execution, draft-only behavior, explicit build dispatch and next-target
+manual intent/exact-source checks, draft-only behavior, explicit build dispatch and next-target
 PR creation; local mocked tests do not prove GitHub settings or real signing/publication.
 Release-state API reads request cache revalidation: a stale empty listing must not
 hide an existing draft or replace the fresh asset identity/digest checks.
@@ -254,6 +257,23 @@ update mechanism. Product version equality does not establish wire or stored-dat
 
 ## Why this model
 
+The established tagged build, verified draft and explicit publication stages remain the
+release engine. Manual preparation supplies reviewed intent and orchestrates that engine;
+it does not duplicate the platform matrix or publisher. The earlier releases established
+that separation, while the current preparation action removes hand-run tag/API coordination.
+
+[Release Please](https://github.com/googleapis/release-please) derives proposals from
+Conventional Commits. Mesh-Talk uses one versioned product and can squash several features
+into one integration commit, so that input does not reliably describe user-facing scope.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) instead advocates curated notable
+changes, grouped by their effects on users. Maintainers review those notes in the same
+source change as the intended version; CI validates and renders them deterministically.
+No additional package-version planner or automatic commit-list body is required.
+[GitHub's release guidance](https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes)
+supports reviewing draft content and assembling assets before publication. The existing
+artifact/source checks and immutable publication path continue to own that transition.
+
+
 [VS Code Insiders](https://code.visualstudio.com/insiders/) demonstrates an explicit daily
 experimental channel; [Zed's release policy](https://zed.dev/faq) separates early access from
 stability, and [RustDesk's Nightly workflow](https://github.com/rustdesk/rustdesk/blob/master/.github/workflows/flutter-nightly.yml)
@@ -261,7 +281,7 @@ demonstrates scheduled and manual builds. Mesh-Talk uses two channels initially 
 not yet have a separate Preview stabilization process.
 
 GitHub Releases [are based on Git tags](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases):
-this mechanism removes manual official tagging, not Git's source identity. GitHub's
+the explicit preparation action creates the chosen tag without changing Git's source identity. GitHub's
 [release API](https://docs.github.com/en/rest/releases/releases) separates prereleases from latest
 full releases. Unique per-build releases fit GitHub's
 [immutable release model](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
@@ -274,8 +294,8 @@ SHA or incrementing a fourth MSI component would not reliably identify the next 
 
 [Cargo workspace inheritance](https://doc.rust-lang.org/cargo/reference/workspaces.html#the-package-table)
 and [Tauri's Cargo-version fallback](https://v2.tauri.app/reference/config/#version) provide the
-existing single-source mechanisms. [release-please](https://github.com/googleapis/release-please)
-provides reviewed release proposals and [scoped manifest updates](https://github.com/googleapis/release-please/blob/main/docs/customizing.md);
-Mesh-Talk keeps artifact verification and final publication in its own release workflow.
+existing single-source mechanisms. Mesh-Talk uses reviewed version/changelog changes and an
+explicit draft-preparation action, keeping artifact verification and final publication in its
+existing release workflow.
 [GitHub's workflow-trigger rules](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)
 explain the explicit dispatch and bot-PR check requirements.
