@@ -367,3 +367,21 @@ it("enriches existing unseen history receipts without reviving read mentions", (
   );
   expect(state.unreadIds[key]).toEqual([]);
 });
+
+it.each([false, true])(
+  "classifies a duplicate with late mention text without changing read state (own=%s)",
+  (own) => {
+    const key = "channel:a";
+    const event = { event_id: "late-text", own_device: own };
+    let state = receiveIdentity(emptyReception(), key, event);
+    state = receiveIdentity(state, key, event, true);
+    expect(state.ledger[key]["late-text"].mentioned === true).toBe(!own);
+    expect(state.unreadIds[key]).toEqual(own ? [] : ["late-text"]);
+    state = receiveIdentity(state, key, event);
+    expect(state.ledger[key]["late-text"].mentioned === true).toBe(!own);
+    state = viewIdentities(state, key, ["late-text"]);
+    state = receiveIdentity(state, key, event, true);
+    expect(state.ledger[key]["late-text"].seen).toBe(true);
+    expect(state.unreadIds[key]).toEqual([]);
+  },
+);

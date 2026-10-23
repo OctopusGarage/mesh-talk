@@ -3902,53 +3902,61 @@ it("ignores an old roster response before negotiating push capability", async ()
   }
 });
 
-it("tracks external channel mentions independently of previews and open navigation", async () => {
-  invoke.mockImplementation((command: string) =>
-    command === "owner_node_identity"
-      ? Promise.resolve({
-          owner: "host",
-          device_id: "me",
-          account_id: "myacct",
-        })
-      : Promise.resolve([]),
-  );
-  const stop = useChat.getState().start();
-  await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
-  const event = {
-    channel_id: "team",
-    channel_name: "Team",
-    from: "peer",
-    text: "@Alice hello",
-    reply_to: null,
-    event_id: "mention",
-  };
-  try {
-    captured.current!.onChannelMessage(event);
-    captured.current!.onChannelMessage({
-      ...event,
-      event_id: "ordinary",
-      text: "latest message",
+it.each(["Alice", ""])(
+  "tracks external channel mentions with display name %j independently of navigation",
+  async (displayName) => {
+    useAuth.setState({
+      user: { id: "host", username: "alice", display_name: displayName },
     });
-    captured.current!.onChannelMessage({
-      ...event,
-      event_id: "other",
-      text: "@Bob hello",
-    });
-    captured.current!.onChannelMessage({
-      ...event,
-      event_id: "own",
-      own_device: true,
-    });
-    const entries = useChat.getState().ledger["channel:team"];
-    expect(entries.mention).toMatchObject({ mentioned: true, seen: false });
-    expect(entries.ordinary.mentioned).not.toBe(true);
-    expect(entries.other.mentioned).not.toBe(true);
-    expect(entries.own.mentioned).not.toBe(true);
-    await useChat
-      .getState()
-      .open({ kind: "channel", id: "team", name: "Team" });
-    expect(useChat.getState().ledger["channel:team"].mention.seen).toBe(false);
-  } finally {
-    stop();
-  }
-});
+    invoke.mockImplementation((command: string) =>
+      command === "owner_node_identity"
+        ? Promise.resolve({
+            owner: "host",
+            device_id: "me",
+            account_id: "myacct",
+          })
+        : Promise.resolve([]),
+    );
+    const stop = useChat.getState().start();
+    await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+    const event = {
+      channel_id: "team",
+      channel_name: "Team",
+      from: "peer",
+      text: "@Alice hello",
+      reply_to: null,
+      event_id: "mention",
+    };
+    try {
+      captured.current!.onChannelMessage(event);
+      captured.current!.onChannelMessage({
+        ...event,
+        event_id: "ordinary",
+        text: "latest message",
+      });
+      captured.current!.onChannelMessage({
+        ...event,
+        event_id: "other",
+        text: "@Bob hello",
+      });
+      captured.current!.onChannelMessage({
+        ...event,
+        event_id: "own",
+        own_device: true,
+      });
+      const entries = useChat.getState().ledger["channel:team"];
+      expect(entries.mention).toMatchObject({ mentioned: true, seen: false });
+      expect(entries.ordinary.mentioned).not.toBe(true);
+      expect(entries.other.mentioned).not.toBe(true);
+      expect(entries.own.mentioned).not.toBe(true);
+      await useChat
+        .getState()
+        .open({ kind: "channel", id: "team", name: "Team" });
+      expect(useChat.getState().ledger["channel:team"].mention.seen).toBe(
+        false,
+      );
+    } finally {
+      stop();
+    }
+  },
+);
