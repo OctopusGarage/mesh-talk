@@ -491,7 +491,7 @@ jobs:
           node scripts/release/release-state.mjs verify "$RELEASE_TAG" draft-assets
       - uses: actions/download-artifact@v8
         with:
-          pattern: mesh-talk-default-linux-*
+          pattern: mesh-talk-linux-*
           merge-multiple: true
           path: container-input
           github-token: ${{ secrets.GITHUB_TOKEN }}

@@ -55,6 +55,15 @@ test("post-office images use verified Linux archives and publish before the rele
   assert.match(publish, /packages: write/);
   assert.match(publish, /name: verified-release-evidence/);
   assert.match(publish, /scripts\/release\/prepare-post-office-container\.sh container-input verification\.txt/);
+  const artifactName = build.match(/name: (mesh-talk-.*\$\{\{ matrix\.target \}\})/)?.[1];
+  const linuxPattern = publish.match(/pattern: (.+)\n\s+merge-multiple: true\n\s+path: container-input/)?.[1];
+  assert.ok(artifactName && linuxPattern, "publication must select the uploaded Linux artifacts");
+  const selected = new RegExp(`^${linuxPattern.replaceAll("*", ".*")}$`);
+  for (const target of ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]) {
+    const uploaded = artifactName.replace("${{ matrix.os }}", "linux").replace("${{ matrix.target }}", target);
+    assert.ok(selected.test(uploaded), `container input must include ${uploaded}`);
+  }
+  assert.equal(selected.test(artifactName.replace("${{ matrix.os }}", "windows").replace("${{ matrix.target }}", "x86_64-pc-windows-msvc")), false);
   assert.match(publish, /platforms: linux\/amd64,linux\/arm64/);
   assert.match(publish, /org\.opencontainers\.image\.source=/);
   assert.ok(publish.indexOf("Publish verified multi-platform post-office image") < publish.indexOf("Publish only the verified draft"));
