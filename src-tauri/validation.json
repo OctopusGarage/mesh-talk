@@ -18,6 +18,9 @@
           ]
         }
       ],
+      "node": [
+        "scripts/diagnostics/background-command.test.mjs"
+      ],
       "capability": {
         "summary": "Capture through the Linux Screenshot portal or an optional native X11 helper into the shared screenshot editor.",
         "guide": "docs/help/topics/screenshots.md#platform-behavior",

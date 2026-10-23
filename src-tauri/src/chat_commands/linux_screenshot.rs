@@ -41,7 +41,7 @@ pub(super) async fn capture_x11(tool: &Path, timeout: Duration) -> Result<Vec<u8
     let directory =
         tempfile::tempdir().map_err(|e| format!("cannot create screenshot directory: {e}"))?;
     let path = directory.path().join("screen.png");
-    let mut command = tokio::process::Command::new(tool);
+    let mut command = crate::background_command::command(tool);
     // WSLg can export WAYLAND_DISPLAY alongside an XFCE X11 session. Match the
     // verified native app backend instead of letting GTK pick the other display.
     command.env("GDK_BACKEND", "x11");
