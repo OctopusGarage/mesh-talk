@@ -1,3 +1,4 @@
+import { messageFavorites } from "./api/messageFavorites";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { chat } from "./api";
 import { defaultSavePath, effectiveDownloadDir } from "./download";
@@ -13,11 +14,28 @@ import {
 export async function saveAttachment(
   file: { fileConv: string; name: string; mime?: string },
   lease: { current: () => boolean; owner?: string | null },
-  options: { mode: "as" | "default"; destination?: string },
+  options: {
+    mode: "as" | "default";
+    destination?: string;
+    source?: "favorite";
+  },
 ): Promise<string | null> {
+  const favorite = options.source === "favorite";
+  let retainedReady = false;
+  const refresh = async () => {
+    if (!lease.current()) return;
+    if (favorite)
+      retainedReady =
+        !!lease.owner &&
+        (await messageFavorites.fileAvailable(lease.owner, file.fileConv));
+    else await refreshFileAvailability([file.fileConv]);
+  };
   const current = () =>
     lease.current() &&
-    !!useFileAvailability.getState().statuses[file.fileConv]?.ready;
+    (favorite
+      ? retainedReady
+      : !!useFileAvailability.getState().statuses[file.fileConv]?.ready);
+  if (favorite) await refresh();
   if (!current()) return null;
   const directory = isDirectoryAttachment(file.mime ?? "");
   let destination = options.destination;
@@ -42,15 +60,22 @@ export async function saveAttachment(
     }
   }
   if (!current()) return null;
-  await refreshFileAvailability([file.fileConv]);
+  await refresh();
   if (!current()) return null;
-  const path = toDirectory
-    ? await chat.saveFileToDir(
+  const path = favorite
+    ? await messageFavorites.saveFile(
+        lease.owner!,
         file.fileConv,
         destination,
-        lease.owner ?? undefined,
+        toDirectory,
       )
-    : (await chat.saveFile(file.fileConv, destination), destination);
+    : toDirectory
+      ? await chat.saveFileToDir(
+          file.fileConv,
+          destination,
+          lease.owner ?? undefined,
+        )
+      : (await chat.saveFile(file.fileConv, destination), destination);
   if (!lease.current()) return null;
   rememberSavedDownload(file.fileConv, path);
   return path;

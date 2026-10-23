@@ -22,7 +22,7 @@ fn open_sibling(dir: &std::path::Path, account: &Account) -> Arc<Node> {
     .unwrap()
 }
 
-fn sibling_nodes() -> (tempfile::TempDir, Arc<Node>, Arc<Node>) {
+pub(super) fn sibling_nodes() -> (tempfile::TempDir, Arc<Node>, Arc<Node>) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let source = open_sibling(&dir.path().join("source"), &account);
@@ -41,7 +41,11 @@ fn sibling_nodes() -> (tempfile::TempDir, Arc<Node>, Arc<Node>) {
     (dir, source, receiver)
 }
 
-fn sibling_peer(receiver: &Node, source: &Node, address: std::net::SocketAddr) -> PeerRecord {
+pub(super) fn sibling_peer(
+    receiver: &Node,
+    source: &Node,
+    address: std::net::SocketAddr,
+) -> PeerRecord {
     receiver.roster.lock().unwrap().update(
         &crate::discovery::Announce::new_with_account(
             &source.identity,
@@ -78,8 +82,8 @@ fn reusable_sibling_peer(
     receiver.routing_peer(&source.user_id()).unwrap()
 }
 
-// Old implementations close on the optional tag before accepting the original
-// one-shot request. Keep downgrade fixtures explicit about this extra probe.
+// Old implementations close on optional session/Favorites tags before accepting
+// the original one-shot request. Keep downgrade fixtures explicit about probes.
 pub(super) async fn accept_legacy_account_request(
     listener: &tokio::net::TcpListener,
     node: &Arc<Node>,
@@ -90,7 +94,11 @@ pub(super) async fn accept_legacy_account_request(
         let bytes = channel.recv().await.unwrap();
         if matches!(
             AccountHistoryFrame::decode_versioned(&bytes),
-            Some((_, AccountHistoryFrame::SessionRequest { .. }))
+            Some((
+                _,
+                AccountHistoryFrame::SessionRequest { .. }
+                    | AccountHistoryFrame::FavoritesRequest { .. }
+            ))
         ) {
             continue;
         }

@@ -360,6 +360,38 @@ impl Node {
             return;
         }
         if let Some((
+            super::account_sync_wire::AccountSyncVersion::V2,
+            super::account_sync_wire::AccountHistoryFrame::FavoritesRequest {
+                version: 1,
+                account_id,
+                after,
+                known_digest,
+                ..
+            },
+        )) = super::account_sync_wire::AccountHistoryFrame::decode_versioned(&first)
+        {
+            self.serve_message_favorites(&mut channel, &account_id, after, known_digest)
+                .await;
+            return;
+        }
+        if let Some((
+            super::account_sync_wire::AccountSyncVersion::V2,
+            super::account_sync_wire::AccountHistoryFrame::FavoriteAttachmentRequest {
+                version: 1,
+                account_id,
+                file_conv,
+            },
+        )) = super::account_sync_wire::AccountHistoryFrame::decode_versioned(&first)
+        {
+            self.serve_favorite_attachment(
+                &mut channel,
+                &account_id,
+                crate::eventlog::event::ConversationId::new(file_conv),
+            )
+            .await;
+            return;
+        }
+        if let Some((
             version,
             super::account_sync_wire::AccountHistoryFrame::Request {
                 account_id,
