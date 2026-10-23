@@ -384,11 +384,12 @@ export function Composer({
     if (admission) void admission.finally(release);
   };
 
-  const onKeyDown = (e: React.KeyboardEvent) => {
+  const onKeyDown = (e: React.KeyboardEvent | KeyboardEvent) => {
     // Enter confirms an IME candidate in many writing systems. Let the input method
     // finish composition before interpreting Enter as a send shortcut. WebKit
     // can emit compositionend first, so its confirming keydown needs the 229 fallback.
-    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+    const nativeEvent = "nativeEvent" in e ? e.nativeEvent : e;
+    if (nativeEvent.isComposing || nativeEvent.keyCode === 229) return;
     if (suggestions.length > 0 && e.key === "Enter") {
       e.preventDefault();
       applyMention(suggestions[0]);
@@ -399,6 +400,26 @@ export function Composer({
       send();
     }
   };
+
+  useEffect(() => {
+    // Native capture/window transitions can leave focus on the page background.
+    // Keep Enter available for staged screenshots without taking keyboard control
+    // from other inputs, buttons or modal dialogs.
+    if (!pendingFiles.some((file) => screenshotFiles.current.has(file))) return;
+    const keyboard = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.target !== document.body ||
+        document.querySelector(
+          '[role="dialog"][aria-modal="true"], dialog[open]',
+        )
+      )
+        return;
+      onKeyDown(event);
+    };
+    document.addEventListener("keydown", keyboard);
+    return () => document.removeEventListener("keydown", keyboard);
+  });
 
   // Stage copied files (including screenshots) for the normal Enter/Send shortcut.
   // Desktop clipboards often include the filename as text too; consume that only when

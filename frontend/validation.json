@@ -2,6 +2,28 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-screenshot-submission",
+      "paths": [
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ComposerScreenshot.test.ts",
+        "frontend/e2e/screenshot-portable.spec.ts"
+      ],
+      "frontend": ["src/features/chat/ComposerScreenshot.test.ts"],
+      "capability": {
+        "summary": "Send a staged screenshot with Enter even when native capture leaves focus on the page background.",
+        "guide": "docs/help/topics/screenshots.md",
+        "invariants": [
+          {
+            "name": "Background Enter sends only staged screenshots and preserves IME confirmation, Shift+Enter, focused controls and modal ownership",
+            "reference": "docs/help/topics/screenshots.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run screenshot browser scenarios in Chromium and WebKit; mocked focus loss does not establish native fullscreen restoration behavior."
+      ]
+    },
+    {
       "id": "frontend-search",
       "paths": [
         "frontend/src/features/chat/SearchDialog.tsx",
@@ -631,6 +653,15 @@
     }
   ],
   "prScenarios": [
+    {
+      "id": "frontend-screenshot-submission-acceptance",
+      "paths": [
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ComposerScreenshot.test.ts",
+        "frontend/e2e/screenshot-portable.spec.ts"
+      ],
+      "browser": ["e2e/screenshot-portable.spec.ts"]
+    },
     {
       "id": "frontend-exact-search-acceptance",
       "paths": [
