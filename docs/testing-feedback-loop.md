@@ -28,11 +28,11 @@ cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
 
-Browser spec and portable configuration changes select the
-`portable-browser-reporting` diagnostic. It compares both core and extended
+Changes to configured portable browser specs and the portable configuration
+select the `portable-browser-reporting` diagnostic. It compares both core and extended
 inventories with Playwright discovery without launching browsers. Register new
-scenarios in `requiredBrowserPaths`; discovery checks do not replace executed
-browser evidence.
+scenarios in `requiredBrowserPaths` and additional spec files in the owning
+validation contract. Discovery checks do not replace executed browser evidence.
 
 Portable browser acceptance runs through `scripts/evals/portable-runner.mjs`.
 Windows uses two sequential Playwright shards with separate browser/dev-server

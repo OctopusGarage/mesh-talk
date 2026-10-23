@@ -308,6 +308,14 @@ test("acceptance harness changes select their focused integrity checks without c
     assert.deepEqual(plan.blockers, [], file);
     assert.ok(plan[kind].includes(selected), `${file} must select ${selected}`);
   }
+  const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
+  for (const name of new Set(requiredBrowserPaths("core").map(path => path[0]))) {
+    const file = `frontend/e2e/${name}`;
+    const plan = buildAffectedPlan([file], { contracts: registered });
+    assert.deepEqual(plan.blockers, [], file);
+    assert.ok(plan.node.includes("scripts/diagnostics/browser-eval-report.test.mjs"), `${file} must select portable inventory parity`);
+  }
+  assert.ok(buildAffectedPlan(["frontend/playwright.portable.config.ts"], { contracts: registered }).node.includes("scripts/diagnostics/browser-eval-report.test.mjs"));
   for (const file of ["frontend/e2e/future.spec.ts", "scripts/diagnostics/future-native.mjs", "docs/evals/future-suite.json"]) {
     assert.match(buildAffectedPlan([file], { contracts: registered }).blockers.join(" "), /unmapped/i, file);
   }
