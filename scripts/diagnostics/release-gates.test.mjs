@@ -49,7 +49,7 @@ test("publication resolves a verified build and skips compilation", () => {
 test("post-office images use verified Linux archives and publish before the release", () => {
   const build = workflow.split("  build-release:\n")[1]?.split(/^  verify-release:/m)[0];
   const publish = workflow.split("  publish-release:\n")[1];
-  assert.match(build, /name: Build headless post-office node\n\s+if: matrix\.variant == 'default'/);
+  assert.match(build, /name: Build headless post-office node\n\s+run: cargo build/);
   assert.match(build, /scripts\/release\/package-post-office\.sh/);
   assert.match(build, /subject-path: "release_zips\/\*\.zip"/);
   assert.match(publish, /packages: write/);

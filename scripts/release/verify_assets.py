@@ -28,7 +28,6 @@ PLATFORMS = {
     "linux_x86_64": ("deb", "rpm", "AppImage"),
     "linux_aarch64": ("deb", "rpm", "AppImage"),
 }
-VARIANTS = ("default", "lite")
 MAX_UNCOMPRESSED = 2 * 1024**3
 
 
@@ -281,10 +280,8 @@ def verify_directory(root, tag, version, *, check_installers=True):
     require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version), "invalid version")
     expected = {"mesh-talk.cdx.json"}
     for platform in PLATFORMS:
-        for variant in VARIANTS:
-            suffix = "_lite" if variant == "lite" else ""
-            name = f"mesh-talk_{tag}_{platform}{suffix}.zip"
-            expected.update((name, name + ".bundle"))
+        name = f"mesh-talk_{tag}_{platform}.zip"
+        expected.update((name, name + ".bundle"))
         relay_name = f"mesh-talk-post-office_{tag}_{platform}.zip"
         expected.update((relay_name, relay_name + ".bundle"))
     require({path.name for path in root.iterdir()} == expected, "incomplete or unexpected asset set")
@@ -294,17 +291,15 @@ def verify_directory(root, tag, version, *, check_installers=True):
     sbom = json.loads((root / "mesh-talk.cdx.json").read_text())
     require(sbom.get("bomFormat") == "CycloneDX" and isinstance(sbom.get("components"), list) and sbom["components"], "invalid or empty SBOM")
     for platform in PLATFORMS:
-        for variant in VARIANTS:
-            suffix = "_lite" if variant == "lite" else ""
-            archive = root / f"mesh-talk_{tag}_{platform}{suffix}.zip"
-            bundle = json.loads(Path(str(archive) + ".bundle").read_text())
-            require(isinstance(bundle, dict) and bundle.get("mediaType"), "invalid signature bundle")
-            verify_archive(archive, platform, version, check_installers)
+        archive = root / f"mesh-talk_{tag}_{platform}.zip"
+        bundle = json.loads(Path(str(archive) + ".bundle").read_text())
+        require(isinstance(bundle, dict) and bundle.get("mediaType"), "invalid signature bundle")
+        verify_archive(archive, platform, version, check_installers)
         relay_archive = root / f"mesh-talk-post-office_{tag}_{platform}.zip"
         relay_bundle = json.loads(Path(str(relay_archive) + ".bundle").read_text())
         require(isinstance(relay_bundle, dict) and relay_bundle.get("mediaType"), "invalid post-office signature bundle")
         verify_post_office_archive(relay_archive, platform, check_installers)
-    return [f"{platform}:{variant}" for platform in PLATFORMS for variant in VARIANTS] + [f"{platform}:post-office" for platform in PLATFORMS]
+    return [f"{platform}:desktop" for platform in PLATFORMS] + [f"{platform}:post-office" for platform in PLATFORMS]
 
 
 def main():

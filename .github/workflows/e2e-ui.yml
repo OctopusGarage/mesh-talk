@@ -228,8 +228,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  lite:
-    name: Lite UI and asset check
+  packs:
+    name: Optional pack UI and asset check
     needs: unit-coverage
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -245,9 +245,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - name: Verify lite build has no bundled packs
-        run: npm run build:lite && node ../scripts/release/check-variant-assets.mjs lite
-      - name: Check lite JavaScript for macOS 12 WKWebView
+      - name: Verify desktop build has no bundled packs
+        run: npm run build && node ../scripts/release/check-variant-assets.mjs
+      - name: Check JavaScript for macOS 12 WKWebView
         run: npm run check:build-syntax
       - name: Download this run's unit coverage
         uses: actions/download-artifact@v8
@@ -256,18 +256,17 @@ jobs:
           path: target/ui-unit-coverage
       - name: Validate unit coverage provenance and restore line map
         run: node ../scripts/ci/unit-coverage-artifact.mjs restore ../target/ui-unit-coverage coverage/lcov.info
-      - name: Run lite sticker and installation flows
-        run: npx playwright test e2e/stickers.spec.ts e2e/packs-lite.spec.ts --grep "lite sends built-in stickers|lite starts without" --workers=1 --retries=0
+      - name: Run sticker and installation flows
+        run: npx playwright test e2e/stickers.spec.ts e2e/packs-empty.spec.ts --grep "starts without" --workers=1 --retries=0
         env:
-          MESH_TALK_VARIANT: lite
           MESH_TALK_E2E_COVERAGE: "1"
-      - name: Merge lite browser coverage
+      - name: Merge pack browser coverage
         run: node scripts/merge-e2e-coverage.mjs
-      - name: Upload lite browser coverage
+      - name: Upload pack browser coverage
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v5.5.1
         with:
           files: frontend/coverage/e2e.lcov
-          flags: ui-e2e-lite
+          flags: ui-e2e-packs
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 
@@ -370,7 +369,7 @@ jobs:
 
   ui-gate:
     name: Playwright UI E2E
-    needs: [e2e, coverage, reports, lite, portable, firefox-extended]
+    needs: [e2e, coverage, reports, packs, portable, firefox-extended]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -379,7 +378,7 @@ jobs:
           BASELINE: ${{ needs.e2e.result }}
           COVERAGE: ${{ needs.coverage.result }}
           REPORTS: ${{ needs.reports.result }}
-          LITE: ${{ needs.lite.result }}
+          PACKS: ${{ needs.packs.result }}
           PORTABLE: ${{ needs.portable.result }}
           FIREFOX: ${{ needs.firefox-extended.result }}
           EXTENDED: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended) }}
@@ -387,7 +386,7 @@ jobs:
           test "$BASELINE" = success
           test "$COVERAGE" = success
           test "$REPORTS" = success
-          test "$LITE" = success
+          test "$PACKS" = success
           test "$PORTABLE" = success
           if [ "$EXTENDED" = true ]; then
             test "$FIREFOX" = success

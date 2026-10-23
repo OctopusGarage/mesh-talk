@@ -29,6 +29,7 @@ test("personal avatar gallery offers the player pack", async ({ page }) => {
 test("personal avatar gallery offers all Cat Acrylic portraits", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["cat-acrylic-avatars"]);
   await login(page);
   await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "Change your photo" }).click();
@@ -40,7 +41,9 @@ test("personal avatar gallery offers all Cat Acrylic portraits", async ({
   await expect(gallery).toBeHidden();
 });
 
-test("bundled avatar tabs retain their translated names", async ({ page }) => {
+test("installed avatar tabs retain their translated names", async ({
+  page,
+}) => {
   await page.addInitScript(() => localStorage.setItem("mesh-talk-lang", "ja"));
   await seedMarketPacks(page, ["players"]);
   await login(page);

@@ -439,7 +439,7 @@ independent checks run concurrently and heavy suites are not repeated by health.
 | `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, dependency audits on Linux/macOS/Windows                                                                                                      |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
 | `ci.yml`                              | Frontend builds, built-JS compatibility, unit coverage, diagnostic/Python regressions, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; Linux Rust/E2E coverage and eval smoke |
-| `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, lite checks, portable browser matrices and scheduled extended scenarios                                                                       |
+| `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, optional-pack checks, portable browser matrices and scheduled extended scenarios                                                                       |
 | Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                        |
 
 Every existing protected health name now requires both the source scanner job
@@ -469,7 +469,7 @@ resource failures rather than increasing assertion timeouts or enabling retries.
 
 Each Linux shard uploads raw browser coverage plus its source SHA and shard
 identity. A single same-workflow Linux unit-coverage producer supplies the line map to
-the full and lite consumers. Consumers check source SHA, workflow/run/attempt,
+the full and optional-pack consumers. Consumers check source SHA, workflow/run/attempt,
 platform/architecture, Node major and LCOV digest before restoring it. The
 coverage job requires that producer and all four distinct current-source shards before collecting their parts and producing
 one browser LCOV upload. It prefixes filenames so reports from different runners
@@ -479,7 +479,7 @@ workflow when retrying a failed attempt, so producer and shards belong to the
 same attempt. The extra producer job adds setup/queue/transfer cost; benchmark
 its net latency and runner-minute effect before claiming a speedup.
 The final UI gate requires successful browser, coverage, merged-report,
-lite and portable jobs, plus Firefox when selected. Blob reports and failure
+optional-pack and portable jobs, plus Firefox when selected. Blob reports and failure
 traces are retained per OS/shard/attempt, and an HTML report is merged per OS even
 when browser execution fails.
 

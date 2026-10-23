@@ -4,9 +4,7 @@ import { test, expect } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 
-test.skip(process.env.MESH_TALK_VARIANT !== "lite", "Lite build only");
-
-test("lite starts without avatar and theme libraries but accepts ZIPs", async ({
+test("starts without avatar and theme libraries but accepts ZIPs", async ({
   page,
 }) => {
   await enterChat(page);

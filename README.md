@@ -136,9 +136,9 @@ clients do not enforce the expiry frame. For the exact limits, see the
 ## Install and start talking
 
 1. Download the archive for your OS and CPU from
-   [GitHub Releases](https://github.com/OctopusGarage/mesh-talk/releases). The default
-   edition bundles optional visual packs; the lite edition omits those bundles and
-   animated sticker assets. Both can install packs later.
+   [GitHub Releases](https://github.com/OctopusGarage/mesh-talk/releases). The app starts
+   without optional visual packs or animated sticker assets. Install packs later
+   from the marketplace or a local ZIP.
 2. Unzip the archive and install the app using the platform package below.
 3. Create a local account on each person's device. On the same LAN, peers should appear
    through automatic discovery. Verify a contact's safety number before relying on that
