@@ -13,11 +13,11 @@ Treat a linking code as sensitive. Do not share it with someone who should not j
 
 ## Choose what synchronizes
 
-The device dialog shows available synchronization categories and status. Choose history, file cards and attachment contents separately. History shares available direct, accepted-channel and Saved Messages history when permitted. A synchronized file card does not mean its contents are downloaded. Appearance can participate when its category is enabled; machine-specific and privacy choices do not all synchronize.
+The device dialog shows available synchronization categories and status. Choose history, file cards and attachment contents separately. History shares available direct, accepted-channel and Message Yourself history when permitted. A synchronized file card does not mean its contents are downloaded. Appearance can participate when its category is enabled; machine-specific and privacy choices do not all synchronize.
 
-Open **Saved Messages → Devices** to see this device and the other devices linked to your account, including currently offline devices. The device list stays collapsed until you open it. Online status reflects current presence observations; it is separate from whether synchronization is enabled or complete. If no other devices are linked, you can choose **Link a device** from the list. Saved Messages remains available for local notes and files.
+Open **Message Yourself → Devices** to see this device and the other devices linked to your account, including currently offline devices. The device list stays collapsed until you open it. Online status reflects current presence observations; it is separate from whether synchronization is enabled or complete. If no other devices are linked, you can choose **Link a device** from the list. Message Yourself remains available for local notes and files.
 
-Use **Saved Messages** for notes and files addressed to your own account. You can save them before linking another device. Linked devices synchronize eligible retained content according to your selections when a trusted source is reachable.
+Use **Message Yourself** for notes and files addressed to your own account. You can save them before linking another device. Linked devices synchronize eligible retained content according to your selections when a trusted source is reachable.
 
 A post-office bridge is not a substitute for the direct reachable path needed by device synchronization. Linking is not an encrypted backup, and it cannot recreate data that no device retains.
 
