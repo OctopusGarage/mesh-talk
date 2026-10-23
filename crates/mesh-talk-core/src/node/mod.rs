@@ -45,6 +45,7 @@ pub(crate) mod filebook;
 pub(crate) mod files;
 #[cfg(test)]
 mod group_chain_tests;
+mod join_history;
 pub(crate) mod lifecycle;
 pub(crate) mod linking;
 pub(crate) mod media_store;

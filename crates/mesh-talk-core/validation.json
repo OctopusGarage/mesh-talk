@@ -2,6 +2,51 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-channel-join-history",
+      "paths": [
+        "crates/mesh-talk-core/src/channel/history.rs",
+        "crates/mesh-talk-core/src/node/join_history.rs",
+        "crates/mesh-talk-core/src/node/join_history_tests.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::join_history::tests::",
+            "node::channel::tests::late_joiner_cannot_read_pre_join_history",
+            "node::session::tests::",
+            "node::group_chain_tests::public_group_history_capability_metadata_is_cached_and_principal_scoped"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-channel",
+        "desktop-chat",
+        "frontend-chat"
+      ],
+      "capability": {
+        "summary": "Share only a frozen owner-authorized bounded text copy after invitation acceptance without exposing prior sender chains.",
+        "guide": "docs/help/topics/channels.md#history-for-new-members",
+        "invariants": [
+          {
+            "name": "Existing channels default off; only an active owner signs policy changes, which affect future invitations",
+            "reference": "docs/help/topics/channels.md#history-for-new-members"
+          },
+          {
+            "name": "Count, authored-time, frame, expiry, recall, source authority and invitation lifetime bounds apply to separately encrypted copies and their post-acceptance row-key releases",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "V3 sync gates new event kinds, replay/restart deduplicates original IDs and shared copies arrive as silent history",
+            "reference": "docs/help/topics/channels.md#history-for-new-members"
+          }
+        ]
+      },
+      "escalation": [
+        "Run focused Noise loopback and restart tests, registered desktop admission tests and the history-settings browser scenario. Native cross-platform lifecycle gates and required CI remain separate acceptance evidence."
+      ]
+    },
+    {
       "id": "core-search-references",
       "paths": [
         "crates/mesh-talk-core/src/node/search.rs",

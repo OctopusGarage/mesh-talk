@@ -230,6 +230,14 @@ A retained authorized copy served by an accepted channel member. It is distinct
 from an opaque post-office copy whose holder cannot decrypt channel content.
 _Avoid_: post-office membership, global archive.
 
+**Join-history copy**:
+A bounded, owner-authorized copy of retained channel text offered for a particular
+invitation and readable only after acceptance. Original IDs and authored times
+are retained; the owner attests to the copied content. It does not grant old
+sender-chain keys, attachment access or complete conversation history.
+_Avoid_: full history sync, original-author signature on the copied plaintext.
+See [channel history settings](docs/help/topics/channels.md#history-for-new-members).
+
 ## Peer trust evidence
 
 - **Trust card**: an Account-signed public profile statement, not proof of a human

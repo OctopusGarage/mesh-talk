@@ -437,3 +437,14 @@ while a detached admitted task finishes best-effort peer/relay fanout.
 and manual verification. Profile renderers must not derive verification from a
 valid public signature. The [peer trust guide](peer-trust.md) owns claim meanings
 and evidence limits.
+
+### Bounded history for channel invitations
+
+`channel/history.rs` owns the four fixed history policy presets. The existing
+channel lifecycle in `node/channels.rs` owns invitations; `node/join_history.rs`
+owns frozen encrypted copies, owner-policy validation and post-acceptance row-key
+release. It reuses the delivery journal, channel crypto primitives, causal
+membership projection and received-history store. Desktop IPC delegates authority
+to core; the member dialog presents the policy without independently deciding
+history eligibility. The [channel guide](help/topics/channels.md#history-for-new-members)
+owns user-visible limits and availability.

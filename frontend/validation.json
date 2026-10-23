@@ -658,9 +658,48 @@
       "escalation": [
         "Run e2e/notification-permission.spec.ts and affected settings/visual browser scenarios. Native authorization prompts and OS navigation require packaged-app macOS/Windows evidence."
       ]
+    },
+    {
+      "id": "frontend-channel-join-history",
+      "paths": [
+        "frontend/src/features/chat/ChannelHistorySettings.tsx",
+        "frontend/src/features/chat/ChannelHistorySettings.test.ts",
+        "frontend/e2e/channel-history.spec.ts",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/types.ts"
+      ],
+      "frontend": [
+        "src/features/chat/ChannelHistorySettings.test.ts",
+        "src/features/chat/MembersDialog.test.ts",
+        "src/lib/api.test.ts"
+      ],
+      "capability": {
+        "summary": "Expose the owner-controlled recent history window for new channel members.",
+        "guide": "docs/help/topics/channels.md",
+        "invariants": [
+          {
+            "name": "Only an accepted owner may change the policy; stale channel or desktop session results never replace current settings",
+            "reference": "docs/ARCHITECTURE.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run channel membership browser and native IPC scenarios for owner-only settings, channel switching and desktop session retirement; mocked IPC does not certify native authorization."
+      ]
     }
   ],
   "prScenarios": [
+    {
+      "id": "frontend-channel-join-history-acceptance",
+      "paths": [
+        "frontend/src/features/chat/ChannelHistorySettings.tsx",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/e2e/channel-history.spec.ts"
+      ],
+      "browser": ["e2e/channel-history.spec.ts"]
+    },
     {
       "id": "frontend-screenshot-submission-acceptance",
       "paths": [

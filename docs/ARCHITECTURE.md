@@ -140,6 +140,26 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   when its signed event causally descends from acceptance, and an unaccepted member
   cannot send or inherit ownership. This cutoff also applies to channel file
   manifests, reactions, and recalls.
+  A separately owner-authorized [join-history copy](help/topics/channels.md#history-for-new-members)
+  is the bounded exception to the acceptance cutoff. Append-only event kinds 15/16
+  carry a signed policy and versioned offer/release controls; V3 channel sync gates
+  them from older decoders. Invitation and offer use the existing durable delivery
+  journal as one transaction. The offer freezes a capped selection of retained text
+  at the invitation, with original event IDs and expiry framing. A fresh snapshot
+  root derives independent per-message encryption keys via domain-separated HKDF;
+  only existing holders authorized for every row receive the root, sealed per
+  device. After signed acceptance, an eligible sharing holder seals only unexpired,
+  nonrecalled row keys to the new device. The release observes both offer and
+  acceptance, which may arrive in either order. Removal ends that invitation's
+  permission lifetime; stale offers do not generate retry events. Recipients
+  validate canonical owner authority, original event ancestry, count/time limits, lifetime,
+  release authority and encryption before using the existing durable received
+  projection. Ownership transfers pin observed policy/offer ancestry; former-owner
+  forks cannot override the new owner or backdate unobserved grants into a closed
+  owner lifetime. These are owner-attested copies of text, not independent proof that
+  the original author encrypted that exact plaintext. Sender chains, attachment
+  admission, ordinary post-acceptance content and existing plaintext archive rules
+  remain owned by their existing modules.
   Legacy unmarked channels retain their original auto-join semantics. The current
   owner alone may add/remove members or sign `ChannelOwnerTransfer`, and only an
   accepted current member can become owner. A non-owner can append a self-signed

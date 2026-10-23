@@ -507,6 +507,40 @@
       "escalation": [
         "Run e2e/notification-permission.spec.ts for UI recovery and nonblocking sends. Packaged macOS and Windows authorization/revocation, system-settings navigation and actual notification delivery require native platform evidence; browser mocks and mapping tests do not certify them."
       ]
+    },
+    {
+      "id": "desktop-channel-join-history",
+      "paths": [
+        "src-tauri/src/chat_commands/channels.rs",
+        "src-tauri/src/chat_commands/models.rs"
+      ],
+      "frontend": [
+        "src/lib/api.test.ts"
+      ],
+      "capability": {
+        "summary": "Expose the owner-controlled recent history window for new channel members.",
+        "guide": "docs/help/topics/channels.md",
+        "invariants": [
+          {
+            "name": "Only an accepted owner may change the policy; stale channel or desktop session results never replace current settings",
+            "reference": "docs/ARCHITECTURE.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run channel membership browser and native IPC scenarios for owner-only settings, channel switching and desktop session retirement; mocked IPC does not certify native authorization."
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "chat_commands::models::tests::membership_metadata_serializes_each_history_policy",
+            "owner_commands::tests::registered_channel_history_policy_round_trips_and_rejects_locked_mutation",
+            "owner_commands::tests::queued_channel_mutation_rejects_lock_and_same_owner_relogin",
+            "runtime_admission::"
+          ]
+        }
+      ]
     }
   ],
   "prScenarios": [

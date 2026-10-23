@@ -115,6 +115,7 @@ pub struct ChannelMemberInfo {
 /// reveal the add/remove controls only to the owner.
 #[derive(Serialize)]
 pub struct ChannelMembersInfo {
+    pub history_policy: mesh_talk_core::channel::HistoryPolicy,
     pub owner: String,
     pub members: Vec<ChannelMemberInfo>,
 }
@@ -145,5 +146,31 @@ mod peer_route_tests {
         let json = serde_json::to_value(&routed).unwrap();
         assert_eq!(json["directly_reachable"], true);
         assert_eq!(json["discovered_on_lan"], false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mesh_talk_core::channel::HistoryPolicy;
+    #[test]
+    fn membership_metadata_serializes_each_history_policy() {
+        for (policy, expected) in [
+            (HistoryPolicy::Off, "off"),
+            (HistoryPolicy::LastTen, "last_ten"),
+            (HistoryPolicy::LastThreeDays, "last_three_days"),
+            (
+                HistoryPolicy::LastTenWithinThreeDays,
+                "last_ten_within_three_days",
+            ),
+        ] {
+            let value = serde_json::to_value(ChannelMembersInfo {
+                owner: "owner".into(),
+                members: vec![],
+                history_policy: policy,
+            })
+            .unwrap();
+            assert_eq!(value["history_policy"], expected);
+        }
     }
 }

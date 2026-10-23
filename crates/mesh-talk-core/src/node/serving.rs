@@ -1023,6 +1023,12 @@ impl Node {
                 }
                 received.push(msg);
             }
+            let (history, received): (Vec<_>, Vec<_>) = received
+                .into_iter()
+                .partition(|message| message.arrival_kind == "history_sync");
+            for message in history {
+                let _ = self.channel_incoming.send(message);
+            }
             let total = received.len();
             let kind = if context == "live" && (opened > 1 || retrying) {
                 "catch_up"

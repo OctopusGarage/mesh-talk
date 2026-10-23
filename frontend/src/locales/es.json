@@ -795,6 +795,18 @@
     "reverify": "Volver a verificar"
   },
   "members": {
+    "historyTitle": "Historial para nuevos miembros",
+    "historyHelp": "Elige los mensajes recientes que se comparten con los nuevos miembros. Esto no modifica el historial de los miembros actuales.",
+    "historyLoading": "Cargando la configuración del historial…",
+    "historySaving": "Guardando la configuración del historial…",
+    "historyError": "No se pudo cargar o guardar la configuración del historial. Inténtalo de nuevo.",
+    "historyRetry": "Reintentar",
+    "historyPolicy": {
+      "off": "Desactivado",
+      "last_ten": "Últimos 10 mensajes",
+      "last_three_days": "Mensajes de los últimos 3 días",
+      "last_ten_within_three_days": "Últimos 10 mensajes de los últimos 3 días"
+    },
     "activity": "Actividad",
     "activity_created": "{{actor}} creó el canal",
     "activity_joined": "{{actor}} añadió a {{target}}",

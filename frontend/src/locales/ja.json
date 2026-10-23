@@ -795,6 +795,18 @@
     "reverify": "再検証"
   },
   "members": {
+    "historyTitle": "新しいメンバーに共有する履歴",
+    "historyHelp": "新しいメンバーに共有する最近のメッセージを選択します。既存のメンバーの履歴は変わりません。",
+    "historyLoading": "履歴の設定を読み込み中…",
+    "historySaving": "履歴の設定を保存中…",
+    "historyError": "履歴の設定を読み込み、または保存できませんでした。もう一度お試しください。",
+    "historyRetry": "再試行",
+    "historyPolicy": {
+      "off": "オフ",
+      "last_ten": "最新の10件のメッセージ",
+      "last_three_days": "過去3日間のメッセージ",
+      "last_ten_within_three_days": "過去3日間の最新10件のメッセージ"
+    },
     "activity": "チャンネルの履歴",
     "activity_created": "{{actor}} がチャンネルを作成",
     "activity_joined": "{{actor}} が {{target}} を追加",

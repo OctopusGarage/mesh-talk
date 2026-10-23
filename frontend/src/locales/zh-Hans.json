@@ -795,6 +795,18 @@
     "reverify": "重新验证"
   },
   "members": {
+    "historyTitle": "新成员可见的历史消息",
+    "historyHelp": "选择与新成员共享的近期消息。这不会更改现有成员的历史消息。",
+    "historyLoading": "正在加载历史消息设置…",
+    "historySaving": "正在保存历史消息设置…",
+    "historyError": "无法加载或保存历史消息设置，请重试。",
+    "historyRetry": "重试",
+    "historyPolicy": {
+      "off": "关闭",
+      "last_ten": "最近 10 条消息",
+      "last_three_days": "最近 3 天的消息",
+      "last_ten_within_three_days": "最近 3 天内的最近 10 条消息"
+    },
     "activity": "频道动态",
     "activity_created": "{{actor}} 创建了频道",
     "activity_joined": "{{actor}} 邀请了 {{target}}",

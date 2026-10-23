@@ -576,6 +576,15 @@ impl Node {
                     meta.encode()
                 },
             )?;
+            if invite {
+                self.append_event(
+                    channel,
+                    EventKind::ChannelHistoryPolicy,
+                    super::join_history::encode_policy(
+                        crate::channel::HistoryPolicy::LastTenWithinThreeDays,
+                    ),
+                )?;
+            }
             // Build our own channel state (sets our identity for the sender-key path).
             self.process_channel(channel);
             // Distribute our epoch-0 sender-key distribution to every member.
@@ -718,11 +727,9 @@ impl Node {
                 epoch: new_epoch,
                 owner,
             };
-            self.append_event(
-                channel,
-                EventKind::MembershipChange,
-                meta.encode_invitation(),
-            )?;
+            let policy = self.channel_history_policy(channel);
+            let selected = self.select_join_history(channel, policy, now_millis());
+            self.append_invitation_with_history(channel, &meta, &new_member, selected, policy)?;
             self.process_channel(channel);
             distribution = Some(new_members.clone());
             Ok(())
@@ -1032,6 +1039,10 @@ impl Node {
     }
 
     pub async fn retry_channel_controls(&self) {
+        let released = self.retry_join_history().unwrap_or_else(|error| {
+            log::warn!("channel join history retry failed: {error}");
+            Vec::new()
+        });
         let mut pending = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let own = self.user_id();
@@ -1044,6 +1055,11 @@ impl Node {
                 .chain(book.pending_replica_preferences(&own))
             {
                 controls.insert(id, members);
+            }
+            for channel in released {
+                if let Some(state) = book.state(&channel) {
+                    controls.insert(channel, state.members().to_vec());
+                }
             }
             controls.into_iter().collect::<Vec<_>>()
         };
