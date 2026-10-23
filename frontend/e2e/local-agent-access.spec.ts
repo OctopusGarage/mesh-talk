@@ -29,7 +29,13 @@ for (const viewport of [
     expect(instructions).not.toContain("agent-access.json");
     await panel.getByTestId("copy-agent-instructions").click();
     await expect
-      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .poll(async () => {
+        const copied = await page.evaluate(() =>
+          navigator.clipboard.readText(),
+        );
+        // Windows clipboard reads use CRLF; preserve every other prompt byte.
+        return copied.replace(/\r\n/g, "\n");
+      })
       .toBe(instructions);
     await expectDialogFitsViewport(page, "settings-dialog");
     await page.screenshot({

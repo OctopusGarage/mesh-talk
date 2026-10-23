@@ -103,6 +103,11 @@ fn check_path(path: &Path, create_parents: bool) -> Result<(), String> {
             return Err("Agent access paths must not contain parent traversal".into());
         }
         current.push(component);
+        // A Windows drive/UNC prefix becomes a queryable path only once the root
+        // separator is appended. Still inspect the root and every descendant.
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) => {
                 if is_link(&metadata) || (current != path && !metadata.is_dir()) {
@@ -256,6 +261,27 @@ mod tests {
             directory.join("AGENTS.md"),
             directory.join("client.json"),
         )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_and_verbatim_paths_support_nested_instruction_lifecycle() {
+        let root = tempfile::Builder::new()
+            .prefix("mesh-agent-instructions-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        let ordinary = root.path().to_path_buf();
+        let verbatim = ordinary.canonicalize().unwrap();
+        for (index, base) in [ordinary, verbatim].iter().enumerate() {
+            let agents = base.join(format!("nested-{index}/codex/AGENTS.md"));
+            install(&agents, "http://127.0.0.1:12345/v1/help").unwrap();
+            install(&agents, "http://127.0.0.1:54321/v1/help").unwrap();
+            let installed = fs::read_to_string(&agents).unwrap();
+            assert_eq!(installed.matches(BEGIN).count(), 1);
+            assert!(installed.contains("54321/v1/help"));
+            remove(&agents).unwrap();
+            assert!(fs::read(&agents).unwrap().is_empty());
+        }
     }
 
     #[test]
