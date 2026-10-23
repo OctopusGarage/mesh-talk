@@ -31,6 +31,7 @@ pub mod favorites;
 mod integrations;
 mod linked_account;
 pub mod logger;
+pub mod message_favorites;
 mod notifications;
 pub mod owner_commands;
 pub mod perf;
@@ -411,6 +412,14 @@ pub fn run_tauri_configured(
                 crate::chat_commands::search,
                 crate::owner_commands::owner_search_recent,
                 crate::owner_commands::owner_search_context,
+                crate::message_favorites::owner_list_message_favorites,
+                crate::message_favorites::owner_save_message_favorite,
+                crate::message_favorites::owner_edit_message_favorite,
+                crate::message_favorites::owner_remove_message_favorite,
+                crate::message_favorites::owner_inspect_message_favorites,
+                crate::message_favorites::owner_favorite_file_available,
+                crate::message_favorites::owner_read_favorite_file,
+                crate::message_favorites::owner_save_favorite_file,
                 crate::chat_commands::delete_message,
                 crate::chat_commands::recall_message,
                 crate::chat_commands::clear_conversation,

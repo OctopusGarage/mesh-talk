@@ -25,6 +25,7 @@ and the technical [documentation map](../README.md).
 | Add another computer                    | [Link devices](topics/link-devices.md)               |
 | Protect the screen or change visibility | [Privacy controls](topics/privacy.md)                |
 | Change alerts and previews              | [Notifications](topics/notifications.md)             |
+| Collect messages with personal notes    | [Favorites](topics/favorites.md)                     |
 | Search or retain local messages         | [History](topics/history.md)                         |
 | Keep a recoverable copy                 | [Backup and restore](topics/backup.md)               |
 | Change theme or wallpaper               | [Appearance](topics/appearance.md)                   |

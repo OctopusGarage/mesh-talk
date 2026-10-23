@@ -1,3 +1,4 @@
+import { FavoritesDialog } from "./favorites/FavoritesDialog";
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, Network, Wifi, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -63,6 +64,8 @@ export function Sidebar() {
   const policyLoaded = useContactPolicy((s) => s.loaded);
   const policyError = useContactPolicy((s) => s.error);
   const owner = useAuth((s) => s.user?.id);
+  const generation = useAuth((s) => s.generation);
+  const favoritesScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
   const publiclyVisible = usePrivacy(
     (s) => s.owner === owner && s.loaded && s.snapshot?.invisible === false,
   );
@@ -244,6 +247,7 @@ export function Sidebar() {
           <span>Mesh-Talk</span>
         </div>
         <SearchDialog />
+        <FavoritesDialog key={`${owner}:${generation}:${favoritesScope}`} />
         <ProfileDialog open={profileOpen} onOpenChange={setProfileOpen} />
       </div>
 

@@ -1,4 +1,11 @@
 import { ConversationBio } from "./ConversationHeaders";
+import { useMessageCollection } from "./favorites/useMessageCollection";
+import {
+  CollectionToolbar,
+  FavoriteEditor,
+} from "./favorites/MessageCollection";
+import { canCollect, MAX_FAVORITE_MESSAGES } from "./favorites/selection";
+import { useFavoriteMembership } from "./favorites/useFavoriteMembership";
 import { NotificationPermissionNotice } from "./NotificationPermissionNotice";
 import { useNotificationPermissionReminder } from "./useNotificationPermissionReminder";
 import { displayIdentity } from "@/lib/displayIdentity";
@@ -125,6 +132,11 @@ export function ConversationView() {
     return map;
   }, [members]);
   const key = active ? convKey(active) : "";
+  const collection = useMessageCollection(
+    active,
+    `${owner}:${authGeneration}:${receptionScope}:${key}`,
+  );
+
   useEffect(() => {
     setPendingDelete(null);
   }, [key]);
@@ -160,6 +172,11 @@ export function ConversationView() {
           )
         : historyMessages,
     [exactContext, historyMessages, deletedContextIds, expiryNow],
+  );
+  const savedMessageIds = useFavoriteMembership(
+    active,
+    messages,
+    `${owner}:${authGeneration}:${receptionScope}:${key}`,
   );
   const closeSearchContext = () => {
     useChat.setState({ searchTarget: null });
@@ -444,6 +461,36 @@ export function ConversationView() {
           onDismiss={notificationReminder.dismiss}
         />
       )}
+      {collection.error && (
+        <p
+          role="alert"
+          className="break-words border-b px-4 py-2 text-sm text-destructive"
+        >
+          {collection.error}
+        </p>
+      )}
+      {collection.inspecting && (
+        <p
+          role="status"
+          className="border-b px-4 py-2 text-sm text-muted-foreground"
+        >
+          {t("common.loading")}
+        </p>
+      )}
+      {collection.selecting && (
+        <CollectionToolbar
+          selected={collection.selected}
+          onCancel={collection.cancel}
+          onCollect={() => collection.collect(collection.selected)}
+        />
+      )}
+      {collection.draft && (
+        <FavoriteEditor
+          key={`favorite:${owner}:${authGeneration}:${key}`}
+          draft={collection.draft}
+          onClose={collection.cancel}
+        />
+      )}
       <ReceptionStatus
         key={`${receptionScope}:${key}`}
         conversation={key}
@@ -606,7 +653,40 @@ export function ConversationView() {
                   )}
                 >
                   {showDay && <DaySeparator label={formatDay(m.wallClock)} />}
+                  {collection.selecting && (
+                    <label className="mx-4 flex items-center gap-2 rounded px-2 py-1 text-xs text-muted-foreground focus-within:ring-2 focus-within:ring-ring">
+                      <input
+                        type="checkbox"
+                        data-testid={`favorite-select-${m.id}`}
+                        checked={collection.selected.some(
+                          (item) => item.id === m.id,
+                        )}
+                        disabled={
+                          !canCollect(m) ||
+                          (collection.selected.length >=
+                            MAX_FAVORITE_MESSAGES &&
+                            !collection.selected.some(
+                              (item) => item.id === m.id,
+                            ))
+                        }
+                        onChange={() => collection.toggle(m)}
+                        className="h-4 w-4 accent-[hsl(var(--signal))]"
+                      />
+                      {t("messageFavorites.selectMessage", {
+                        text: (m.text || m.file?.name || "").slice(0, 60),
+                      })}
+                    </label>
+                  )}
                   <MessageBubble
+                    onCollect={
+                      canCollect(m)
+                        ? (message) => collection.collect([message])
+                        : undefined
+                    }
+                    onSelectMessages={
+                      canCollect(m) ? collection.start : undefined
+                    }
+                    collected={!!m.id && savedMessageIds.has(m.id)}
                     m={m}
                     parent={parent}
                     showAuthor={showAuthor}

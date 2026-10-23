@@ -1,3 +1,4 @@
+import { useMessageFavorites } from "@/store/messageFavorites";
 import {
   startAutomaticDownloads,
   useAutomaticDownloads,
@@ -163,6 +164,11 @@ export function ChatApp() {
     const stop = startPresence();
     return stop;
   }, [startPresence, owner, generation, ready, presenceRun, presenceIdentity]);
+
+  useEffect(() => {
+    useMessageFavorites.getState().reset();
+    return () => useMessageFavorites.getState().reset();
+  }, [owner, generation, presenceRun, presenceIdentity]);
 
   return (
     <DeliveryRecoveryProvider fallbackRef={recoveryFocus}>

@@ -109,10 +109,21 @@ What this installation has observed of a conversation's retained events. It is
 not proof of global history completeness or a read position.
 _Avoid_: synchronization complete, all messages received.
 
-**Saved Messages**:
+**Message Yourself**:
 The current account's personal conversation. Its existence does not require a
 second device to be discoverable.
+UI label: **Message Yourself** (Simplified Chinese: **给自己发消息**).
 _Avoid_: second account, temporary local scratch chat.
+
+**Message favorite**:
+An account-owned saved item containing one or more ordered message snapshots and
+optional personal title, description and per-message notes. It is independent of
+ordinary chat retention; explicit message expiry still applies to saved content.
+Collection UI label: **Favorites** (Simplified Chinese: **收藏夹**). An item without
+a title is an **Untitled favorite** (**未命名收藏**). Do not use “Saved Messages”
+as either feature's UI label.
+_Avoid_: Message Yourself, self-chat, pinned contact or pinned conversation.
+See [Favorites](docs/favorites.md).
 
 **Recovery archive**:
 A user-created encrypted snapshot protected by a separate recovery key. Restore

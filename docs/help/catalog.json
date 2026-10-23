@@ -237,6 +237,10 @@
         "pair",
         "sync",
         "Your devices",
+        "message yourself",
+        "self-chat",
+        "给自己发消息",
+        "自聊",
         "多设备",
         "关联设备",
         "同步",
@@ -485,6 +489,25 @@
         "kind": "settings",
         "category": "appearance"
       }
+    },
+    {
+      "id": "favorites",
+      "title": "Collect useful messages in Favorites",
+      "summary": "Save related messages together with searchable titles, descriptions and individual notes.",
+      "category": "messaging",
+      "keywords": [
+        "favorites",
+        "collect",
+        "notes",
+        "multi-select",
+        "收藏夹",
+        "消息收藏",
+        "多选",
+        "备注",
+        "说明"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/favorites.md"
     }
   ]
 }

@@ -2,6 +2,49 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-message-favorites",
+      "paths": [
+        "crates/mesh-talk-core/src/node/favorites.rs",
+        "crates/mesh-talk-core/src/node/favorites/",
+        "crates/mesh-talk-core/src/node/account_sync/favorites.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::favorites::",
+            "node::account_sync::favorites::",
+            "node::account_sync_wire::"
+          ]
+        }
+      ],
+      "consumers": [
+        "desktop-message-favorites",
+        "frontend-message-favorites"
+      ],
+      "capability": {
+        "summary": "Persist encrypted account-owned message snapshots and notes, independently retain files, and reconcile certified siblings through an optional bounded Favorites exchange.",
+        "guide": "docs/favorites.md",
+        "invariants": [
+          {
+            "name": "Canonical source resolution and atomic grouped capture never accept caller-claimed source plaintext; ordinary retention does not erase favorites",
+            "reference": "docs/favorites.md#collection-and-metadata"
+          },
+          {
+            "name": "Certified-sibling policy intersections, bounded records and deterministic revisions/tombstones prevent cross-account disclosure and stale resurrection",
+            "reference": "docs/favorites.md#synchronization"
+          },
+          {
+            "name": "Favorite file access requires a nonremoved unexpired reference and never grants transfer consent",
+            "reference": "docs/favorites.md#lifetime-and-files"
+          }
+        ]
+      },
+      "escalation": [
+        "Run the certified-sibling loopback save/edit/remove and policy/foreign-account tests; preserve old account-history wire fixtures. Native/physical device evidence is required before claiming cross-machine behavior."
+      ]
+    },
+    {
       "id": "core-search-references",
       "paths": [
         "crates/mesh-talk-core/src/node/search.rs",

@@ -36,6 +36,7 @@ pub(crate) mod dm;
 pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
 pub(crate) mod expiry_policy;
+mod favorites;
 mod file_completion;
 mod file_consent;
 mod file_consent_store;
@@ -147,3 +148,8 @@ mod account_profile_data;
 pub use account_profile_data::AccountProfile;
 
 mod account_profile_io;
+
+pub use favorites::{
+    FavoriteFile, FavoriteInspection, FavoriteMessage, FavoriteMetadata, FavoriteSource,
+    MessageFavorite, MessageFavoriteList,
+};

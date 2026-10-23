@@ -22,7 +22,7 @@ Restoring retains the account fingerprint but creates a new device fingerprint. 
 
 ## Know what is excluded
 
-Backups exclude machine settings, local UI customizations, pending deliveries, old device keys and files outside the managed media store. There is no vendor password-reset or recovery service. Losing both the backup and its key can make the old identity and encrypted history unrecoverable.
+Backups exclude Favorites and their retained attachments, machine settings, local UI customizations, pending deliveries, old device keys and files outside the managed media store. There is no vendor password-reset or recovery service. Losing both the backup and its key can make the old identity and encrypted history unrecoverable.
 
 ## Further reference
 
