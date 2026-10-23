@@ -205,20 +205,26 @@ local network discovery, cross-network discovery, post-office discovery, or
 public authenticated contact with unspecified network scope. Ordinary signed UDP
 observations outside the established interface scope show signed discovery with
 unspecified scope; they are not labeled local merely because of an address prefix.
-Sources can overlap
-on one device. The profile's **Discovered via** summary deduplicates devices while
-retaining each fresh introducing post office and local **UDP multicast** source.
-The host resolves an office name and device identity only when its exact introducing
-endpoint uniquely matches an infrastructure device in the verified snapshot. If
-that match is absent or ambiguous, show the endpoint with an unavailable name;
-never infer an office from an IP prefix or a person's preferred route. The named
-office is the immediate directory introducer, not necessarily the originating site
-or an onward federation hop. Unknown-scope observations remain explicitly unscoped.
+Sources can overlap on one device. The profile's **Discovery source** summary
+retains local **UDP multicast** and selects the closest identified visible post
+office to each device's original presence registration. Directory v5 reports a
+bounded origin distance: zero means the responding office directly registered
+the device; each trusted federation v3 forwarding hop adds one, up to sixteen.
+A hidden origin therefore falls back to the identified visible introducer with
+the smallest known distance, with stable device-identity tie breaking. Multiple
+devices can contribute different source offices. Unknown legacy distance, missing
+identity or ambiguous endpoint mapping yields an unknown office origin rather
+than a guessed source. The raw evidence remains available for device diagnostics.
+The host resolves names only when an exact introducing endpoint uniquely matches
+verified infrastructure; IP prefixes, ports and response ordering are not origin
+proof. Distances are trusted relay routing hints, not signatures by the originating
+office, geographic claims or conversation authority. They cannot renew presence.
+Legacy federation/directory records retain their existing encodings and never
+acquire fabricated origin distances. A newer registration supersedes older
+metadata; equal-expiry forwarded observations may improve the retained distance.
 Each source disappears at its own evidence deadline, including during failed IPC;
-Online tolerance never extends a discovery-source label. Discovery metadata is
-additive desktop IPC and does not change wire formats, trust or route selection.
-Neither a source nor an endpoint establishes physical location or the path of any
-particular message.
+Online tolerance never extends a source label. Neither this summary nor an endpoint
+establishes the route of a particular message. The UI does not expose message paths.
 A direct application path means no intermediate Mesh Talk post office; it says
 nothing about Tailscale's underlying transport. Online does not guarantee TCP,
 message delivery, file transfer, or calls. UDP discovery can succeed while TCP
@@ -606,7 +612,19 @@ There are two wrapper scopes. Legacy opaque copies bind the device pair and a pa
 
 ### C. Relay preference, failover and partitions
 
-For an explicit healthy preference P, the shared candidate policy keeps P first. Without a preference, local discovery is favored. Recipient-specific introducing relays can be ordered ahead of unrelated alternatives while preserving the explicit preference. All eligible feature paths reuse this ordering.
+For an explicit healthy preference P, the shared candidate policy keeps P first.
+Automatic candidates use unclamped authenticated handshake/control latency
+estimates from the bounded session timing owner; timeout penalties and existing
+retry cooldowns demote failed paths. Samples expire after 120 seconds and clear
+on network changes. Cold routes retain local-first defaults, with known fresh
+origin distance contributing a small forwarding allowance (50 ms per hop;
+unknown distance uses four hops). These are estimates of usable relay paths,
+not measured end-to-end delivery latency or a global shortest-path guarantee.
+Equal costs retain stable ordering. All eligible feature paths reuse the owner.
+Bounded batches always include the current best candidate and rotate three
+alternatives; existing upload concurrency races two attempts so a silent relay
+cannot monopolize progress. Source presentation and communication selection
+remain independent; no per-message path UI is added.
 
 A failed operation can try R. If R has a surviving trusted path to Q, recipient delivery can progress; otherwise local/relay custody waits. A recipient may need to drain alternative known relays after the preference returns because copies can remain on a fallback. Subsequent operations can favor P again; this is per-operation recovery, not a centralized primary-election protocol or guaranteed instantaneous health convergence.
 
