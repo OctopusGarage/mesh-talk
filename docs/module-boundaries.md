@@ -96,7 +96,14 @@ coverage scans and expansion to a requested Event. It shares history selection
 and coverage/reception commits across those paths. The roster supplies discovered
 Conversations and import revisions; `outgoingIntent.ts` retains acceptance and
 retry. `reception.ts` owns identity-based receipt/unread decisions, including the
-legacy unread projection. `conversationState.ts` retains cache, deletion and
+legacy unread projection. Channel receipts retain a content-free mention flag,
+classified with the same display-name matcher as message rendering. The sidebar
+shows a localized mention prefix alongside the latest preview and unread count
+while any retained mention identity is unseen. Opening a conversation or receiving
+ordinary messages does not acknowledge mentions; exact viewport read evidence
+does. Owner/account-scoped receipt persistence preserves the flag independently
+of message-cache eviction. Own-account messages never classify as
+mention alerts. `conversationState.ts` retains cache, deletion and
 optimistic-message reconciliation. History callers do not coordinate those
 internal transitions or import back into the chat composition module at runtime.
 DM file status refresh continues after the file offer's receipt, until the

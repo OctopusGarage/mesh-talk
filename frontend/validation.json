@@ -876,6 +876,40 @@
       "escalation": [
         "Run channel membership browser and native IPC scenarios for owner-only settings, channel switching and desktop session retirement; mocked IPC does not certify native authorization."
       ]
+    },
+    {
+      "id": "frontend-channel-mentions",
+      "paths": [
+        "frontend/e2e/unread-badge.spec.ts",
+        "frontend/src/lib/mentions.tsx",
+        "frontend/src/lib/mentions.test.ts",
+        "frontend/src/lib/unreadStorage.ts",
+        "frontend/src/store/reception.ts",
+        "frontend/src/store/reception.test.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.test.ts"
+      ],
+      "frontend": [
+        "src/lib/mentions.test.ts",
+        "src/store/reception.test.ts",
+        "src/store/conversationHistory.test.ts",
+        "src/store/chat.test.ts",
+        "src/features/chat/sidebar/ConversationRow.test.ts"
+      ],
+      "capability": {
+        "summary": "Keep unread channel mentions distinguishable from ordinary unread messages in the sidebar.",
+        "guide": "docs/module-boundaries.md",
+        "invariants": [
+          {
+            "name": "Mention alerts follow exact read identities across ordinary arrivals, navigation and owner-scoped persistence; own messages do not trigger alerts",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Check mention-prefix visibility and preview truncation in light/dark sidebar layouts; browser acceptance includes e2e/unread-badge.spec.ts and e2e/ui-visual-regression.spec.ts."
+      ]
     }
   ],
   "prScenarios": [

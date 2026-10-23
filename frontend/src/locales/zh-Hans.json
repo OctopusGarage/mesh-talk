@@ -140,6 +140,7 @@
     "newUsernamePlaceholder": "设置本地用户名"
   },
   "sidebar": {
+    "mentionedYou": "[有人@我]",
     "hideChannel": "隐藏频道",
     "hiddenChannels": "已隐藏频道（{{count}}）",
     "restoreChannel": "恢复",

@@ -293,6 +293,16 @@
     {
       "id": "portable-browser-reporting",
       "paths": [
+        "frontend/e2e/portable-core.spec.ts",
+        "frontend/e2e/automatic-delivery.spec.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "frontend/e2e/media-lifecycle.spec.ts",
+        "frontend/e2e/screenshot-portable.spec.ts",
+        "frontend/e2e/file-send-progress.spec.ts",
+        "frontend/e2e/directory-transfer.spec.ts",
+        "frontend/e2e/attachment-approval.spec.ts",
+        "frontend/e2e/unread-badge.spec.ts",
+        "frontend/playwright.portable.config.ts",
         "scripts/evals/browser-report.mjs",
         "scripts/evals/portable-runner.mjs",
         "scripts/diagnostics/browser-eval-report.test.mjs"

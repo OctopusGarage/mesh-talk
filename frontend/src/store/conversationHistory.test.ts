@@ -441,3 +441,42 @@ it("drops context with an identical ID from a different namespace", async () => 
   const target = store.getState().searchTarget;
   expect(target && "reference" in target && target.context).toEqual([]);
 });
+
+it.each(["Alice", ""])(
+  "classifies channel history mentions with display name %j while preserving unread identities",
+  async (displayName) => {
+    useAuth.setState({
+      user: { id: "host", username: "alice", display_name: displayName },
+    });
+    const store = session();
+    const channel: Conversation = { kind: "channel", id: "team", name: "Team" };
+    const channelKey = "channel:team";
+    store.setState({
+      active: channel,
+      cacheOrder: [channelKey],
+      ledger: { [channelKey]: { mention: { seen: false, late: true } } },
+      unreadIds: { [channelKey]: ["mention"] },
+      unread: { [channelKey]: 1 },
+    });
+    invoke.mockImplementation((command: string) =>
+      Promise.resolve(
+        command === "channel_history"
+          ? [
+              { ...row("mention"), text: "@Alice please check" },
+              { ...row("own"), text: "@Alice", from_me: true },
+              { ...row("other"), text: "@Bob" },
+              { ...row("archive"), text: "@Alice archived" },
+            ]
+          : [],
+      ),
+    );
+    expect(await reloadConversation(store.setState, store.getState)).toBe(true);
+    expect(store.getState().ledger[channelKey].mention).toMatchObject({
+      mentioned: true,
+      seen: false,
+    });
+    expect(store.getState().ledger[channelKey].own.mentioned).not.toBe(true);
+    expect(store.getState().ledger[channelKey].other.mentioned).not.toBe(true);
+    expect(store.getState().ledger[channelKey].archive.seen).toBe(true);
+  },
+);

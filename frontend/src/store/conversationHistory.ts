@@ -1,3 +1,5 @@
+import { mentionsName } from "@/lib/mentions";
+import { useAuth } from "./auth";
 import { chat } from "@/lib/api/chat";
 import { readWithDeadline } from "@/lib/readDeadline";
 import type { HistoryItem } from "@/lib/types";
@@ -90,7 +92,7 @@ function snapshotPatch(
       : reconcileHistory(
           state,
           key,
-          rows.map((row) => ({ id: row.id, fromMe: row.from_me })),
+          receptionRows(key, rows),
           snapshot.discoverChanges &&
             state.historyBaselines.includes(key) &&
             Object.prototype.hasOwnProperty.call(state.ledger, key),
@@ -375,7 +377,7 @@ function reconcileSnapshotCoverage(
   rows: import("@/lib/types").HistoryItem[],
   initialized: boolean,
 ): ReceptionState {
-  const messages = rows.map((row) => ({ id: row.id, fromMe: row.from_me }));
+  const messages = receptionRows(key, rows);
   const known = initialized && state.historyBaselines.includes(key);
   if (known && !state.historyFullBaselines.includes(key)) {
     // Only the comparable latest window has a baseline. Older expansion rows are
@@ -384,4 +386,18 @@ function reconcileSnapshotCoverage(
     return reconcileHistory(recent, key, messages, false);
   }
   return reconcileHistory(state, key, messages, known);
+}
+
+/** Classify mentions at the history boundary; never retain message text in receipts. */
+function receptionRows(key: string, rows: HistoryItem[]) {
+  const user = useAuth.getState().user;
+  const name = user?.display_name || user?.username || "";
+  return rows.map((row) => ({
+    id: row.id,
+    fromMe: row.from_me,
+    mentioned:
+      key.startsWith("channel:") &&
+      !row.from_me &&
+      mentionsName(row.text, name),
+  }));
 }

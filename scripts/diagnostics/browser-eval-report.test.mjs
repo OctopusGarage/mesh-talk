@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 64], ["extended", 65]]) {
+  for (const [tier, count] of [["core", 65], ["extended", 66]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[0] === "portable-core.spec.ts" && path[1] === "presence waits for node readiness without showing a startup failure"));
@@ -25,7 +27,8 @@ test("portable matrix requires existing receipt and media cases in both tiers", 
     assert.equal(paths.filter(path => path[0] === "directory-transfer.spec.ts").length, 3);
     assert.equal(paths.filter(path => path[0] === "attachment-approval.spec.ts").length, 4);
     assert.ok(paths.some(path => path[0] === "attachment-approval.spec.ts" && path[1] === "an expired previously ready attachment becomes unavailable"));
-    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 11);
+    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 12);
+    assert.ok(paths.some(path => path[0] === "unread-badge.spec.ts" && path[1] === "channel mention indicator survives later traffic and clears when the mention is viewed"));
     assert.ok(paths.some(path => path[0] === "unread-badge.spec.ts" && path[1] === "one logical DM remains one unread badge across duplicate live events and history scanning"));
     const report = complete();
     report.stats.expected = count;
@@ -89,3 +92,27 @@ test("isolated portable shards preserve the complete strict inventory and every 
   assert.throws(() => validateBrowserReport(mergePortableReports([first, bad]), options), /harness errors/);
   assert.throws(() => mergePortableReports([]), /Missing/);
 });
+
+for (const tier of ["core", "extended"]) {
+  test(`portable ${tier} inventory matches Playwright discovery`, async () => {
+    const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
+    const frontend = fileURLToPath(new URL("../../frontend/", import.meta.url));
+    const cli = fileURLToPath(new URL("../../frontend/node_modules/@playwright/test/cli.js", import.meta.url));
+    const listed = spawnSync(process.execPath, [cli, "test", "--config", "playwright.portable.config.ts", "--list", "--reporter=json"], {
+      cwd: frontend,
+      env: { ...process.env, EVAL_BROWSER: "chromium", EVAL_TIER: tier },
+      encoding: "utf8", maxBuffer: 8 * 1024 * 1024, timeout: 120_000,
+    });
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const report = JSON.parse(listed.stdout);
+    assert.deepEqual(report.errors, []);
+    const paths = [];
+    function visit(suite, parents = []) {
+      const current = [...parents, suite.title];
+      for (const spec of suite.specs ?? []) paths.push([...current, spec.title]);
+      for (const child of suite.suites ?? []) visit(child, current);
+    }
+    for (const suite of report.suites ?? []) visit(suite);
+    assert.deepEqual(paths.map(path => JSON.stringify(path)).sort(), requiredBrowserPaths(tier).map(path => JSON.stringify(path)).sort());
+  });
+}
