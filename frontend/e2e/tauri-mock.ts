@@ -1474,6 +1474,20 @@ export const test = base.extend({
           }),
           open_notification_settings: () => null,
           get_app_settings: () => appSettings,
+          // Browser-only persistence stand-in; production drafts use encrypted native storage.
+          load_conversation_drafts: (a) => ({
+            session: "mock-drafts-session",
+            drafts: JSON.parse(
+              localStorage.getItem(`mock-drafts-${a.owner}`) ?? "{}",
+            ),
+          }),
+          save_conversation_drafts: (a) => {
+            localStorage.setItem(
+              `mock-drafts-${a.owner}`,
+              JSON.stringify(a.drafts),
+            );
+            return null;
+          },
           set_app_settings: (a) => {
             Object.assign(appSettings, (a.settings as object) ?? {});
             if (appSettings.privacy_level === "balanced") {

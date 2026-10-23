@@ -24,6 +24,7 @@ pub mod config_store;
 pub mod contact_policy;
 mod desktop_session;
 pub mod diagnostics;
+mod drafts;
 mod easytier_discovery;
 pub mod events;
 pub mod favorites;
@@ -439,6 +440,8 @@ pub fn run_tauri_configured(
                 crate::updates::download_update,
                 crate::updates::cancel_update_download,
                 crate::settings::get_app_settings,
+                crate::drafts::load_conversation_drafts,
+                crate::drafts::save_conversation_drafts,
                 crate::settings::set_app_settings,
                 crate::trust::get_trust,
                 crate::trust::mark_verified,

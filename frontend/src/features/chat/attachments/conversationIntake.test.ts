@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import "@/lib/i18n";
 import { useChat } from "@/store/chat";
 import { useAuth } from "@/store/auth";
+import { useDrafts } from "@/store/drafts";
 import type { Composer } from "../Composer";
 import type { ScreenshotEditor } from "../ScreenshotEditor";
 import i18n from "@/lib/i18n";
@@ -81,6 +82,14 @@ beforeEach(async () => {
   useAuth.setState({
     user: { id: "owner", username: "alice", display_name: "Alice" },
   });
+  // This fixture mounts ConversationView directly, without ChatApp's draft loader.
+  useDrafts.setState({
+    owner: "owner",
+    generation: useAuth.getState().generation,
+    texts: {},
+    loaded: true,
+    error: null,
+  });
   useChat.setState({
     active: { kind: "account", id: "alice", name: "Alice" },
     ready: true,
@@ -97,6 +106,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await act(async () => root.unmount());
+  useDrafts.getState().reset();
   vi.unstubAllGlobals();
 });
 it("deletes a pasted temp file when the conversation changes during staging", async () => {
@@ -766,6 +776,10 @@ it("clears an already staged screenshot when its owning account changes", async 
   expect(composer.stagedScreenshot).toBeInstanceOf(File);
   await act(async () =>
     useAuth.setState({ generation: useAuth.getState().generation + 1 }),
+  );
+  // Resume the composer after ChatApp would finish loading the new session's drafts.
+  await act(async () =>
+    useDrafts.setState({ generation: useAuth.getState().generation }),
   );
   expect(composer.stagedScreenshot).toBeNull();
   expect(useChat.getState().sendFile).not.toHaveBeenCalled();

@@ -557,6 +557,7 @@ pub async fn logout<R: tauri::Runtime>(
             .matching(&lease, |_| ())
             .map_err(CommandError::Authentication)?;
         let result = logout_impl(app_state.inner())?;
+        *app_state.drafts.lock().unwrap() = None;
         settings_state.deactivate();
         app_state.app_lock().clear();
         crate::chat_commands::clear_badge_after_logout(&app_handle, app_state.session().clone());

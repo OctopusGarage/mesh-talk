@@ -1103,5 +1103,12 @@
       "linux": "Check your desktop’s notification settings and allow Mesh-Talk.",
       "other": "Open your device’s notification settings and allow Mesh-Talk."
     }
+  },
+  "drafts": {
+    "label": "[Draft]",
+    "loading": "Loading drafts…",
+    "loadFailed": "Couldn’t load your drafts. Retry to continue composing.",
+    "saveFailed": "Couldn’t save drafts. Your text is still available in this window.",
+    "retry": "Retry"
   }
 }

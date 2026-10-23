@@ -1103,5 +1103,12 @@
       "linux": "檢查桌面環境嘅通知設定並允許 Mesh-Talk。",
       "other": "開啟裝置嘅通知設定並允許 Mesh-Talk。"
     }
+  },
+  "drafts": {
+    "label": "[草稿]",
+    "loading": "載入草稿中…",
+    "loadFailed": "載入唔到草稿，請重試後繼續輸入。",
+    "saveFailed": "草稿儲存失敗，文字仍然保留喺目前視窗。",
+    "retry": "重試"
   }
 }

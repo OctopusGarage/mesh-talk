@@ -21,6 +21,7 @@ import { usePrivacy } from "@/store/privacy";
 import { ease, useMotionOK } from "@/lib/motion";
 import { startLinkedAppearance } from "@/lib/linkedAppearance";
 import { startLinkedContacts } from "@/lib/linkedContacts";
+import { useDrafts } from "@/store/drafts";
 
 import { DeliveryRecoveryProvider } from "./DeliveryRecoveryProvider";
 
@@ -31,6 +32,23 @@ export function ChatApp() {
   const start = useChat((s) => s.start);
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
+  const draftError = useDrafts((s) => s.error);
+  useEffect(() => {
+    if (!owner) return;
+    void useDrafts.getState().start(owner, generation);
+    const flush = () => {
+      void useDrafts.getState().flush();
+    };
+    window.addEventListener("blur", flush);
+    document.addEventListener("visibilitychange", flush);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("blur", flush);
+      document.removeEventListener("visibilitychange", flush);
+      window.removeEventListener("pagehide", flush);
+      useDrafts.getState().reset();
+    };
+  }, [owner, generation]);
   const ready = useChat((s) => s.ready);
   const presenceRun = useChat((s) => s.runEpoch);
   const presenceIdentity = useChat((s) => s.identityEpoch);
@@ -178,6 +196,29 @@ export function ChatApp() {
           <ConversationView />
           <CallDialog />
           <div className="absolute inset-x-4 top-3 z-40 flex flex-col gap-2">
+            {draftError && (
+              <div
+                role="alert"
+                className="rounded-md border border-destructive/40 bg-popover px-4 py-3 text-sm text-foreground shadow-elevation"
+              >
+                {t(
+                  draftError === "load"
+                    ? "drafts.loadFailed"
+                    : "drafts.saveFailed",
+                )}{" "}
+                <button
+                  type="button"
+                  className="underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => {
+                    if (draftError === "load" && owner)
+                      void useDrafts.getState().start(owner, generation);
+                    else void useDrafts.getState().flush();
+                  }}
+                >
+                  {t("drafts.retry")}
+                </button>
+              </div>
+            )}
             {downloadPersistenceError && (
               <div
                 role="alert"

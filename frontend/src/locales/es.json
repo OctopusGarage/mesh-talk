@@ -1103,5 +1103,12 @@
       "linux": "Revisa los ajustes de notificaciones de tu escritorio y permite Mesh-Talk.",
       "other": "Abre los ajustes de notificaciones del dispositivo y permite Mesh-Talk."
     }
+  },
+  "drafts": {
+    "label": "[Borrador]",
+    "loading": "Cargando borradores…",
+    "loadFailed": "No se pudieron cargar los borradores. Reintenta para continuar.",
+    "saveFailed": "No se pudieron guardar los borradores. El texto sigue en esta ventana.",
+    "retry": "Reintentar"
   }
 }
