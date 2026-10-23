@@ -1158,5 +1158,12 @@
     "loadMore": "Cargar más",
     "preview": "Vista previa",
     "fileUnavailable": "Tarjeta guardada; el contenido no está retenido en Favoritos."
+  },
+  "drafts": {
+    "label": "[Borrador]",
+    "loading": "Cargando borradores…",
+    "loadFailed": "No se pudieron cargar los borradores. Reintenta para continuar.",
+    "saveFailed": "No se pudieron guardar los borradores. El texto sigue en esta ventana.",
+    "retry": "Reintentar"
   }
 }

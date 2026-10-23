@@ -126,6 +126,7 @@ impl AppLock {
             })
             .unwrap_or(false);
         if locked {
+            *app.drafts.lock().unwrap() = None;
             let _ = handle.emit("app-locked", ());
         }
     }
@@ -164,7 +165,9 @@ pub fn lock_app(
         .map_err(CommandError::Authorization)?;
     app.session()
         .matching(&lease, |_| state.lock(lease.clone()))
-        .map_err(CommandError::Authorization)?
+        .map_err(CommandError::Authorization)??;
+    *app.drafts.lock().unwrap() = None;
+    Ok(())
 }
 
 #[tauri::command]

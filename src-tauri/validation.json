@@ -2,6 +2,36 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-conversation-drafts",
+      "paths": [
+        "src-tauri/src/drafts.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "drafts::tests::"
+          ]
+        }
+      ],
+      "consumers": [
+        "frontend-conversation-drafts"
+      ],
+      "capability": {
+        "summary": "Preserve encrypted local conversation text drafts with idle batching and inactive sidebar previews.",
+        "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
+        "invariants": [
+          {
+            "name": "Ten-second idle saves serialize snapshots without periodic writes during typing; retired sessions cannot release or overwrite draft text",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
+      "escalation": [
+        "Native quit/restart spot check verifies encrypted draft restoration; abrupt exits may lose edits within the idle window."
+      ]
+    },
+    {
       "id": "desktop-message-favorites",
       "paths": [
         "src-tauri/src/message_favorites.rs"

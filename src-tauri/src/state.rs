@@ -21,6 +21,7 @@ pub use crate::desktop_session::{SessionInfo, SessionState};
 /// node runs out of [`crate::chat_commands::NodeState`].)
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) drafts: Arc<Mutex<Option<crate::drafts::DraftStorage>>>,
     app_lock: crate::app_lock::AppLock,
     #[cfg(test)]
     pub(crate) rename_hot_gate: HostOperationGate,
@@ -41,6 +42,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(auth_service: AuthService) -> Self {
         Self {
+            drafts: Arc::new(Mutex::new(None)),
             app_lock: crate::app_lock::AppLock::default(),
             #[cfg(test)]
             rename_hot_gate: Arc::new(Mutex::new(None)),

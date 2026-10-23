@@ -22,7 +22,7 @@ import { useTranslation } from "react-i18next";
 import { needsCustomWindowControls } from "@/lib/platform";
 import { ReceptionStatus } from "./ReceptionStatus";
 import { Composer } from "./Composer";
-import { ConversationDrafts } from "./conversationDrafts";
+import { useDrafts } from "@/store/drafts";
 import {
   EmptyState,
   StartupFailureState,
@@ -139,7 +139,15 @@ export function ConversationView() {
   useEffect(() => {
     setPendingDelete(null);
   }, [key]);
-  const drafts = useRef(new ConversationDrafts());
+  const draftsLoaded = useDrafts(
+    (s) => s.owner === owner && s.generation === authGeneration && s.loaded,
+  );
+  useEffect(
+    () => () => {
+      void useDrafts.getState().flush();
+    },
+    [key],
+  );
   const draftKey = `${owner}:${authGeneration}:${key}`;
   const historyMessages = useChat((s) =>
     active ? (s.messages[key] ?? NO_MESSAGES) : NO_MESSAGES,
@@ -815,6 +823,13 @@ export function ConversationView() {
                 : "conversation.archivedChannelHint",
           )}
         </div>
+      ) : !draftsLoaded ? (
+        <div
+          className="border-t bg-card px-5 py-4 text-sm text-muted-foreground"
+          role="status"
+        >
+          {t("drafts.loading")}
+        </div>
       ) : (
         <Composer
           expiryDurationMs={isPersonal ? null : expiryDurationMs}
@@ -822,9 +837,9 @@ export function ConversationView() {
           screenshotAvailable={attachments.screenshotAvailable}
           stagedScreenshot={attachments.stagedScreenshot}
           key={`${owner}:${authGeneration}:${key}`}
-          initialDraft={drafts.current.get(draftKey)}
+          initialDraft={useDrafts.getState().texts[key] ?? ""}
           onDraftChange={(text) => {
-            drafts.current.set(draftKey, text);
+            useDrafts.getState().edit(owner!, authGeneration, key, text);
           }}
           placeholder={
             isChannel

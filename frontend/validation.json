@@ -2,6 +2,36 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-conversation-drafts",
+      "paths": [
+        "frontend/src/store/drafts.ts",
+        "frontend/src/store/drafts.test.ts",
+        "frontend/src/lib/api/drafts.ts",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/e2e/conversation-drafts.spec.ts"
+      ],
+      "frontend": [
+        "src/store/drafts.test.ts",
+        "src/features/chat/ConversationView.test.ts",
+        "src/features/chat/ComposerAdmission.test.ts"
+      ],
+      "capability": {
+        "summary": "Preserve encrypted local conversation text drafts with idle batching and inactive sidebar previews.",
+        "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
+        "invariants": [
+          {
+            "name": "Ten-second idle saves serialize snapshots without periodic writes during typing; retired sessions cannot release or overwrite draft text",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
+      "escalation": [
+        "Verify switching, clearing, Unicode restoration and inactive previews in browser scenarios. Browser reload with mocked IPC does not certify native quit/restart persistence."
+      ]
+    },
+    {
       "id": "frontend-message-favorites",
       "paths": [
         "frontend/src/features/chat/favorites/",
@@ -451,7 +481,7 @@
         "src/store/chat.test.ts",
         "src/store/outgoingIntent.test.ts",
         "src/features/chat/ComposerAdmission.test.ts",
-        "src/features/chat/conversationDrafts.test.ts"
+        "src/store/drafts.test.ts"
       ],
       "capability": {
         "summary": "Move submitted text from the composer into one owner-scoped outgoing intent immediately, retaining draft text only when local admission refuses.",

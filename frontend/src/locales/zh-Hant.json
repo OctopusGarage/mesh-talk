@@ -1158,5 +1158,12 @@
     "loadMore": "載入更多",
     "preview": "預覽",
     "fileUnavailable": "已儲存檔案卡片，但收藏夾未保留檔案內容。"
+  },
+  "drafts": {
+    "label": "[草稿]",
+    "loading": "正在載入草稿…",
+    "loadFailed": "無法載入草稿，請重試後繼續輸入。",
+    "saveFailed": "草稿儲存失敗，文字仍保留在目前視窗中。",
+    "retry": "重試"
   }
 }

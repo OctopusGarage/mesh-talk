@@ -20,6 +20,8 @@ import {
 } from "@/store/presence";
 import { ContactContextMenu } from "../HiddenContactsDialog";
 import { MemberProfileDialog } from "../MemberProfileDialog";
+import { useDrafts } from "@/store/drafts";
+import { useAuth } from "@/store/auth";
 
 export function ConversationRow({
   conv,
@@ -56,6 +58,18 @@ export function ConversationRow({
   const history = useChat((s) => s.messages[convKey(conv)]);
   const open = useChat((s) => s.open);
   const isActive = active != null && convKey(active) === convKey(conv);
+  const owner = useAuth((s) => s.user?.id);
+  const generation = useAuth((s) => s.generation);
+  const draft = useDrafts((s) =>
+    s.owner === owner &&
+    s.generation === generation &&
+    !isActive &&
+    !prioritizeSubtitle
+      ? (s.texts[convKey(conv)] ?? "")
+      : "",
+  );
+  const showDraft = !isActive && !prioritizeSubtitle && !!draft.trim();
+  const draftPreview = draft.replace(/\s+/g, " ").trim();
   // Presence is read from the isolated store and keyed by id, so a presence tick only
   // re-renders the rows whose snapshot actually changed.
   const presence = usePresenceFor(conv.id);
@@ -142,9 +156,16 @@ export function ConversationRow({
           </div>
           <div
             className="truncate text-[11px] leading-4 text-muted-foreground"
-            title={summary}
+            title={showDraft ? `${t("drafts.label")} ${draftPreview}` : summary}
           >
-            {summary}
+            {showDraft ? (
+              <>
+                <span className="text-destructive">{t("drafts.label")}</span>{" "}
+                {draftPreview}
+              </>
+            ) : (
+              summary
+            )}
           </div>
         </div>
       </button>

@@ -131,6 +131,18 @@ creates no bubble. An admitted submission clears the input immediately; its bubb
 alone owns pending acceptance, failure and retry. Backend acceptance and recipient
 confirmation remain distinct states, and later completion cannot overwrite a new
 draft or put submitted text back into the composer.
+
+`ui/store/drafts.ts` owns reactive conversation text and one idle-save coordinator
+per local user/session; both composer restoration and inactive sidebar previews
+consume it. Typing updates memory without re-rendering the conversation view.
+Persistence coalesces after ten seconds idle, restarting the timer on each edit;
+navigation and visibility loss request a flush. Session retirement discards
+unsaved memory, and abrupt exits may lose recent edits. `src-tauri/src/drafts.rs`
+owns bounded encrypted snapshots, session admission and atomic replacement using
+the core encrypted record-log implementation. Its cached derived key is reused
+until lock/logout; writes never repeat password derivation. Stable conversation
+keys restore across restarts while exact session handles reject retired writes.
+See [draft behavior](help/topics/history.md#keep-an-unfinished-message).
 Channel text, stickers and file offers use owner-scoped acceptance IPC returning
 an exact durable event ID (and file-conversation ID for attachments). Network
 fanout retains its own runtime admission and cannot hold the acceptance response

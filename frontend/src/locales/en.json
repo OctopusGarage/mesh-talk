@@ -1158,5 +1158,12 @@
     "loadMore": "Load more",
     "preview": "Preview",
     "fileUnavailable": "File card saved; contents are not retained in Favorites."
+  },
+  "drafts": {
+    "label": "[Draft]",
+    "loading": "Loading drafts…",
+    "loadFailed": "Couldn’t load your drafts. Retry to continue composing.",
+    "saveFailed": "Couldn’t save drafts. Your text is still available in this window.",
+    "retry": "Retry"
   }
 }
