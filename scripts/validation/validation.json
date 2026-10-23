@@ -65,14 +65,14 @@
         "scripts/diagnostics/version-automation.test.mjs"
       ],
       "escalation": [
-        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Both editions and every platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Release-maintenance changes require hosted evidence for bot-PR permissions/checks, unpublished draft-only creation, explicit release build dispatch and reviewed next-target PR creation; local mocks do not prove those settings. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate."
+        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Every desktop and relay platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Release-maintenance changes require hosted evidence for bot-PR permissions/checks, unpublished draft-only creation, explicit release build dispatch and reviewed next-target PR creation; local mocks do not prove those settings. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate."
       ],
       "capability": {
         "summary": "Maintain one Cargo product target and reviewed release/next-target PRs, publishing complete exact-source verified Stable releases and immutable automatic main-branch Nightlies.",
         "guide": "docs/updates.md",
         "invariants": [
           {
-            "name": "Stable publication remains explicit; Nightly is opt-in, main-only and never latest, with all platform/edition assets verified before visibility.",
+            "name": "Stable publication remains explicit; Nightly is opt-in, main-only and never latest, with all platform assets verified before visibility; desktop packages omit optional packs and edition suffixes.",
             "reference": "docs/updates.md"
           },
           {
@@ -183,6 +183,7 @@
         "scripts/pr-platform/",
         "scripts/validation/pr-scenarios.mjs",
         "scripts/diagnostics/prepare-pr.test.mjs",
+        "scripts/diagnostics/pr-platform.test.mjs",
         "scripts/diagnostics/pr-scenarios.test.mjs",
         "scripts/validation/native-build.mjs",
         "scripts/diagnostics/native-build.test.mjs"

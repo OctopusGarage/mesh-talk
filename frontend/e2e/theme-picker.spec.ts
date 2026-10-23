@@ -103,6 +103,13 @@ test("theme changes stay scoped and reduced motion keeps control feedback", asyn
 test("theme previews match the canvas, signal, and rail colors they apply", async ({
   page,
 }) => {
+  await seedMarketPacks(page, [
+    "argentina",
+    "barcelona",
+    "messi",
+    "nature",
+    "cat-acrylic",
+  ]);
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");
@@ -245,6 +252,7 @@ test("nature theme offers all 50 wallpapers and restores the selected scene", as
 test("Cat Acrylic theme offers 45 wallpapers and restores the selection", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["cat-acrylic"]);
   await login(page);
   await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
   await openSidebarMenuAction(page, "sidebar-nav-settings");
@@ -280,6 +288,7 @@ test("Cat Acrylic theme offers 45 wallpapers and restores the selection", async 
 test("upgrading preserves the old Cat Acrylic wallpaper choice", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["cat-acrylic"]);
   await page.addInitScript(() => {
     localStorage.setItem("mesh-talk-theme", "cat-acrylic");
     localStorage.setItem("mesh-talk-cat-acrylic-wallpaper", "cat-45");
@@ -319,6 +328,7 @@ test("upgrading preserves the old Nature wallpaper choice", async ({
 test("a replacement theme uses its declared base for omitted colors", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["barcelona"]);
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");

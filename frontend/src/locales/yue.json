@@ -841,7 +841,6 @@
     "version": "版本 {{version}}",
     "sourceRepo": "原始碼儲存庫",
     "license": "授權（MIT）",
-    "credits": "動畫貼圖來自 Google Noto Emoji，根據其開源授權使用。",
     "updates": {
       "title": "更新",
       "manual": "檢查所選渠道嘅新版本。由你決定幾時下載同安裝。",

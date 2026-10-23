@@ -16,7 +16,7 @@ replies, @mentions, search, and multi-device.
 - Improve profile synchronization, offline delivery recovery and retained-history
   costs across peer-operated relays.
 - Choose Stable or Nightly updates with verified downloads that preserve your
-  platform, CPU architecture and default/lite edition.
+  platform and CPU architecture.
 - Provide signed native relay packages.
 <!-- STABLE_ONLY_START -->
 - Provide a verified Linux container image.
@@ -30,7 +30,7 @@ file, and ships alongside a cosign signature (`.zip.bundle`) and a SLSA build-pr
 attestation. A CycloneDX SBOM (`mesh-talk.cdx.json`) is attached to the release.
 The macOS zip contains a DMG; the app is inside that DMG.
 
-Each platform has a default edition with the current avatar and personal theme collections preinstalled, and a lite edition with an empty optional library. Both editions retain light, dark, and OLED themes and support ZIP installation. Lite shows emoji fallbacks for built-in Noto stickers without bundling their animations. Add `_lite` before `.zip` in the table below to select the lite edition. The two editions replace one another on the same device and preserve packs you have installed or removed.
+Each platform has one desktop package. The app starts without optional avatar, theme, or sticker packs and retains light, dark, and OLED themes. Install packs from the marketplace or a local ZIP. Built-in Noto stickers show emoji fallbacks until their artwork pack is installed. Upgrading preserves packs already installed on the device.
 
 | Platform              | Asset                                  |
 | --------------------- | -------------------------------------- |
@@ -44,7 +44,7 @@ Each platform has a default edition with the current avatar and personal theme c
 ### Installation
 
 Quit Mesh-Talk before installing an update. Your existing local account and data
-remain in `~/.mesh-talk`; default and lite editions replace the same application.
+remain in `~/.mesh-talk`; the update replaces the existing application.
 
 - **macOS**: unzip the download, open the `.dmg`, then drag `mesh-talk.app` into
   **Applications**. Replace the existing app when upgrading, then launch it from
@@ -74,7 +74,6 @@ an owner-only password file. See the [post-office package and container guide](h
 
 These builds are **not signed by a commercial CA** (free distribution), but every artifact is
 independently verifiable. Replace `<os>_<arch>` with your platform (e.g. `macos_arm64`).
-For lite, append `_lite` after `<os>_<arch>` in the examples.
 
 **1. Checksum** — unzip, then in the extracted folder:
 

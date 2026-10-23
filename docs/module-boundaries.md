@@ -226,7 +226,7 @@ explicit build dispatch; they cannot replace the final verified Stable publicati
 Source/Nightly/Stable logical identities follow SemVer independently of numeric native package
 metadata. New consumers extend these owners rather than creating manual version copies. See
 [updates and publication](updates.md) for invariants, triggers and native acceptance requirements.
-Channel choice does not change protocol, account/device identity, data location or edition.
+Channel choice does not change protocol, account/device identity, data location or package naming.
 
 ## 3. Sidebar responsibilities
 

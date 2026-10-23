@@ -1,6 +1,6 @@
 //! Explicit, manual release downloads. The renderer cannot choose a URL or local path:
 //! each request rechecks the exact published release and matching asset for
-//! this build's OS, architecture, and edition before writing to Downloads.
+//! this build's OS and architecture before writing to Downloads.
 
 mod channel;
 
@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const API_RELEASES: &str = "https://api.github.com/repos/OctopusGarage/mesh-talk/releases";
 const API_URL: &str = "https://api.github.com/repos/OctopusGarage/mesh-talk/releases/latest";
 const MAX_RELEASE_PAGES: u32 = 3;
-// Each release contains the complete twelve-edition/platform archive matrix,
+// Each release contains the complete six-platform archive matrix,
 // signatures and relay assets. Small pages fit the bounded JSON response budget.
 const RELEASE_PAGE_SIZE: usize = 10;
 const RELEASES_URL: &str = "https://github.com/OctopusGarage/mesh-talk/releases";
@@ -64,6 +64,7 @@ pub struct UpdateCheck {
     pub notes: String,
     pub package_name: Option<String>,
     pub package_size: Option<u64>,
+    // Retained for IPC compatibility; desktop packages have one canonical edition.
     pub edition: &'static str,
     pub channel: UpdateChannel,
 }
@@ -80,15 +81,7 @@ pub struct DownloadedUpdate {
     pub file_name: String,
 }
 
-fn edition() -> &'static str {
-    if option_env!("MESH_TALK_VARIANT") == Some("lite") {
-        "lite"
-    } else {
-        "default"
-    }
-}
-
-fn package_name(tag: &str, os: &str, arch: &str, edition: &str) -> Option<String> {
+fn package_name(tag: &str, os: &str, arch: &str) -> Option<String> {
     let os = match os {
         "macos" => "macos",
         "windows" => "windows",
@@ -105,8 +98,7 @@ fn package_name(tag: &str, os: &str, arch: &str, edition: &str) -> Option<String
     } else {
         arch
     };
-    let suffix = if edition == "lite" { "_lite" } else { "" };
-    Some(format!("mesh-talk_{tag}_{os}_{arch}{suffix}.zip"))
+    Some(format!("mesh-talk_{tag}_{os}_{arch}.zip"))
 }
 
 fn release_version(release: &Release, channel: UpdateChannel) -> Result<ReleaseIdentity, String> {
@@ -154,12 +146,11 @@ fn describe_release(
     release: &Release,
     os: &str,
     arch: &str,
-    edition: &'static str,
     channel: UpdateChannel,
 ) -> Result<UpdateCheck, String> {
     let latest = release_version(release, channel)?;
     let current = current_identity();
-    let name = package_name(&release.tag_name, os, arch, edition);
+    let name = package_name(&release.tag_name, os, arch);
     let asset = name
         .as_deref()
         .and_then(|name| selected_asset(release, name));
@@ -186,7 +177,7 @@ fn describe_release(
         } else {
             None
         },
-        edition,
+        edition: "default",
         channel,
     })
 }
@@ -334,7 +325,6 @@ pub async fn check_for_update(
         &release,
         std::env::consts::OS,
         std::env::consts::ARCH,
-        edition(),
         channel,
     )
 }
@@ -411,7 +401,6 @@ pub async fn download_update(
         &release.tag_name,
         std::env::consts::OS,
         std::env::consts::ARCH,
-        edition(),
     )
     .ok_or("There is no installer for this platform")?;
     let asset = selected_asset(&release, &name)
@@ -944,10 +933,10 @@ mod tests {
     }
 
     #[test]
-    fn nightly_descriptions_preserve_edition_and_do_not_fallback_to_an_older_package() {
+    fn nightly_descriptions_do_not_fallback_to_an_older_package() {
         let base = current_version();
         let tag = format!("v{base}-nightly.999999999999.1");
-        let name = package_name(&tag, "windows", "aarch64", "lite").unwrap();
+        let name = package_name(&tag, "windows", "aarch64").unwrap();
         let mut release = catalog_release(&tag, true, false);
         release.assets.push(ReleaseAsset {
             name: name.clone(),
@@ -956,56 +945,36 @@ mod tests {
             browser_download_url: format!("{RELEASES_URL}/download/{tag}/{name}"),
             digest: Some(format!("sha256:{}", "a".repeat(64))),
         });
-        let check = describe_release(
-            &release,
-            "windows",
-            "aarch64",
-            "lite",
-            UpdateChannel::Nightly,
-        )
-        .unwrap();
+        let check =
+            describe_release(&release, "windows", "aarch64", UpdateChannel::Nightly).unwrap();
         assert!(check.is_newer);
         assert_eq!(check.latest_version, tag[1..]);
         assert_eq!(check.channel, UpdateChannel::Nightly);
         assert_eq!(check.package_name.as_deref(), Some(name.as_str()));
-        let default = describe_release(
-            &release,
-            "windows",
-            "aarch64",
-            "default",
-            UpdateChannel::Nightly,
-        )
-        .unwrap();
-        assert!(default.is_newer);
-        assert!(default.package_name.is_none());
-        assert!(
-            describe_release(
-                &release,
-                "windows",
-                "aarch64",
-                "lite",
-                UpdateChannel::Stable
-            )
-            .is_err()
-        );
+        // A legacy suffixed asset cannot substitute for the canonical desktop package.
+        release.assets[0].name = name.replace(".zip", "_lite.zip");
+        let unavailable =
+            describe_release(&release, "windows", "aarch64", UpdateChannel::Nightly).unwrap();
+        assert!(unavailable.package_name.is_none());
+        assert!(describe_release(&release, "windows", "aarch64", UpdateChannel::Stable).is_err());
     }
 
     #[test]
-    fn package_names_match_all_release_targets_and_editions() {
+    fn package_names_match_all_release_targets() {
         assert_eq!(
-            package_name("v0.4.0", "macos", "aarch64", "default").unwrap(),
+            package_name("v0.4.0", "macos", "aarch64").unwrap(),
             "mesh-talk_v0.4.0_macos_arm64.zip"
         );
         assert_eq!(
-            package_name("v0.4.0", "windows", "x86_64", "lite").unwrap(),
-            "mesh-talk_v0.4.0_windows_x86_64_lite.zip"
+            package_name("v0.4.0", "windows", "x86_64").unwrap(),
+            "mesh-talk_v0.4.0_windows_x86_64.zip"
         );
         assert_eq!(
-            package_name("v0.4.0", "linux", "aarch64", "default").unwrap(),
+            package_name("v0.4.0", "linux", "aarch64").unwrap(),
             "mesh-talk_v0.4.0_linux_aarch64.zip"
         );
-        assert!(package_name("v0.4.0", "freebsd", "x86_64", "default").is_none());
-        assert!(package_name("v0.4.0", "linux", "riscv64", "default").is_none());
+        assert!(package_name("v0.4.0", "freebsd", "x86_64").is_none());
+        assert!(package_name("v0.4.0", "linux", "riscv64").is_none());
     }
 
     #[test]
@@ -1022,55 +991,28 @@ mod tests {
         }))
         .unwrap();
         assert!(
-            describe_release(
-                &release,
-                "macos",
-                "aarch64",
-                "default",
-                UpdateChannel::Stable
-            )
-            .unwrap()
-            .package_name
-            .is_some()
+            describe_release(&release, "macos", "aarch64", UpdateChannel::Stable)
+                .unwrap()
+                .package_name
+                .is_some()
         );
         release.assets[0].digest = None;
         assert!(
-            describe_release(
-                &release,
-                "macos",
-                "aarch64",
-                "default",
-                UpdateChannel::Stable
-            )
-            .unwrap()
-            .package_name
-            .is_none()
+            describe_release(&release, "macos", "aarch64", UpdateChannel::Stable)
+                .unwrap()
+                .package_name
+                .is_none()
         );
         release.assets[0].digest = Some(format!("sha256:{}", "a".repeat(64)));
         release.assets[0].browser_download_url = "https://example.com/fake.zip".into();
         assert!(
-            describe_release(
-                &release,
-                "macos",
-                "aarch64",
-                "default",
-                UpdateChannel::Stable
-            )
-            .unwrap()
-            .package_name
-            .is_none()
+            describe_release(&release, "macos", "aarch64", UpdateChannel::Stable)
+                .unwrap()
+                .package_name
+                .is_none()
         );
         release.prerelease = true;
-        assert!(
-            describe_release(
-                &release,
-                "macos",
-                "aarch64",
-                "default",
-                UpdateChannel::Stable
-            )
-            .is_err()
-        );
+        assert!(describe_release(&release, "macos", "aarch64", UpdateChannel::Stable).is_err());
     }
 
     #[tokio::test]
@@ -1263,14 +1205,8 @@ mod tests {
             "draft": false, "prerelease": false, "assets": []
         }))
         .unwrap();
-        let current = describe_release(
-            &release,
-            "macos",
-            "aarch64",
-            "default",
-            UpdateChannel::Stable,
-        )
-        .unwrap();
+        let current =
+            describe_release(&release, "macos", "aarch64", UpdateChannel::Stable).unwrap();
         assert_eq!(
             current.is_newer,
             release_version(&release, UpdateChannel::Stable).unwrap() > current_identity()
@@ -1282,10 +1218,10 @@ mod tests {
 
         release.tag_name = next_release_tag();
         let unavailable =
-            describe_release(&release, "linux", "x86_64", "lite", UpdateChannel::Stable).unwrap();
+            describe_release(&release, "linux", "x86_64", UpdateChannel::Stable).unwrap();
         assert!(unavailable.is_newer);
         assert!(unavailable.package_name.is_none());
-        assert_eq!(unavailable.edition, "lite");
+        assert_eq!(unavailable.edition, "default");
 
         release.draft = true;
         assert!(release_version(&release, UpdateChannel::Stable).is_err());
