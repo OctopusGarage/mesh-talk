@@ -183,8 +183,8 @@
     "createBackup": "创建加密备份",
     "restoreBackup": "从加密备份恢复",
     "exportIntro": "保存账号和本地记录的可迁移副本。恢复时需要单独保管的恢复密钥。",
-    "included": "包含账号身份、可见消息、只读群聊记录、文件卡片、应用管理的本地媒体及已收到的头像。",
-    "excluded": "不包含本地界面个性化设置、旧设备密钥、待发送内容、网络设置和应用外部存储的文件。 也不包含收藏夹及其保留的附件。",
+    "included": "包含账号身份、可见消息、只读群聊记录、文件卡片、应用管理的本地媒体、已收到的头像，以及收藏、备注和已保留的收藏附件。",
+    "excluded": "不包含本地界面个性化设置、旧设备密钥、待发送内容、网络设置和应用外部存储的文件。",
     "pauseNotice": "创建备份时，消息收发会短暂停止。",
     "saveKey": "请将此恢复密钥与备份文件分开保存。",
     "perExportKey": "每份备份都有独立密钥，Mesh-Talk 不会保存它。",
@@ -218,7 +218,9 @@
     "signInNext": "使用新的本地凭据登录。",
     "noBackup": "此设备上没有备份记录。",
     "statusUnavailable": "无法加载上次备份：{{error}}",
-    "restoreHint": "如需恢复备份，请先退出登录，再在登录界面选择恢复。"
+    "restoreHint": "如需恢复备份，请先退出登录，再在登录界面选择恢复。",
+    "favoriteCounts": "{{favorites}} 项收藏 · {{files}} 个已保留的收藏附件",
+    "missingFavoriteFiles": "缺少文件内容的收藏附件：{{count}} 个"
   },
   "conversation": {
     "archivedChannel": "已归档群聊",
@@ -1165,5 +1167,31 @@
     "loadFailed": "无法加载草稿，请重试后继续输入。",
     "saveFailed": "草稿保存失败，文字仍保留在当前窗口中。",
     "retry": "重试"
+  },
+  "drive": {
+    "connect": "连接 Google 云端硬盘",
+    "connecting": "正在等待 Google 登录…",
+    "connected": "已为本次会话连接 Google 云端硬盘。",
+    "privacy": "仅上传加密备份。请单独保存每份备份的恢复密钥；Google 登录不能替代密钥。",
+    "unavailable": "此构建尚未配置 Google 云端硬盘。你仍可保存和恢复本地备份文件。",
+    "destination": "备份目标",
+    "local": "本地文件",
+    "cloud": "Google 云端硬盘",
+    "backUpNow": "立即备份",
+    "complete": "已将加密备份保存到 Google 云端硬盘",
+    "snapshot": "正在创建并验证加密备份…",
+    "uploading": "正在上传加密备份…",
+    "downloading": "正在下载加密备份…",
+    "cancel": "取消传输",
+    "restore": "从 Google 云端硬盘恢复",
+    "load": "加载备份",
+    "choose": "选择备份",
+    "download": "下载选中的备份",
+    "empty": "此 Google 账号中没有已完成的 Mesh-Talk 备份。",
+    "downloaded": "备份已下载。请输入对应的恢复密钥以验证备份。",
+    "reconnect": "断开连接 / 更换 Google 账号",
+    "loading": "正在加载备份…",
+    "selected": "选中的备份",
+    "source": "备份来源"
   }
 }

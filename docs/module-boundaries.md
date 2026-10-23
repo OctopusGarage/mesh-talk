@@ -440,6 +440,9 @@ superseded audit findings and implementation reports.
 
 `core/node/favorites.rs` owns the independent encrypted collection, canonical
 snapshot capture, editable metadata and retained-file authorization.
+Its recovery adapter owns logical record encoding, account identity validation
+and expiry projection. The existing recovery owner streams these records and
+independent retained files through the same local/Drive archive and staged install.
 `core/node/account_sync/favorites.rs` owns optional certified-sibling exchange.
 Desktop `src-tauri/src/message_favorites.rs` owns admitted IPC adaptation;
 `ui/store/messageFavorites.ts` owns query lifetimes, and
@@ -470,3 +473,13 @@ while a detached admitted task finishes best-effort peer/relay fanout.
 and manual verification. Profile renderers must not derive verification from a
 valid public signature. The [peer trust guide](peer-trust.md) owns claim meanings
 and evidence limits.
+
+## Google Drive recovery transport
+
+`src-tauri/src/google_drive/` owns ephemeral desktop OAuth grants, exact-session
+admission, bounded Drive HTTP transfers and temporary encrypted file lifetimes.
+`src-tauri/src/recovery.rs` remains the owner of consistent snapshot/runtime restart,
+archive verification and transactional profile restore; `core/recovery/` owns format
+and cryptography. `ui/lib/api/googleDrive.ts` adapts IPC, and
+`ui/features/recovery/` provides shared connection/progress presentation for the
+existing export/restore dialogs. See [backup and recovery](backup-recovery.md#google-drive-security-and-boundaries).

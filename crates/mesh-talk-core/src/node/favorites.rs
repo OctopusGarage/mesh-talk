@@ -244,6 +244,10 @@ pub(super) fn project(mut favorite: MessageFavorite, now: u64) -> MessageFavorit
 #[path = "favorites/capture_tests.rs"]
 mod capture_tests;
 mod collection;
+pub(crate) mod recovery;
+#[cfg(test)]
+#[path = "favorites/recovery_tests.rs"]
+mod recovery_tests;
 #[cfg(test)]
 #[path = "favorites/store_tests.rs"]
 mod tests;

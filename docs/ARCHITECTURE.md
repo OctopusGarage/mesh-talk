@@ -1122,7 +1122,13 @@ discovered from durable account history.
 
 Snapshots include visible plaintext history, signed event provenance, file cards,
 managed media referenced by visible cards, received peer avatars, signed public
-trust cards and their attached proofs, and recall marks.
+trust cards and their attached proofs, recall marks, and account-owned Favorites
+with their metadata, notes and independently retained attachment bytes.
+Schema 4 appends Favorites records without changing earlier positional tags;
+schemas 1–3 remain readable. The Favorites owner validates logical records and
+retains removal generations/tombstones. Expired content is withheld, and retained
+file records must match a live collection reference. Favorite media has a separate
+namespace from ordinary media and shares the archive's aggregate byte budget.
 Verified peer recall marks are persisted before export so a restored device does not
 redisplay recalled plaintext it cannot decrypt from the old device's events. A
 password-encrypted local index retains original IDs for restored outgoing messages;

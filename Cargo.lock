@@ -3168,6 +3168,7 @@ name = "mesh-talk"
 version = "0.4.5"
 dependencies = [
  "ashpd",
+ "base64 0.23.1",
  "block2 0.6.2",
  "core-foundation 0.10.1",
  "hex",
@@ -4625,6 +4626,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

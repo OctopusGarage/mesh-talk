@@ -21,7 +21,7 @@ pub(super) fn open(dir: &Path, account: &Account) -> Arc<Node> {
     )
     .unwrap()
 }
-fn source(node: &Node) -> FavoriteSource {
+pub(super) fn source(node: &Node) -> FavoriteSource {
     let peer = "ab".repeat(16);
     let conv = super::super::conversation::account_conversation_id(&node.account_id(), &peer);
     for (seq, id, text) in [(1, [1; 32], "first"), (2, [2; 32], "second")] {
@@ -579,4 +579,126 @@ fn stale_and_denied_mutations_cannot_overwrite_or_remove_the_latest_durable_valu
         reopened.list_message_favorites("", 0, 10).unwrap().items,
         vec![latest]
     );
+}
+
+#[test]
+fn encrypted_recovery_preserves_favorites_after_source_history_is_cleared() {
+    use crate::recovery::key::RecoveryKey;
+    use sha2::{Digest, Sha256};
+    use std::io::Cursor;
+
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(&dir.path().join("source"), &account);
+    let selected = source(&node);
+    let metadata = FavoriteMetadata {
+        title: "部署笔记 🌍".into(),
+        description: "Retain this independently of chat history".into(),
+        notes: BTreeMap::from([(selected.message_ids[0].clone(), "確認済み ✅".into())]),
+    };
+    let mut favorite = node
+        .save_message_favorite_guarded(selected, metadata, |c| c())
+        .unwrap();
+    for (index, (name, mime, media, bytes)) in [
+        (
+            "说明.txt",
+            "text/plain",
+            false,
+            b"retained generic".as_slice(),
+        ),
+        ("photo.png", "image/png", true, b"retained image".as_slice()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let conv = ConversationId::new([70 + index as u8; 32]);
+        favorite.messages[index].file = Some(FavoriteFile {
+            file_conv: hex::encode(conv.as_bytes()),
+            name: name.into(),
+            size: bytes.len() as u64,
+            mime: mime.into(),
+            media,
+        });
+        node.favorite_media.store_bytes(conv, name, bytes).unwrap();
+    }
+    favorite.revision += 1;
+    node.favorites
+        .lock()
+        .unwrap()
+        .merge(FavoriteRecord {
+            generation: 1,
+            favorite: favorite.clone(),
+            removed: false,
+        })
+        .unwrap();
+    node.clear_account_conversation(&favorite.source.target)
+        .unwrap();
+    let original_device = node.user_id();
+    let key = RecoveryKey::generate();
+    let mut archive = Vec::new();
+    node.write_encrypted_recovery_archive(&mut archive, &key, now_millis())
+        .unwrap();
+    let preview =
+        Node::inspect_encrypted_recovery_archive(Cursor::new(&archive), &key, dir.path()).unwrap();
+    assert_eq!(preview.messages, 0);
+    let destination = dir.path().join("restored");
+    let (restored, _) = Node::install_encrypted_recovery_archive(
+        Cursor::new(&archive),
+        &key,
+        dir.path(),
+        &destination,
+        "fresh password",
+    )
+    .unwrap();
+    assert_eq!(restored.account_id(), account.account_id());
+    assert_ne!(restored.user_id(), original_device);
+    assert_eq!(
+        restored.list_message_favorites("", 0, 10).unwrap().items,
+        vec![favorite.clone()]
+    );
+    for (index, expected) in [b"retained generic".as_slice(), b"retained image".as_slice()]
+        .into_iter()
+        .enumerate()
+    {
+        let bytes = restored
+            .read_favorite_file(ConversationId::new([70 + index as u8; 32]))
+            .unwrap();
+        assert_eq!(Sha256::digest(&bytes), Sha256::digest(expected));
+    }
+    drop(restored);
+    let reopened = Node::open_recovery_profile(&destination, "fresh password").unwrap();
+    assert_eq!(
+        reopened.list_message_favorites("", 0, 10).unwrap().items,
+        vec![favorite.clone()]
+    );
+    assert!(Node::open_recovery_profile(&destination, "pw").is_err());
+    let mut second_archive = Vec::new();
+    reopened
+        .write_encrypted_recovery_archive(&mut second_archive, &key, now_millis())
+        .unwrap();
+    let (second, preview) = Node::install_encrypted_recovery_archive(
+        Cursor::new(&second_archive),
+        &key,
+        dir.path(),
+        &dir.path().join("second-restore"),
+        "third password",
+    )
+    .unwrap();
+    assert_eq!(preview.favorites, 1);
+    assert_eq!(preview.favorite_files, 2);
+    assert_eq!(second.account_id(), account.account_id());
+    assert_ne!(second.user_id(), reopened.user_id());
+    assert_eq!(
+        second.list_message_favorites("", 0, 10).unwrap().items,
+        vec![favorite]
+    );
+    for (index, expected) in [b"retained generic".as_slice(), b"retained image".as_slice()]
+        .into_iter()
+        .enumerate()
+    {
+        let bytes = second
+            .read_favorite_file(ConversationId::new([70 + index as u8; 32]))
+            .unwrap();
+        assert_eq!(Sha256::digest(&bytes), Sha256::digest(expected));
+    }
 }

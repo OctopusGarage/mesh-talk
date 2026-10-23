@@ -183,8 +183,8 @@
     "createBackup": "建立加密備份",
     "restoreBackup": "由加密備份復原",
     "exportIntro": "儲存帳號同本機記錄嘅可攜副本。復原時要用另外保管嘅復原金鑰。",
-    "included": "包括帳號身分、可見訊息、唯讀群組記錄、檔案卡片、程式管理嘅本機媒體同收到嘅頭像。",
-    "excluded": "唔包括本機介面設定、舊裝置金鑰、待傳送內容、網絡設定同程式以外嘅檔案。 亦唔包含收藏夾同當中保留嘅附件。",
+    "included": "包括帳號身分、可見訊息、唯讀群組記錄、檔案卡片、程式管理嘅本機媒體、收到嘅頭像，以及收藏、備註同已保留嘅收藏附件。",
+    "excluded": "唔包括本機介面設定、舊裝置金鑰、待傳送內容、網絡設定同程式以外嘅檔案。",
     "pauseNotice": "建立備份嗰陣，訊息收發會短暫暫停。",
     "saveKey": "請將復原金鑰同備份檔分開保存。",
     "perExportKey": "每份備份都有獨立金鑰，Mesh-Talk 唔會儲存。",
@@ -218,7 +218,9 @@
     "signInNext": "用新本機憑證登入。",
     "noBackup": "呢部裝置冇備份記錄。",
     "statusUnavailable": "載入唔到上次備份：{{error}}",
-    "restoreHint": "要還原備份，請先登出，再喺登入畫面揀還原。"
+    "restoreHint": "要還原備份，請先登出，再喺登入畫面揀還原。",
+    "favoriteCounts": "{{favorites}} 項收藏 · {{files}} 個已保留嘅收藏附件",
+    "missingFavoriteFiles": "冇保留檔案內容嘅收藏附件：{{count}} 個"
   },
   "conversation": {
     "archivedChannel": "已封存群組",
@@ -1165,5 +1167,31 @@
     "loadFailed": "載入唔到草稿，請重試後繼續輸入。",
     "saveFailed": "草稿儲存失敗，文字仍然保留喺目前視窗。",
     "retry": "重試"
+  },
+  "drive": {
+    "connect": "連接 Google 雲端硬碟",
+    "connecting": "等緊 Google 登入…",
+    "connected": "今次工作階段已連接 Google 雲端硬碟。",
+    "privacy": "只會上傳加密備份。請分開保存每份備份嘅復原密鑰；Google 登入唔可以代替密鑰。",
+    "unavailable": "呢個版本未設定 Google 雲端硬碟。你仍然可以儲存同還原本機備份檔案。",
+    "destination": "備份目的地",
+    "local": "本機檔案",
+    "cloud": "Google 雲端硬碟",
+    "backUpNow": "即刻備份",
+    "complete": "已將加密備份儲存到 Google 雲端硬碟",
+    "snapshot": "建立同驗證緊加密備份…",
+    "uploading": "上傳緊加密備份…",
+    "downloading": "下載緊加密備份…",
+    "cancel": "取消傳輸",
+    "restore": "從 Google 雲端硬碟還原",
+    "load": "載入備份",
+    "choose": "揀選備份",
+    "download": "下載揀選嘅備份",
+    "empty": "呢個 Google 帳號冇已完成嘅 Mesh-Talk 備份。",
+    "downloaded": "備份已下載。請輸入對應嘅復原密鑰嚟驗證備份。",
+    "reconnect": "中斷連線 / 更換 Google 帳號",
+    "loading": "載入緊備份…",
+    "selected": "揀選咗嘅備份",
+    "source": "備份來源"
   }
 }

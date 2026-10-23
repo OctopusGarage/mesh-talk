@@ -38,9 +38,10 @@ log = { workspace = true }
 tracing = { workspace = true }
 rand = "0.10" # session-token generation; already in the tree via tauri-plugin-notification
 hex = { workspace = true }
+base64 = { workspace = true }
 lazy_static = { workspace = true }
 serde_json = "1" # persist app settings as JSON in the app config dir
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "system-proxy", "query", "form"] }
 semver = "1"
 sha2 = { workspace = true }
 tempfile = { workspace = true } # atomic replacement of per-account contact policy

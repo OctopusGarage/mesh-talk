@@ -20,10 +20,11 @@
       ],
       "consumers": [
         "desktop-message-favorites",
-        "frontend-message-favorites"
+        "frontend-message-favorites",
+        "core-recovery"
       ],
       "capability": {
-        "summary": "Persist encrypted account-owned message snapshots and notes, independently retain files, and reconcile certified siblings through an optional bounded Favorites exchange.",
+        "summary": "Persist encrypted account-owned message snapshots and notes, independently retain files, reconcile certified siblings, and export/restore the collection through portable recovery archives.",
         "guide": "docs/favorites.md",
         "invariants": [
           {
@@ -37,11 +38,16 @@
           {
             "name": "Favorite file access requires a nonremoved unexpired reference and never grants transfer consent",
             "reference": "docs/favorites.md#lifetime-and-files"
+          },
+          {
+            "name": "Portable recovery preserves collection metadata, notes and removal generations, withholds expired content and validates independently retained files before publication",
+            "reference": "docs/favorites.md#backup-and-recovery"
           }
         ]
       },
       "escalation": [
-        "Run the certified-sibling loopback save/edit/remove and policy/foreign-account tests; preserve old account-history wire fixtures. Native/physical device evidence is required before claiming cross-machine behavior."
+        "Run the certified-sibling loopback save/edit/remove and policy/foreign-account tests; preserve old account-history wire fixtures. Native/physical device evidence is required before claiming cross-machine behavior.",
+        "Portable-format changes require recovery_snapshot, recovery_archive and recovery_key integration targets, encrypted archive Favorites roundtrip/restart tests and registered native Google Drive command coverage; old schema tags stay readable."
       ]
     },
     {
@@ -285,7 +291,11 @@
     {
       "id": "core-recovery",
       "paths": [
-        "crates/mesh-talk-core/src/recovery/"
+        "crates/mesh-talk-core/src/recovery/",
+        "crates/mesh-talk-core/src/node/recovery.rs",
+        "crates/mesh-talk-core/tests/recovery_snapshot.rs",
+        "crates/mesh-talk-core/tests/recovery_archive.rs",
+        "crates/mesh-talk-core/tests/recovery_key.rs"
       ],
       "rust": [
         {
@@ -302,7 +312,21 @@
       "consumers": [
         "core-node",
         "desktop-recovery"
-      ]
+      ],
+      "capability": {
+        "summary": "Validate versioned logical account snapshots and authenticated encrypted archives, including independent Favorites records and retained files, before staging publication.",
+        "guide": "docs/backup-recovery.md",
+        "invariants": [
+          {
+            "name": "Schema 4 appends bounded Favorites and retained-file tags while preserving schema 1\u20133 compatibility and existing archive authentication",
+            "reference": "docs/backup-recovery.md#snapshot-compatibility"
+          },
+          {
+            "name": "Both local and Google Drive recovery preserve the account, generate a new device and reencrypt supported stores without overwriting an existing local profile",
+            "reference": "docs/backup-recovery.md#restore-after-losing-a-device"
+          }
+        ]
+      }
     },
     {
       "id": "core-storage",

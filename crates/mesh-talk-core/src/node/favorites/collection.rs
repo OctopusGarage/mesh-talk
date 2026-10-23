@@ -217,12 +217,8 @@ impl Node {
         } else {
             self.favorite_name(&source.target)
         };
-        let mut hasher = Sha256::new();
-        hasher.update(b"mesh-talk-favorite-v1");
-        hasher.update(self.account_id());
-        hasher.update(bincode::serialize(&source).map_err(|_| invalid("invalid favorite"))?);
         Ok(MessageFavorite {
-            id: format!("{:x}", hasher.finalize()),
+            id: super::recovery::canonical_id(&self.account_id(), &source)?,
             source,
             source_label,
             metadata,

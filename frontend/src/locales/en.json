@@ -183,8 +183,8 @@
     "createBackup": "Create encrypted backup",
     "restoreBackup": "Restore from encrypted backup",
     "exportIntro": "Save a portable copy of your account and local history. You will need a separate recovery key to restore it.",
-    "included": "Includes account identity, visible messages, read-only channel history, file cards, locally managed media, and received avatars.",
-    "excluded": "Excludes local UI customizations and settings, old device keys, pending deliveries, network settings, and files stored outside Mesh-Talk. Favorites and their retained attachments are also excluded.",
+    "included": "Includes account identity, visible messages, read-only channel history, file cards, locally managed media, received avatars, and Favorites with notes and retained attachments.",
+    "excluded": "Excludes local UI customizations and settings, old device keys, pending deliveries, network settings, and files stored outside Mesh-Talk.",
     "pauseNotice": "Messaging pauses briefly while the backup is made.",
     "saveKey": "Save this recovery key separately from the backup file.",
     "perExportKey": "Each backup has its own key. Mesh-Talk does not store it.",
@@ -218,7 +218,9 @@
     "signInNext": "Sign in with your new local credentials.",
     "noBackup": "No backup recorded on this device.",
     "statusUnavailable": "Couldn’t load the last backup: {{error}}",
-    "restoreHint": "To restore a backup, sign out and choose recovery on the sign-in screen."
+    "restoreHint": "To restore a backup, sign out and choose recovery on the sign-in screen.",
+    "favoriteCounts": "{{favorites}} favorites · {{files}} retained favorite files",
+    "missingFavoriteFiles": "Favorite files without retained bytes: {{count}}"
   },
   "conversation": {
     "archivedChannel": "Archived channel",
@@ -1165,5 +1167,31 @@
     "loadFailed": "Couldn’t load your drafts. Retry to continue composing.",
     "saveFailed": "Couldn’t save drafts. Your text is still available in this window.",
     "retry": "Retry"
+  },
+  "drive": {
+    "connect": "Connect Google Drive",
+    "connecting": "Waiting for Google sign-in…",
+    "connected": "Google Drive connected for this session.",
+    "privacy": "Only encrypted backups are uploaded. Keep each recovery key separately; Google sign-in cannot replace it.",
+    "unavailable": "Google Drive is not configured in this build. You can still save and restore local backup files.",
+    "destination": "Backup destination",
+    "local": "Local file",
+    "cloud": "Google Drive",
+    "backUpNow": "Back up now",
+    "complete": "Encrypted backup saved to Google Drive",
+    "snapshot": "Creating and verifying encrypted backup…",
+    "uploading": "Uploading encrypted backup…",
+    "downloading": "Downloading encrypted backup…",
+    "cancel": "Cancel transfer",
+    "restore": "Restore from Google Drive",
+    "load": "Load backups",
+    "choose": "Choose a backup",
+    "download": "Download selected backup",
+    "empty": "No completed Mesh-Talk backups were found in this Google account.",
+    "downloaded": "Backup downloaded. Enter its recovery key to verify it.",
+    "reconnect": "Disconnect / change Google account",
+    "loading": "Loading backups…",
+    "selected": "Selected backup",
+    "source": "Backup source"
   }
 }

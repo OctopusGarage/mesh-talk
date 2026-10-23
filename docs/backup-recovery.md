@@ -2,7 +2,8 @@
 
 Mesh-Talk has no account server. Your local password unlocks this installation;
 it does not recover data from a lost device. Create a manual encrypted backup
-while you still have access to an unlocked device.
+while you still have access to an unlocked device. Save it locally or, in a
+configured build, upload it directly to your Google Drive.
 
 For first-use sign-in, saved credentials and the optional account-protection
 reminder, see [Keep access to your account](help/topics/first-run.md#keep-access-to-your-account).
@@ -38,7 +39,11 @@ locally managed bytes remain visible but their contents may be unavailable.
 Some direct messages after the backup date may return through peer sync.
 
 The backup includes visible message history, received peer avatars, file
-cards, and locally managed media referenced by those cards. It excludes Favorites and their independently retained attachments, local UI
+cards, locally managed media referenced by those cards, and Favorites with their
+titles, descriptions, message notes and independently retained attachments. A
+favorite remains recoverable after its source chat history has been cleared.
+Unavailable attachments remain file cards; the preview reports missing ordinary
+media and missing Favorite files separately. It excludes local UI
 customizations (including your own avatar override), machine settings, pending
 deliveries, old device keys, and files outside Mesh-Talk's media store. It never
 merges a backup into an existing local profile.
@@ -50,7 +55,19 @@ and previous identity cannot be recovered by a password reset.
 
 ## Snapshot compatibility
 
-New backups use snapshot schema 3; this build also accepts schemas 1 and 2.
+New backups use snapshot schema 4; this build also accepts schemas 1, 2 and 3.
+Schema 4 adds logical Favorites records and separately encrypted-on-install
+retained attachments. It preserves removal tombstones and expiry restrictions;
+restoring does not revive removed entries or grant access to expired content.
+Only already retained, live referenced Favorite files are exported, with the
+existing 64 MiB per-file retention limit. Ordinary media and Favorite files share
+the snapshot's 8 GiB aggregate media limit. Each attachment is checked for its
+declared size, chunk order and SHA-256 digest before the restored profile is
+published. Restore opens staged attachment files only while writing or installing
+them, so large collections do not require one open handle per retained file.
+Older snapshots contain no Favorites; their existing record tags and
+the outer encrypted archive format remain unchanged.
+
 Schema 3 preserves signed public [trust cards](peer-trust.md), including their
 self-declared creation claims and attached proofs. Older snapshots contain no
 trust-card evidence and never gain an inferred creation date. Private relationship
@@ -59,3 +76,86 @@ message-language metadata in older schema 2 backups is validated for format and
 authenticity but does not restore restrictions or hidden-message decisions.
 New backups omit that metadata. Display-language preferences remain ordinary
 local device settings.
+
+## Google Drive backup and restore
+
+Google Drive is an optional destination for the same encrypted `.mtbackup` format.
+Backups run only when requested; there is no schedule or background cloud sync.
+
+1. Open **Settings → History & backup → Create encrypted backup**.
+2. Set **Backup destination** to **Google Drive**, then **Connect Google Drive**.
+   Choose the intended Google account in your system browser and grant access.
+3. Save the newly generated recovery key separately and complete the key challenge.
+4. Choose **Back up now**. Messaging pauses only for the consistent local snapshot,
+   then restarts while the encrypted file uploads. Wait for the cloud success message.
+
+To restore on another installation, open **Restore from encrypted backup** on the
+signed-out screen and set **Backup source** to **Google Drive**. Connect the same
+Google account, select an archive and choose **Download selected backup**. Enter
+that archive's recovery key, verify the preview and explicitly confirm restoration
+with an unused local username and new password. The existing account/device and
+channel-recovery rules above apply unchanged. Cloud listing names and sizes are
+provider metadata; account identity and content counts are trusted only after
+archive authentication.
+
+**Cancel transfer** stops cloud work and disconnects its temporary grant. If a local
+snapshot is already running, it finishes safely and restarts messaging before the
+cancellation returns. Confirmed local profile restoration completes transactionally;
+it is not interrupted during publication. Reconnect to retry or change Google accounts.
+Closing the dialog retires its connection. Local-file export and restore stay available
+when Google cannot be reached or the build has no Google configuration.
+
+### Google Drive security and boundaries
+
+- The desktop host requests only `drive.appdata`. Archives live in the hidden
+  `appDataFolder`, accessible through Mesh-Talk rather than the Drive file browser.
+- Google receives encrypted archive bytes, archive names, sizes and ordinary service
+  request metadata. Recovery keys and local passwords are never sent to Google.
+  Each archive still needs its own original recovery key. Google sign-in alone cannot
+  recover an account or decrypt history.
+- OAuth authorization uses the system browser, PKCE, an unpredictable state and a
+  temporary IPv4 loopback callback. Tokens remain in native memory for the dialog's
+  connection, which expires after 30 minutes; they are not stored in settings or backups.
+  Disconnecting removes local access, not the Google account's consent grant. Consent
+  can be revoked in Google Account settings.
+- Connections are tied to the exact desktop session generation, including signed-out
+  restore sessions. Logout, lock/session replacement and view retirement invalidate
+  further work. Work already admitted may finish; it cannot publish into a replacement
+  profile. Temporary encrypted files are removed when their owning operation retires.
+- Uploads create new archive files. A remote archive becomes selectable only after
+  its size and SHA-256 checksum match the locally verified encrypted archive.
+  Downloaded size and checksum are checked before existing cryptographic verification.
+  Transfers use bounded chunks, fixed HTTPS destinations, disabled redirects and
+  request timeouts. The transfer ceiling is 9 GiB including archive framing; the
+  core's existing 8 GiB plaintext limit remains authoritative.
+- Previous backups are retained. Interrupted or unverified uploads are never offered
+  for restoration. Drive storage limits and user deletion still apply. Clearing
+  Mesh-Talk application data in Drive deletes its cloud backups; retain local copies
+  and keep recovery keys separately.
+
+### Configure a desktop build
+
+Create a Google Cloud project, enable the Google Drive API, configure the OAuth
+consent screen with the `https://www.googleapis.com/auth/drive.appdata` scope and
+register an OAuth client of type **Desktop app**. During Google OAuth testing, add
+the Google accounts that will test the build to the consent screen's test users.
+Follow Google's publication/verification requirements before distributing broadly.
+
+Build the desktop app with `MESH_TALK_GOOGLE_CLIENT_ID` set to the registered desktop
+client ID. If Google supplies/requires its desktop client secret, also set
+`MESH_TALK_GOOGLE_CLIENT_SECRET` at build time. Native application client credentials
+are distributed with the app and are not confidential server credentials; PKCE
+protects each authorization exchange. Never use a Web application client's secret.
+These variables affect compilation; restart/rebuild the native host after changing them.
+No vendor-operated OAuth callback server is required. Release jobs must receive the
+same registered desktop client configuration to enable this optional capability.
+Unconfigured builds explain that Google Drive is unavailable and retain local backups.
+
+Provider references: [desktop OAuth](https://developers.google.com/identity/protocols/oauth2/native-app),
+[Drive application data](https://developers.google.com/workspace/drive/api/guides/appdata).
+
+Native acceptance requires a configured packaged app on supported platforms: prove
+browser callback/denial/timeout, account selection, cancel during snapshot and upload,
+offline and revoked access, unchanged previous backups and fresh-install restore using
+the saved recovery key. Unit HTTP fixtures and browser IPC mocks cover application
+boundaries but do not prove Google's live consent and transfer behavior.

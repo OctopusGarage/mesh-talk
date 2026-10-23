@@ -584,6 +584,41 @@
       "escalation": [
         "Run e2e/notification-permission.spec.ts for UI recovery and nonblocking sends. Packaged macOS and Windows authorization/revocation, system-settings navigation and actual notification delivery require native platform evidence; browser mocks and mapping tests do not certify them."
       ]
+    },
+    {
+      "id": "desktop-google-drive-backup",
+      "paths": [
+        "src-tauri/src/google_drive/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "google_drive::",
+            "recovery::"
+          ]
+        }
+      ],
+      "consumers": [
+        "desktop-recovery"
+      ],
+      "capability": {
+        "summary": "Transport verified encrypted recovery archives to a user-selected Google account using bounded, cancellable desktop OAuth and Drive requests.",
+        "guide": "docs/backup-recovery.md#google-drive-backup-and-restore",
+        "invariants": [
+          {
+            "name": "Drive grants and pending work belong to the exact desktop session generation; recovery keys never reach Google.",
+            "reference": "docs/backup-recovery.md#google-drive-security-and-boundaries"
+          },
+          {
+            "name": "Only complete checksum-verified archives are offered; prior backups and existing profiles are never overwritten.",
+            "reference": "docs/backup-recovery.md#google-drive-security-and-boundaries"
+          }
+        ]
+      },
+      "escalation": [
+        "Run Google Drive browser flows and packaged desktop OAuth on macOS/Windows/Linux with a configured client. Prove cancelled transfers, revoked grants, runtime restart after snapshot and fresh-install restore; loopback HTTP tests do not certify Google consent or provider behavior."
+      ]
     }
   ],
   "prScenarios": [
@@ -642,6 +677,20 @@
       ],
       "browser": [
         "e2e/notification-permission.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "desktop-google-drive-acceptance",
+      "paths": [
+        "src-tauri/src/google_drive/",
+        "src-tauri/src/recovery.rs"
+      ],
+      "browser": [
+        "e2e/google-drive-backup.spec.ts",
+        "e2e/recovery.spec.ts"
       ],
       "native": [
         "host"

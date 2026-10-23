@@ -36,7 +36,7 @@ pub(crate) mod dm;
 pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
 pub(crate) mod expiry_policy;
-mod favorites;
+pub(crate) mod favorites;
 mod file_completion;
 mod file_consent;
 mod file_consent_store;
