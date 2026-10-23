@@ -4,6 +4,8 @@
     {
       "id": "frontend-conversation-drafts",
       "paths": [
+        "frontend/src/features/chat/conversationDrafts.ts",
+        "frontend/src/features/chat/conversationDrafts.test.ts",
         "frontend/src/store/drafts.ts",
         "frontend/src/store/drafts.test.ts",
         "frontend/src/lib/api/drafts.ts",
