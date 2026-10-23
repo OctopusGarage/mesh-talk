@@ -175,7 +175,7 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   one-time 128-bit code (SHA-256 authenticator binding both device keys, constant-time
   check) → account secret + cert + history backfill transferred over the Noise channel.
   Self-account sends also work with no known siblings: the delivery WAL accepts a
-  durable local projection without reserving a remote queue slot. Saved Messages
+  durable local projection without reserving a remote queue slot. Message Yourself
   reuses the self-account conversation and logical message IDs. Personal file
   cards retain encrypted managed content and a detached signed manifest proof
   (`MTPFM1`) binding the exact expiry-wrapped manifest digest to that conversation.
@@ -1122,7 +1122,13 @@ discovered from durable account history.
 
 Snapshots include visible plaintext history, signed event provenance, file cards,
 managed media referenced by visible cards, received peer avatars, signed public
-trust cards and their attached proofs, and recall marks.
+trust cards and their attached proofs, recall marks, and account-owned Favorites
+with their metadata, notes and independently retained attachment bytes.
+Schema 4 appends Favorites records without changing earlier positional tags;
+schemas 1–3 remain readable. The Favorites owner validates logical records and
+retains removal generations/tombstones. Expired content is withheld, and retained
+file records must match a live collection reference. Favorite media has a separate
+namespace from ordinary media and shares the archive's aggregate byte budget.
 Verified peer recall marks are persisted before export so a restored device does not
 redisplay recalled plaintext it cannot decrypt from the old device's events. A
 password-encrypted local index retains original IDs for restored outgoing messages;

@@ -217,6 +217,30 @@ pub(super) enum AccountHistoryFrame {
     SessionReady {
         request_id: [u8; 16],
     },
+    // Append-only optional extension. Never emitted in a history exchange.
+    FavoritesRequest {
+        version: u16,
+        account_id: String,
+        after: Option<String>,
+        known_digest: [u8; 32],
+        attachments: bool,
+    },
+    FavoriteHeader {
+        id: String,
+        total_len: u32,
+    },
+    FavoriteChunk {
+        bytes: Vec<u8>,
+    },
+    FavoritesComplete {
+        next: Option<String>,
+        digest: [u8; 32],
+    },
+    FavoriteAttachmentRequest {
+        version: u16,
+        account_id: String,
+        file_conv: [u8; 32],
+    },
 }
 
 impl AccountHistoryFrame {
@@ -258,7 +282,12 @@ impl AccountHistoryFrame {
 
     fn valid_for(&self, codec: AccountSyncVersion) -> bool {
         match self {
-            Self::Wake { .. }
+            Self::FavoritesRequest { .. }
+            | Self::FavoriteHeader { .. }
+            | Self::FavoriteChunk { .. }
+            | Self::FavoritesComplete { .. }
+            | Self::FavoriteAttachmentRequest { .. }
+            | Self::Wake { .. }
             | Self::WakeAck { .. }
             | Self::SessionRequest { .. }
             | Self::SessionReady { .. }
@@ -284,6 +313,32 @@ impl AccountHistoryFrame {
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         }
         match self {
+            Self::FavoritesRequest {
+                version,
+                account_id: id,
+                after,
+                ..
+            } => {
+                *version == 1
+                    && account_id(id)
+                    && after
+                        .as_ref()
+                        .is_none_or(|s| super::favorites::conversation(s).is_some())
+            }
+            Self::FavoriteHeader { id, total_len } => {
+                super::favorites::conversation(id).is_some()
+                    && *total_len > 0
+                    && *total_len as usize <= super::favorites::MAX_FAVORITE_BYTES
+            }
+            Self::FavoriteChunk { bytes } => !bytes.is_empty() && bytes.len() <= MAX_CHUNK,
+            Self::FavoritesComplete { next, .. } => next
+                .as_ref()
+                .is_none_or(|s| super::favorites::conversation(s).is_some()),
+            Self::FavoriteAttachmentRequest {
+                version,
+                account_id: id,
+                ..
+            } => *version == 1 && account_id(id),
             Self::Request {
                 version,
                 account_id: id,
@@ -774,5 +829,26 @@ mod tests {
             },
         );
         assert!(AccountHistoryFrame::decode(&oversized_chunk).is_none());
+    }
+}
+
+#[cfg(test)]
+mod favorites_wire_tests {
+    use super::*;
+    #[test]
+    fn favorites_extension_is_explicitly_versioned_and_v1_incompatible() {
+        let request = AccountHistoryFrame::FavoritesRequest {
+            version: 1,
+            account_id: "ab".repeat(16),
+            after: None,
+            known_digest: [0; 32],
+            attachments: false,
+        };
+        assert!(request.encode_version(AccountSyncVersion::V1).is_none());
+        let bytes = request.encode_version(AccountSyncVersion::V2).unwrap();
+        assert_eq!(
+            AccountHistoryFrame::decode_versioned(&bytes),
+            Some((AccountSyncVersion::V2, request))
+        );
     }
 }

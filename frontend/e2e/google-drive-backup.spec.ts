@@ -11,6 +11,9 @@ const preview = {
   file_cards: 3,
   media_files: 2,
   missing_media: 1,
+  favorites: 4,
+  favorite_files: 2,
+  missing_favorite_files: 1,
 };
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(
@@ -133,6 +136,12 @@ test("Drive recovery downloads, verifies, previews and explicitly restores", asy
   await page.getByTestId("restore-inspect").click();
   await expect(page.getByTestId("restore-preview")).toContainText(
     "12 messages",
+  );
+  await expect(page.getByTestId("restore-preview")).toContainText(
+    "4 favorites · 2 retained favorite files",
+  );
+  await expect(page.getByTestId("restore-preview")).toContainText(
+    "Favorite files without retained bytes: 1",
   );
   await page.getByTestId("restore-username").fill("recovered");
   await page.getByTestId("restore-password").fill("newpassword123");

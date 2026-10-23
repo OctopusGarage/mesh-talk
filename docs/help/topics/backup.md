@@ -31,7 +31,9 @@ Restoring retains the account fingerprint but creates a new device fingerprint. 
 
 ## Know what is excluded
 
-Backups exclude machine settings, local UI customizations, pending deliveries, old device keys and files outside the managed media store. There is no vendor password-reset or recovery service. Losing both the backup and its key can make the old identity and encrypted history unrecoverable.
+Backups include Favorites, their titles and notes, and retained Favorite attachments, even if the original chat history was cleared. Expired content stays unavailable. File cards without retained bytes remain visible; the preview reports missing Favorite files separately. Backups made before Favorites backup support contain no Favorites.
+
+Backups exclude machine settings, local UI customizations, pending deliveries, old device keys and files outside Mesh-Talk's managed stores. There is no vendor password-reset or recovery service. Losing both the backup and its key can make the old identity and encrypted history unrecoverable.
 
 ## Further reference
 

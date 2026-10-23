@@ -183,7 +183,7 @@
     "createBackup": "建立加密備份",
     "restoreBackup": "從加密備份復原",
     "exportIntro": "儲存帳號與本機記錄的可攜副本。復原時需要另行保管的復原金鑰。",
-    "included": "包含帳號身分、可見訊息、唯讀群聊記錄、檔案卡片、應用程式管理的本機媒體及收到的頭像。",
+    "included": "包含帳號身分、可見訊息、唯讀群聊記錄、檔案卡片、應用程式管理的本機媒體、收到的頭像，以及收藏、備註與已保留的收藏附件。",
     "excluded": "不包含本機介面個人化設定、舊裝置金鑰、待傳送內容、網路設定及應用程式外部的檔案。",
     "pauseNotice": "建立備份時，訊息收發會短暫暫停。",
     "saveKey": "請將此復原金鑰與備份檔分開保存。",
@@ -218,7 +218,9 @@
     "signInNext": "使用新的本機憑證登入。",
     "noBackup": "此裝置上沒有備份記錄。",
     "statusUnavailable": "無法載入上次備份：{{error}}",
-    "restoreHint": "若要還原備份，請先登出，再於登入畫面選擇還原。"
+    "restoreHint": "若要還原備份，請先登出，再於登入畫面選擇還原。",
+    "favoriteCounts": "{{favorites}} 項收藏 · {{files}} 個已保留的收藏附件",
+    "missingFavoriteFiles": "缺少檔案內容的收藏附件：{{count}} 個"
   },
   "conversation": {
     "archivedChannel": "已封存群聊",
@@ -993,7 +995,7 @@
     "viewNamed": "查看{{name}}的資料"
   },
   "personal": {
-    "title": "收藏訊息",
+    "title": "傳訊息給自己",
     "description": "在你的裝置之間同步筆記和檔案",
     "saved": "已儲存在此裝置上",
     "fileCardSaved": "檔案資訊已儲存在此裝置上",
@@ -1129,5 +1131,41 @@
     "loading": "正在載入備份…",
     "selected": "選取的備份",
     "source": "備份來源"
+  },
+  "messageFavorites": {
+    "title": "收藏夾",
+    "add": "加入收藏夾",
+    "saved": "已收藏",
+    "collect": "收藏",
+    "selectMessages": "多選訊息",
+    "selected": "已選 {{count}} / {{max}} 則",
+    "selectMessage": "選擇訊息：{{text}}",
+    "edit": "編輯說明",
+    "editorHint": "將 {{count}} 則訊息一起收藏。標題與備註皆可不填，並支援搜尋。",
+    "itemTitle": "標題（選填）",
+    "description": "整體說明（選填）",
+    "titlePlaceholder": "為這組訊息取一個方便尋找的名稱",
+    "descriptionPlaceholder": "為什麼收藏這些訊息？",
+    "messageNote": "逐則備註",
+    "noteFor": "第 {{index}} 則訊息的備註",
+    "contentUnavailable": "訊息內容已無法使用",
+    "alreadySaved": "這些訊息已收藏，已為你保留原有說明。",
+    "saveFailed": "儲存失敗，已保留你的備註。{{error}}",
+    "saving": "儲存中…",
+    "hint": "集中收藏實用訊息，加入說明，方便日後搜尋。",
+    "back": "返回",
+    "remove": "移除收藏",
+    "removeConfirm": "移除此收藏？原聊天訊息會保留。",
+    "viewOriginal": "檢視原訊息",
+    "search": "搜尋訊息、標題與備註",
+    "empty": "尚無收藏",
+    "emptyHint": "從訊息選單收藏單則訊息，或多選後一起收藏。",
+    "noResults": "沒有符合的收藏",
+    "searchHint": "試試訊息、標題或備註中的關鍵字。",
+    "untitled": "未命名收藏",
+    "messageCount": "{{count}} 則訊息",
+    "loadMore": "載入更多",
+    "preview": "預覽",
+    "fileUnavailable": "已儲存檔案卡片，但收藏夾未保留檔案內容。"
   }
 }

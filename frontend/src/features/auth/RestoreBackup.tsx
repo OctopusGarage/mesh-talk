@@ -376,6 +376,17 @@ export function RestoreBackup({
                 <p>
                   {t("recovery.missingMedia", { count: preview.missing_media })}
                 </p>
+                <p>
+                  {t("recovery.favoriteCounts", {
+                    favorites: preview.favorites,
+                    files: preview.favorite_files,
+                  })}
+                </p>
+                <p>
+                  {t("recovery.missingFavoriteFiles", {
+                    count: preview.missing_favorite_files,
+                  })}
+                </p>
                 <p className="text-xs text-muted-foreground">
                   {t("recovery.newerMissing")}
                 </p>

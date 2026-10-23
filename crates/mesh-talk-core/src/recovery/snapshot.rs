@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use zeroize::Zeroize;
 
-pub const SNAPSHOT_SCHEMA_VERSION: u16 = 3;
+pub const SNAPSHOT_SCHEMA_VERSION: u16 = 4;
 const MAGIC: &[u8; 8] = b"MTSNAP1\0";
 const MAX_RECORDS: u64 = 10_000_000;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
@@ -117,6 +117,20 @@ pub enum SnapshotRecordV1 {
     /// Schema 3 appends this tag; earlier positional tags stay unchanged.
     PeerTrustCard {
         card: crate::node::TrustCard,
+    },
+    /// Schema 4 appends account-owned Favorites without changing earlier tags.
+    Favorite {
+        payload: Vec<u8>,
+    },
+    FavoriteMediaDescriptor {
+        file_conv: [u8; 32],
+        size: u64,
+        sha256: [u8; 32],
+    },
+    FavoriteMediaChunk {
+        file_conv: [u8; 32],
+        index: u32,
+        bytes: Vec<u8>,
     },
 }
 
@@ -299,7 +313,10 @@ pub struct SnapshotValidator {
     account_contacts: HashSet<String>,
     event_ids: HashMap<[u8; 32], SignedEventInfo>,
     file_cards: HashMap<[u8; 32], FileCardInfo>,
-    media: HashMap<[u8; 32], MediaProgress>,
+    media: HashMap<(bool, [u8; 32]), MediaProgress>,
+    favorites: HashSet<String>,
+    favorite_files: HashMap<[u8; 32], u64>,
+    created_at_ms: u64,
     total_media_bytes: u64,
 }
 
@@ -368,6 +385,9 @@ impl SnapshotValidator {
             event_ids: HashMap::new(),
             file_cards: HashMap::new(),
             media: HashMap::new(),
+            favorites: HashSet::new(),
+            favorite_files: HashMap::new(),
+            created_at_ms: header.created_at_ms,
             total_media_bytes: 0,
         })
     }
@@ -471,22 +491,64 @@ impl SnapshotValidator {
                     return Err(SnapshotError::DuplicateRecord);
                 }
             }
+            SnapshotRecordV1::Favorite { payload } => {
+                if self.schema_version < 4 {
+                    return Err(SnapshotError::UnsupportedVersion);
+                }
+                let favorite = crate::node::favorites::recovery::validate(
+                    payload,
+                    &self.own_account_id,
+                    self.created_at_ms,
+                )?;
+                if !self.favorites.insert(favorite.id) {
+                    return Err(SnapshotError::DuplicateRecord);
+                }
+                if self.favorites.len() > crate::node::favorites::recovery::PORTABLE_RECORD_LIMIT {
+                    return Err(SnapshotError::SizeLimit);
+                }
+                for file in favorite.files {
+                    let mut conv = [0; 32];
+                    hex::decode_to_slice(file.file_conv, &mut conv)
+                        .map_err(|_| SnapshotError::InvalidEncoding)?;
+                    if self
+                        .favorite_files
+                        .insert(conv, file.size)
+                        .is_some_and(|old| old != file.size)
+                    {
+                        return Err(SnapshotError::InvalidMedia);
+                    }
+                }
+            }
             SnapshotRecordV1::MediaDescriptor {
                 file_conv,
                 size,
                 sha256,
+            }
+            | SnapshotRecordV1::FavoriteMediaDescriptor {
+                file_conv,
+                size,
+                sha256,
             } => {
+                let favorite = matches!(record, SnapshotRecordV1::FavoriteMediaDescriptor { .. });
+                if favorite && self.schema_version < 4 {
+                    return Err(SnapshotError::UnsupportedVersion);
+                }
+                let limit = if favorite {
+                    crate::node::favorites::recovery::PORTABLE_FILE_LIMIT
+                } else {
+                    MAX_MEDIA_BYTES
+                };
                 self.total_media_bytes = self
                     .total_media_bytes
                     .checked_add(*size)
                     .ok_or(SnapshotError::SizeLimit)?;
-                if *size > MAX_MEDIA_BYTES || self.total_media_bytes > MAX_TOTAL_MEDIA_BYTES {
+                if *size > limit || self.total_media_bytes > MAX_TOTAL_MEDIA_BYTES {
                     return Err(SnapshotError::SizeLimit);
                 }
                 if self
                     .media
                     .insert(
-                        *file_conv,
+                        (favorite, *file_conv),
                         MediaProgress {
                             size: *size,
                             sha256: *sha256,
@@ -504,10 +566,19 @@ impl SnapshotValidator {
                 file_conv,
                 index,
                 bytes,
+            }
+            | SnapshotRecordV1::FavoriteMediaChunk {
+                file_conv,
+                index,
+                bytes,
             } => {
+                let favorite = matches!(record, SnapshotRecordV1::FavoriteMediaChunk { .. });
+                if favorite && self.schema_version < 4 {
+                    return Err(SnapshotError::UnsupportedVersion);
+                }
                 let progress = self
                     .media
-                    .get_mut(file_conv)
+                    .get_mut(&(favorite, *file_conv))
                     .ok_or(SnapshotError::InvalidMedia)?;
                 if *index != progress.next_index
                     || bytes.is_empty()
@@ -588,8 +659,9 @@ impl SnapshotValidator {
         if self.accepted != self.expected {
             return Err(SnapshotError::RecordCount);
         }
-        for progress in self.media.values() {
-            if progress.written != progress.size
+        for ((favorite, file_conv), progress) in &self.media {
+            if (*favorite && self.favorite_files.get(file_conv) != Some(&progress.size))
+                || progress.written != progress.size
                 || progress.hasher.clone().finalize().as_slice() != progress.sha256
             {
                 return Err(SnapshotError::InvalidMedia);

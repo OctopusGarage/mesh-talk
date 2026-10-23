@@ -8,6 +8,9 @@ export interface BackupPreview {
   file_cards: number;
   media_files: number;
   missing_media: number;
+  favorites: number;
+  favorite_files: number;
+  missing_favorite_files: number;
 }
 
 export interface BackupCreated {

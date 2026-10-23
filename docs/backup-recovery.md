@@ -39,7 +39,11 @@ locally managed bytes remain visible but their contents may be unavailable.
 Some direct messages after the backup date may return through peer sync.
 
 The backup includes visible message history, received peer avatars, file
-cards, and locally managed media referenced by those cards. It excludes local UI
+cards, locally managed media referenced by those cards, and Favorites with their
+titles, descriptions, message notes and independently retained attachments. A
+favorite remains recoverable after its source chat history has been cleared.
+Unavailable attachments remain file cards; the preview reports missing ordinary
+media and missing Favorite files separately. It excludes local UI
 customizations (including your own avatar override), machine settings, pending
 deliveries, old device keys, and files outside Mesh-Talk's media store. It never
 merges a backup into an existing local profile.
@@ -51,7 +55,19 @@ and previous identity cannot be recovered by a password reset.
 
 ## Snapshot compatibility
 
-New backups use snapshot schema 3; this build also accepts schemas 1 and 2.
+New backups use snapshot schema 4; this build also accepts schemas 1, 2 and 3.
+Schema 4 adds logical Favorites records and separately encrypted-on-install
+retained attachments. It preserves removal tombstones and expiry restrictions;
+restoring does not revive removed entries or grant access to expired content.
+Only already retained, live referenced Favorite files are exported, with the
+existing 64 MiB per-file retention limit. Ordinary media and Favorite files share
+the snapshot's 8 GiB aggregate media limit. Each attachment is checked for its
+declared size, chunk order and SHA-256 digest before the restored profile is
+published. Restore opens staged attachment files only while writing or installing
+them, so large collections do not require one open handle per retained file.
+Older snapshots contain no Favorites; their existing record tags and
+the outer encrypted archive format remain unchanged.
+
 Schema 3 preserves signed public [trust cards](peer-trust.md), including their
 self-declared creation claims and attached proofs. Older snapshots contain no
 trust-card evidence and never gain an inferred creation date. Private relationship

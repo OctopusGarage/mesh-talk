@@ -278,14 +278,63 @@ fn registered_cloud_commands_round_trip_real_archive_and_restart_runtime() {
     let source = Fixture::new();
     let provider = Provider::new();
     source.sign_in();
-    let (account, device, channel) = tauri::async_runtime::block_on(async {
-        let node = source.node.node_handle().await.unwrap();
-        let channel = node.create_channel("Portable 你好", vec![]).await.unwrap();
-        node.send_channel_message(channel, "encrypted cloud fixture 🌍".as_bytes())
-            .await
-            .unwrap();
-        (node.account_id(), node.user_id(), channel)
-    });
+    let (account, device, channel, favorite, attachment, media) =
+        tauri::async_runtime::block_on(async {
+            let node = source.node.node_handle().await.unwrap();
+            let channel = node.create_channel("Portable 你好", vec![]).await.unwrap();
+            node.send_channel_message(channel, "encrypted cloud fixture 🌍".as_bytes())
+                .await
+                .unwrap();
+            let attachment_path = source.root.path().join("portable-说明.txt");
+            std::fs::write(&attachment_path, b"independently retained cloud attachment").unwrap();
+            let attachment = node
+                .send_file_channel(
+                    channel,
+                    &attachment_path,
+                    mesh_talk_core::file::FileKind::File,
+                )
+                .await
+                .unwrap();
+            let media_path = source.root.path().join("portable-image.png");
+            std::fs::write(&media_path, b"independently retained cloud media").unwrap();
+            let media = node
+                .send_file_channel(channel, &media_path, mesh_talk_core::file::FileKind::Media)
+                .await
+                .unwrap();
+            let ids: Vec<_> = node
+                .channel_history(channel, 100)
+                .iter()
+                .map(|entry| entry.id.to_hex())
+                .collect();
+            let favorite = node
+                .save_message_favorite_guarded(
+                    mesh_talk_core::node::FavoriteSource {
+                        kind: "channel".into(),
+                        target: hex::encode(channel.as_bytes()),
+                        message_ids: ids.clone(),
+                    },
+                    mesh_talk_core::node::FavoriteMetadata {
+                        title: "云端收藏 🌍".into(),
+                        description: "Portable title and description".into(),
+                        notes: std::collections::BTreeMap::from([(
+                            ids[0].clone(),
+                            "保存したメモ ✅".into(),
+                        )]),
+                    },
+                    |commit| commit(),
+                )
+                .unwrap();
+            assert!(node.favorite_file_available(attachment));
+            assert!(node.favorite_file_available(media));
+            (
+                node.account_id(),
+                node.user_id(),
+                channel,
+                favorite,
+                attachment,
+                media,
+            )
+        });
     source.grant(&provider.client);
     assert_eq!(
         source.invoke("google_drive_list", json!({})).unwrap(),
@@ -296,6 +345,10 @@ fn registered_cloud_commands_round_trip_real_archive_and_restart_runtime() {
         .invoke("google_drive_create_backup", json!({"recoveryKey":key}))
         .unwrap();
     assert_eq!(backup["preview"]["account_id"], account);
+    assert_eq!(backup["preview"]["favorites"], 1);
+    assert_eq!(backup["preview"]["favorite_files"], 2);
+    assert_eq!(backup["preview"]["media_files"], 1);
+    assert_eq!(backup["preview"]["missing_favorite_files"], 0);
     source.wait_for_runtime();
     assert_eq!(
         source.invoke("google_drive_progress", json!({})).unwrap()["phase"],
@@ -382,6 +435,18 @@ fn registered_cloud_commands_round_trip_real_archive_and_restart_runtime() {
     )
     .unwrap();
     assert_eq!(reopened.account_id(), account);
+    assert_eq!(
+        reopened.list_message_favorites("", 0, 10).unwrap().items,
+        vec![favorite]
+    );
+    assert_eq!(
+        sha2::Sha256::digest(reopened.read_favorite_file(attachment).unwrap()),
+        sha2::Sha256::digest(b"independently retained cloud attachment"),
+    );
+    assert_eq!(
+        sha2::Sha256::digest(reopened.read_favorite_file(media).unwrap()),
+        sha2::Sha256::digest(b"independently retained cloud media"),
+    );
     assert!(
         reopened
             .channel_history(channel, 100)
@@ -553,5 +618,22 @@ fn registered_local_recovery_and_cloud_generation_checks_share_the_same_authorit
     assert_eq!(
         fixture.invoke("google_drive_list", json!({})).unwrap_err()["kind"],
         "authorization"
+    );
+}
+
+#[test]
+fn legacy_saved_backup_preview_defaults_favorites_counts() {
+    let preview: mesh_talk_core::recovery::BackupPreview = serde_json::from_value(json!({
+        "account_id": "legacy-account", "created_at_ms": 1, "messages": 2,
+        "channels": 0, "file_cards": 0, "media_files": 0, "missing_media": 0,
+    }))
+    .unwrap();
+    assert_eq!(
+        (
+            preview.favorites,
+            preview.favorite_files,
+            preview.missing_favorite_files
+        ),
+        (0, 0, 0)
     );
 }

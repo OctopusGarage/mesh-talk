@@ -414,6 +414,20 @@ above. It is not an exhaustive line-by-line audit or proof that all bugs have
 been eliminated. This file is the maintained ownership guide; Git history retains
 superseded audit findings and implementation reports.
 
+## Message Favorites
+
+`core/node/favorites.rs` owns the independent encrypted collection, canonical
+snapshot capture, editable metadata and retained-file authorization.
+Its recovery adapter owns logical record encoding, account identity validation
+and expiry projection. The existing recovery owner streams these records and
+independent retained files through the same local/Drive archive and staged install.
+`core/node/account_sync/favorites.rs` owns optional certified-sibling exchange.
+Desktop `src-tauri/src/message_favorites.rs` owns admitted IPC adaptation;
+`ui/store/messageFavorites.ts` owns query lifetimes, and
+`ui/features/chat/favorites/` owns collection/selection/editing. These do not reuse
+contact pin/alias preferences or Message Yourself as a collection store.
+[Favorites](favorites.md) owns the limits, retention and synchronization contract.
+
 ## Public help
 
 `docs/help/` owns the English task manual and stable feature catalog.

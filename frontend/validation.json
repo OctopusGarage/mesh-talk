@@ -2,6 +2,44 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-message-favorites",
+      "paths": [
+        "frontend/src/features/chat/favorites/",
+        "frontend/src/store/messageFavorites.ts",
+        "frontend/src/store/messageFavorites.test.ts",
+        "frontend/src/lib/api/messageFavorites.ts",
+        "frontend/src/lib/api/messageFavorites.test.ts",
+        "frontend/e2e/message-favorites.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/favorites/selection.test.ts",
+        "src/features/chat/favorites/FavoriteEditor.test.ts",
+        "src/store/messageFavorites.test.ts",
+        "src/lib/api/messageFavorites.test.ts",
+        "src/lib/attachmentSave.test.ts",
+        "src/features/chat/ConversationView.test.ts",
+        "src/features/chat/Sidebar.test.ts",
+        "src/features/chat/favorites/MessageCollection.test.ts"
+      ],
+      "capability": {
+        "summary": "Collect ordered messages as independent favorites with editable searchable group descriptions and individual notes.",
+        "guide": "docs/favorites.md",
+        "invariants": [
+          {
+            "name": "Favorites are distinct from self-chat and contact pins; notes never modify original message content",
+            "reference": "docs/favorites.md#collection-and-metadata"
+          },
+          {
+            "name": "Selections, editor drafts and asynchronous collection results cannot cross conversation or owner/runtime lifetimes",
+            "reference": "docs/favorites.md#ownership-and-acceptance"
+          }
+        ]
+      },
+      "escalation": [
+        "Run frontend/e2e/message-favorites.spec.ts for grouped/single collection, searchable notes, edit/remove, duplicate lookup, exact original navigation, keyboard and narrow layouts; include relevant visual-regression scenarios for the sidebar change. Browser mocks do not establish native IPC authority or physical linked-device synchronization."
+      ]
+    },
+    {
       "id": "frontend-screenshot-submission",
       "paths": [
         "frontend/src/features/chat/Composer.tsx",
@@ -666,7 +704,9 @@
         "frontend/src/lib/api/googleDrive.ts",
         "frontend/src/features/chat/DataRecoverySettings.tsx",
         "frontend/src/features/auth/RestoreBackup.tsx",
-        "frontend/e2e/google-drive-backup.spec.ts"
+        "frontend/e2e/google-drive-backup.spec.ts",
+        "frontend/src/lib/api/recovery.ts",
+        "frontend/e2e/recovery.spec.ts"
       ],
       "frontend": ["src/features/recovery/GoogleDriveConnection.test.ts"],
       "capability": {
@@ -680,6 +720,10 @@
           {
             "name": "Cloud restoration uses the existing verified archive preview and explicit new-profile commit.",
             "reference": "docs/backup-recovery.md#google-drive-backup-and-restore"
+          },
+          {
+            "name": "Verified previews distinguish Favorites and independently retained files from ordinary history and show missing Favorite bytes",
+            "reference": "docs/favorites.md#backup-and-recovery"
           }
         ]
       },
