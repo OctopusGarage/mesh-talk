@@ -965,6 +965,178 @@ mod tests {
     }
 
     #[test]
+    fn registered_message_favorite_files_retain_export_and_revoke_access() {
+        use tauri::Manager;
+
+        let fixture = Fixture::new();
+        let target = fixture.offline_peer();
+        let bytes = b"retained attachment\0\xff\n";
+        let source_path = fixture.root.path().join("attachment.bin");
+        std::fs::write(&source_path, bytes).unwrap();
+        let file = fixture
+            .invoke(
+                "owner_enqueue_file",
+                serde_json::json!({"owner":"alice","account":target,"path":source_path,"media":false}),
+            )
+            .unwrap();
+        let file_conv = &file["fileConv"];
+        let available = serde_json::json!({"owner":"alice","fileConv":file_conv});
+        let export_path = fixture.root.path().join("export.bin");
+        let export = serde_json::json!({"owner":"alice","fileConv":file_conv,"dest":export_path,"toDirectory":false});
+
+        // Ordinary attachment availability alone never authorizes Favorites IPC.
+        assert_eq!(
+            fixture
+                .invoke("owner_favorite_file_available", available.clone())
+                .unwrap(),
+            false
+        );
+        assert!(
+            fixture
+                .invoke("owner_read_favorite_file", available.clone())
+                .is_err()
+        );
+        assert!(
+            fixture
+                .invoke("owner_save_favorite_file", export.clone())
+                .is_err()
+        );
+        assert!(!export_path.exists());
+
+        let favorite = fixture.invoke("owner_save_message_favorite", serde_json::json!({"owner":"alice","source":{"kind":"account","target":target,"message_ids":[file["id"]]},"metadata":{"title":"Attachment","description":"","notes":{}}})).unwrap();
+        std::fs::remove_file(&source_path).unwrap();
+        fixture
+            .invoke(
+                "clear_conversation",
+                serde_json::json!({"convId":target,"isChannel":false}),
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .invoke(
+                    "owner_account_history",
+                    serde_json::json!({"owner":"alice","account":target,"limit":20})
+                )
+                .unwrap(),
+            serde_json::json!([])
+        );
+        assert_eq!(
+            fixture
+                .invoke("owner_favorite_file_available", available.clone())
+                .unwrap(),
+            true
+        );
+        // The registered command's raw response is decoded as an array by invoke.
+        assert_eq!(
+            fixture
+                .invoke("owner_read_favorite_file", available.clone())
+                .unwrap(),
+            serde_json::json!(bytes.as_slice())
+        );
+        assert_eq!(
+            fixture
+                .invoke("owner_save_favorite_file", export.clone())
+                .unwrap(),
+            serde_json::json!(export_path)
+        );
+        assert_eq!(std::fs::read(&export_path).unwrap(), bytes);
+
+        let directory = fixture.root.path().join("downloads");
+        std::fs::create_dir(&directory).unwrap();
+        let existing = directory.join("attachment.bin");
+        std::fs::write(&existing, b"keep existing download").unwrap();
+        let saved = fixture.invoke("owner_save_favorite_file", serde_json::json!({"owner":"alice","fileConv":file_conv,"dest":directory,"toDirectory":true})).unwrap();
+        let saved = std::path::PathBuf::from(saved.as_str().unwrap());
+        assert_eq!(saved.parent(), Some(directory.as_path()));
+        assert_ne!(saved, existing);
+        assert_eq!(std::fs::read(&saved).unwrap(), bytes);
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep existing download");
+
+        // Queue commands with real retained plaintext behind the runtime gate.
+        // A replacement owner or app lock must prevent both disclosure and writes.
+        for change in ["switch-owner", "lock"] {
+            for command in [
+                "owner_favorite_file_available",
+                "owner_read_favorite_file",
+                "owner_save_favorite_file",
+            ] {
+                fixture.app_state.app_lock().clear();
+                fixture
+                    .app_state
+                    .session()
+                    .set("entry".into(), user("alice"), "pw".into());
+                let denied_path = fixture
+                    .root
+                    .path()
+                    .join(format!("denied-{change}-{command}"));
+                let body = serde_json::json!({"owner":"alice","fileConv":file_conv,"dest":denied_path,"toDirectory":false});
+                let (entered, captured) = std::sync::mpsc::channel();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+                let lifecycle = fixture.node.0.blocking_write();
+                let webview = fixture.webview.clone();
+                let pending = std::thread::spawn(move || invoke(&webview, command, body));
+                let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
+                if change == "switch-owner" {
+                    fixture
+                        .app_state
+                        .session()
+                        .set("replacement".into(), user("bob"), "pw".into());
+                } else {
+                    crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap();
+                }
+                drop(lifecycle);
+                let result = pending.join().unwrap();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+                assert!(captured.is_ok(), "{command} captures entry before waiting");
+                assert_eq!(
+                    result.unwrap_err()["kind"],
+                    "authorization",
+                    "{change}: {command}"
+                );
+                assert!(
+                    !denied_path.exists(),
+                    "{change}: {command} must not export bytes"
+                );
+            }
+        }
+        fixture.app_state.app_lock().clear();
+        fixture
+            .app_state
+            .session()
+            .set("restored".into(), user("alice"), "pw".into());
+        assert_eq!(
+            fixture
+                .invoke("owner_read_favorite_file", available.clone())
+                .unwrap(),
+            serde_json::json!(bytes.as_slice())
+        );
+
+        fixture.invoke("owner_remove_message_favorite", serde_json::json!({"owner":"alice","id":favorite["id"],"expectedRevision":favorite["revision"],"expectedDeviceId":favorite["device_id"]})).unwrap();
+        assert_eq!(
+            fixture
+                .invoke("owner_favorite_file_available", available.clone())
+                .unwrap(),
+            false
+        );
+        assert!(
+            fixture
+                .invoke("owner_read_favorite_file", available)
+                .is_err()
+        );
+        // Denial must leave an existing explicit destination untouched too.
+        std::fs::write(&export_path, b"keep destination").unwrap();
+        assert!(fixture.invoke("owner_save_favorite_file", export).is_err());
+        assert_eq!(std::fs::read(&export_path).unwrap(), b"keep destination");
+        let denied_path = fixture.root.path().join("removed-export.bin");
+        assert!(fixture.invoke("owner_save_favorite_file", serde_json::json!({"owner":"alice","fileConv":file_conv,"dest":denied_path,"toDirectory":false})).is_err());
+        assert!(!denied_path.exists());
+    }
+
+    #[test]
     fn registered_search_validates_inputs_and_explicit_owner() {
         let fixture = Fixture::new();
         for kind in ["account", "channel", "legacy-device"] {

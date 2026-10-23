@@ -10,6 +10,16 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import v8ToIstanbul from "v8-to-istanbul";
 
+/** Controls only for retained-attachment scenarios; no product test hooks. */
+export interface FavoriteAttachmentMock {
+  bytes: number[];
+  calls: Array<{ command: string; args: Record<string, unknown> }>;
+  saved: Array<{ path: string; bytes: number[] }>;
+  authorized: boolean;
+  releaseRead?: () => void;
+  releaseSaveDialog?: () => void;
+}
+
 /**
  * Headless E2E runs the React frontend in plain Chromium — there is no Tauri runtime, so
  * `@tauri-apps/api` (invoke/listen) would throw ("Cannot read properties of undefined
@@ -495,6 +505,70 @@ export const test = base.extend({
         Record<string, MessageFavorite>
       > = {};
       let collectionRevision = 0;
+
+      // Retained bytes deliberately have no source-chat message or ordinary media entry.
+      let favoriteAttachment: FavoriteAttachmentMock | undefined;
+      if (dataMode?.startsWith("favorites-attachment")) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 2;
+        canvas.height = 2;
+        const context = canvas.getContext("2d")!;
+        context.fillStyle = "#cc5533";
+        context.fillRect(0, 0, 2, 2);
+        const bytes = Array.from(atob(canvas.toDataURL().split(",")[1]), (c) =>
+          c.charCodeAt(0),
+        );
+        favoriteAttachment = { bytes, calls: [], saved: [], authorized: true };
+        (
+          window as unknown as { __favoriteAttachment: FavoriteAttachmentMock }
+        ).__favoriteAttachment = favoriteAttachment;
+        messageCollections.u_self = {
+          retained: {
+            id: "retained",
+            source: {
+              kind: "account",
+              target: BOB.account_id,
+              message_ids: ["removed-photo"],
+            },
+            source_label: BOB.name,
+            metadata: {
+              title: "Retained field photo",
+              description: "After source history was cleared",
+              notes: { "removed-photo": "Keep for the field report" },
+            },
+            messages: [
+              {
+                id: "removed-photo",
+                who: BOB.device_id,
+                sender_name: BOB.name,
+                text: "",
+                wall_clock: BASE,
+                expires_at_ms: null,
+                sticker: null,
+                file: {
+                  file_conv: "retained-photo",
+                  name: "field-photo.png",
+                  size: bytes.length,
+                  mime: "image/png",
+                  media: true,
+                },
+              },
+            ],
+            saved_at_ms: BASE,
+            revision: ++collectionRevision,
+            device_id: SELF.device,
+          },
+        };
+      }
+      const retainedFileAuthorized = (a: Record<string, unknown>) =>
+        !!favoriteAttachment?.authorized &&
+        a.owner === "u_self" &&
+        a.fileConv === "retained-photo" &&
+        Object.values(messageCollections.u_self ?? {}).some((item) =>
+          item.messages.some(
+            (message) => message.file?.file_conv === a.fileConv,
+          ),
+        );
 
       // --- Favorites (pin + alias), persisted in-memory ---------------------
       const favorites: Record<
@@ -1418,7 +1492,28 @@ export const test = base.extend({
               ].filter((id) => source.message_ids.includes(id)),
             };
           },
-          owner_favorite_file_available: () => false,
+          owner_favorite_file_available: (a) => retainedFileAuthorized(a),
+          owner_read_favorite_file: async (a) => {
+            if (!retainedFileAuthorized(a))
+              throw new Error("Favorite file unavailable");
+            const bytes = new Uint8Array(favoriteAttachment!.bytes).buffer;
+            if (dataMode === "favorites-attachment-delayed-read")
+              await new Promise<void>((resolve) => {
+                favoriteAttachment!.releaseRead = resolve;
+              });
+            // Native read commands return raw IPC bytes, not a JSON array.
+            return bytes;
+          },
+          owner_save_favorite_file: (a) => {
+            if (!retainedFileAuthorized(a))
+              throw new Error("Favorite file unavailable");
+            const path = String(a.dest);
+            favoriteAttachment!.saved.push({
+              path,
+              bytes: [...favoriteAttachment!.bytes],
+            });
+            return path;
+          },
           owner_list_message_favorites: (a) => {
             const q = String(a.query ?? "")
               .trim()
@@ -1741,6 +1836,23 @@ export const test = base.extend({
             return id;
           },
           async invoke(cmd: string, args: Record<string, unknown>) {
+            if (
+              favoriteAttachment &&
+              /^(owner_.*favorite|read_media$|read_file$|save_file|plugin:dialog\|save$)/.test(
+                cmd,
+              )
+            )
+              favoriteAttachment.calls.push({
+                command: cmd,
+                args: structuredClone(args ?? {}),
+              });
+            if (favoriteAttachment && cmd === "plugin:dialog|save") {
+              if (dataMode === "favorites-attachment-delayed-dialog")
+                await new Promise<void>((resolve) => {
+                  favoriteAttachment!.releaseSaveDialog = resolve;
+                });
+              return "/home/tester/Downloads/field-photo.png";
+            }
             if (cmd === failNextCommand) {
               failNextCommand = null;
               throw new Error(failNextMessage);

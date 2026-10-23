@@ -11,7 +11,8 @@
           "package": "mesh-talk",
           "filters": [
             "owner_commands::tests::registered_message_favorites_validate_owner_and_reject_queued_session_changes",
-            "owner_commands::tests::registered_message_favorites_save_search_edit_remove_and_keep_original"
+            "owner_commands::tests::registered_message_favorites_save_search_edit_remove_and_keep_original",
+            "owner_commands::tests::registered_message_favorite_files_retain_export_and_revoke_access"
           ]
         }
       ],
@@ -33,7 +34,7 @@
         ]
       },
       "escalation": [
-        "Run registered Favorites IPC tests for save/search/edit/remove and queued same-owner relogin/logout/app-lock denial. Real native webview and linked-device acceptance remain separate evidence."
+        "Run registered Favorites IPC tests for save/search/edit/remove, retained-file reads/exports and queued same-owner relogin/logout/app-lock denial. Real native webview and linked-device acceptance remain separate evidence."
       ]
     },
     {

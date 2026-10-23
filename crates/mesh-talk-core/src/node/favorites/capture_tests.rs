@@ -377,3 +377,206 @@ fn missing_attachment_queue_filters_existing_files_before_bounding() {
         vec![ConversationId::new([101; 32])]
     );
 }
+
+#[test]
+fn oversized_group_capture_is_atomic_even_when_each_message_fits() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(dir.path(), &account);
+    let peer = "ab".repeat(16);
+    let conv = super::super::conversation::account_conversation_id(&node.account_id(), &peer);
+    // Each message fits the snapshot budget; their selected group does not.
+    let text = vec![b'x'; 140 * 1024];
+    let ids: Vec<_> = (1..=2u8)
+        .map(|index| {
+            let id = [index; 32];
+            let envelope = super::super::DmEnvelope::new(
+                node.account_id(),
+                peer.clone(),
+                id,
+                super::super::MessageBody::new(text.clone(), None).encode(),
+            );
+            node.sentlog
+                .lock()
+                .unwrap()
+                .record(conv, index.into(), index.into(), &envelope.encode())
+                .unwrap();
+            hex::encode(id)
+        })
+        .collect();
+    let selected = FavoriteSource {
+        kind: "account".into(),
+        target: peer,
+        message_ids: ids,
+    };
+    assert!(
+        node.save_message_favorite_guarded(selected.clone(), Default::default(), |c| c())
+            .is_err()
+    );
+    assert!(
+        node.list_message_favorites("", 0, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    drop(node);
+    let node = open(dir.path(), &account);
+    assert!(
+        node.list_message_favorites("", 0, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    for id in &selected.message_ids {
+        let mut single = selected.clone();
+        single.message_ids = vec![id.clone()];
+        let favorite = node
+            .save_message_favorite_guarded(single, Default::default(), |c| c())
+            .unwrap();
+        assert_eq!(favorite.messages.len(), 1);
+        assert_eq!(favorite.messages[0].text.as_bytes(), text);
+    }
+    assert_eq!(
+        node.list_message_favorites("", 0, 10).unwrap().items.len(),
+        2
+    );
+}
+
+#[test]
+fn rejected_metadata_edits_preserve_the_complete_durable_favorite() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(dir.path(), &account);
+    let selected = source(&node);
+    let metadata = FavoriteMetadata {
+        title: "Keep title".into(),
+        description: "Keep description".into(),
+        notes: BTreeMap::from([(selected.message_ids[0].clone(), "Keep note".into())]),
+    };
+    let favorite = node
+        .save_message_favorite_guarded(selected, metadata, |c| c())
+        .unwrap();
+    let mut oversized = favorite.metadata.clone();
+    oversized.description = "界".repeat(4001);
+    assert!(matches!(
+        node.edit_message_favorite_guarded(
+            &favorite.id,
+            favorite.revision,
+            &favorite.device_id,
+            oversized,
+            |c| c()
+        ),
+        Err(NodeError::InvalidInput(_))
+    ));
+    let mut foreign_note = favorite.metadata.clone();
+    foreign_note.notes = BTreeMap::from([(hex::encode([99; 32]), "Not selected".into())]);
+    assert!(matches!(
+        node.edit_message_favorite_guarded(
+            &favorite.id,
+            favorite.revision,
+            &favorite.device_id,
+            foreign_note,
+            |c| c()
+        ),
+        Err(NodeError::InvalidInput(_))
+    ));
+    assert_eq!(
+        node.list_message_favorites("", 0, 10).unwrap().items,
+        vec![favorite.clone()]
+    );
+    drop(node);
+    let reopened = open(dir.path(), &account);
+    assert_eq!(
+        reopened.list_message_favorites("", 0, 10).unwrap().items,
+        vec![favorite]
+    );
+}
+
+#[test]
+fn stale_and_denied_mutations_cannot_overwrite_or_remove_the_latest_durable_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(dir.path(), &account);
+    let selected = source(&node);
+    let initial = node
+        .save_message_favorite_guarded(selected, Default::default(), |c| c())
+        .unwrap();
+    let latest = node
+        .edit_message_favorite_guarded(
+            &initial.id,
+            initial.revision,
+            &initial.device_id,
+            FavoriteMetadata {
+                title: "Latest accepted title".into(),
+                ..Default::default()
+            },
+            |c| c(),
+        )
+        .unwrap();
+    assert!(
+        node.edit_message_favorite_guarded(
+            &initial.id,
+            initial.revision,
+            &initial.device_id,
+            Default::default(),
+            |c| c()
+        )
+        .is_err()
+    );
+    assert!(
+        node.remove_message_favorite_guarded(
+            &initial.id,
+            initial.revision,
+            &initial.device_id,
+            |c| c()
+        )
+        .is_err()
+    );
+    // A matching revision alone is insufficient: concurrent device identity is
+    // part of the optimistic edit/removal token.
+    let other_device = "00".repeat(16);
+    assert_ne!(latest.device_id, other_device);
+    assert!(
+        node.edit_message_favorite_guarded(
+            &latest.id,
+            latest.revision,
+            &other_device,
+            Default::default(),
+            |c| c()
+        )
+        .is_err()
+    );
+    assert!(
+        node.remove_message_favorite_guarded(&latest.id, latest.revision, &other_device, |c| c())
+            .is_err()
+    );
+    assert!(matches!(
+        node.edit_message_favorite_guarded(
+            &latest.id,
+            latest.revision,
+            &latest.device_id,
+            Default::default(),
+            |_| Err(NodeError::Authorization("retired".into()))
+        ),
+        Err(NodeError::Authorization(_))
+    ));
+    assert!(matches!(
+        node.remove_message_favorite_guarded(
+            &latest.id,
+            latest.revision,
+            &latest.device_id,
+            |_| Err(NodeError::Authorization("retired".into()))
+        ),
+        Err(NodeError::Authorization(_))
+    ));
+    assert_eq!(
+        node.list_message_favorites("", 0, 10).unwrap().items,
+        vec![latest.clone()]
+    );
+    drop(node);
+    let reopened = open(dir.path(), &account);
+    assert_eq!(
+        reopened.list_message_favorites("", 0, 10).unwrap().items,
+        vec![latest]
+    );
+}
