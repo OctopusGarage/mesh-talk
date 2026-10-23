@@ -971,12 +971,12 @@
     "idConflict": "另一種資源庫已經用咗呢個資源包 ID。"
   },
   "memberProfile": {
-    "discoveredVia": "發現來源",
+    "discoveredVia": "上線來源",
     "discoveryLocal": "本地區域網絡 · UDP 群播",
     "discoveryPostOffice": "郵局 · {{name}}",
-    "discoveryUnnamedOffice": "郵局 · 名稱未知",
+    "discoveryUnnamedOffice": "郵局 · 來源未知",
     "discoveryUnavailable": "暫時冇有效嘅發現來源資訊",
-    "discoveryHint": "呢個用戶端發現成員嘅途徑；訊息實際經過嘅路徑可能唔同。",
+    "discoveryHint": "顯示本機認到、最接近成員原始上線公告嘅郵局。通訊路徑由系統自動揀選。",
     "originalName": "原始名稱",
     "remark": "備註",
     "title": "成員資料",

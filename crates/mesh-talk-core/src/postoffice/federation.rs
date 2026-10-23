@@ -7,7 +7,7 @@ use crate::eventlog::event::{ConversationId, Event, EventId};
 use crate::eventlog::store::AppendOutcome;
 use crate::eventlog::sync::SyncStore;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
-use crate::node::bridge_directory::{BridgeDirectory, FederatedPresence};
+use crate::node::bridge_directory::{BridgeDirectory, FederatedPresence, FederatedPresenceSource};
 use crate::node::session::request_round;
 use crate::postoffice::gateway::GatewayProof;
 use crate::postoffice::{FederatedMailbox, MAX_RELAY_AGE, PostOffice};
@@ -21,6 +21,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
 const REQUEST: &[u8] = b"MTFI1Q";
+const REQUEST_V3: &[u8] = b"MTFI3Q";
 const REQUEST_V2: &[u8] = b"MTFI2Q";
 const RESPONSE: &[u8] = b"MTFI1R";
 const IDS_PER_PAGE: usize = 512;
@@ -28,6 +29,7 @@ const MAX_PAGES: usize = 256;
 const ROUND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum mailbox work in one bounded exchange; a full batch schedules continuation.
 pub const MAX_MAILBOXES_PER_EXCHANGE: usize = 16;
+const ROUTED_PRESENCE_FRAME: &[u8] = b"MTFP2D";
 const PRESENCE_FRAME: &[u8] = b"MTFP1D";
 const PRESENCE_PER_PAGE: usize = 16;
 
@@ -153,16 +155,35 @@ impl FederationDirectory {
         store: &Arc<Mutex<PostOffice>>,
         network: &super::network::RelayNetwork,
     ) -> Result<usize, String> {
-        sync_version(
-            addr,
-            identity,
-            expected,
-            store,
-            Some(&self.0),
-            REQUEST_V2,
-            Some(network),
-        )
+        tokio::time::timeout(ROUND_TIMEOUT, async {
+            match sync_version(
+                addr,
+                identity,
+                expected,
+                store,
+                Some(&self.0),
+                REQUEST_V3,
+                Some(network),
+            )
+            .await
+            {
+                Err(error) if error == "unsupported federation version" => {
+                    sync_version(
+                        addr,
+                        identity,
+                        expected,
+                        store,
+                        Some(&self.0),
+                        REQUEST_V2,
+                        Some(network),
+                    )
+                    .await
+                }
+                result => result,
+            }
+        })
         .await
+        .map_err(|_| "federation exchange deadline exceeded".to_string())?
     }
 
     pub async fn sync_with_relay(
@@ -229,6 +250,7 @@ async fn send_presence_pages<IO>(
     channel: &mut SecureChannel<IO>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
     limit: usize,
+    routed: bool,
 ) -> Result<(), String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
@@ -238,20 +260,29 @@ where
             directory
                 .lock()
                 .expect("directory lock not poisoned")
-                .export_federated(Instant::now(), unix_now())
+                .export_presence_sources(Instant::now(), unix_now())
         })
         .unwrap_or_default();
     proofs.truncate(limit);
+    let encode = |entries: &[FederatedPresenceSource], last| {
+        if routed {
+            let mut bytes = Vec::from(ROUTED_PRESENCE_FRAME);
+            bytes.push(u8::from(last));
+            bytes.extend_from_slice(&bincode::serialize(entries).map_err(|e| e.to_string())?);
+            (bytes.len() <= MAX_PLAINTEXT)
+                .then_some(bytes)
+                .ok_or_else(|| "federation presence page is too large".to_string())
+        } else {
+            let legacy: Vec<_> = entries.iter().map(|entry| entry.presence.clone()).collect();
+            encode_presence_page(&legacy, last)
+        }
+    };
     let chunks = proofs.chunks(PRESENCE_PER_PAGE).collect::<Vec<_>>();
     if chunks.is_empty() {
-        send_frame(channel, &encode_presence_page(&[], true)?).await?;
+        send_frame(channel, &encode(&[], true)?).await?;
     } else {
         for (index, chunk) in chunks.iter().enumerate() {
-            send_frame(
-                channel,
-                &encode_presence_page(chunk, index + 1 == chunks.len())?,
-            )
-            .await?;
+            send_frame(channel, &encode(chunk, index + 1 == chunks.len())?).await?;
         }
     }
     Ok(())
@@ -261,6 +292,7 @@ async fn receive_presence_pages<IO>(
     channel: &mut SecureChannel<IO>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
     limit: usize,
+    routed: bool,
 ) -> Result<(), String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
@@ -272,7 +304,41 @@ where
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-        let (page, last) = decode_presence_page(&bytes)?;
+        let (page, last) = if routed {
+            let body = bytes
+                .strip_prefix(ROUTED_PRESENCE_FRAME)
+                .ok_or_else(|| "invalid routed federation presence frame".to_string())?;
+            if bytes.len() > MAX_PLAINTEXT || body.is_empty() || body[0] > 1 {
+                return Err("invalid routed federation presence page".into());
+            }
+            let page: Vec<FederatedPresenceSource> = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_limit(MAX_PLAINTEXT as u64)
+                .reject_trailing_bytes()
+                .deserialize(&body[1..])
+                .map_err(|e| e.to_string())?;
+            if page.len() > PRESENCE_PER_PAGE
+                || page.iter().any(|entry| {
+                    entry
+                        .origin_hops
+                        .is_some_and(|h| h > crate::node::bridge_directory::MAX_ORIGIN_HOPS)
+                })
+            {
+                return Err("invalid federation origin distance".into());
+            }
+            (page, body[0] == 1)
+        } else {
+            let (page, last) = decode_presence_page(&bytes)?;
+            (
+                page.into_iter()
+                    .map(|presence| FederatedPresenceSource {
+                        presence,
+                        origin_hops: None,
+                    })
+                    .collect(),
+                last,
+            )
+        };
         proofs.extend(page);
         if last {
             complete = true;
@@ -283,20 +349,23 @@ where
         return Err("incomplete federation presence".into());
     }
     if let Some(directory) = directory {
-        directory
-            .lock()
-            .map_err(|e| e.to_string())?
-            .import_federated(&proofs, unix_now());
+        let mut directory = directory.lock().map_err(|e| e.to_string())?;
+        if routed {
+            directory.import_presence_sources(&proofs, unix_now());
+        } else {
+            let legacy: Vec<_> = proofs.into_iter().map(|entry| entry.presence).collect();
+            directory.import_federated(&legacy, unix_now());
+        }
     }
     Ok(())
 }
 
 pub(crate) fn is_inventory_request(bytes: &[u8]) -> bool {
-    bytes == REQUEST || bytes == REQUEST_V2
+    bytes == REQUEST || bytes == REQUEST_V2 || bytes == REQUEST_V3
 }
 
 pub(crate) fn presence_limit(request: &[u8]) -> usize {
-    if request == REQUEST_V2 {
+    if request == REQUEST_V2 || request == REQUEST_V3 {
         crate::node::bridge_directory::MAX_MEMBERS
     } else {
         crate::node::bridge_directory::LEGACY_MAX_MEMBERS
@@ -398,14 +467,14 @@ pub(crate) async fn send_inventory<IO>(
     channel: &mut SecureChannel<IO>,
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
-    limit: usize,
+    request: &[u8],
 ) -> Result<FederationStore, String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     tokio::time::timeout(
         ROUND_TIMEOUT,
-        send_inventory_inner(channel, store, directory, limit),
+        send_inventory_inner(channel, store, directory, request),
     )
     .await
     .map_err(|_| "federation inventory deadline exceeded".to_string())?
@@ -415,12 +484,14 @@ async fn send_inventory_inner<IO>(
     channel: &mut SecureChannel<IO>,
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
-    limit: usize,
+    request: &[u8],
 ) -> Result<FederationStore, String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    receive_presence_pages(channel, directory, limit).await?;
+    let limit = presence_limit(request);
+    let routed = request == REQUEST_V3;
+    receive_presence_pages(channel, directory, limit, routed).await?;
     let remote = receive_inventory_pages(channel).await?;
     let mut local = {
         let mut office = store.lock().map_err(|e| e.to_string())?;
@@ -432,7 +503,7 @@ where
     };
     local.sort_by_key(|entry| *entry.id.as_bytes());
     send_inventory_pages(channel, &local).await?;
-    send_presence_pages(channel, directory, limit).await?;
+    send_presence_pages(channel, directory, limit, routed).await?;
     Ok(FederationStore::new(store, remote))
 }
 
@@ -456,16 +527,15 @@ async fn sync_with_directory(
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
 ) -> Result<usize, String> {
     tokio::time::timeout(ROUND_TIMEOUT, async {
-        match sync_version(addr, identity, expected, store, directory, REQUEST_V2, None).await {
-            Ok(count) => Ok(count),
-            // A clean authenticated close before the first protocol response is
-            // the deployed legacy version-rejection signal. Network, malformed
-            // data and post-negotiation errors must not repeat the whole exchange.
-            Err(error) if error == "unsupported federation version" => {
-                sync_version(addr, identity, expected, store, directory, REQUEST, None).await
+        for request in [REQUEST_V3, REQUEST_V2, REQUEST] {
+            match sync_version(addr, identity, expected, store, directory, request, None).await {
+                Ok(count) => return Ok(count),
+                // Only a pre-response authenticated close negotiates a lower version.
+                Err(error) if error == "unsupported federation version" => continue,
+                Err(error) => return Err(error),
             }
-            Err(error) => Err(error),
         }
+        Err("unsupported federation version".to_string())
     })
     .await
     .map_err(|_| "federation exchange deadline exceeded".to_string())?
@@ -497,7 +567,7 @@ async fn sync_version(
         network.connect(&mut channel).await?;
     }
     send_frame(&mut channel, request).await?;
-    send_presence_pages(&mut channel, directory, limit).await?;
+    send_presence_pages(&mut channel, directory, limit, request == REQUEST_V3).await?;
     let mut local = {
         let mut office = store.lock().map_err(|e| e.to_string())?;
         office.prune_expired().map_err(|e| e.to_string())?;
@@ -511,7 +581,7 @@ async fn sync_version(
         .map_err(|e| e.to_string())?
         .adopt_federated_arrivals(&remote, SystemTime::now())
         .map_err(|e| e.to_string())?;
-    receive_presence_pages(&mut channel, directory, limit).await?;
+    receive_presence_pages(&mut channel, directory, limit, request == REQUEST_V3).await?;
     let local_digests = local
         .iter()
         .map(|entry| (entry.id, entry.digest))
@@ -634,7 +704,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut channel = SecureChannel::accept(stream, &remote).await.unwrap();
-            assert_eq!(channel.recv().await.unwrap(), REQUEST_V2);
+            assert_eq!(channel.recv().await.unwrap(), REQUEST_V3);
             accepted.send(()).unwrap();
             std::future::pending::<()>().await;
         });
@@ -908,19 +978,18 @@ mod tests {
             let identity = DeviceIdentity::from_secret_bytes(be, bx);
             let (stream, _) = listener.accept().await.unwrap();
             let mut first = SecureChannel::accept(stream, &identity).await.unwrap();
-            assert_eq!(first.recv().await.unwrap(), REQUEST_V2);
-            drop(first); // Simulate a pre-v2 endpoint rejecting the new request.
+            assert_eq!(first.recv().await.unwrap(), REQUEST_V3);
+            drop(first);
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut second = SecureChannel::accept(stream, &identity).await.unwrap();
+            assert_eq!(second.recv().await.unwrap(), REQUEST_V2);
+            drop(second); // Simulate a pre-v2 endpoint rejecting the new request.
             let (stream, _) = listener.accept().await.unwrap();
             let mut legacy = SecureChannel::accept(stream, &identity).await.unwrap();
             assert_eq!(legacy.recv().await.unwrap(), REQUEST);
-            send_inventory(
-                &mut legacy,
-                &remote,
-                Some(&target.0),
-                presence_limit(REQUEST),
-            )
-            .await
-            .unwrap();
+            send_inventory(&mut legacy, &remote, Some(&target.0), REQUEST)
+                .await
+                .unwrap();
         });
         source
             .sync_with_relay(address, &a, &expected, &local)
