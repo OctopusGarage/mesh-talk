@@ -1104,5 +1104,23 @@
       "linux": "Check your desktop’s notification settings and allow Mesh-Talk.",
       "other": "Open your device’s notification settings and allow Mesh-Talk."
     }
+  },
+  "protectedMessage": {
+    "label": "Protected message",
+    "nextSend": "Next message",
+    "normal": "Normal",
+    "open": "Click to view",
+    "modeVerify": "Verify to view",
+    "verify": "Verify and view",
+    "duration": "Automatically hides after 30 seconds.",
+    "textOnly": "Text & images · hides after 30 seconds",
+    "remaining": "Hides in {{count}}s",
+    "hide": "Hide",
+    "opening": "Opening…",
+    "failed": "Could not open this message. Try again.",
+    "image": "Protected image",
+    "unsupported": "Protected messages support text and images only. Choose Normal to send videos, files or stickers.",
+    "imageNotAccepted": "Image not accepted. Your protection setting is unchanged.",
+    "imageTooLarge": "Protected images must be 16 MiB or smaller."
   }
 }

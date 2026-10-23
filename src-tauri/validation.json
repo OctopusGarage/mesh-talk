@@ -45,6 +45,67 @@
       ]
     },
     {
+      "id": "desktop-protected-messages",
+      "paths": [
+        "src-tauri/src/owner_commands.rs",
+        "src-tauri/src/owner_commands/search.rs",
+        "src-tauri/src/app_lock.rs",
+        "src-tauri/src/chat_commands/models.rs",
+        "src-tauri/src/events.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "owner_commands::tests::registered_protected_click_reveal_redacts_history_and_rejects_plaintext",
+            "owner_commands::tests::registered_protected_channel_reveal_preserves_namespace_and_redacts_history",
+            "owner_commands::tests::registered_protected_reveal_requires_exact_reference_and_current_owner",
+            "owner_commands::tests::protected_authentication_rechecks_authority_runtime_and_retention",
+            "owner_commands::tests::registered_search_rejects_queued_replaced_owner_and_app_lock",
+            "chat_commands::models::",
+            "events::",
+            "app_lock::tests::",
+            "owner_commands::tests::protected_image_authentication_failure_and_lock_transition_never_return_bytes",
+            "owner_commands::tests::registered_protected_image_reveal_requires_exact_authority_and_blocks_ordinary_reads",
+            "owner_commands::tests::registered_protected_paste_retry_preserves_source_until_durable_acceptance"
+          ]
+        }
+      ],
+      "frontend": [
+        "src/lib/api.test.ts"
+      ],
+      "consumers": [
+        "desktop-chat",
+        "desktop-app-lock",
+        "frontend-chat"
+      ],
+      "capability": {
+        "summary": "Reveal exact retained protected text and images under one-operation session and existing app-lock authentication authority.",
+        "guide": "docs/privacy-controls.md#protected-messages",
+        "invariants": [
+          {
+            "name": "Ordinary history, received events, native notification previews and file/media read/save APIs cannot expose protected content",
+            "reference": "docs/privacy-controls.md#protected-messages"
+          },
+          {
+            "name": "Authenticate uses existing platform app-lock verifier without unlocking or cached grants; cancellation, session/runtime replacement, any app-lock transition, recall or expiry invalidates reveal",
+            "reference": "docs/privacy-controls.md#protected-messages"
+          },
+          {
+            "name": "Protected image reveal returns bounded binary bytes only for an exact retained image reference; initial authentication policy lookup does not load image bytes",
+            "reference": "docs/privacy-controls.md#protected-messages"
+          },
+          {
+            "name": "Failed file acceptance preserves the managed paste source for retry; successful durable acceptance removes the staging source",
+            "reference": "docs/privacy-controls.md#protected-messages"
+          }
+        ]
+      },
+      "escalation": [
+        "Exercise protected text/image send/reveal and lock-dismissal browser consumers. Packaged macOS system authentication success/cancellation and non-macOS account-password verification require native evidence; headless verifier futures do not certify OS prompts."
+      ]
+    },
+    {
       "id": "desktop-session",
       "paths": [
         "src-tauri/src/desktop_session.rs",

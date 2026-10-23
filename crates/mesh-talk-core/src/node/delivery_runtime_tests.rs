@@ -1894,6 +1894,83 @@ async fn automatic_file_card_receipt_and_chunk_resume_without_manual_flush() {
 }
 
 #[tokio::test]
+async fn protected_image_loopback_retains_policy_and_blocks_ordinary_receive_reads() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob_account = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let (a, _) = node(ad.path(), alice, aa, &bp);
+    let (b, _, mut files) = node_with_files(bd.path(), bob, bob_account, &ap);
+    let bytes = b"\x89PNG\r\n\x1a\nprivate image bytes".to_vec();
+    let path = ad.path().join("sensitive-name.png");
+    std::fs::write(&path, &bytes).unwrap();
+    let (id, file) = a
+        .enqueue_protected_file_to_account_progress_expiring_if(
+            &b.account_id(),
+            &path,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            MessageProtection::Authenticate,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let reference = SearchReference::Account {
+        account_id: a.account_id(),
+        message_id: Some(id),
+    };
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        loop {
+            if a.delivery_status(id) == Some(DeliveryStatus::Delivered)
+                && b.protected_image_content(&reference)
+                    .is_some_and(|(mode, actual)| {
+                        mode == MessageProtection::Authenticate && actual == bytes
+                    })
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    at.abort();
+    bt.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    assert!(
+        result.is_ok(),
+        "automatic immutable chunks must continue after card confirmation"
+    );
+    let received = files.try_recv().unwrap();
+    assert_eq!(received.protection, Some(MessageProtection::Authenticate));
+    assert_eq!(received.name, "Protected image");
+    assert!(!format!("{received:?}").contains("sensitive-name"));
+    assert!(b.read_file(file).is_err());
+    assert!(b.read_media(file).is_none());
+    assert_eq!(
+        b.account_history(&a.account_id(), 10)[0].protection,
+        Some(MessageProtection::Authenticate)
+    );
+    a.recall_account(&b.account_id(), id).await.unwrap();
+    assert!(
+        a.protected_image_content(&SearchReference::Account {
+            account_id: b.account_id(),
+            message_id: Some(id)
+        })
+        .is_none()
+    );
+}
+
+#[tokio::test]
 async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
     for reopen in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -3257,6 +3334,103 @@ async fn expiring_account_message_arrives_over_loopback_and_expires_on_both_side
     .expect("connection and cleanup tasks must release both nodes");
     Arc::get_mut(&mut a).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
     Arc::get_mut(&mut b).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
+    assert!(a.account_history(&b.account_id(), 10).is_empty());
+    assert!(b.account_history(&a.account_id(), 10).is_empty());
+    assert!(a.prune_expired_received().unwrap() > 0);
+    assert!(b.prune_expired_received().unwrap() > 0);
+    let conv = super::conversation::account_conversation_id(&a.account_id(), &b.account_id());
+    assert!(a.sent_entries_for_history(conv).is_empty());
+    assert!(b.received.lock().unwrap().entries(&conv).is_empty());
+    assert!(a.account_suppression.lock().unwrap().contains(conv, id));
+}
+
+#[tokio::test]
+async fn protected_account_message_arrives_redacted_and_exact_reveal_expires() {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
+    let (mut a, _) = node(ad.path(), alice, aa, &bp);
+    let (mut b, mut incoming) = node(bd.path(), bob, bob_account, &ap);
+    let deadline = super::node::now_millis() + 300_000;
+    let id = a
+        .enqueue_protected_to_account_expiring_if(
+            &b.account_id(),
+            b"expires on both sides",
+            None,
+            Some(deadline),
+            super::MessageProtection::Authenticate,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    let received = tokio::time::timeout(std::time::Duration::from_secs(8), incoming.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(received.text.is_empty());
+    assert_eq!(
+        received.protection,
+        Some(super::MessageProtection::Authenticate)
+    );
+    let ar = super::SearchReference::Account {
+        account_id: b.account_id(),
+        message_id: Some(id),
+    };
+    let br = super::SearchReference::Account {
+        account_id: a.account_id(),
+        message_id: Some(id),
+    };
+    for (node, reference) in [(&a, &ar), (&b, &br)] {
+        assert_eq!(
+            node.protected_message_content(reference),
+            Some((
+                super::MessageProtection::Authenticate,
+                b"expires on both sides".to_vec()
+            ))
+        );
+        assert!(node.search("expires").is_empty());
+        assert!(node.search_recent("expires").hits.is_empty());
+        assert!(
+            node.search_context(reference).unwrap().messages[0]
+                .text
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        a.account_history(&b.account_id(), 10)[0].expires_at_ms,
+        Some(deadline)
+    );
+    assert_eq!(
+        b.account_history(&a.account_id(), 10)[0].expires_at_ms,
+        Some(deadline)
+    );
+    at.abort();
+    bt.abort();
+    let _ = at.await;
+    let _ = bt.await;
+    // JoinSet abort requests are asynchronous, and a blocking cleanup may still
+    // own the node after the accept-loop future has finished. Wait for teardown
+    // before changing the test clock through exclusive ownership.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while Arc::strong_count(&a) != 1 || Arc::strong_count(&b) != 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("connection and cleanup tasks must release both nodes");
+    Arc::get_mut(&mut a).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
+    Arc::get_mut(&mut b).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
+    assert!(a.protected_message_content(&ar).is_none());
+    assert!(b.protected_message_content(&br).is_none());
     assert!(a.account_history(&b.account_id(), 10).is_empty());
     assert!(b.account_history(&a.account_id(), 10).is_empty());
     assert!(a.prune_expired_received().unwrap() > 0);

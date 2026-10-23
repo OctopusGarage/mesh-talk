@@ -88,6 +88,7 @@ export function ConversationView() {
   const channels = useChat((s) => s.channels);
   const favorites = useChat((s) => s.favorites);
   const admitText = useChat((s) => s.admitText);
+  const admitProtectedText = useChat((s) => s.admitTextAndWait);
   const retry = useChat((s) => s.retry);
   const [expiryDurationMs, setExpiryDurationMs] = useState<number | null>(null);
   const expiresAtSend = () =>
@@ -108,6 +109,25 @@ export function ConversationView() {
   const attachments = useAttachmentIntake(t, {
     expiresAtSend,
     onHandoff: () => setExpiryDurationMs(null),
+    captureProtection: () => {
+      const snapshot = drafts.current.captureProtection(draftKey);
+      return {
+        protection: snapshot.protection,
+        onAccepted: (batch) => {
+          if (
+            drafts.current.get(draftKey) ||
+            (!batch && (attachmentDraftCounts.current.get(draftKey) ?? 0) > 0)
+          )
+            return;
+          if (!snapshot.accept()) return;
+          setProtectionReset((previous) => ({
+            key: draftKey,
+            n: (previous?.n ?? 0) + 1,
+            applyIf: () => !drafts.current.getProtection(draftKey),
+          }));
+        },
+      };
+    },
   });
   const recallMessage = useChat((s) => s.recallMessage);
   const sendSticker = useChat((s) => s.sendSticker);
@@ -128,6 +148,18 @@ export function ConversationView() {
     setPendingDelete(null);
   }, [key]);
   const drafts = useRef(new ConversationDrafts());
+  const attachmentDraftCounts = useRef(new Map<string, number>());
+  const [, refreshDrafts] = useState(0);
+  const [protectionReset, setProtectionReset] = useState<{
+    key: string;
+    n: number;
+    applyIf: () => boolean;
+  } | null>(null);
+  const [acceptedClear, setAcceptedClear] = useState<{
+    key: string;
+    n: number;
+    applyIf: () => boolean;
+  } | null>(null);
   const draftKey = `${owner}:${authGeneration}:${key}`;
   const historyMessages = useChat((s) =>
     active ? (s.messages[key] ?? NO_MESSAGES) : NO_MESSAGES,
@@ -742,7 +774,23 @@ export function ConversationView() {
           screenshotAvailable={attachments.screenshotAvailable}
           stagedScreenshot={attachments.stagedScreenshot}
           key={`${owner}:${authGeneration}:${key}`}
+          protectionReset={
+            protectionReset?.key === draftKey ? protectionReset : undefined
+          }
+          acceptedClear={
+            acceptedClear?.key === draftKey ? acceptedClear : undefined
+          }
+          onAttachmentDraftChange={(count) => {
+            const previous = attachmentDraftCounts.current.get(draftKey) ?? 0;
+            attachmentDraftCounts.current.set(draftKey, count);
+            if (count > 0 || previous !== count) drafts.current.touch(draftKey);
+          }}
           initialDraft={drafts.current.get(draftKey)}
+          initialProtection={drafts.current.getProtection(draftKey)}
+          onProtectionChange={(mode) =>
+            drafts.current.setProtection(draftKey, mode)
+          }
+          admissionPending={drafts.current.isPending(draftKey)}
           onDraftChange={(text) => {
             drafts.current.set(draftKey, text);
           }}
@@ -763,7 +811,7 @@ export function ConversationView() {
           onAttach={attachments.attachFile}
           onAttachDirectory={attachments.attachDirectory}
           onImage={attachments.pickMedia}
-          onSend={(text) => {
+          onSend={(text, protection) => {
             const current = () => {
               const auth = useAuth.getState();
               const conversation = useChat.getState().active;
@@ -777,17 +825,40 @@ export function ConversationView() {
             if (!current()) return false;
             // Transfer the submitted text to the bounded outgoing intent once.
             // Its bubble owns acceptance/retry feedback; it is no longer a draft.
-            const admitted = admitText(
-              text,
-              replyTo?.id ?? null,
-              expiresAtSend(),
-            );
-            if (admitted && current()) {
-              setExpiryDurationMs(null);
-              setReply(null);
-              setPrefill(null);
-            }
-            return admitted;
+            const admitted = protection
+              ? (drafts.current
+                  .admit(draftKey, text, () =>
+                    admitProtectedText(
+                      text,
+                      replyTo?.id ?? null,
+                      expiresAtSend(),
+                      protection,
+                    ),
+                  )
+                  ?.then((result) => {
+                    if (result.cleared)
+                      setAcceptedClear((previous) => ({
+                        key: draftKey,
+                        n: (previous?.n ?? 0) + 1,
+                        applyIf: () =>
+                          drafts.current.get(draftKey) === "" &&
+                          !drafts.current.getProtection(draftKey),
+                      }));
+                    return result.accepted;
+                  })
+                  .finally(() => refreshDrafts((value) => value + 1)) ?? false)
+              : admitText(text, replyTo?.id ?? null, expiresAtSend());
+            const finish = (accepted: boolean) => {
+              if (accepted && current()) {
+                setExpiryDurationMs(null);
+                setReply(null);
+                setPrefill(null);
+              }
+              return accepted;
+            };
+            return typeof admitted === "boolean"
+              ? finish(admitted)
+              : admitted.then(finish);
           }}
           onPasteFiles={attachments.pasteFiles}
           onScreenshot={attachments.captureScreenshot}

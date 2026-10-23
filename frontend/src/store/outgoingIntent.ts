@@ -297,11 +297,14 @@ export function beginSendIntent(
     who: get().myId,
     text:
       payload.kind === "text"
-        ? payload.text
+        ? payload.protection
+          ? ""
+          : payload.text
         : payload.kind === "sticker"
           ? payload.fallback
           : "",
     replyTo: payload.kind === "text" ? payload.replyTo : null,
+    protection: payload.kind !== "sticker" ? payload.protection : null,
     wallClock: Date.now(),
     expiresAtMs: payload.expiresAtMs,
     pending: true,
@@ -364,6 +367,7 @@ export async function dispatchIntent(
             payload.text,
             payload.replyTo,
             payload.expiresAtMs,
+            payload.protection,
           ),
           pending: false,
         };
@@ -387,6 +391,7 @@ export async function dispatchIntent(
           payload.media,
           clientId,
           payload.expiresAtMs,
+          payload.protection,
         );
         accepted = {
           ...message,
@@ -411,6 +416,7 @@ export async function dispatchIntent(
             payload.text,
             payload.replyTo,
             payload.expiresAtMs,
+            payload.protection,
           ),
           pending: false,
         };
@@ -434,6 +440,7 @@ export async function dispatchIntent(
           payload.media,
           clientId,
           payload.expiresAtMs,
+          payload.protection,
         );
         accepted = {
           ...message,

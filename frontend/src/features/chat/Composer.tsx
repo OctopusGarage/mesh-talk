@@ -1,3 +1,8 @@
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { StickerThumb } from "./StickerThumb";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ComposerImagePreview } from "./ComposerImagePreview";
@@ -13,6 +18,7 @@ import {
   Camera,
   Image as ImageIcon,
   Plus,
+  Shield,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -94,6 +100,11 @@ export function Composer({
   onSend,
   admissionPending = false,
   initialDraft = "",
+  initialProtection,
+  acceptedClear,
+  protectionReset,
+  onAttachmentDraftChange,
+  onProtectionChange,
   onDraftChange,
   onAttach,
   onAttachDirectory,
@@ -112,10 +123,20 @@ export function Composer({
   expiryDurationMs = null,
   onExpiryDurationChange,
 }: {
-  onSend: (text: string) => boolean | Promise<boolean>;
+  onSend: (
+    text: string,
+    protection?: import("@/lib/types").MessageProtection,
+  ) => boolean | Promise<boolean>;
   /** A conversation-scoped durable admission may outlive this keyed composer. */
   admissionPending?: boolean;
+  onAttachmentDraftChange?: (count: number) => void;
+  protectionReset?: { n: number; applyIf: () => boolean };
+  acceptedClear?: { n: number; applyIf: () => boolean };
   initialDraft?: string;
+  initialProtection?: import("@/lib/types").MessageProtection;
+  onProtectionChange?: (
+    protection: import("@/lib/types").MessageProtection | undefined,
+  ) => void;
   onDraftChange?: (text: string) => void;
   onAttach?: () => void;
   onAttachDirectory?: () => void;
@@ -154,7 +175,11 @@ export function Composer({
   );
   const motionOK = useMotionOK();
   const [text, setText] = useState(initialDraft);
+  const [protection, setProtection] = useState<
+    import("@/lib/types").MessageProtection | undefined
+  >(initialProtection);
   const [sendRejected, setSendRejected] = useState(false);
+  const [protectionOpen, setProtectionOpen] = useState(false);
   const [queuing, setQueuing] = useState(false);
   const sendPendingRef = useRef(false);
   const sendEpoch = useRef(0);
@@ -169,7 +194,26 @@ export function Composer({
     draftRevision.current += 1;
     setText(next);
   };
+  // Durable acceptance may settle after this keyed composer remounts. The
+  // owning draft revision decides whether this is still the accepted draft.
+  useEffect(() => {
+    if (!acceptedClear?.applyIf()) return;
+    setDraftText("");
+    setProtection(undefined);
+    setSendRejected(false);
+    // The owner has already cleared its exact accepted revision.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [acceptedClear?.n]);
+  useEffect(() => {
+    if (protectionReset?.applyIf()) setProtection(undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [protectionReset?.n]);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  useEffect(() => {
+    onAttachmentDraftChange?.(pendingFiles.length);
+    // File identity changes invalidate an in-flight policy even when the count is equal.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingFiles]);
   const [sendingFiles, setSendingFiles] = useState(false);
   const lastScreenshot = useRef<File | null>(null);
   const screenshotFiles = useRef(new WeakSet<File>());
@@ -362,6 +406,8 @@ export function Composer({
         return;
       }
       setSendRejected(false);
+      setProtection(undefined);
+      onProtectionChange?.(undefined);
       setDraftText("");
       onDraftChange?.("");
       setMentionQuery(null);
@@ -369,7 +415,9 @@ export function Composer({
     };
     const admit = (): void | Promise<void> => {
       try {
-        const acceptance = onSend(candidate);
+        const acceptance = protection
+          ? onSend(candidate, protection)
+          : onSend(candidate);
         if (typeof acceptance === "boolean") {
           finish(acceptance);
           return;
@@ -449,6 +497,31 @@ export function Composer({
       data-testid="composer"
       className="composer-dock border-t bg-[hsl(var(--composer-surface))] px-4 pb-3 pt-3"
     >
+      {protection && (
+        <div className="mx-auto mb-2 flex max-w-[820px] items-center gap-2 text-xs">
+          <Shield className="h-3.5 w-3.5 text-signal" />
+          <span>
+            {t(
+              protection === "click"
+                ? "protectedMessage.open"
+                : "protectedMessage.modeVerify",
+            )}{" "}
+            · {t("protectedMessage.textOnly")}
+          </span>
+          <button
+            type="button"
+            aria-label={t("protectedMessage.normal")}
+            disabled={queuing || admissionPending}
+            onClick={() => {
+              setProtection(undefined);
+              onProtectionChange?.(undefined);
+            }}
+            className="rounded p-1 hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
       {replyTo && (
         <div
           data-testid="composer-reply-banner"
@@ -458,7 +531,9 @@ export function Composer({
           <span className="min-w-0 flex-1 truncate text-muted-foreground">
             {t("composer.replyingTo")}{" "}
             <span className="text-foreground">
-              {replyTo.text || t("composer.message")}
+              {replyTo.protection
+                ? t("protectedMessage.label")
+                : replyTo.text || t("composer.message")}
             </span>
           </span>
           <button
@@ -667,6 +742,7 @@ export function Composer({
                           key={s.id}
                           type="button"
                           data-testid={`sticker-option-${s.id}`}
+                          disabled={!!protection}
                           onClick={() => {
                             onSendSticker(s.id, s.emoji);
                             setPanelPointerMotion(false);
@@ -780,11 +856,12 @@ export function Composer({
             <Button
               variant="ghost"
               size="icon"
+              disabled={!!protection}
               data-testid="composer-attach"
               className="h-9 w-9 shrink-0 rounded-md text-muted-foreground"
               title={t("composer.attach")}
               aria-label={t("composer.attach")}
-              onClick={onAttach}
+              onClick={protection ? undefined : onAttach}
             >
               <Paperclip className="h-4 w-4" />
             </Button>
@@ -793,11 +870,12 @@ export function Composer({
             <Button
               variant="ghost"
               size="icon"
+              disabled={!!protection}
               data-testid="composer-attach-directory"
               className="h-9 w-9 shrink-0 rounded-md text-muted-foreground"
               title={t("composer.attachDirectory")}
               aria-label={t("composer.attachDirectory")}
-              onClick={onAttachDirectory}
+              onClick={protection ? undefined : onAttachDirectory}
             >
               <FolderUp className="h-4 w-4" />
             </Button>
@@ -869,8 +947,67 @@ export function Composer({
             placeholder={placeholder}
             aria-label={placeholder}
             title={t("redesign.keyboardHint")}
-            className="max-h-40 flex-1 resize-none bg-transparent px-1 py-1.5 text-[14px] leading-6 outline-none placeholder:text-muted-foreground"
+            className="min-w-0 max-h-40 flex-1 resize-none bg-transparent px-1 py-1.5 text-[14px] leading-6 outline-none placeholder:text-muted-foreground"
           />
+          <Popover open={protectionOpen} onOpenChange={setProtectionOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                data-testid="composer-protection"
+                aria-label={t("protectedMessage.nextSend")}
+                title={t("protectedMessage.nextSend")}
+                disabled={queuing || admissionPending}
+                className={cn(
+                  "h-9 w-9 shrink-0 rounded-md",
+                  protection
+                    ? "text-signal bg-signal/10"
+                    : "text-muted-foreground",
+                )}
+              >
+                <Shield className="h-4 w-4" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-56 p-1" side="top" align="end">
+              <div
+                role="radiogroup"
+                aria-label={t("protectedMessage.nextSend")}
+              >
+                {(["normal", "click", "authenticate"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="radio"
+                    aria-checked={(protection ?? "normal") === mode}
+                    data-testid={`composer-protection-${mode}`}
+                    onClick={() => {
+                      setProtection(mode === "normal" ? undefined : mode);
+                      onProtectionChange?.(
+                        mode === "normal" ? undefined : mode,
+                      );
+                      setProtectionOpen(false);
+                    }}
+                    className="flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {t(
+                      mode === "normal"
+                        ? "protectedMessage.normal"
+                        : mode === "click"
+                          ? "protectedMessage.open"
+                          : "protectedMessage.modeVerify",
+                    )}
+                    {(protection ?? "normal") === mode && (
+                      <Shield
+                        aria-hidden="true"
+                        className="h-3.5 w-3.5 text-signal"
+                      />
+                    )}
+                  </button>
+                ))}
+              </div>
+            </PopoverContent>
+          </Popover>
           {onExpiryDurationChange && (
             <select
               data-testid="composer-expiry"

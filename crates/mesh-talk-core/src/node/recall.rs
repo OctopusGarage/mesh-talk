@@ -193,6 +193,19 @@ impl Node {
                 .find(|e| decode_account_entry(&e.plaintext).0 == target)
                 .map(|e| e.wall_clock)
         };
+        let wall = wall.or_else(|| {
+            let files = self.received_files.lock().expect("received files lock");
+            files
+                .entries_ref(&acct_conv)
+                .iter()
+                .find(|row| {
+                    row.event_id == target
+                        && row.from == self.user_id()
+                        && super::files::validated_manifest(&row.plaintext)
+                            .is_some_and(|m| m.protection().is_some())
+                })
+                .map(|row| row.wall_clock)
+        });
         let Some(wall) = wall else {
             return Err(NodeError::Channel(
                 "can only recall your own message".into(),
@@ -256,6 +269,17 @@ impl Node {
     ) -> Result<(), NodeError> {
         authorize(&mut || Ok(()))?;
         let me = Author::from_ed25519(self.identity.public().ed25519_pub);
+        let protected_file_target = self
+            .received_files
+            .lock()
+            .expect("received files lock")
+            .entries_ref(&channel)
+            .iter()
+            .any(|row| {
+                row.event_id == target
+                    && super::files::validated_manifest(&row.plaintext)
+                        .is_some_and(|m| m.protection().is_some())
+            });
         let wall = {
             let log = self.log.lock().expect("log mutex not poisoned");
             let event = log
@@ -266,7 +290,9 @@ impl Node {
                     "can only recall your own message".into(),
                 ));
             }
-            if event.kind != EventKind::Message {
+            if event.kind != EventKind::Message
+                && !(event.kind == EventKind::FileManifest && protected_file_target)
+            {
                 return Err(NodeError::Channel("not a message".into()));
             }
             event.wall_clock
@@ -500,6 +526,27 @@ impl Node {
             entries.sort_by_key(|(_, entry)| entry.wall_clock);
             for (id, entry) in entries {
                 author_of.insert(id, (entry.from.clone(), entry.wall_clock));
+            }
+        }
+        {
+            let mut authors: HashMap<String, String> = self
+                .historical_dm_peers()
+                .into_iter()
+                .filter_map(|proof| proof.account_id().map(|account| (proof.user_id, account)))
+                .collect();
+            authors.insert(self.user_id(), my_account.clone());
+            for device in self.linked_devices() {
+                authors.insert(device.public.user_id(), my_account.clone());
+            }
+            let files = self.received_files.lock().expect("received files lock");
+            for row in files.entries_ref(&acct_conv) {
+                if targets.contains(&row.event_id)
+                    && super::files::validated_manifest(&row.plaintext)
+                        .is_some_and(|m| m.protection().is_some())
+                    && let Some(account) = authors.get(&row.from)
+                {
+                    author_of.insert(row.event_id, (account.clone(), row.wall_clock));
+                }
             }
         }
         // Only the message's own author account may recall it.

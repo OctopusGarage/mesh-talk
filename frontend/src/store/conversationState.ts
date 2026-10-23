@@ -66,12 +66,13 @@ export function fromHistoryItem(h: HistoryItem): ChatMessage {
     id: h.id,
     fromMe: h.from_me,
     who: h.who,
-    text: h.text,
+    text: h.protection ? "" : h.text,
+    protection: h.protection,
     wallClock: h.wall_clock,
     expiresAtMs: h.expires_at_ms,
     replyTo: h.reply_to,
     recalled: h.recalled,
-    recalledText: h.recalled_text,
+    recalledText: h.protection ? null : h.recalled_text,
     sticker: h.sticker,
     file: h.file
       ? {
@@ -163,7 +164,15 @@ export function completeSendIntentState(
           : {}),
       }
     : null;
-  if (resolved) intents[clientId] = { ...intent, message: resolved };
+  if (resolved)
+    intents[clientId] = {
+      ...intent,
+      message: resolved,
+      payload:
+        resolved.id && resolved.protection && intent.payload.kind === "text"
+          ? { ...intent.payload, text: "" }
+          : intent.payload,
+    };
   else delete intents[clientId];
   // Completion must not repopulate an evicted conversation's cache.
   const messages = { ...state.messages };

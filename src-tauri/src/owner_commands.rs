@@ -64,6 +64,7 @@ pub async fn owner_enqueue_text(
     text: String,
     reply_to: Option<String>,
     expires_at_ms: Option<u64>,
+    protection: Option<mesh_talk_core::node::MessageProtection>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
@@ -74,17 +75,30 @@ pub async fn owner_enqueue_text(
     let result = admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
-                let id = runtime
-                    .handle()
-                    .enqueue_to_account_expiring_if(
-                        &account,
-                        text.as_bytes(),
-                        reply,
-                        expires_at_ms,
-                        |accept| admission.authorize_accept(runtime, accept),
-                    )
-                    .await
-                    .map_err(CommandError::from)?;
+                let handle = runtime.handle();
+                let id = if let Some(protection) = protection {
+                    handle
+                        .enqueue_protected_to_account_expiring_if(
+                            &account,
+                            text.as_bytes(),
+                            reply,
+                            expires_at_ms,
+                            protection,
+                            |accept| admission.authorize_accept(runtime, accept),
+                        )
+                        .await
+                } else {
+                    handle
+                        .enqueue_to_account_expiring_if(
+                            &account,
+                            text.as_bytes(),
+                            reply,
+                            expires_at_ms,
+                            |accept| admission.authorize_accept(runtime, accept),
+                        )
+                        .await
+                }
+                .map_err(CommandError::from)?;
                 Ok(hex::encode(id.as_bytes()))
             })
         })
@@ -167,6 +181,7 @@ pub async fn owner_enqueue_channel_text(
     text: String,
     reply_to: Option<String>,
     expires_at_ms: Option<u64>,
+    protection: Option<mesh_talk_core::node::MessageProtection>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
@@ -177,16 +192,26 @@ pub async fn owner_enqueue_channel_text(
     let id = admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
-                runtime
-                    .handle()
-                    .enqueue_channel_message_reply_expiring_if(
+                let handle = runtime.handle();
+                if let Some(protection) = protection {
+                    handle.enqueue_protected_channel_message_reply_expiring_if(
+                        channel,
+                        text.as_bytes(),
+                        reply,
+                        expires_at_ms,
+                        protection,
+                        |accept| admission.authorize_accept(runtime, accept),
+                    )
+                } else {
+                    handle.enqueue_channel_message_reply_expiring_if(
                         channel,
                         text.as_bytes(),
                         reply,
                         expires_at_ms,
                         |accept| admission.authorize_accept(runtime, accept),
                     )
-                    .map_err(CommandError::from)
+                }
+                .map_err(CommandError::from)
             })
         })
         .await?;
@@ -235,24 +260,13 @@ pub async fn owner_enqueue_channel_file<R: tauri::Runtime>(
     media: bool,
     progress_key: Option<String>,
     expires_at_ms: Option<u64>,
+    protection: Option<mesh_talk_core::node::MessageProtection>,
     handle: tauri::AppHandle<R>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<AcceptedFile, CommandError> {
-    let admission = match RuntimeAdmission::capture(&app, &node, &owner) {
-        Ok(admission) => admission,
-        Err(error) => {
-            crate::chat_commands::cleanup_pasted_file(&handle, &path);
-            return Err(error);
-        }
-    };
-    let channel = match crate::chat_commands::parse_channel_id(&channel_id) {
-        Ok(channel) => channel,
-        Err(error) => {
-            crate::chat_commands::cleanup_pasted_file(&handle, &path);
-            return Err(error);
-        }
-    };
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    let channel = crate::chat_commands::parse_channel_id(&channel_id)?;
     let flush = admission.clone();
     let cleanup = handle.clone();
     let mut progress =
@@ -265,19 +279,36 @@ pub async fn owner_enqueue_channel_file<R: tauri::Runtime>(
                 } else {
                     mesh_talk_core::file::FileKind::File
                 };
-                let result = runtime
-                    .handle()
-                    .enqueue_file_channel_progress_expiring_if(
-                        channel,
-                        std::path::Path::new(&path),
-                        kind,
-                        move |p| progress.emit(p.done, p.total),
-                        expires_at_ms,
-                        |accept| admission.authorize_accept(runtime, accept),
-                    )
-                    .await;
+                let handle = runtime.handle();
+                let on_progress =
+                    move |p: mesh_talk_core::node::FileProgress| progress.emit(p.done, p.total);
+                let result = if let Some(protection) = protection {
+                    handle
+                        .enqueue_protected_file_channel_progress_expiring_if(
+                            channel,
+                            std::path::Path::new(&path),
+                            kind,
+                            on_progress,
+                            expires_at_ms,
+                            protection,
+                            |accept| admission.authorize_accept(runtime, accept),
+                        )
+                        .await
+                } else {
+                    handle
+                        .enqueue_file_channel_progress_expiring_if(
+                            channel,
+                            std::path::Path::new(&path),
+                            kind,
+                            on_progress,
+                            expires_at_ms,
+                            |accept| admission.authorize_accept(runtime, accept),
+                        )
+                        .await
+                };
+                let accepted = result.map_err(CommandError::from)?;
                 crate::chat_commands::cleanup_pasted_file(&cleanup, &path);
-                result.map_err(CommandError::from)
+                Ok(accepted)
             })
         })
         .await?;
@@ -303,21 +334,13 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
     media: bool,
     progress_key: Option<String>,
     expires_at_ms: Option<u64>,
+    protection: Option<mesh_talk_core::node::MessageProtection>,
     handle: tauri::AppHandle<R>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<AcceptedFile, CommandError> {
-    let admission = match RuntimeAdmission::capture(&app, &node, &owner) {
-        Ok(admission) => admission,
-        Err(error) => {
-            crate::chat_commands::cleanup_pasted_file(&handle, &path);
-            return Err(error);
-        }
-    };
-    if let Err(error) = validate_account(&account) {
-        crate::chat_commands::cleanup_pasted_file(&handle, &path);
-        return Err(error);
-    }
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    validate_account(&account)?;
     let cleanup_handle = handle.clone();
     let mut progress = crate::events::ProgressThrottle::new(
         handle,
@@ -334,28 +357,43 @@ pub async fn owner_enqueue_file<R: tauri::Runtime>(
                 } else {
                     mesh_talk_core::file::FileKind::File
                 };
-                let result = runtime
-                    .handle()
-                    .enqueue_file_to_account_progress_expiring_if(
-                        &account,
-                        std::path::Path::new(&path),
-                        kind,
-                        move |p| {
-                            progress.emit(p.done, p.total);
-                            #[cfg(test)]
-                            {
-                                let hook = progress_hook.lock().unwrap().take();
-                                if let Some(hook) = hook {
-                                    hook();
-                                }
-                            }
-                        },
-                        expires_at_ms,
-                        |accept| admission.authorize_accept(runtime, accept),
-                    )
-                    .await;
-                crate::chat_commands::cleanup_pasted_file(&cleanup_handle, &path);
+                let handle = runtime.handle();
+                let on_progress = move |p: mesh_talk_core::node::FileProgress| {
+                    progress.emit(p.done, p.total);
+                    #[cfg(test)]
+                    {
+                        let hook = progress_hook.lock().unwrap().take();
+                        if let Some(hook) = hook {
+                            hook();
+                        }
+                    }
+                };
+                let result = if let Some(protection) = protection {
+                    handle
+                        .enqueue_protected_file_to_account_progress_expiring_if(
+                            &account,
+                            std::path::Path::new(&path),
+                            kind,
+                            on_progress,
+                            expires_at_ms,
+                            protection,
+                            |accept| admission.authorize_accept(runtime, accept),
+                        )
+                        .await
+                } else {
+                    handle
+                        .enqueue_file_to_account_progress_expiring_if(
+                            &account,
+                            std::path::Path::new(&path),
+                            kind,
+                            on_progress,
+                            expires_at_ms,
+                            |accept| admission.authorize_accept(runtime, accept),
+                        )
+                        .await
+                };
                 let (id, conv) = result.map_err(CommandError::from)?;
+                crate::chat_commands::cleanup_pasted_file(&cleanup_handle, &path);
                 Ok(AcceptedFile {
                     id: hex::encode(id.as_bytes()),
                     file_conv: hex::encode(conv.as_bytes()),
@@ -632,6 +670,8 @@ mod tests {
                     crate::chat_commands::write_temp_file,
                     super::owner_search_recent,
                     super::owner_search_context,
+                    super::owner_reveal_message,
+                    super::owner_reveal_image,
                     super::owner_node_identity,
                     super::owner_enqueue_text,
                     super::owner_enqueue_channel_text,
@@ -1001,6 +1041,401 @@ mod tests {
     }
 
     #[test]
+    fn registered_protected_click_reveal_redacts_history_and_rejects_plaintext() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let id = fixture.invoke("owner_enqueue_text", serde_json::json!({"owner":"alice","account":account,"text":"protected secret","protection":"click"})).unwrap();
+        let reference = serde_json::json!({"kind":"account","target":account,"message_id":id});
+        let history = fixture
+            .invoke(
+                "owner_account_history",
+                serde_json::json!({"owner":"alice","account":account,"limit":50}),
+            )
+            .unwrap();
+        assert!(!history.to_string().contains("protected secret"));
+        assert_eq!(history[0]["protection"], "click");
+        let revealed = fixture
+            .invoke(
+                "owner_reveal_message",
+                serde_json::json!({"owner":"alice","reference":reference}),
+            )
+            .unwrap();
+        assert_eq!(revealed["text"], "protected secret");
+        assert_eq!(revealed["visible_for_ms"], 30_000);
+        fixture
+            .invoke(
+                "recall_message",
+                serde_json::json!({"convId":account,"target":id,"isChannel":false}),
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .invoke(
+                    "owner_reveal_message",
+                    serde_json::json!({"owner":"alice","reference":reference})
+                )
+                .is_err()
+        );
+        let recalled = fixture
+            .invoke(
+                "owner_account_history",
+                serde_json::json!({"owner":"alice","account":account,"limit":50}),
+            )
+            .unwrap();
+        assert!(!recalled.to_string().contains("protected secret"));
+        let plain = fixture
+            .invoke(
+                "owner_enqueue_text",
+                serde_json::json!({"owner":"alice","account":account,"text":"ordinary"}),
+            )
+            .unwrap();
+        assert!(fixture.invoke("owner_reveal_message", serde_json::json!({"owner":"alice","reference":{"kind":"account","target":account,"message_id":plain}})).is_err());
+    }
+
+    #[test]
+    fn protected_image_authentication_failure_and_lock_transition_never_return_bytes() {
+        use tauri::Manager;
+        for change in ["cancel", "lock-clear"] {
+            let fixture = Fixture::new();
+            let account = fixture.offline_peer();
+            let path = fixture.root.path().join("authenticated.png");
+            std::fs::write(&path, b"\x89PNG\r\n\x1a\nsecret").unwrap();
+            let accepted = fixture.invoke("owner_enqueue_file", serde_json::json!({"owner":"alice","account":account,"path":path,"media":true,"protection":"authenticate"})).unwrap();
+            let reference = mesh_talk_core::node::SearchReference::Account {
+                account_id: account,
+                message_id: Some(super::parse_id(accepted["id"].as_str().unwrap()).unwrap()),
+            };
+            let admission = crate::runtime_admission::RuntimeAdmission::capture(
+                &fixture.app_state,
+                &fixture.node,
+                "alice",
+            )
+            .unwrap();
+            let lock = fixture.app_state.app_lock().clone();
+            let revision = lock.authorization_revision().unwrap();
+            let result = tauri::async_runtime::block_on(super::search::reveal_image_with_verifier(
+                admission,
+                lock.clone(),
+                revision,
+                reference,
+                || async {
+                    if change == "cancel" {
+                        return Err(crate::commands::CommandError::Authentication(
+                            "canceled".into(),
+                        ));
+                    }
+                    crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap();
+                    lock.clear();
+                    Ok(())
+                },
+            ));
+            assert!(result.is_err(), "{change} never returns image bytes");
+        }
+    }
+
+    #[test]
+    fn registered_protected_paste_retry_preserves_source_until_durable_acceptance() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let channel = fixture
+            .invoke(
+                "create_channel",
+                serde_json::json!({"name":"Retry images","memberIds":[]}),
+            )
+            .unwrap();
+        for protection in [serde_json::Value::Null, serde_json::json!("click")] {
+            for (command, key, valid, invalid) in [
+                (
+                    "owner_enqueue_file",
+                    "account",
+                    serde_json::json!(account),
+                    serde_json::json!("ab".repeat(16)),
+                ),
+                (
+                    "owner_enqueue_channel_file",
+                    "channelId",
+                    channel.clone(),
+                    serde_json::json!("ab".repeat(32)),
+                ),
+            ] {
+                let source = fixture.invoke("write_temp_file", serde_json::json!({"bytes":b"\x89PNG\r\n\x1a\nretry image".as_slice(),"ext":"png","name":"retry.png"})).unwrap();
+                let path = std::path::PathBuf::from(source.as_str().unwrap());
+                let mut body = serde_json::json!({"owner":"alice","path":source,"media":true,"protection":protection});
+                body[key] = invalid;
+                let mut retired = body.clone();
+                retired["owner"] = serde_json::json!("retired");
+                assert!(fixture.invoke(command, retired).is_err());
+                assert!(
+                    path.is_file(),
+                    "{command} preserves source after owner rejection"
+                );
+                let mut malformed = body.clone();
+                malformed[key] = serde_json::json!("malformed");
+                assert!(fixture.invoke(command, malformed).is_err());
+                assert!(
+                    path.is_file(),
+                    "{command} preserves source after malformed destination"
+                );
+                assert!(
+                    fixture.invoke(command, body.clone()).is_err(),
+                    "{command} rejects missing destination"
+                );
+                assert!(
+                    path.is_file(),
+                    "{command} preserves retry source after rejection"
+                );
+                body[key] = valid;
+                let accepted = fixture.invoke(command, body).unwrap();
+                assert_eq!(accepted["id"].as_str().unwrap().len(), 64);
+                assert!(
+                    !path.exists(),
+                    "{command} removes staging source only after durable acceptance"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn registered_protected_image_reveal_requires_exact_authority_and_blocks_ordinary_reads() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let channel = fixture
+            .invoke(
+                "create_channel",
+                serde_json::json!({"name":"Protected images","memberIds":[]}),
+            )
+            .unwrap();
+        let path = fixture.root.path().join("protected.png");
+        let bytes = b"\x89PNG\r\n\x1a\nprotected image bytes";
+        std::fs::write(&path, bytes).unwrap();
+        for (kind, target, command, key) in [
+            (
+                "account",
+                serde_json::json!(account),
+                "owner_enqueue_file",
+                "account",
+            ),
+            (
+                "channel",
+                channel,
+                "owner_enqueue_channel_file",
+                "channelId",
+            ),
+        ] {
+            let mut body =
+                serde_json::json!({"owner":"alice","path":path,"media":true,"protection":"click"});
+            body[key] = target.clone();
+            let accepted = fixture.invoke(command, body).unwrap();
+            let reference =
+                serde_json::json!({"kind":kind,"target":target,"message_id":accepted["id"]});
+            let revealed = fixture
+                .invoke(
+                    "owner_reveal_image",
+                    serde_json::json!({"owner":"alice","reference":reference}),
+                )
+                .unwrap();
+            assert_eq!(revealed, serde_json::to_value(bytes.as_slice()).unwrap());
+            assert!(
+                fixture
+                    .invoke(
+                        "owner_reveal_message",
+                        serde_json::json!({"owner":"alice","reference":reference})
+                    )
+                    .is_err()
+            );
+            for read in ["read_media", "read_file"] {
+                assert!(
+                    fixture
+                        .invoke(read, serde_json::json!({"fileConv":accepted["fileConv"]}))
+                        .is_err(),
+                    "{kind}: {read}"
+                );
+            }
+            assert_eq!(
+                fixture
+                    .invoke(
+                        "owner_reveal_image",
+                        serde_json::json!({"owner":"bob","reference":reference})
+                    )
+                    .unwrap_err()["kind"],
+                "authorization"
+            );
+        }
+        let ordinary_content = b"\x89PNG\r\n\x1a\nordinary image bytes";
+        std::fs::write(&path, ordinary_content).unwrap();
+        let ordinary = fixture
+            .invoke(
+                "owner_enqueue_file",
+                serde_json::json!({"owner":"alice","account":account,"path":path,"media":true}),
+            )
+            .unwrap();
+        assert!(fixture.invoke("owner_reveal_image", serde_json::json!({"owner":"alice","reference":{"kind":"account","target":account,"message_id":ordinary["id"]}})).is_err());
+        let ordinary_bytes = fixture
+            .invoke(
+                "read_media",
+                serde_json::json!({"fileConv":ordinary["fileConv"]}),
+            )
+            .unwrap();
+        assert_eq!(
+            ordinary_bytes,
+            serde_json::to_value(ordinary_content.as_slice()).unwrap()
+        );
+    }
+
+    #[test]
+    fn registered_protected_channel_reveal_preserves_namespace_and_redacts_history() {
+        let fixture = Fixture::new();
+        let channel = fixture
+            .invoke(
+                "create_channel",
+                serde_json::json!({"name":"Protected", "memberIds":[]}),
+            )
+            .unwrap();
+        let id = fixture.invoke("owner_enqueue_channel_text", serde_json::json!({"owner":"alice","channelId":channel,"text":"channel protected secret","protection":"click"})).unwrap();
+        let history = fixture
+            .invoke(
+                "channel_history",
+                serde_json::json!({"channelId":channel,"limit":10}),
+            )
+            .unwrap();
+        assert!(!history.to_string().contains("channel protected secret"));
+        assert_eq!(history[0]["protection"], "click");
+        let revealed = fixture.invoke("owner_reveal_message", serde_json::json!({"owner":"alice","reference":{"kind":"channel","target":channel,"message_id":id}})).unwrap();
+        assert_eq!(revealed["text"], "channel protected secret");
+    }
+
+    #[test]
+    fn protected_authentication_rechecks_authority_runtime_and_retention() {
+        use mesh_talk_core::node::SearchReference;
+        use tauri::Manager;
+        for change in [
+            "success",
+            "cancel",
+            "lock",
+            "lock-clear",
+            "relogin",
+            "recall",
+            "replace-runtime",
+            "expire",
+        ] {
+            let fixture = Fixture::new();
+            let account = fixture.offline_peer();
+            let expires = (change == "expire").then(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+                    + 1500
+            });
+            let id = fixture.invoke("owner_enqueue_text", serde_json::json!({"owner":"alice","account":account,"text":"authenticated secret","protection":"authenticate","expiresAtMs":expires})).unwrap();
+            let reference = SearchReference::Account {
+                account_id: account.clone(),
+                message_id: Some(super::parse_id(id.as_str().unwrap()).unwrap()),
+            };
+            let admission = crate::runtime_admission::RuntimeAdmission::capture(
+                &fixture.app_state,
+                &fixture.node,
+                "alice",
+            )
+            .unwrap();
+            let lock = fixture.app_state.app_lock().clone();
+            let revision = lock.authorization_revision().unwrap();
+            let replacement = (change == "replace-runtime").then(Fixture::new);
+            let response =
+                tauri::async_runtime::block_on(super::search::reveal_message_with_verifier(
+                    admission,
+                    lock.clone(),
+                    revision,
+                    reference,
+                    || async {
+                        match change {
+                            "cancel" => {
+                                return Err(crate::commands::CommandError::Authentication(
+                                    "canceled".into(),
+                                ));
+                            }
+                            "lock" | "lock-clear" => {
+                                crate::app_lock::lock_app(
+                                    fixture.webview.state::<AppState>(),
+                                    fixture.webview.state::<crate::app_lock::AppLock>(),
+                                )
+                                .unwrap();
+                                if change == "lock-clear" {
+                                    lock.clear();
+                                }
+                            }
+                            "relogin" => fixture.app_state.session().set(
+                                "replacement".into(),
+                                user("alice"),
+                                "pw".into(),
+                            ),
+                            "recall" => {
+                                let handle = fixture.node.0.read().await.as_ref().unwrap().handle();
+                                handle
+                                    .recall_account_if(
+                                        &account,
+                                        super::parse_id(id.as_str().unwrap()).unwrap(),
+                                        |commit| commit(),
+                                    )
+                                    .await
+                                    .unwrap();
+                            }
+                            "replace-runtime" => {
+                                let new = replacement.as_ref().unwrap().node.0.write().await.take();
+                                let old =
+                                    std::mem::replace(&mut *fixture.node.0.write().await, new);
+                                if let Some(old) = old {
+                                    old.stop().await;
+                                }
+                            }
+                            "expire" => {
+                                tokio::time::sleep(std::time::Duration::from_millis(1600)).await
+                            }
+                            _ => {}
+                        }
+                        Ok(())
+                    },
+                ));
+            if change == "success" {
+                assert_eq!(
+                    serde_json::to_value(response.unwrap()).unwrap()["text"],
+                    "authenticated secret"
+                );
+                assert!(!lock.is_locked(), "revealing does not alter app lock");
+            } else {
+                assert!(response.is_err(), "{change} must never return plaintext");
+            }
+        }
+    }
+
+    #[test]
+    fn registered_protected_reveal_requires_exact_reference_and_current_owner() {
+        let fixture = Fixture::new();
+        for command in ["owner_reveal_message", "owner_reveal_image"] {
+            for reference in [
+                serde_json::json!({"kind":"account","target":"01".repeat(16),"message_id":null}),
+                serde_json::json!({"kind":"legacy-device","target":"01".repeat(16),"message_id":"01".repeat(32)}),
+                serde_json::json!({"kind":"channel","target":"bad","message_id":"01".repeat(32)}),
+            ] {
+                assert_eq!(
+                    fixture
+                        .invoke(
+                            command,
+                            serde_json::json!({"owner":"alice","reference":reference})
+                        )
+                        .unwrap_err()["kind"],
+                    "invalid-input"
+                );
+            }
+            assert_eq!(fixture.invoke(command, serde_json::json!({"owner":"bob","reference":{"kind":"account","target":"01".repeat(16),"message_id":"01".repeat(32)}})).unwrap_err()["kind"], "authorization");
+        }
+    }
+
+    #[test]
     fn registered_search_rejects_queued_replaced_owner_and_app_lock() {
         use tauri::Manager;
         let fixture = Fixture::new();
@@ -1009,6 +1444,14 @@ mod tests {
                 (
                     "owner_search_recent",
                     serde_json::json!({"owner":"alice","query":"secret"}),
+                ),
+                (
+                    "owner_reveal_message",
+                    serde_json::json!({"owner":"alice","reference":{"kind":"account","target":"01".repeat(16),"message_id":"01".repeat(32)}}),
+                ),
+                (
+                    "owner_reveal_image",
+                    serde_json::json!({"owner":"alice","reference":{"kind":"account","target":"01".repeat(16),"message_id":"01".repeat(32)}}),
                 ),
                 (
                     "owner_search_context",
@@ -2605,6 +3048,7 @@ mod tests {
                 target,
                 path.to_string_lossy().into_owned(),
                 false,
+                None,
                 None,
                 None,
                 handle.clone(),

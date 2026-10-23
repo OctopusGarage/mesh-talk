@@ -196,3 +196,66 @@ it.each([
     expect(input.value).toBe("");
   },
 );
+
+it("retains protection on rejection and resets it after acceptance", async () => {
+  await render();
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>('[data-testid="composer-protection"]')!
+      .click(),
+  );
+  await act(async () =>
+    document
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="composer-protection-authenticate"]',
+      )!
+      .click(),
+  );
+  const selected = () =>
+    host.textContent?.includes("Text & images · hides after 30 seconds");
+  send.mockReturnValueOnce(false);
+  await click();
+  expect(send).toHaveBeenLastCalledWith(
+    "Please send the document tomorrow.",
+    "authenticate",
+  );
+  expect(selected()).toBe(true);
+  await click();
+  expect(selected()).toBe(false);
+});
+
+it.each([true, false])(
+  "synchronizes accepted clear after remount only while its owning revision is current (%s)",
+  async (current) => {
+    await act(async () =>
+      root.render(
+        createElement(Composer, {
+          onSend: send,
+          initialDraft: "Accepted original",
+          initialProtection: "click",
+          placeholder: "Message",
+          mentionNames: [],
+        }),
+      ),
+    );
+    if (!current) await edit("Replacement draft");
+    await act(async () =>
+      root.render(
+        createElement(Composer, {
+          onSend: send,
+          initialDraft: "",
+          initialProtection: undefined,
+          acceptedClear: { n: 1, applyIf: () => current },
+          placeholder: "Message",
+          mentionNames: [],
+        }),
+      ),
+    );
+    expect(host.querySelector("textarea")!.value).toBe(
+      current ? "" : "Replacement draft",
+    );
+    expect(
+      host.textContent?.includes("Text & images · hides after 30 seconds"),
+    ).toBe(!current);
+  },
+);

@@ -417,3 +417,68 @@ it("preserves exact search namespaces and owner payloads", async () => {
     });
   }
 });
+
+it("binds protected sends and reveals to the exact owner and stable message reference", async () => {
+  await chat.enqueueText("owner", "account", "secret", "reply", null, "click");
+  expect(invoke).toHaveBeenLastCalledWith("owner_enqueue_text", {
+    owner: "owner",
+    account: "account",
+    text: "secret",
+    replyTo: "reply",
+    expiresAtMs: null,
+    protection: "click",
+  });
+  await chat.enqueueChannelText(
+    "owner",
+    "channel",
+    "secret",
+    null,
+    null,
+    "authenticate",
+  );
+  expect(invoke).toHaveBeenLastCalledWith(
+    "owner_enqueue_channel_text",
+    expect.objectContaining({ protection: "authenticate" }),
+  );
+  const reference = {
+    kind: "account" as const,
+    target: "account",
+    message_id: "message",
+  };
+  await chat.revealMessage("owner", reference, "password");
+  expect(invoke).toHaveBeenLastCalledWith("owner_reveal_message", {
+    owner: "owner",
+    reference,
+    password: "password",
+  });
+});
+
+it("keeps protected image bytes behind the owner-scoped binary reveal command", async () => {
+  const reference = {
+    kind: "channel" as const,
+    target: "channel",
+    message_id: "image",
+  };
+  invoke.mockResolvedValueOnce([137, 80, 78, 71]);
+  expect(
+    new Uint8Array(await chat.revealImage("owner", reference, "password")),
+  ).toEqual(new Uint8Array([137, 80, 78, 71]));
+  expect(invoke).toHaveBeenLastCalledWith("owner_reveal_image", {
+    owner: "owner",
+    reference,
+    password: "password",
+  });
+  await chat.enqueueFile(
+    "owner",
+    "peer",
+    "/tmp/photo.png",
+    true,
+    "progress",
+    null,
+    "click",
+  );
+  expect(invoke).toHaveBeenLastCalledWith(
+    "owner_enqueue_file",
+    expect.objectContaining({ protection: "click" }),
+  );
+});

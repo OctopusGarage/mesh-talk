@@ -42,7 +42,7 @@ the read-only [documentation MCP](../tools/help/README.md).
 | [`docs/channel-release-rehearsal.md`](channel-release-rehearsal.md)       | Repeatable channel replica scale, old-binary compatibility, and physical LAN release checks.                                                                |
 | [`docs/updates.md`](updates.md)                                           | Stable/Nightly selection, verified downloads, native installation, canonical product-version ownership, reviewed release/next-target automation, and publication recovery. |
 | [`docs/settings.md`](settings.md)                                         | Seven category pages, automatic saving, permission dependencies, local retention confirmation and settings ownership.                                       |
-| [`docs/privacy-controls.md`](privacy-controls.md)                         | Privacy presets, app lock, invisible mode, hidden contacts, and limits.                                                                                     |
+| [`docs/privacy-controls.md`](privacy-controls.md)                         | Privacy presets, app lock, protected messages, invisible mode, hidden contacts, and limits.                                                                 |
 | [`specifications/TODO.md`](../specifications/TODO.md)                     | Current capability index, deliberate design boundaries and separately unverified acceptance cases.                                                          |
 
 The [group reception guide](group-conversation-reception.md) owns ordering, unread

@@ -1069,11 +1069,16 @@ impl Node {
                                 .insert(manifest.file_conv());
                             if !self.certified_sibling(&sender) {
                                 let _ = self.file_incoming.send(ReceivedFile {
+                                    protection: manifest.protection(),
                                     expires_at_ms: crate::expiry::deadline(&entry.plaintext),
                                     conv: original_conv,
                                     is_channel: false,
                                     from: sender.user_id(),
-                                    name: manifest.name().to_owned(),
+                                    name: if manifest.protection().is_some() {
+                                        "Protected image".into()
+                                    } else {
+                                        manifest.name().to_owned()
+                                    },
                                     size: manifest.size(),
                                     mime: manifest.mime().to_owned(),
                                     file_conv: manifest.file_conv(),
@@ -1116,6 +1121,7 @@ impl Node {
                             from: sender.user_id(),
                             from_name,
                             text: body.text,
+                            protection: body.protection,
                             reply_to: body.reply_to,
                         });
                     }

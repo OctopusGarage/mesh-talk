@@ -4,6 +4,7 @@
 //! (or not decoding) is treated as a legacy raw-text message (`reply_to = None`).
 
 use crate::eventlog::event::EventId;
+use base64::Engine;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,23 @@ const MSG_MAGIC_V2: &[u8] = b"MTB2";
 /// `MTB2` body version that carries the optional `sticker` field (text + reply_to + sticker).
 const MTB2_V_STICKER: u8 = 1;
 
+pub use crate::protection::MessageProtection;
+
+#[derive(Serialize, Deserialize)]
+struct ProtectedWire {
+    protection: MessageProtection,
+    text: String,
+    reply_to: Option<EventId>,
+}
+
+fn protected_wire(bytes: &[u8]) -> Option<ProtectedWire> {
+    opts()
+        .with_limit(bytes.len() as u64)
+        .reject_trailing_bytes()
+        .deserialize(bytes.strip_prefix(b"MTPR1")?)
+        .ok()
+}
+
 /// The chat-message body. `text` is the message (or, for a sticker, the fallback emoji
 /// char); `reply_to` is the parent for a threaded reply; `sticker` is an animated-sticker
 /// id (an emoji codepoint string like `1f602`) sent by reference — both peers bundle the
@@ -25,6 +43,7 @@ const MTB2_V_STICKER: u8 = 1;
 /// something.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageBody {
+    pub protection: Option<MessageProtection>,
     pub text: Vec<u8>,
     pub reply_to: Option<EventId>,
     pub sticker: Option<String>,
@@ -56,6 +75,7 @@ impl MessageBody {
             text,
             reply_to,
             sticker: None,
+            protection: None,
         }
     }
 
@@ -66,11 +86,28 @@ impl MessageBody {
             text: fallback,
             reply_to: None,
             sticker: Some(sticker_id),
+            protection: None,
+        }
+    }
+
+    /// Construct a body whose default projection conceals text.
+    pub fn protected(
+        text: Vec<u8>,
+        reply_to: Option<EventId>,
+        protection: MessageProtection,
+    ) -> Self {
+        Self {
+            text,
+            reply_to,
+            sticker: None,
+            protection: Some(protection),
         }
     }
 
     /// Encode the sealed plaintext. A sticker message ships as `MTB2 ‖ 1 ‖ bincode(WireV2)`;
-    /// everything else ships as `MTB1 ‖ bincode(WireV1)` (unchanged on the wire).
+    /// ordinary text ships as `MTB1 ‖ bincode(WireV1)` (unchanged on the wire).
+    /// Protected text uses an outer zero-deadline sentinel, `MTPR1` and a bounded
+    /// positional envelope with base64 content; legacy raw fallbacks stay opaque.
     // CROSS-VERSION NOTE: a sticker is framed as MTB2, which only sticker-aware peers (this
     // version onward) decode; a pre-sticker peer falls through to raw text and shows the
     // framing bytes rather than the `text` emoji fallback. MTB1 uses reject_trailing_bytes,
@@ -79,6 +116,18 @@ impl MessageBody {
     // peers that don't advertise sticker support) needs capability negotiation in the
     // announce — deferred; the steady state on this LAN app is all peers updated together.
     pub fn encode(&self) -> Vec<u8> {
+        if let Some(protection) = self.protection {
+            let body = opts()
+                .serialize(&ProtectedWire {
+                    protection,
+                    text: base64::engine::general_purpose::STANDARD.encode(&self.text),
+                    reply_to: self.reply_to,
+                })
+                .expect("protected body serializes");
+            let mut wire = b"MTEX1\0\0\0\0\0\0\0\0MTPR1".to_vec();
+            wire.extend(body);
+            return wire;
+        }
         if self.sticker.is_some() {
             let body = opts()
                 .serialize(&WireV2 {
@@ -114,15 +163,34 @@ impl MessageBody {
     ///    unknown version or an undecodable body falls through to raw text.
     /// 3. Anything else — a legacy raw-text message.
     pub fn decode(bytes: &[u8]) -> MessageBody {
+        let mut body = Self::decode_revealed(bytes);
+        if body.protection.is_some() {
+            body.text.clear();
+        }
+        body
+    }
+
+    pub(in crate::node) fn decode_revealed(bytes: &[u8]) -> MessageBody {
+        let protected = bytes.starts_with(b"MTEX1\0\0\0\0\0\0\0\0");
         let Some((_, bytes)) = crate::expiry::split(bytes) else {
             return MessageBody::new(Vec::new(), None);
         };
+        if protected {
+            let Some(body) = protected_wire(bytes) else {
+                return MessageBody::new(Vec::new(), None);
+            };
+            return match base64::engine::general_purpose::STANDARD.decode(&body.text) {
+                Ok(text) => MessageBody::protected(text, body.reply_to, body.protection),
+                Err(_) => MessageBody::new(Vec::new(), None),
+            };
+        }
         if let Some(rest) = bytes.strip_prefix(MSG_MAGIC) {
             if let Ok(b) = opts().reject_trailing_bytes().deserialize::<WireV1>(rest) {
                 return MessageBody {
                     text: b.text,
                     reply_to: b.reply_to,
                     sticker: None,
+                    protection: None,
                 };
             }
         } else if let Some(rest) = bytes.strip_prefix(MSG_MAGIC_V2)
@@ -134,12 +202,14 @@ impl MessageBody {
                 text: b.text,
                 reply_to: b.reply_to,
                 sticker: b.sticker,
+                protection: None,
             };
         }
         MessageBody {
             text: bytes.to_vec(),
             reply_to: None,
             sticker: None,
+            protection: None,
         }
     }
 }
@@ -147,6 +217,86 @@ impl MessageBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_magic_without_reserved_sentinel_preserves_legacy_raw_text() {
+        for text in [b"MTPR status".as_slice(), b"MTPR1 ordinary text"] {
+            assert_eq!(MessageBody::decode(text).text, text);
+            assert_eq!(MessageBody::decode(text).protection, None);
+            let expiring = crate::expiry::wrap(text, Some(1_700_000_300_000));
+            assert_eq!(MessageBody::decode(&expiring).text, text);
+        }
+        let framed =
+            MessageBody::protected(b"secret".to_vec(), None, MessageProtection::Click).encode();
+        let bare = &framed[13..];
+        assert_eq!(MessageBody::decode(bare).text, bare);
+        assert_eq!(MessageBody::decode(bare).protection, None);
+        assert_eq!(MessageBody::decode_revealed(bare).text, bare);
+        let expiring = crate::expiry::wrap(bare, Some(1_700_000_300_000));
+        assert_eq!(MessageBody::decode(&expiring).text, bare);
+        assert_eq!(MessageBody::decode(&expiring).protection, None);
+    }
+
+    #[test]
+    fn malformed_protection_fails_closed_without_raw_fallback() {
+        let encoded =
+            MessageBody::protected(b"secret".to_vec(), None, MessageProtection::Click).encode();
+        for end in 5..encoded.len() {
+            assert!(MessageBody::decode(&encoded[..end]).text.is_empty());
+        }
+        for offset in [13, 17, 18] {
+            let mut corrupt = encoded.clone();
+            corrupt[offset] = 255;
+            assert!(MessageBody::decode(&corrupt).text.is_empty());
+        }
+        let wrapped = crate::expiry::wrap(&encoded, Some(1_700_000_300_000));
+        // Deployed expiry-aware peers inspect exactly one deadline: always zero.
+        assert_eq!(u64::from_le_bytes(wrapped[5..13].try_into().unwrap()), 0);
+        assert!(!String::from_utf8_lossy(&wrapped).contains("secret"));
+        let legacy_decode = |wire: &[u8]| -> Vec<u8> {
+            let rest = wire.strip_prefix(b"MTEX1").unwrap();
+            let deadline = u64::from_le_bytes(rest[..8].try_into().unwrap());
+            if deadline == 0 {
+                Vec::new()
+            } else {
+                rest[8..].to_vec()
+            }
+        };
+        assert!(legacy_decode(&encoded).is_empty());
+        assert!(legacy_decode(&wrapped).is_empty());
+        let mut invalid_base64 = b"MTEX1\0\0\0\0\0\0\0\0MTPR1".to_vec();
+        invalid_base64.extend(
+            opts()
+                .serialize(&ProtectedWire {
+                    protection: MessageProtection::Click,
+                    text: "###".into(),
+                    reply_to: None,
+                })
+                .unwrap(),
+        );
+        assert!(MessageBody::decode(&invalid_base64).text.is_empty());
+        let mut nested = b"MTEX1\0\0\0\0\0\0\0\0".repeat(5000);
+        nested.extend_from_slice(&encoded);
+        assert!(MessageBody::decode(&nested).text.is_empty());
+    }
+
+    #[test]
+    fn protected_content_is_redacted_and_legacy_expiry_fails_closed() {
+        let encoded =
+            MessageBody::protected(b"secret".to_vec(), None, MessageProtection::Authenticate)
+                .encode();
+        let decoded = MessageBody::decode(&encoded);
+        assert!(decoded.text.is_empty());
+        assert_eq!(decoded.protection, Some(MessageProtection::Authenticate));
+        assert_eq!(MessageBody::decode_revealed(&encoded).text, b"secret");
+        // The deployed decoder rejects a zero deadline before raw-text fallback.
+        assert_eq!(&encoded[..5], b"MTEX1");
+        assert_eq!(u64::from_le_bytes(encoded[5..13].try_into().unwrap()), 0);
+        let wrapped = crate::expiry::wrap(&encoded, Some(1_700_000_300_000));
+        assert!(MessageBody::decode(&wrapped).text.is_empty());
+        assert_eq!(MessageBody::decode_revealed(&wrapped).text, b"secret");
+        assert_eq!(crate::expiry::deadline(&wrapped), Some(1_700_000_300_000));
+    }
 
     #[test]
     fn round_trips_with_and_without_reply() {

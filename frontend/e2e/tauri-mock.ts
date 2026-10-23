@@ -312,6 +312,7 @@ export const test = base.extend({
       // --- Messages (in-memory, per conversation) ---------------------------
       const BASE = 1_700_000_000_000;
       type Msg = {
+        protection?: "click" | "authenticate" | null;
         expires_at_ms?: number | null;
         id: string | null;
         from_me: boolean;
@@ -406,6 +407,8 @@ export const test = base.extend({
         Array<{ target: string; emoji: string; who: string[] }>
       > = {};
 
+      const protectedBodies: Record<string, string> = {};
+      const protectedModes: Record<string, string> = {};
       const recordSend = (
         conv: string,
         text: string,
@@ -666,6 +669,19 @@ export const test = base.extend({
       const probedEndpoints: string[] = [];
       (window as unknown as Record<string, unknown>).__mockProbedEndpoints =
         probedEndpoints;
+      let deferredCommand: string | null = null;
+      let releaseCommand: (() => void) | null = null;
+      let deferredBarrier: Promise<void> | null = null;
+      (window as unknown as Record<string, unknown>).__mockDeferNext = (
+        command: string,
+      ) => {
+        deferredCommand = command;
+        deferredBarrier = new Promise<void>((resolve) => {
+          releaseCommand = resolve;
+        });
+      };
+      (window as unknown as Record<string, unknown>).__mockReleaseDeferred =
+        () => releaseCommand?.();
       let failNextCommand: string | null = null;
       let failNextMessage = "network unreachable";
       (window as unknown as Record<string, unknown>).__mockFailNext = (
@@ -715,6 +731,34 @@ export const test = base.extend({
             device_id: SELF.device,
             account_id: SELF.account,
           }),
+          owner_reveal_image: (a) => {
+            const reference = a.reference as { message_id: string };
+            if (!protectedModes[reference.message_id])
+              throw new Error("Image unavailable");
+            if (
+              protectedModes[reference.message_id] === "authenticate" &&
+              a.password !== "password123"
+            )
+              throw new Error("Verification failed");
+            return (
+              (window as unknown as { __lastWrittenFileBytes?: number[] })
+                .__lastWrittenFileBytes ??
+              Array.from(atob(TINY_PNG.split(",")[1]), (char) =>
+                char.charCodeAt(0),
+              )
+            );
+          },
+          owner_reveal_message: (a) => {
+            const reference = a.reference as { message_id: string };
+            const text = protectedBodies[reference.message_id];
+            if (
+              protectedModes[reference.message_id] === "authenticate" &&
+              a.password !== "password123"
+            )
+              throw new Error("Verification cancelled or failed");
+            if (text === undefined) throw new Error("Message unavailable");
+            return { text, visible_for_ms: 30000 };
+          },
           owner_account_history: (a) =>
             (msgs[`acc:${a.account}`] ?? []).slice(-Number(a.limit ?? 200)),
           owner_delivery_statuses: (a) =>
@@ -729,6 +773,14 @@ export const test = base.extend({
               a.replyTo,
               a.expiresAtMs as number | null | undefined,
             );
+            if (a.protection) {
+              const row =
+                msgs[`ch:${a.channelId}`][msgs[`ch:${a.channelId}`].length - 1];
+              protectedBodies[row.id!] = row.text;
+              protectedModes[row.id!] = String(a.protection);
+              row.text = "";
+              row.protection = a.protection as "click" | "authenticate";
+            }
             return msgs[`ch:${a.channelId}`][
               msgs[`ch:${a.channelId}`].length - 1
             ].id;
@@ -746,17 +798,19 @@ export const test = base.extend({
           owner_enqueue_channel_file: (a) => {
             const fileConv = `fc_${++mid}`;
             const row = msg({
+              protection: a.protection as "click" | "authenticate" | undefined,
               from_me: true,
               who: SELF.device,
               file: {
                 name: String(a.path).split(/[\\/]/).pop() || "file",
                 size: 123,
-                mime: "application/octet-stream",
+                mime: a.protection ? "image/png" : "application/octet-stream",
                 file_conv: fileConv,
                 media: Boolean(a.media),
               },
             });
             (msgs[`ch:${a.channelId}`] ||= []).push(row);
+            if (a.protection) protectedModes[row.id!] = String(a.protection);
             return { id: row.id, fileConv };
           },
           channel_custody_statuses: (a) =>
@@ -772,6 +826,14 @@ export const test = base.extend({
               a.replyTo,
               a.expiresAtMs as number | null | undefined,
             );
+            if (a.protection) {
+              const row =
+                msgs[`acc:${a.account}`][msgs[`acc:${a.account}`].length - 1];
+              protectedBodies[row.id!] = row.text;
+              protectedModes[row.id!] = String(a.protection);
+              row.text = "";
+              row.protection = a.protection as "click" | "authenticate";
+            }
             return acceptLast(String(a.account));
           },
           owner_enqueue_sticker: (a) => {
@@ -786,17 +848,25 @@ export const test = base.extend({
             const fileConv = `fc_${++mid}`;
             (msgs[`acc:${a.account}`] ||= []).push(
               msg({
+                protection: a.protection as
+                  "click" | "authenticate" | undefined,
                 from_me: true,
                 who: SELF.device,
                 file: {
                   name: String(a.path).split(/[\\/]/).pop() || "file",
                   size: 123,
-                  mime: "application/octet-stream",
+                  mime: a.protection ? "image/png" : "application/octet-stream",
                   file_conv: fileConv,
                   media: Boolean(a.media),
                 },
               }),
             );
+            if (a.protection)
+              protectedModes[
+                msgs[`acc:${a.account}`][
+                  msgs[`acc:${a.account}`].length - 1
+                ].id!
+              ] = String(a.protection);
             return { id: acceptLast(String(a.account)), fileConv };
           },
           // auth
@@ -1601,6 +1671,10 @@ export const test = base.extend({
             return id;
           },
           async invoke(cmd: string, args: Record<string, unknown>) {
+            if (cmd === deferredCommand) {
+              deferredCommand = null;
+              await deferredBarrier;
+            }
             if (cmd === failNextCommand) {
               failNextCommand = null;
               throw new Error(failNextMessage);

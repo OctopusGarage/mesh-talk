@@ -1104,5 +1104,23 @@
       "linux": "檢查桌面環境嘅通知設定並允許 Mesh-Talk。",
       "other": "開啟裝置嘅通知設定並允許 Mesh-Talk。"
     }
+  },
+  "protectedMessage": {
+    "label": "受保護嘅訊息",
+    "nextSend": "下一則訊息",
+    "normal": "一般",
+    "open": "撳一下查看",
+    "modeVerify": "驗證後查看",
+    "verify": "驗證並查看",
+    "duration": "30 秒後自動隱藏。",
+    "textOnly": "文字同圖片 · 30 秒後隱藏",
+    "remaining": "{{count}} 秒後隱藏",
+    "hide": "隱藏",
+    "opening": "開啟中…",
+    "failed": "開唔到呢則訊息，請再試一次。",
+    "image": "受保護嘅圖片",
+    "unsupported": "只支援保護文字同圖片。傳送影片、檔案或貼圖前請揀一般模式。",
+    "imageNotAccepted": "圖片未被接受，保護設定已保留。",
+    "imageTooLarge": "受保護嘅圖片唔可以超過 16 MiB。"
   }
 }

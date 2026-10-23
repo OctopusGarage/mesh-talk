@@ -94,6 +94,22 @@ agent-workflow suite; model judgments do not replace unit or loopback evidence.
 AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/person-presence-ai-eval-suite.json --report target/ai-eval/person-presence-report.json
 ```
 
+## Protected messages
+
+The [protected messages suite](protected-messages-ai-eval-suite.json) reviews text
+and image framing/default redaction, exact retained image reads and export guards,
+app-lock authentication and session/runtime authority, the 30-second reveal and
+Blob URL lifecycle, and captured send policies across image batches and retry.
+Its scope is accidental-disclosure control in supported clients, as defined by
+the [privacy guide](../privacy-controls.md#protected-messages), rather than
+resistance to a modified recipient or secure browser-memory erasure. Supplied
+contexts include delegated production owners; source judgments supplement unit,
+real-process and browser evidence and cannot certify native OS authentication.
+
+```bash
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/protected-messages-ai-eval-suite.json --report target/ai-eval/protected-messages-report.json
+```
+
 ## Evaluation workflow and limits
 
 `make eval-smoke` checks deterministic repository contracts and required scenario

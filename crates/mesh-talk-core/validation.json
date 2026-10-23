@@ -5,13 +5,18 @@
       "id": "core-search-references",
       "paths": [
         "crates/mesh-talk-core/src/node/search.rs",
-        "crates/mesh-talk-core/src/node/search_tests.rs"
+        "crates/mesh-talk-core/src/node/search_tests.rs",
+        "crates/mesh-talk-core/src/node/message.rs",
+        "crates/mesh-talk-core/src/protection.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
-            "node::search::tests::"
+            "node::search::tests::",
+            "node::delivery_runtime_tests::protected_account_message_arrives_redacted_and_exact_reveal_expires",
+            "node::message::tests::",
+            "node::delivery_runtime_tests::protected_image_loopback_retains_policy_and_blocks_ordinary_receive_reads"
           ]
         }
       ],
@@ -35,6 +40,14 @@
           {
             "name": "Exact context remains namespace-scoped, caps output at 51 canonical rows and omits recalled re-edit plaintext; missing, recalled or expired targets are unavailable",
             "reference": "docs/ARCHITECTURE.md#recent-search-references"
+          },
+          {
+            "name": "Protected text remains absent from default history, search and context; explicit exact lookup rechecks namespace, recall and expiry",
+            "reference": "docs/ARCHITECTURE.md#protected-messages"
+          },
+          {
+            "name": "Protected raster images use existing encrypted transfer while exact authorized reveals preserve policy, retention, recall and expiry; ordinary reads and exports reject them and missing manifest metadata never grants media access",
+            "reference": "docs/ARCHITECTURE.md#protected-messages"
           }
         ]
       },

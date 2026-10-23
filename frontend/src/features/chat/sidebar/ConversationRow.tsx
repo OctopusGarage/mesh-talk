@@ -67,7 +67,11 @@ export function ConversationRow({
       ? groupPresenceLabel(presence, t)
       : prioritizeSubtitle
         ? subtitle
-        : (latest?.text ? latest.text : "") ||
+        : (latest?.protection
+            ? t("protectedMessage.label")
+            : latest?.text
+              ? latest.text
+              : "") ||
           latest?.file?.name ||
           (personal
             ? subtitle

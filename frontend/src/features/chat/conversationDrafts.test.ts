@@ -97,3 +97,18 @@ it("refuses an obsolete composer snapshot instead of sending stale text", () => 
   expect(drafts.admit(alice, "Original draft", submit)).toBeNull();
   expect(submit).not.toHaveBeenCalled();
 });
+it("preserves protected draft mode across navigation and only clears it on accepted original admission", async () => {
+  const drafts = new ConversationDrafts();
+  drafts.setProtection(alice, "authenticate");
+  drafts.set(alice, "Secret");
+  drafts.set(bob, "Other");
+  expect(drafts.getProtection(alice)).toBe("authenticate");
+  expect(drafts.getProtection(bob)).toBeUndefined();
+  expect(await drafts.admit(alice, "Secret", async () => false)).toEqual({
+    accepted: false,
+    cleared: false,
+  });
+  expect(drafts.getProtection(alice)).toBe("authenticate");
+  await drafts.admit(alice, "Secret", async () => true);
+  expect(drafts.getProtection(alice)).toBeUndefined();
+});

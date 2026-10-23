@@ -84,6 +84,18 @@ their distinct authorization contracts.
 
 ### Coordinated state owners
 
+Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
+`files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary
+projections omit the content. The explicit exact-message content lookup is for
+an authorized host reveal, not a second history/search implementation.
+`src-tauri/src/owner_commands/search.rs` owns that reveal's session/runtime and
+reference checks and reuses the credential verifier in `app_lock.rs` without
+unlocking the application. The frontend message view owns the temporary
+30-second reveal and temporary image URLs; revealed bodies must not enter
+conversation caches, reply
+quotes or notification previews. The [privacy guide](privacy-controls.md#protected-messages)
+owns the product behavior and limitations.
+
 `ui/store/conversationHistory.ts` owns active history reloads, bounded background
 coverage scans and expansion to a requested Event. It shares history selection
 and coverage/reception commits across those paths. The roster supplies discovered

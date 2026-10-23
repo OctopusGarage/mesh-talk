@@ -817,3 +817,160 @@ it("does not reopen a cancelled screenshot when an acquisition completes late", 
   });
   expect(intake.screenshotBytes).toBeNull();
 });
+
+it("snapshots image-picker protection and preserves a later mode selection", async () => {
+  const picked = deferred<string>();
+  native.open.mockReturnValueOnce(picked.promise);
+  const admitImage = vi.fn().mockResolvedValue(true);
+  useChat.setState({ admitImage });
+  await act(async () => composer.onProtectionChange!("click"));
+  let selecting!: Promise<void>;
+  await act(async () => {
+    selecting = composer.onImage!() as unknown as Promise<void>;
+  });
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  await act(async () => {
+    picked.resolve("/tmp/private.png");
+    await selecting;
+  });
+  expect(admitImage).toHaveBeenCalledWith("/tmp/private.png", "click", null);
+  expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+  await act(async () =>
+    useChat.setState({
+      active: { kind: "account", id: "other", name: "Other" },
+    }),
+  );
+  await act(async () =>
+    useChat.setState({
+      active: { kind: "account", id: "alice", name: "Alice" },
+    }),
+  );
+  expect(composer.initialProtection).toBe("authenticate");
+});
+
+it("rejects a protected mixed attachment batch before any handoff", async () => {
+  await act(async () => composer.onProtectionChange!("click"));
+  const admitImage = vi.fn().mockResolvedValue(true);
+  useChat.setState({ admitImage });
+  await expect(
+    composer.onPasteFiles!([
+      new File(["image"], "photo.png", { type: "image/png" }),
+      new File(["video"], "clip.mp4", { type: "video/mp4" }),
+    ]),
+  ).rejects.toThrow("support text and images only");
+  expect(admitImage).not.toHaveBeenCalled();
+  expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+});
+
+it("keeps failed image protection and rejects oversized protected image bytes before writing", async () => {
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  const admitImage = vi.fn().mockResolvedValue(false);
+  useChat.setState({ admitImage });
+  native.invoke.mockImplementation((command: string) =>
+    command === "write_temp_file"
+      ? Promise.resolve("/tmp/photo.png")
+      : Promise.resolve(false),
+  );
+  const small = new File(["image"], "photo.png", { type: "image/png" });
+  Object.defineProperty(small, "arrayBuffer", {
+    value: async () => new Uint8Array([1]).buffer,
+  });
+  await act(async () => {
+    await expect(composer.onPasteFiles!([small])).rejects.toThrow(
+      "Image not accepted",
+    );
+  });
+  expect(admitImage).toHaveBeenCalledWith(
+    "/tmp/photo.png",
+    "authenticate",
+    null,
+  );
+  const huge = new File([], "large.png", { type: "image/png" });
+  Object.defineProperty(huge, "size", { value: 16 * 1024 * 1024 + 1 });
+  await act(async () => {
+    await expect(composer.onPasteFiles!([huge])).rejects.toThrow("16 MiB");
+  });
+  expect(
+    native.invoke.mock.calls.filter(
+      ([command]) => command === "write_temp_file",
+    ),
+  ).toHaveLength(1);
+});
+
+it("applies protected image policy to dropped images and rejects dropped videos explicitly", async () => {
+  await act(async () => composer.onProtectionChange!("click"));
+  const admitImage = vi.fn().mockResolvedValue(true);
+  useChat.setState({ admitImage });
+  await act(async () =>
+    native.drop!({ payload: { type: "drop", paths: ["/tmp/photo.png"] } }),
+  );
+  expect(admitImage).toHaveBeenCalledWith("/tmp/photo.png", "click", null);
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  await act(async () =>
+    native.drop!({ payload: { type: "drop", paths: ["/tmp/clip.mp4"] } }),
+  );
+  expect(admitImage).toHaveBeenCalledTimes(1);
+  expect(useChat.getState().error).toContain("support text and images only");
+});
+
+it("retains verification for a partially accepted pasted batch and its retry", async () => {
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  const admitImage = vi
+    .fn()
+    .mockResolvedValueOnce(true)
+    .mockResolvedValueOnce(false)
+    .mockResolvedValueOnce(true);
+  useChat.setState({ admitImage });
+  native.invoke.mockImplementation(
+    (command: string, args: { name?: string }) =>
+      command === "write_temp_file"
+        ? Promise.resolve(`/tmp/${args.name}`)
+        : Promise.resolve(false),
+  );
+  const images = ["one.png", "two.png"].map((name) => {
+    const image = new File(["bytes"], name, { type: "image/png" });
+    Object.defineProperty(image, "arrayBuffer", {
+      value: async () => new Uint8Array([1]).buffer,
+    });
+    return image;
+  });
+  await act(async () => {
+    await expect(composer.onPasteFiles!(images)).rejects.toThrow(
+      "Image not accepted",
+    );
+  });
+  await act(async () => {
+    await composer.onPasteFiles!([images[1]]);
+  });
+  expect(admitImage.mock.calls.map(([, mode]) => mode)).toEqual([
+    "authenticate",
+    "authenticate",
+    "authenticate",
+  ]);
+});
+
+it("does not consume protected text or staged image policy when an unrelated picker succeeds", async () => {
+  await act(async () => {
+    composer.onProtectionChange!("authenticate");
+    composer.onDraftChange!("Keep this protected text");
+    composer.onAttachmentDraftChange!(1);
+  });
+  const admitImage = vi.fn().mockResolvedValue(true);
+  useChat.setState({ admitImage });
+  native.open.mockResolvedValueOnce("/tmp/picked.png");
+  await act(async () => {
+    await composer.onImage!();
+  });
+  await act(async () =>
+    useChat.setState({
+      active: { kind: "account", id: "other", name: "Other" },
+    }),
+  );
+  await act(async () =>
+    useChat.setState({
+      active: { kind: "account", id: "alice", name: "Alice" },
+    }),
+  );
+  expect(composer.initialProtection).toBe("authenticate");
+  expect(composer.initialDraft).toBe("Keep this protected text");
+});

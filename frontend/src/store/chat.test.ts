@@ -3901,3 +3901,123 @@ it("ignores an old roster response before negotiating push capability", async ()
     setPushStateSupport(null);
   }
 });
+
+it("conceals pending protected messages, preserves failed retry payload, and scrubs accepted plaintext", async () => {
+  useChat.setState({
+    active: { kind: "account", id: "target", name: "Target" },
+    ready: true,
+  });
+  let finish!: (id: string) => void;
+  invoke.mockImplementation((cmd: string) =>
+    cmd === "owner_enqueue_text"
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve([]),
+  );
+  const admission = useChat
+    .getState()
+    .admitTextAndWait("private body", "parent", null, "authenticate");
+  const pending = useChat.getState().messages["account:target"][0];
+  expect(pending).toMatchObject({
+    text: "",
+    protection: "authenticate",
+    pending: true,
+    replyTo: "parent",
+  });
+  expect(useChat.getState().intents[pending.clientId!].payload).toMatchObject({
+    text: "private body",
+    protection: "authenticate",
+  });
+  finish("accepted-protected");
+  expect(await admission).toBe(true);
+  expect(JSON.stringify(useChat.getState().messages)).not.toContain(
+    "private body",
+  );
+  expect(JSON.stringify(useChat.getState().intents)).not.toContain(
+    "private body",
+  );
+});
+
+it("retries a failed protected send with its original protection and reply without exposing the body", async () => {
+  useChat.setState({
+    active: { kind: "channel", id: "channel", name: "Channel" },
+    ready: true,
+  });
+  let attempts = 0;
+  invoke.mockImplementation((cmd: string) =>
+    cmd === "owner_enqueue_channel_text"
+      ? ++attempts === 1
+        ? Promise.reject(new Error("offline"))
+        : Promise.resolve("protected-retry")
+      : Promise.resolve([]),
+  );
+  expect(
+    await useChat
+      .getState()
+      .admitTextAndWait("retry secret", "parent", null, "click"),
+  ).toBe(false);
+  const failed = useChat.getState().messages["channel:channel"][0];
+  expect(failed).toMatchObject({ text: "", failed: true, protection: "click" });
+  expect(useChat.getState().intents[failed.clientId!].payload).toMatchObject({
+    text: "retry secret",
+    replyTo: "parent",
+    protection: "click",
+  });
+  await useChat.getState().retry(failed.clientId!);
+  expect(
+    invoke.mock.calls
+      .filter(([command]) => command === "owner_enqueue_channel_text")
+      .map(([, args]) => args),
+  ).toEqual([
+    expect.objectContaining({
+      text: "retry secret",
+      replyTo: "parent",
+      protection: "click",
+    }),
+    expect.objectContaining({
+      text: "retry secret",
+      replyTo: "parent",
+      protection: "click",
+    }),
+  ]);
+  expect(JSON.stringify(useChat.getState().messages)).not.toContain(
+    "retry secret",
+  );
+  expect(JSON.stringify(useChat.getState().intents)).not.toContain(
+    "retry secret",
+  );
+});
+
+it("keeps image protection on failed admission and retry without falling back to ordinary files", async () => {
+  useChat.setState({
+    active: { kind: "account", id: "target", name: "Target" },
+    ready: true,
+  });
+  let attempts = 0;
+  invoke.mockImplementation((command: string) =>
+    command === "owner_enqueue_file"
+      ? ++attempts === 1
+        ? Promise.reject(new Error("offline"))
+        : Promise.resolve({ id: "protected-image", fileConv: "image-conv" })
+      : Promise.resolve([]),
+  );
+  expect(
+    await useChat.getState().admitImage("/tmp/private.png", "authenticate"),
+  ).toBe(false);
+  const failed = useChat.getState().messages["account:target"][0];
+  expect(failed).toMatchObject({
+    text: "",
+    protection: "authenticate",
+    failed: true,
+  });
+  await useChat.getState().retry(failed.clientId!);
+  expect(
+    invoke.mock.calls
+      .filter(([command]) => command === "owner_enqueue_file")
+      .map(([, args]) => args),
+  ).toEqual([
+    expect.objectContaining({ protection: "authenticate", media: true }),
+    expect.objectContaining({ protection: "authenticate", media: true }),
+  ]);
+});
