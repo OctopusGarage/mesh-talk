@@ -131,6 +131,17 @@ impl SessionPool {
             .timed_out(&peer.user_id(), address);
     }
 
+    pub(in crate::node) fn routing_cost(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+    ) -> Option<Duration> {
+        self.timings
+            .lock()
+            .unwrap()
+            .routing_cost(&peer.user_id(), address, Instant::now())
+    }
+
     pub(in crate::node) fn control_timeout(
         &self,
         peer: &PublicIdentity,

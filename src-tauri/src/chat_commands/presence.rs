@@ -13,6 +13,8 @@ pub struct PresenceEvidence {
     last_seen_secs: u64,
     expires_in_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    origin_hops: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     post_office: Option<PresencePostOffice>,
 }
 
@@ -106,6 +108,7 @@ fn add_peer_with_sources(
                 source,
                 last_seen_secs: age,
                 expires_in_secs: remaining,
+                origin_hops: route.origin_hops,
                 post_office: (route.source == RouteSource::PostOffice).then(|| {
                     offices
                         .get(&route.addr)
@@ -200,6 +203,7 @@ fn add_self(out: &mut HashMap<String, PresenceInfo>, account_id: String, user_id
             source: "self",
             last_seen_secs: 0,
             expires_in_secs: lease,
+            origin_hops: None,
             post_office: None,
         }],
     });
@@ -349,6 +353,7 @@ mod tests {
             route.source = RouteSource::PostOffice;
             route.addr = office.addr;
             route.presence_expires_at = Some(now + std::time::Duration::from_secs(lifetime));
+            route.origin_hops = Some(index - 3);
             peer.routes.push(route);
             offices.push(office);
         }
@@ -357,6 +362,9 @@ mod tests {
         let json = serde_json::to_value(&out[&account.account_id()]).unwrap();
         let evidence = json["devices"][0]["evidence"].as_array().unwrap();
         assert_eq!(evidence.len(), 3);
+        assert!(evidence[0].get("origin_hops").is_none());
+        assert_eq!(evidence[1]["origin_hops"], 0);
+        assert_eq!(evidence[2]["origin_hops"], 1);
         assert!(evidence[0].get("post_office").is_none());
         assert_eq!(evidence[1]["post_office"]["name"], "mac-mini-post-office");
         assert_eq!(

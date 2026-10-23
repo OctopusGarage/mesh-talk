@@ -982,12 +982,12 @@
     "idConflict": "其他类型的资源库已使用这个资源包 ID。"
   },
   "memberProfile": {
-    "discoveredVia": "发现来源",
+    "discoveredVia": "在线来源",
     "discoveryLocal": "本地局域网 · UDP 组播",
     "discoveryPostOffice": "邮局 · {{name}}",
-    "discoveryUnnamedOffice": "邮局 · 名称未知",
+    "discoveryUnnamedOffice": "邮局 · 来源未知",
     "discoveryUnavailable": "暂无有效的发现来源信息",
-    "discoveryHint": "此客户端发现成员的途径；消息的实际传输路径可能不同。",
+    "discoveryHint": "显示本机可识别且最接近成员原始在线公告的邮局。通信路径由系统自动选择。",
     "originalName": "原始名称",
     "remark": "备注",
     "title": "成员资料",
