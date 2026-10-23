@@ -987,6 +987,25 @@ mod tests {
                 .iter()
                 .any(|proof| proof.announce.user_id == bob.user_id())
         );
+        let routed = directory_p
+            .shared()
+            .lock()
+            .unwrap()
+            .export_presence_sources(
+                std::time::Instant::now(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            );
+        assert_eq!(
+            routed
+                .iter()
+                .find(|entry| entry.presence.announce.user_id == bob.user_id())
+                .unwrap()
+                .origin_hops,
+            Some(2)
+        );
 
         q_task.abort();
         s_task.abort();
