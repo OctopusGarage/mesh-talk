@@ -841,7 +841,6 @@
     "version": "Versión {{version}}",
     "sourceRepo": "Repositorio de código",
     "license": "Licencia (MIT)",
-    "credits": "Stickers animados de Noto Emoji de Google, usados bajo su licencia de código abierto.",
     "updates": {
       "title": "Actualizaciones",
       "manual": "Busca una versión más reciente en el canal seleccionado. Tú decides cuándo descargarla e instalarla.",

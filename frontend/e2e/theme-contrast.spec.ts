@@ -1,6 +1,7 @@
 import { waitForChatShell } from "./helpers/session";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./tauri-mock";
+import { seedMarketPacks } from "./helpers/packs";
 import { contrastRatio } from "./helpers/ui-audit";
 
 const BOB = "acc_bob_bbbb2222";
@@ -17,6 +18,16 @@ const THEMES = [
   "cat-acrylic",
 ];
 const MIN_TEXT_CONTRAST = 4.5;
+
+test.beforeEach(async ({ page }) => {
+  await seedMarketPacks(page, [
+    "argentina",
+    "barcelona",
+    "messi",
+    "nature",
+    "cat-acrylic",
+  ]);
+});
 
 test("attention text is readable on dialog surfaces in every theme", async ({
   page,

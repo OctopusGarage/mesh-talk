@@ -277,7 +277,7 @@ export interface UpdateCheck {
   notes: string;
   package_name: string | null;
   package_size: number | null;
-  edition: "default" | "lite";
+  edition: "default";
 }
 
 export interface DownloadProgress {

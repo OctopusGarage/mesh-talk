@@ -31,8 +31,8 @@ const candidate: UpdateCheck = {
   release_url:
     "https://github.com/OctopusGarage/mesh-talk/releases/tag/v0.4.4-nightly.42.1",
   notes: "Preview feature for early feedback",
-  edition: "lite",
-  package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
+  edition: "default",
+  package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64.zip",
   package_size: 10485760,
 };
 let root: Root;
@@ -138,17 +138,15 @@ it("keeps channel selection disabled during checks and verified downloads, then 
   expect(host.textContent).toContain("50%");
   await act(async () =>
     downloaded({
-      path: "/Downloads/nightly-lite.zip",
-      file_name: "nightly-lite.zip",
+      path: "/Downloads/nightly.zip",
+      file_name: "nightly.zip",
     }),
   );
   expect(select().disabled).toBe(false);
   expect(host.textContent).toContain("Download verified");
   expect(host.textContent).toContain("DEB or RPM");
   await click("Show in Downloads");
-  expect(mocks.revealItemInDir).toHaveBeenCalledWith(
-    "/Downloads/nightly-lite.zip",
-  );
+  expect(mocks.revealItemInDir).toHaveBeenCalledWith("/Downloads/nightly.zip");
   mocks.revealItemInDir.mockRejectedValueOnce(
     new Error("Downloads unavailable"),
   );

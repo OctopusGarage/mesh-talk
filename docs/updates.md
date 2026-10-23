@@ -16,9 +16,11 @@ start a network request or installation. Nightly also accepts a newer Stable rel
 appropriate. Other prerelease labels, drafts and arbitrary branch builds are not update candidates.
 Nightly is a development channel, not a claim that a feature is ready for general use.
 
-Both channels preserve the installed **default/lite edition**, OS and CPU architecture. A missing
-matching package is reported rather than substituting an edition or an older build. Review the
-release notes and package name before choosing **Download update**.
+Both channels select the desktop package for the installed OS and CPU architecture. A missing
+matching package is reported rather than substituting an older build. Desktop releases use one
+package per target, without optional bundled packs or an edition suffix. Installed packs survive
+upgrades. Older Lite clients still look for suffixed assets: install the new unsuffixed package
+manually to migrate. Review the release notes and package name before choosing **Download update**.
 
 Each Nightly has a unique build identity, for example `0.4.4-nightly.123456789.1`. About and
 diagnostics show the logical build identity. The final two numbers identify the workflow run
@@ -76,7 +78,7 @@ artifact access or a GitHub login.
 
 The authoritative implementation is [the release workflow](../.github/workflows/release.yml),
 with policy in `scripts/release/preflight.mjs`, `release-state.mjs`, and the existing artifact
-verifiers. Stable and Nightly reuse the same platform/edition matrix and verification owners.
+verifiers. Stable and Nightly reuse the same platform matrix and verification owners.
 
 - The daily schedule runs at **03:23 UTC** on `main`. It skips a source SHA already represented
   by a published Nightly. A manual **Tauri Release → Run workflow** on `main` with
@@ -90,7 +92,7 @@ verifiers. Stable and Nightly reuse the same platform/edition matrix and verific
 - CI generates `v<workspace-version>-nightly.<run-id>.<attempt>` and binds that technical tag to
   the exact source SHA. There is no manual version bump or official Stable tag. Never reuse or
   move a published Nightly tag, and never replace its uploaded assets.
-- All default/lite desktop packages and post-office archives are built, signed and source-attested.
+- All desktop packages and post-office archives are built, signed and source-attested.
   The workflow verifies the downloaded workflow assets, creates a prerelease draft, uploads the
   complete set, re-downloads and verifies the draft, records asset IDs/digests, and publishes
   only that verified snapshot with `prerelease=true` and `make_latest=false`.
