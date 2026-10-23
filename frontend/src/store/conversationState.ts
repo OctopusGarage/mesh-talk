@@ -168,9 +168,14 @@ export function completeSendIntentState(
     intents[clientId] = {
       ...intent,
       message: resolved,
+      onAccepted: resolved.id ? undefined : intent.onAccepted,
       payload:
-        resolved.id && resolved.protection && intent.payload.kind === "text"
-          ? { ...intent.payload, text: "" }
+        resolved.id && resolved.protection
+          ? intent.payload.kind === "text"
+            ? { ...intent.payload, text: "" }
+            : intent.payload.kind === "file"
+              ? { ...intent.payload, path: "" }
+              : intent.payload
           : intent.payload,
     };
   else delete intents[clientId];

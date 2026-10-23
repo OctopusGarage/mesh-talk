@@ -281,7 +281,7 @@ export function beginSendIntent(
   get: Get,
   c: Conversation,
   payload: SendPayload,
-  options: { waitForHydration?: boolean } = {},
+  options: { waitForHydration?: boolean; onAccepted?: () => void } = {},
 ): Promise<boolean> | null {
   if (Object.keys(get().intents).length >= SEND_INTENT_CAP) {
     get().setError(
@@ -321,7 +321,12 @@ export function beginSendIntent(
           }
         : null,
   };
-  const intent = { conversation: { ...c }, payload, message };
+  const intent = {
+    conversation: { ...c },
+    payload,
+    message,
+    onAccepted: options.onAccepted,
+  };
   const key = convKey(c);
   set((s) => ({
     intents: { ...s.intents, [clientId]: intent },
@@ -457,6 +462,7 @@ export async function dispatchIntent(
     }
     if (!lease.current()) return false;
     if (accepted?.id) {
+      intent.onAccepted?.();
       // The durable ID settles admission. Optional UI hydration must not hold the draft.
       const hydration =
         get().active && convKey(get().active!) === key

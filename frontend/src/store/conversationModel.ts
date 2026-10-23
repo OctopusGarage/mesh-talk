@@ -84,6 +84,8 @@ export interface SendIntent {
   conversation: Conversation;
   payload: SendPayload;
   message: ChatMessage;
+  /** Consumed only on durable acceptance, including a later retry. */
+  onAccepted?: () => void;
   /** Exact deletion protection owned by the bounded intent, never by an LRU scope. */
   deletedIds?: string[];
   /** Capacity fallback: accepted messages need canonical history, never an overlay. */

@@ -30,7 +30,11 @@ Choose a protection mode beside the message composer before sending text or an i
 
 The choice applies to text messages, including text replies, and images selected,
 pasted, dropped or captured as screenshots. It returns to Normal after successful
-acceptance. A failed send retains its protection mode for retry. Videos, generic
+acceptance. An image transferred to the local outgoing queue is retried from its
+message bubble if native acceptance fails; it is not also retained as a second
+composer retry. Images refused before that transfer stay in the composer. Failed
+images and the remaining items of a partial batch retain their captured protection
+for retry, while only durable acceptance resets the selected mode. Videos, generic
 file attachments, folders and stickers do not support protected sending; they
 cannot be sent in a protected mode. Protected images use the existing supported
 raster-image formats and 16 MiB inline-image limit; unsupported formats and larger
@@ -59,9 +63,11 @@ messages.
 The 30-second period controls screen visibility, not message retention. Existing
 expiry and recall rules continue to apply. Protected content remains in the
 encrypted history store and follows ordinary eligible history synchronization
-and recovery. Clients that predate protected messages cannot reveal them;
-the protected framing prevents their ordinary text decoder from exposing the
-body. Use an updated client on each viewing device.
+and recovery. Use an updated client on each viewing device. Expiry-aware older
+clients reject the reserved protected-text framing; clients predating expiry may
+show opaque encoded text instead of a useful message. They cannot use the
+protected reveal interface. Protected images do not downgrade to ordinary image
+offers for older clients.
 
 These controls reduce accidental disclosure by supported clients. They cannot
 prevent screenshots, photographs, a modified recipient client or inspection of

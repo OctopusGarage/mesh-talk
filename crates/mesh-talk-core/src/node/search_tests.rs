@@ -1100,6 +1100,50 @@ fn canonical_dedup_keeps_earliest_clock_copy_despite_reverse_insertion() {
     assert_eq!(history[0].text, b"first canonical copy");
 }
 
+#[test]
+fn malformed_nested_protection_is_absent_from_history_search_and_context() {
+    use crate::node::DmEnvelope;
+
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let own = node.account_id();
+    let contact = "a".repeat(32);
+    let id = EventId::new([7; 32]);
+    let protected =
+        MessageBody::protected(b"secret".to_vec(), None, MessageProtection::Click).encode();
+    let mut malformed = b"MTEX1".to_vec();
+    malformed.extend_from_slice(&u64::MAX.to_le_bytes());
+    malformed.extend_from_slice(&protected);
+    let envelope = DmEnvelope::new(contact.clone(), own.clone(), [7; 32], malformed);
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            account_conversation_id(&own, &contact),
+            contact.clone(),
+            1,
+            &envelope.encode(),
+            id,
+        )
+        .unwrap();
+
+    let history = node.account_history(&contact, 10);
+    assert_eq!(history.len(), 1);
+    assert!(history[0].text.is_empty());
+    for query in ["MTPR1", "MTEX1", "c2VjcmV0", "secret"] {
+        assert!(node.search(query).is_empty());
+        assert!(node.search_recent(query).hits.is_empty());
+    }
+    let reference = SearchReference::Account {
+        account_id: contact,
+        message_id: Some(id),
+    };
+    let context = node.search_context(&reference).unwrap();
+    assert_eq!(context.messages.len(), 1);
+    assert!(context.messages[0].text.is_empty());
+    assert!(node.protected_message_content(&reference).is_none());
+}
+
 #[tokio::test]
 async fn protected_channel_exact_reveal_excludes_search_context_recall_and_wrong_namespace() {
     let dir = tempfile::tempdir().unwrap();

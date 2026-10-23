@@ -43,7 +43,10 @@ pub(crate) fn split(wire: &[u8]) -> Option<(Option<u64>, &[u8])> {
         };
         return content.starts_with(b"MTPR1").then_some((deadline, content));
     }
-    if body.is_empty() {
+    // A second deadline is only supported inside the outer protection sentinel
+    // handled above. Never return a nested reserved frame to a legacy raw-text
+    // fallback, which would project protected framing as ordinary content.
+    if body.is_empty() || body.starts_with(MAGIC) {
         return None;
     }
     Some((Some(deadline), body))
@@ -68,6 +71,22 @@ mod tests {
             Some((Some(1_700_000_000_000), body.as_slice()))
         );
         assert_eq!(wrap(body, None), body);
+    }
+
+    #[test]
+    fn ordinary_deadline_rejects_nested_reserved_deadline_frames() {
+        for inner in [
+            b"MTEX1".as_slice(),
+            b"MTEX1\0\0\0\0\0\0\0\0MTPR1opaque",
+            b"MTEX1\x01\0\0\0\0\0\0\0ordinary",
+        ] {
+            // wrap() preserves a protection sentinel, so construct the
+            // unsupported nested deadline directly.
+            let mut nested = b"MTEX1".to_vec();
+            nested.extend_from_slice(&1_700_000_000_000u64.to_le_bytes());
+            nested.extend_from_slice(inner);
+            assert_eq!(split(&nested), None);
+        }
     }
 
     #[test]

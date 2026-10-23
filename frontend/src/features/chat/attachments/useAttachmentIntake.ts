@@ -76,6 +76,9 @@ export function useAttachmentIntake(
   } | null>(null);
 
   const screenshotPolicies = useRef(new WeakMap<File, AttachmentSendOptions>());
+  const submittedPolicies = useRef(
+    new WeakMap<File, { policy: AttachmentSendOptions; current: Current }>(),
+  );
   function snapshot(): AttachmentSendOptions {
     const current = options.current;
     return { ...current, ...current.captureProtection?.() };
@@ -112,19 +115,22 @@ export function useAttachmentIntake(
     if (policy.protection) {
       if (!media || !isProtectedImage(path))
         throw new Error(t("protectedMessage.unsupported"));
-      const accepted = await useChat
+      const outcome = await useChat
         .getState()
-        .admitImage(path, policy.protection, policy.expiresAtSend?.());
-      if (!accepted) throw new Error(t("protectedMessage.imageNotAccepted"));
-      policy.onAccepted?.(false);
+        .admitImage(path, policy.protection, policy.expiresAtSend?.(), () =>
+          policy.onAccepted?.(false),
+        );
+      if (outcome === "refused")
+        throw new Error(t("protectedMessage.imageNotAccepted"));
       if (current()) policy.onHandoff?.();
-      return;
+      return outcome === "accepted";
     }
     const sendFile = useChat.getState().sendFile;
     if (policy.expiresAtSend)
       await sendFile(path, media, policy.expiresAtSend());
     else await sendFile(path, media);
     if (current()) policy.onHandoff?.();
+    return true;
   }
   async function stage(
     bytes: Uint8Array,
@@ -134,7 +140,7 @@ export function useAttachmentIntake(
     current: Current,
     policy: AttachmentSendOptions,
   ) {
-    if (!current()) return false;
+    if (!current()) return;
     if (policy.protection && bytes.byteLength > IMAGE_INLINE_CAP)
       throw new Error(t("protectedMessage.imageTooLarge"));
     if (bytes.byteLength > BYTE_LIMIT)
@@ -142,11 +148,16 @@ export function useAttachmentIntake(
     const path = await chat.writeTempFile(Array.from(bytes), ext, name);
     if (!current()) {
       await chat.deleteTempFile(path).catch(() => {});
-      return false;
+      return;
     }
     // The intent retains this path for its own retry lifecycle after handoff.
-    await handoff(path, media, current, policy);
-    return true;
+    try {
+      return await handoff(path, media, current, policy);
+    } catch (error) {
+      // Refused before intent transfer: staging still owns this temporary source.
+      await chat.deleteTempFile(path).catch(() => {});
+      throw error;
+    }
   }
   async function pick(kind: "file" | "directory" | "media") {
     const current = capture();
@@ -177,50 +188,65 @@ export function useAttachmentIntake(
   }
   async function pasteFiles(files: File[]) {
     const current = capture();
+    if (!current()) return;
     const policy = snapshot();
-    if (policy.protection && files.some((file) => !isProtectedImage(file.name)))
+    // Capture at first submission. A refused remainder keeps its original policy
+    // and conversation owner even if the composer mode changes before retry.
+    const submissions = files.map((file) => {
+      let submission = submittedPolicies.current.get(file);
+      if (!submission) {
+        submission = {
+          policy: screenshotPolicies.current.get(file) ?? policy,
+          current,
+        };
+        submittedPolicies.current.set(file, submission);
+      }
+      return { file, ...submission };
+    });
+    if (
+      submissions.some(
+        ({ file, policy }) => policy.protection && !isProtectedImage(file.name),
+      )
+    )
       throw new AttachmentBatchError(
         new Error(t("protectedMessage.unsupported")),
         0,
       );
     let handedOffCount = 0;
-    for (const file of files) {
-      if (!current()) return;
+    let allAccepted = true;
+    for (const { file, policy, current: sourceCurrent } of submissions) {
+      if (!current() || !sourceCurrent()) return;
       try {
-        if (
-          (screenshotPolicies.current.get(file) ?? policy).protection &&
-          file.size > IMAGE_INLINE_CAP
-        )
+        if (policy.protection && file.size > IMAGE_INLINE_CAP)
           throw new Error(t("protectedMessage.imageTooLarge"));
         if (file.size > BYTE_LIMIT)
           throw new Error("Copied file exceeds 64 MB; use Attach instead");
         const bytes = new Uint8Array(await file.arrayBuffer());
-        if (!current()) return;
+        if (!current() || !sourceCurrent()) return;
         const ext =
           file.name.split(".").pop() || file.type.split("/")[1] || "bin";
-        if (
-          await stage(
-            bytes,
-            ext,
-            file.name || undefined,
-            file.type.startsWith("image/") ||
-              isImage(file.name) ||
-              isVideo(file.name),
-            current,
-            {
-              ...(screenshotPolicies.current.get(file) ?? policy),
-              onAccepted: undefined,
-            },
-          )
-        ) {
-          handedOffCount++;
-        }
+        const accepted = await stage(
+          bytes,
+          ext,
+          file.name || undefined,
+          file.type.startsWith("image/") ||
+            isImage(file.name) ||
+            isVideo(file.name),
+          () => current() && sourceCurrent(),
+          policy,
+        );
+        if (accepted === undefined) return;
+        handedOffCount++;
+        allAccepted &&= accepted;
+        submittedPolicies.current.delete(file);
       } catch (error) {
         report(error, current);
         throw new AttachmentBatchError(error, handedOffCount);
       }
     }
-    policy.onAccepted?.(true);
+    if (allAccepted)
+      for (const policy of new Set(submissions.map((entry) => entry.policy)))
+        policy.onAccepted?.(true);
   }
   async function captureScreenshot(hideWindow: boolean) {
     const current = capture();
@@ -329,10 +355,13 @@ export function useAttachmentIntake(
           for (const path of payload.paths) {
             if (!current()) return;
             try {
-              await handoff(path, isImage(path) || isVideo(path), current, {
-                ...policy,
-                onAccepted: undefined,
-              });
+              const accepted = await handoff(
+                path,
+                isImage(path) || isVideo(path),
+                current,
+                policy,
+              );
+              complete &&= accepted === true;
             } catch (error) {
               complete = false;
               report(error, current);

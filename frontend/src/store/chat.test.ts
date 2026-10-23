@@ -4004,7 +4004,7 @@ it("keeps image protection on failed admission and retry without falling back to
   );
   expect(
     await useChat.getState().admitImage("/tmp/private.png", "authenticate"),
-  ).toBe(false);
+  ).toBe("failed");
   const failed = useChat.getState().messages["account:target"][0];
   expect(failed).toMatchObject({
     text: "",
@@ -4020,4 +4020,34 @@ it("keeps image protection on failed admission and retry without falling back to
     expect.objectContaining({ protection: "authenticate", media: true }),
     expect.objectContaining({ protection: "authenticate", media: true }),
   ]);
+});
+
+it("refuses protected image admission before transfer when the intent queue is full", async () => {
+  useChat.setState({
+    active: { kind: "account", id: "target", name: "Target" },
+    ready: true,
+  });
+  invoke.mockImplementation((command: string) =>
+    command === "owner_enqueue_text"
+      ? new Promise(() => {})
+      : Promise.resolve([]),
+  );
+  useChat.getState().admitText("pending", null);
+  const existing = Object.values(useChat.getState().intents)[0];
+  useChat.setState({
+    intents: Object.fromEntries(
+      Array.from({ length: SEND_INTENT_CAP }, (_, index) => [
+        String(index),
+        existing,
+      ]),
+    ),
+  });
+  expect(
+    await useChat.getState().admitImage("/tmp/private.png", "authenticate"),
+  ).toBe("refused");
+  expect(Object.keys(useChat.getState().intents)).toHaveLength(SEND_INTENT_CAP);
+  expect(
+    invoke.mock.calls.filter(([command]) => command === "owner_enqueue_file"),
+  ).toHaveLength(0);
+  expect(useChat.getState().messages["account:target"]).toHaveLength(1);
 });

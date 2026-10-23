@@ -238,6 +238,18 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_expiry_cannot_expose_nested_protected_framing() {
+        let protected =
+            MessageBody::protected(b"secret".to_vec(), None, MessageProtection::Click).encode();
+        // Malicious peers can construct a frame that wrap() deliberately never emits.
+        let mut wire = b"MTEX1".to_vec();
+        wire.extend_from_slice(&1_700_000_300_000u64.to_le_bytes());
+        wire.extend_from_slice(&protected);
+        assert!(MessageBody::decode(&wire).text.is_empty());
+        assert!(MessageBody::decode_revealed(&wire).text.is_empty());
+    }
+
+    #[test]
     fn malformed_protection_fails_closed_without_raw_fallback() {
         let encoded =
             MessageBody::protected(b"secret".to_vec(), None, MessageProtection::Click).encode();

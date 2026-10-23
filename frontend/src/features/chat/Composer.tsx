@@ -129,7 +129,7 @@ export function Composer({
   ) => boolean | Promise<boolean>;
   /** A conversation-scoped durable admission may outlive this keyed composer. */
   admissionPending?: boolean;
-  onAttachmentDraftChange?: (count: number) => void;
+  onAttachmentDraftChange?: (count: number, edited?: boolean) => void;
   protectionReset?: { n: number; applyIf: () => boolean };
   acceptedClear?: { n: number; applyIf: () => boolean };
   initialDraft?: string;
@@ -209,9 +209,15 @@ export function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [protectionReset?.n]);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const attachmentEditRevision = useRef(0);
+  const observedAttachmentRevision = useRef(0);
   useEffect(() => {
-    onAttachmentDraftChange?.(pendingFiles.length);
-    // File identity changes invalidate an in-flight policy even when the count is equal.
+    onAttachmentDraftChange?.(
+      pendingFiles.length,
+      attachmentEditRevision.current !== observedAttachmentRevision.current,
+    );
+    observedAttachmentRevision.current = attachmentEditRevision.current;
+    // Explicit edits invalidate captured policy; transferred-prefix retirement does not.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingFiles]);
   const [sendingFiles, setSendingFiles] = useState(false);
@@ -221,6 +227,7 @@ export function Composer({
     if (!stagedScreenshot) {
       if (lastScreenshot.current) {
         const stale = screenshotFiles.current;
+        attachmentEditRevision.current++;
         setPendingFiles((files) => files.filter((file) => !stale.has(file)));
         screenshotFiles.current = new WeakSet();
         lastScreenshot.current = null;
@@ -230,6 +237,7 @@ export function Composer({
     if (lastScreenshot.current === stagedScreenshot) return;
     lastScreenshot.current = stagedScreenshot;
     screenshotFiles.current.add(stagedScreenshot);
+    attachmentEditRevision.current++;
     setPendingFiles((files) => [...files, stagedScreenshot]);
     ref.current?.focus();
   }, [stagedScreenshot]);
@@ -478,6 +486,7 @@ export function Composer({
     if (!files.length) return;
     e.preventDefault();
     draftRevision.current += 1;
+    attachmentEditRevision.current++;
     setPendingFiles((current) => [...current, ...files]);
     setSendRejected(false);
   };
@@ -569,11 +578,12 @@ export function Composer({
                 type="button"
                 disabled={sendingFiles}
                 aria-label={`${t("common.dismiss")} ${file.name}`}
-                onClick={() =>
+                onClick={() => {
+                  attachmentEditRevision.current++;
                   setPendingFiles((files) =>
                     files.filter((_, i) => i !== index),
-                  )
-                }
+                  );
+                }}
                 className="rounded p-1 hover:bg-accent"
               >
                 <X className="h-3 w-3" />

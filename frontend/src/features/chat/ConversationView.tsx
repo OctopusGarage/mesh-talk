@@ -780,10 +780,9 @@ export function ConversationView() {
           acceptedClear={
             acceptedClear?.key === draftKey ? acceptedClear : undefined
           }
-          onAttachmentDraftChange={(count) => {
-            const previous = attachmentDraftCounts.current.get(draftKey) ?? 0;
+          onAttachmentDraftChange={(count, edited = true) => {
             attachmentDraftCounts.current.set(draftKey, count);
-            if (count > 0 || previous !== count) drafts.current.touch(draftKey);
+            if (edited) drafts.current.touch(draftKey);
           }}
           initialDraft={drafts.current.get(draftKey)}
           initialProtection={drafts.current.getProtection(draftKey)}
