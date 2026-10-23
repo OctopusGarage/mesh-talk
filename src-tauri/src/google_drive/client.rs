@@ -102,6 +102,20 @@ impl DriveClient {
             test_origin: None,
         })
     }
+    #[cfg(test)]
+    pub(super) fn for_test(origin: &str) -> Self {
+        Self {
+            http: Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .unwrap(),
+            api: format!("{origin}/drive/v3"),
+            upload_api: format!("{origin}/upload/drive/v3"),
+            test_origin: Some(origin.into()),
+        }
+    }
     fn file_url(&self, id: &str) -> Result<String, CommandError> {
         if !valid_id(id) {
             return Err(invalid_archive());

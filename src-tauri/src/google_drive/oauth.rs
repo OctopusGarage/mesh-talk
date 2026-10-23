@@ -75,6 +75,29 @@ pub(super) async fn authorize<R: tauri::Runtime>(
         .ok_or_else(|| {
             CommandError::InvalidInput("Google Drive is not configured in this build".into())
         })?;
+    authorize_with(
+        client_id,
+        option_env!("MESH_TALK_GOOGLE_CLIENT_SECRET").filter(|value| !value.is_empty()),
+        http_client,
+        "https://oauth2.googleapis.com/token",
+        Duration::from_secs(180),
+        |url| {
+            app.opener()
+                .open_url(url.as_str(), None::<&str>)
+                .map_err(|_| CommandError::Io("Could not open browser for Google sign-in".into()))
+        },
+    )
+    .await
+}
+
+async fn authorize_with(
+    client_id: &str,
+    client_secret: Option<&str>,
+    make_client: impl FnOnce() -> Result<reqwest::Client, CommandError>,
+    token_endpoint: &str,
+    callback_timeout: Duration,
+    open_browser: impl FnOnce(&Url) -> Result<(), CommandError>,
+) -> Result<String, CommandError> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|_| CommandError::Io("Could not open Google sign-in callback".into()))?;
@@ -83,10 +106,8 @@ pub(super) async fn authorize<R: tauri::Runtime>(
     let state = random_id();
     let verifier = random_id();
     let url = authorization_url(client_id, &redirect, &state, &verifier);
-    app.opener()
-        .open_url(url.as_str(), None::<&str>)
-        .map_err(|_| CommandError::Io("Could not open browser for Google sign-in".into()))?;
-    let code = tokio::time::timeout(Duration::from_secs(180), async {
+    open_browser(&url)?;
+    let code = tokio::time::timeout(callback_timeout, async {
         loop {
             let (mut stream, peer) = listener.accept().await.map_err(|_| auth_error())?;
             if !peer.ip().is_loopback() { continue; }
@@ -122,13 +143,11 @@ pub(super) async fn authorize<R: tauri::Runtime>(
         ("redirect_uri", &redirect),
         ("grant_type", "authorization_code"),
     ];
-    if let Some(secret) =
-        option_env!("MESH_TALK_GOOGLE_CLIENT_SECRET").filter(|value| !value.is_empty())
-    {
+    if let Some(secret) = client_secret {
         form.push(("client_secret", secret));
     }
-    let response = http_client()?
-        .post("https://oauth2.googleapis.com/token")
+    let response = make_client()?
+        .post(token_endpoint)
         .form(&form)
         .send()
         .await
@@ -148,6 +167,10 @@ pub(super) async fn authorize<R: tauri::Runtime>(
     }
     Ok(response.access_token)
 }
+
+#[cfg(test)]
+#[path = "oauth_tests.rs"]
+mod flow_tests;
 
 #[cfg(test)]
 mod tests {

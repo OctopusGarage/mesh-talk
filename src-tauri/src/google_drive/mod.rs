@@ -24,6 +24,8 @@ use tokio::sync::watch;
 #[derive(Default)]
 pub(crate) struct DriveState {
     connections: Mutex<HashMap<String, Arc<Connection>>>,
+    #[cfg(test)]
+    client_override: Mutex<Option<DriveClient>>,
 }
 struct Connection {
     generation: u64,
@@ -140,6 +142,13 @@ impl Drop for Job {
     }
 }
 impl DriveState {
+    fn client(&self) -> Result<DriveClient, CommandError> {
+        #[cfg(test)]
+        if let Some(client) = self.client_override.lock().unwrap().as_ref() {
+            return Ok(client.clone());
+        }
+        DriveClient::new()
+    }
     fn get(&self, id: &str) -> Result<Arc<Connection>, CommandError> {
         let connection = self
             .connections
@@ -252,7 +261,7 @@ pub(crate) async fn google_drive_list(
     let connection = state.get(&connection_id)?;
     let _job = connection.begin()?;
     let token = connection.access_token().await?;
-    connection.run(DriveClient::new()?.list(&token)).await
+    connection.run(state.client()?.list(&token)).await
 }
 #[tauri::command]
 pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
@@ -272,6 +281,8 @@ pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
         .map_err(CommandError::Authentication)?;
     let auth = app_state.inner().clone();
     let node = node_state.inner().clone();
+    let client = state.client()?;
+    let root = recovery::data_root(&node);
     // Own the scratch directory through snapshot completion, even if IPC is dropped
     // or the view disconnects. The existing snapshot worker must restart messaging.
     tokio::spawn(async move {
@@ -293,7 +304,6 @@ pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
             .await?;
         connection.current()?;
         let name = format!("mesh-talk-{}.mtbackup", backup.preview.created_at_ms);
-        let client = DriveClient::new()?;
         let archive = connection
             .run(client.upload(&token, &path, &name, |sent, total| {
                 connection.phase("uploading", sent, total)
@@ -308,7 +318,7 @@ pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
         // A failed status update does not invalidate a complete remote archive.
         let _ = tokio::task::spawn_blocking(move || {
             session.matching(&lease, |info| {
-                FileManager::new(crate::data_dir()).write_encrypted_file(
+                FileManager::new(root).write_encrypted_file(
                     &info.user.name,
                     "meta/backup_status.enc",
                     &status,
@@ -337,9 +347,11 @@ pub(crate) async fn google_drive_download(
     connection.phase("downloading", 0, 0);
     let file = connection
         .run(
-            DriveClient::new()?.download(&token, &file_id, |received, total| {
-                connection.phase("downloading", received, total)
-            }),
+            state
+                .client()?
+                .download(&token, &file_id, |received, total| {
+                    connection.phase("downloading", received, total)
+                }),
         )
         .await?;
     *connection.archive.lock().await = Some(Arc::new(file));
@@ -573,3 +585,6 @@ mod tests {
         assert!(state.get("view").is_err());
     }
 }
+
+#[cfg(test)]
+mod command_tests;

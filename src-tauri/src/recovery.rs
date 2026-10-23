@@ -16,6 +16,17 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// Reuse the runtime's existing per-fixture root; production has one desktop root.
+pub(crate) fn data_root(node: &NodeState) -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some((root, _)) = node.4.lock().unwrap().as_ref() {
+        return root.clone();
+    }
+    #[cfg(not(test))]
+    let _ = node;
+    crate::data_dir()
+}
+
 const MARKER: &str = "recovery-publish.json";
 const COMPLETE_MARKER: &str = "recovery-publish.complete.json";
 
@@ -250,7 +261,7 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
             .begin()
             .await
             .map_err(CommandError::Authorization)?;
-        let root = crate::data_dir();
+        let root = data_root(&node);
         let profile = root.join("accounts").join(lease.owner());
         let authority_for_work = authority.clone();
         let output = tokio::task::spawn_blocking(move || {
@@ -562,16 +573,11 @@ pub(crate) async fn restore_backup_with_generation(
         ));
     }
     let lifecycle_guard = node_state.lock_profile_lifecycle().await;
+    let root = data_root(node_state);
     tokio::task::spawn_blocking(move || {
         let _auth_guard = auth_guard;
         let _lifecycle_guard = lifecycle_guard;
-        restore_offline(
-            &crate::data_dir(),
-            Path::new(&path),
-            &key,
-            &username,
-            &new_password,
-        )
+        restore_offline(&root, Path::new(&path), &key, &username, &new_password)
     })
     .await
     .map_err(|_| CommandError::Internal("Recovery worker stopped".into()))?
