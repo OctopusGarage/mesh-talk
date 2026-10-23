@@ -182,6 +182,13 @@ Eligible participant information learned through a bridge. Its mailbox route
 must not be mistaken for the participant's own transport listener.
 _Avoid_: direct endpoint, participant's physical machine address.
 
+**Presence source office**:
+The identified visible directory introducer closest to a device's original
+presence registration by known trusted forwarding distance. It is client-relative;
+an unseen origin can be represented by the nearest visible introducer. Unknown
+legacy distance remains unknown. Multiple devices may have different sources.
+_Avoid_: physical location, first responder, selected delivery relay.
+
 **Federation**:
 Authenticated exchange among operator-approved, equally eligible post offices.
 Approval uses explicit device pins or authority-signed network memberships;

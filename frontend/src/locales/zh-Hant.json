@@ -841,7 +841,6 @@
     "version": "版本 {{version}}",
     "sourceRepo": "原始碼儲存庫",
     "license": "授權條款（MIT）",
-    "credits": "動畫貼紙來自 Google Noto Emoji,依其開源授權使用。",
     "updates": {
       "title": "更新",
       "manual": "檢查所選管道中的新版本。由你決定何時下載和安裝。",
@@ -971,12 +970,12 @@
     "idConflict": "其他類型的資源庫已使用這個資源包 ID。"
   },
   "memberProfile": {
-    "discoveredVia": "發現來源",
+    "discoveredVia": "上線來源",
     "discoveryLocal": "本地區域網路 · UDP 群播",
     "discoveryPostOffice": "郵局 · {{name}}",
-    "discoveryUnnamedOffice": "郵局 · 名稱未知",
+    "discoveryUnnamedOffice": "郵局 · 來源未知",
     "discoveryUnavailable": "暫無有效的發現來源資訊",
-    "discoveryHint": "此用戶端發現成員的途徑；訊息的實際傳輸路徑可能不同。",
+    "discoveryHint": "顯示本機可識別且最接近成員原始上線公告的郵局。通訊路徑由系統自動選擇。",
     "originalName": "原始名稱",
     "remark": "備註",
     "title": "成員資料",

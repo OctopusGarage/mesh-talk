@@ -14,13 +14,6 @@ fn main() {
     if let Ok(target) = std::env::var("TARGET") {
         println!("cargo:rustc-env=TARGET={target}");
     }
-    println!("cargo:rerun-if-env-changed=MESH_TALK_VARIANT");
-    let variant = if std::env::var("MESH_TALK_VARIANT").as_deref() == Ok("lite") {
-        "lite"
-    } else {
-        "default"
-    };
-    println!("cargo:rustc-env=MESH_TALK_VARIANT={variant}");
     println!("cargo:rerun-if-env-changed=MESH_TALK_BUILD_TAG");
     let base_tag = format!("v{}", std::env::var("CARGO_PKG_VERSION").unwrap());
     let build_tag =

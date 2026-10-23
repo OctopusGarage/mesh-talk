@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { strToU8, unzipSync, zipSync } from "fflate";
 import type { Page } from "@playwright/test";
 import { revealComposerTools } from "./helpers/session";
-import { waitForPackBootstrap } from "./helpers/packs";
+import { seedMarketPacks, waitForPackBootstrap } from "./helpers/packs";
 
 const BOB = { account: "acc_bob_bbbb2222" };
 
@@ -32,7 +32,7 @@ test.use({ viewport: { width: 1100, height: 800 } });
 test("open the sticker panel and send an animated sticker", async ({
   page,
 }) => {
-  test.skip(process.env.MESH_TALK_VARIANT === "lite", "Default edition only");
+  await seedMarketPacks(page, ["google-noto"]);
   await enterBobDm(page);
 
   await revealComposerTools(page);
@@ -61,8 +61,7 @@ test("open the sticker panel and send an animated sticker", async ({
   await expect(page.getByTestId("message-sticker").last()).toBeVisible();
 });
 
-test("lite starts without Google Noto and can install it", async ({ page }) => {
-  test.skip(process.env.MESH_TALK_VARIANT !== "lite", "Lite edition only");
+test("starts without Google Noto and can install it", async ({ page }) => {
   await enterBobDm(page);
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
@@ -79,10 +78,10 @@ test("lite starts without Google Noto and can install it", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("the default edition installs the cat sticker collection", async ({
+test("an installed cat sticker collection can send artwork", async ({
   page,
 }) => {
-  test.skip(process.env.MESH_TALK_VARIANT === "lite", "Default edition only");
+  await seedMarketPacks(page, ["cats"]);
   await enterBobDm(page);
   await revealComposerTools(page);
   await page.getByTestId("composer-emoji").click();
@@ -182,12 +181,7 @@ test("a custom noto pack has its own sticker tab", async ({ page }) => {
   await expect(
     page.getByTestId("sticker-option-pack:noto:1f602"),
   ).toBeVisible();
-  if (process.env.MESH_TALK_VARIANT !== "lite") {
-    await page.getByTestId("sticker-pack-google-noto").click();
-    await expect(
-      page.getByTestId("sticker-option-pack:google-noto:1f602"),
-    ).toBeVisible();
-  }
+  await expect(page.getByTestId("sticker-pack-google-noto")).toHaveCount(0);
 });
 
 test("installs a sticker from the verified marketplace catalog", async ({

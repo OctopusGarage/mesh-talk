@@ -1644,9 +1644,16 @@ impl Node {
             .relay_drain_cursor
             .lock()
             .expect("relay cursor lock not poisoned");
-        let offset = cursors.get(scope).copied().unwrap_or(0) % candidates.len();
-        candidates.rotate_left(offset);
-        let next = offset.wrapping_add(candidates.len().min(4));
+        // Always retain the current best candidate; rotate alternatives so cold
+        // and recovered paths are sampled without delaying a healthy fast route.
+        let alternatives = candidates.len().saturating_sub(1);
+        let offset = if alternatives == 0 {
+            0
+        } else {
+            cursors.get(scope).copied().unwrap_or(0) % alternatives
+        };
+        candidates[1..].rotate_left(offset);
+        let next = offset.wrapping_add(alternatives.min(3));
         if cursors.len() >= MAX_RELAY_CUSTODY_HINTS
             && !cursors.contains_key(scope)
             && let Some(key) = cursors.keys().next().cloned()
@@ -3182,6 +3189,10 @@ mod diagnostic_tests {
         assert!(!first.iter().any(|peer| peer.public == tail));
         let second = node.relay_candidate_batch("pull:peer", candidates.clone());
         assert_eq!(second.len(), 4);
+        assert_eq!(
+            second[0].public, first[0].public,
+            "keep the best candidate in every batch"
+        );
         let third = node.relay_candidate_batch("pull:peer", candidates);
         assert!(
             third.iter().any(|peer| peer.public == tail),
@@ -3191,6 +3202,33 @@ mod diagnostic_tests {
         assert_eq!(
             node.relay_candidate_batch("upload:peer", first.clone())[0].public,
             first[0].public
+        );
+        let candidates = node.post_office_candidates(&node.roster.lock().unwrap());
+        let fastest = candidates.last().unwrap();
+        for relay in &candidates {
+            node.sessions.control_succeeded(
+                &relay.public,
+                relay.addr,
+                std::time::Duration::from_millis(if relay.public == fastest.public {
+                    10
+                } else {
+                    900
+                }),
+            );
+        }
+        assert_eq!(
+            node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+            fastest.public
+        );
+        node.record_relay_attempt(&fastest.public, false);
+        assert_ne!(
+            node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+            fastest.public
+        );
+        node.record_relay_attempt(&fastest.public, true);
+        assert_eq!(
+            node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+            fastest.public
         );
     }
 

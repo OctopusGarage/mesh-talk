@@ -186,6 +186,8 @@ export interface PresenceEvidence {
     "local" | "routed" | "directory" | "authenticated" | "unscoped" | "self";
   last_seen_secs: number;
   expires_in_secs: number;
+  /** Trusted directory distance from direct registration; absent for legacy relays. */
+  origin_hops?: number;
   /** Immediate introducing office, not the member's location or a delivery path. */
   post_office?: {
     endpoint: string;
@@ -278,7 +280,7 @@ export interface UpdateCheck {
   notes: string;
   package_name: string | null;
   package_size: number | null;
-  edition: "default" | "lite";
+  edition: "default";
 }
 
 export interface DownloadProgress {

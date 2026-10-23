@@ -841,7 +841,6 @@
     "version": "Versión {{version}}",
     "sourceRepo": "Repositorio de código",
     "license": "Licencia (MIT)",
-    "credits": "Stickers animados de Noto Emoji de Google, usados bajo su licencia de código abierto.",
     "updates": {
       "title": "Actualizaciones",
       "manual": "Busca una versión más reciente en el canal seleccionado. Tú decides cuándo descargarla e instalarla.",
@@ -971,12 +970,12 @@
     "idConflict": "Otro tipo de biblioteca ya usa este ID de paquete."
   },
   "memberProfile": {
-    "discoveredVia": "Descubierto mediante",
+    "discoveredVia": "Origen de presencia",
     "discoveryLocal": "Red local · multidifusión UDP",
     "discoveryPostOffice": "Oficina postal · {{name}}",
-    "discoveryUnnamedOffice": "Oficina postal · nombre no disponible",
+    "discoveryUnnamedOffice": "Oficina postal · origen desconocido",
     "discoveryUnavailable": "Sin información de descubrimiento vigente",
-    "discoveryHint": "Cómo este cliente descubrió al miembro; la ruta de los mensajes puede variar.",
+    "discoveryHint": "Muestra la oficina postal conocida más cercana al anuncio original de presencia del miembro. La ruta de comunicación se elige automáticamente.",
     "originalName": "Nombre original",
     "remark": "Alias personal",
     "title": "Perfil del miembro",

@@ -84,7 +84,7 @@ or skipped/inconclusive native scenarios as passed.
 
 Tag pushes and dispatches with `publish_release=false` build and verify a draft:
 
-`preflight → 12 desktop edition/target jobs → aggregate verification → draft upload → downloaded-draft verification`
+`preflight → 6 desktop target jobs → aggregate verification → draft upload → downloaded-draft verification`
 
 A dispatch with `publish_release=true` reuses that verified build:
 
@@ -96,8 +96,8 @@ uses `v<version>-ci.<run-id>` archive names and never writes a GitHub release.
 
 Each platform signs its ZIP and records build provenance. Builds only upload workflow
 artifacts; they cannot independently publish or update a release. The aggregate job
-requires exactly 18 ZIPs (12 desktop edition/target archives and six headless
-archives), 18 signature bundles and one nonempty CycloneDX SBOM: 37 release assets.
+requires exactly 12 ZIPs (six desktop target archives and six headless
+archives), 12 signature bundles and one nonempty CycloneDX SBOM: 25 release assets.
 Native builds reuse the Tauri CLI installed by `npm ci` from the committed lockfile,
 instead of compiling an unpinned latest CLI independently on every runner.
 

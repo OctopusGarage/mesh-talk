@@ -202,10 +202,9 @@ The GUI version of Mesh-Talk provides a desktop application with a graphical int
    cargo tauri build
    ```
 
-The default edition bundles optional avatar, theme, and sticker assets. For the
-lite edition, set `MESH_TALK_VARIANT=lite` before `cargo tauri build`; it omits
-optional bundled packs and animated Noto sticker files. Both editions can install
-packs later and use the same app identity. See
+Desktop builds start without optional avatar, theme, or sticker packs and animated
+Noto sticker files. Packs can be installed later from the marketplace or local ZIPs.
+No edition flag is required. See
 [`docs/CUSTOMIZATION_PACKS.md`](../docs/CUSTOMIZATION_PACKS.md).
 
 ### Build Options
@@ -229,7 +228,7 @@ You can customize the build with the following options:
 
 After building from `src-tauri/`, installation packages are under the workspace
 `target/release/bundle/` (or `target/<triple>/release/bundle/` for an explicit
-target). The release workflow packages each target and edition into a ZIP with
+target). The release workflow packages each target into a ZIP with
 checksums and verification artifacts:
 
 - macOS: `.app` bundle and `.dmg` disk image

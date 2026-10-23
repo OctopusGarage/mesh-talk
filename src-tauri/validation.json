@@ -444,7 +444,7 @@
         "guide": "docs/updates.md",
         "invariants": [
           {
-            "name": "Stable is the default and rejects drafts and all prereleases. Nightly accepts only published canonical Nightly identities or Stable; use standard SemVer ordering for BASE-dev, BASE-nightly.RUN.ATTEMPT and tagged BASE, preserving edition/OS/architecture and never silently downgrading.",
+            "name": "Stable is the default and rejects drafts and all prereleases. Nightly accepts only published canonical Nightly identities or Stable; use standard SemVer ordering for BASE-dev, BASE-nightly.RUN.ATTEMPT and tagged BASE, preserving OS/architecture and never silently downgrading.",
             "reference": "docs/updates.md"
           },
           {

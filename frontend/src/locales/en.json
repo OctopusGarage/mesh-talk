@@ -841,7 +841,6 @@
     "version": "Version {{version}}",
     "sourceRepo": "Source repository",
     "license": "License (MIT)",
-    "credits": "Animated stickers from Google's Noto Emoji, used under their open-source license.",
     "updates": {
       "title": "Updates",
       "manual": "Check for a newer release in your selected channel. You choose when to download and install it.",
@@ -971,12 +970,12 @@
     "idConflict": "A different library type already uses this pack ID."
   },
   "memberProfile": {
-    "discoveredVia": "Discovered via",
+    "discoveredVia": "Discovery source",
     "discoveryLocal": "Local LAN · UDP multicast",
     "discoveryPostOffice": "Post office · {{name}}",
-    "discoveryUnnamedOffice": "Post office · name unavailable",
+    "discoveryUnnamedOffice": "Post office · origin unknown",
     "discoveryUnavailable": "No current discovery information",
-    "discoveryHint": "How this client discovered the member; message routes may differ.",
+    "discoveryHint": "Shows the closest known post office to the member’s original presence announcement. Communication chooses its path automatically.",
     "originalName": "Original name",
     "remark": "Remark",
     "title": "Member profile",
