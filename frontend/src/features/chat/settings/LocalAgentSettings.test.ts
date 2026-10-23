@@ -181,3 +181,105 @@ it("discards a delayed load from a replaced settings session", async () => {
       .getAttribute("aria-checked"),
   ).toBe("false");
 });
+
+it("announces clipboard failure and lets the user retry the exact bootstrap", async () => {
+  access = {
+    ...access,
+    enabled: true,
+    running: true,
+    destinations: [destination],
+    instructions: "help bootstrap",
+  };
+  mocks.copy.mockRejectedValueOnce(new Error("Clipboard denied"));
+  await render();
+  const copy = host.querySelector<HTMLButtonElement>(
+    '[data-testid="copy-agent-instructions"]',
+  )!;
+  await act(async () => copy.click());
+  expect(host.querySelector('[role="alert"]')!.textContent).toBe(
+    i18n.t("agentAccess.copyFailed"),
+  );
+  await act(async () => copy.click());
+  expect(mocks.copy).toHaveBeenLastCalledWith("help bootstrap");
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  expect(copy.textContent).toContain(i18n.t("agentAccess.copied"));
+});
+
+it("keeps an unavailable selected conversation removable and disables its final grant", async () => {
+  access = {
+    ...access,
+    enabled: true,
+    running: false,
+    destinations: [destination],
+    available_destinations: [],
+    error: "Conversation unavailable",
+  };
+  await render();
+  const selected = host.querySelector<HTMLInputElement>(
+    'input[type="checkbox"]',
+  )!;
+  expect(selected.checked).toBe(true);
+  expect(host.querySelector('[role="alert"]')!.textContent).toBe(
+    "Conversation unavailable",
+  );
+  await act(async () => selected.click());
+  expect(mocks.set).toHaveBeenLastCalledWith("alice", false, []);
+  expect(
+    host.querySelector<HTMLInputElement>('input[type="checkbox"]'),
+  ).toBeNull();
+  expect(host.textContent).toContain(i18n.t("agentAccess.noConversations"));
+});
+
+it("preserves the original mutation error when canonical reload also fails", async () => {
+  access = {
+    ...access,
+    enabled: true,
+    running: true,
+    destinations: [destination],
+  };
+  await render();
+  mocks.set.mockRejectedValueOnce(new Error("Could not retire instructions"));
+  mocks.get.mockRejectedValueOnce(new Error("Node stopped"));
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>("#setting-local-agent-access")!
+      .click(),
+  );
+  expect(host.querySelector('[role="alert"]')!.textContent).toContain(
+    "Could not retire instructions",
+  );
+  expect(host.textContent).not.toContain("Node stopped");
+});
+
+it("discards mutation completion after the settings identity changes", async () => {
+  access = { ...access, destinations: [destination] };
+  await render();
+  let finish!: (value: LocalAgentAccess) => void;
+  mocks.set.mockReturnValueOnce(
+    new Promise<LocalAgentAccess>((resolve) => {
+      finish = resolve;
+    }),
+  );
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>("#setting-local-agent-access")!
+      .click(),
+  );
+  controller = { ...controller, identity: "bob:2", owner: "bob" };
+  access = { ...access, enabled: false, running: false, destinations: [] };
+  await render();
+  await act(async () =>
+    finish({
+      ...access,
+      enabled: true,
+      running: true,
+      instructions: "stale mutation help",
+    }),
+  );
+  expect(host.textContent).not.toContain("stale mutation help");
+  expect(
+    host
+      .querySelector("#setting-local-agent-access")!
+      .getAttribute("aria-checked"),
+  ).toBe("false");
+});

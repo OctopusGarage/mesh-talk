@@ -575,11 +575,30 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a configured noninteractive real model provider"]
     async fn real_model_uses_only_help_to_send_retry_and_observe_disabled_access() {
+        let provider = std::env::var("AI_EVAL_COMMAND")
+            .expect("AI_EVAL_COMMAND must name an absolute-path, noninteractive model provider");
+        exercise_agent_provider(EvalProvider::ModelCommand(provider)).await;
+    }
+
+    #[tokio::test]
+    async fn deterministic_provider_exercises_help_retry_and_disabled_service() {
+        exercise_agent_provider(EvalProvider::HttpFixture(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/local-agent-provider.mjs"),
+        ))
+        .await;
+    }
+
+    #[derive(Clone)]
+    enum EvalProvider {
+        ModelCommand(String),
+        HttpFixture(PathBuf),
+    }
+
+    async fn exercise_agent_provider(provider: EvalProvider) {
         use std::process::Stdio;
         use tokio::io::AsyncWriteExt;
 
-        let provider = std::env::var("AI_EVAL_COMMAND")
-            .expect("AI_EVAL_COMMAND must name an absolute-path, noninteractive model provider");
         let (_root, app, node, lease, paths, destination) = fixture().await;
         let private = node
             .0
@@ -596,8 +615,13 @@ mod tests {
         let config: ClientConfig = read_private_json(&paths.client).unwrap();
         let workspace = paths.base.join("model-workspace");
         std::fs::create_dir_all(&workspace).unwrap();
-        let evidence_dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/ai-eval/local-agent-live");
+        let evidence_name = match &provider {
+            EvalProvider::ModelCommand(_) => "local-agent-live",
+            EvalProvider::HttpFixture(_) => "local-agent-deterministic",
+        };
+        let evidence_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/ai-eval")
+            .join(evidence_name);
         std::fs::create_dir_all(&evidence_dir).unwrap();
 
         let run = |phase: &'static str, prompt: String| {
@@ -606,14 +630,24 @@ mod tests {
             let token = config.token.clone();
             let evidence_dir = evidence_dir.clone();
             async move {
-                #[cfg(windows)]
-                let mut command = crate::background_command::command("cmd");
-                #[cfg(windows)]
-                command.args(["/C", &provider]);
-                #[cfg(not(windows))]
-                let mut command = crate::background_command::command("sh");
-                #[cfg(not(windows))]
-                command.args(["-c", &provider]);
+                let mut command = match &provider {
+                    EvalProvider::HttpFixture(script) => {
+                        let mut command = crate::background_command::command("node");
+                        command.arg(script);
+                        command
+                    }
+                    EvalProvider::ModelCommand(provider) => {
+                        #[cfg(windows)]
+                        let mut command = crate::background_command::command("cmd");
+                        #[cfg(windows)]
+                        command.args(["/C", provider]);
+                        #[cfg(not(windows))]
+                        let mut command = crate::background_command::command("sh");
+                        #[cfg(not(windows))]
+                        command.args(["-c", provider]);
+                        command
+                    }
+                };
                 let mut child = command
                     .current_dir(workspace)
                     .env("MESH_AGENT_EVAL_SECRET", &token)

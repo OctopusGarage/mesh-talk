@@ -130,7 +130,8 @@
       "id": "desktop-integrations",
       "paths": [
         "src-tauri/src/integrations.rs",
-        "src-tauri/src/integrations/"
+        "src-tauri/src/integrations/",
+        "src-tauri/tests/fixtures/local-agent-provider.mjs"
       ],
       "rust": [
         {

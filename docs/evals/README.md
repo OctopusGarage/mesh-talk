@@ -160,6 +160,15 @@ prove native webview behavior or recipient delivery.
 AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/local-agent-access-ai-eval-suite.json --report target/ai-eval/local-agent-access-report.json
 ```
 
+The normal Rust suite runs `deterministic_provider_exercises_help_retry_and_disabled_service`
+through a Node.js HTTP fixture and the same provider process/evidence harness used
+by the model test. It discovers operations and credentials through help, verifies
+actual accepted history and retry identity, and requires connection refusal after
+disable. This proves the executable scenario and harness; it is not a model-backed
+result. Node.js is required for this desktop test, as in the full repository gates.
+Deterministic evidence uses `target/ai-eval/local-agent-deterministic/` so it cannot
+overwrite real-model evidence.
+
 The opt-in desktop behavioral test starts an isolated temporary account and the
 real local HTTP service, supplies only the rendered bootstrap plus a user task
 to a configured model, and verifies the actual core history after an idempotent
