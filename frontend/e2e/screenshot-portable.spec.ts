@@ -20,6 +20,26 @@ async function selectRegion(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("screenshot-send")).toBeEnabled();
 }
 
+test("Enter sends a staged screenshot after capture loses input focus", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  for (const mode of ["screenshot-now", "screenshot-hidden"] as const) {
+    await openCapture(page, mode);
+    await selectRegion(page);
+    await page.getByTestId("screenshot-send").click();
+    await expect(page.getByTestId("composer-pending-image")).toBeVisible();
+    // Simulate native window restoration leaving keyboard focus on the background.
+    await page.getByTestId("composer-input").evaluate((input) => input.blur());
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("composer-pending-image")).toHaveCount(0);
+    await expect(
+      page.getByRole("article", { name: /screenshot\.png/ }).last(),
+    ).toBeVisible();
+  }
+});
+
 test("screenshot selection annotation and explicit send produce cropped PNG", async ({
   page,
 }, testInfo) => {
