@@ -248,7 +248,7 @@ pub async fn screenshot_available(_app: tauri::AppHandle) -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        linux_screenshot_backend(&_app).await.is_some()
+        linux_screenshot_backend(&_app).await.is_ok()
     }
 }
 
@@ -261,12 +261,7 @@ pub async fn capture_screen(
 
     // Resolve once before hiding. Never switch backends after a portal denial or cancel.
     #[cfg(target_os = "linux")]
-    let backend = linux_screenshot_backend(&app).await.ok_or_else(|| {
-        CommandError::Internal(
-            "screenshot unavailable: requires a Screenshot portal or X11 with xfce4-screenshooter"
-                .into(),
-        )
-    })?;
+    let backend = linux_screenshot_backend(&app).await?;
 
     // Resolve the target before hiding: capture and the later overlay use the same display.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -289,14 +284,7 @@ pub async fn capture_screen(
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let captured = capture_png(monitor).await;
     #[cfg(target_os = "linux")]
-    let captured = match backend {
-        super::linux_screenshot::Backend::Portal => capture_png().await,
-        super::linux_screenshot::Backend::X11(tool) => {
-            super::linux_screenshot::capture_x11(&tool, std::time::Duration::from_secs(15))
-                .await
-                .map_err(CommandError::Internal)
-        }
-    };
+    let captured = super::linux_screenshot::capture(backend, capture_png()).await;
     let result = captured.and_then(|bytes| {
         if bytes.is_empty() || valid_screenshot_png(&bytes) {
             Ok(bytes)
@@ -316,26 +304,18 @@ pub async fn capture_screen(
 }
 
 #[cfg(target_os = "linux")]
-async fn linux_screenshot_backend(
-    app: &tauri::AppHandle,
-) -> Option<super::linux_screenshot::Backend> {
-    use ashpd::desktop::screenshot::{AvailableTargets, ScreenshotProxy};
-    let portal = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        let Ok(proxy) = ScreenshotProxy::new().await else {
-            return false;
-        };
-        proxy.version() < 3
-            || proxy
-                .available_targets()
-                .await
-                .is_ok_and(|targets| targets.contains(AvailableTargets::Screen))
-    })
-    .await
-    .unwrap_or(false);
+pub(super) async fn linux_screenshot_backend<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<super::linux_screenshot::Backend, CommandError> {
     let x11 = app
         .get_webview_window("main")
         .is_some_and(|window| crate::window_visibility::is_x11(&window.as_ref().window()));
-    super::linux_screenshot::select_backend(portal, x11, super::linux_screenshot::find_x11_tool())
+    super::linux_screenshot::resolve_backend(
+        super::linux_screenshot::portal_available(),
+        x11,
+        super::linux_screenshot::find_x11_tool(),
+    )
+    .await
 }
 
 /// Platform-specific capture, returning PNG bytes (empty = user cancelled).
