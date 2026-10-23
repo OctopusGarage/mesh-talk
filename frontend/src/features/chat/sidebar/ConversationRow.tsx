@@ -53,6 +53,13 @@ export function ConversationRow({
   const [profileOpen, setProfileOpen] = useState(false);
   const active = useChat((s) => s.active);
   const unread = useChat((s) => s.unread[convKey(conv)] ?? 0);
+  const mentioned = useChat(
+    (s) =>
+      conv.kind === "channel" &&
+      Object.values(s.ledger[convKey(conv)] ?? {}).some(
+        (entry) => !entry.seen && entry.mentioned,
+      ),
+  );
   const history = useChat((s) => s.messages[convKey(conv)]);
   const open = useChat((s) => s.open);
   const isActive = active != null && convKey(active) === convKey(conv);
@@ -141,10 +148,17 @@ export function ConversationRow({
             )}
           </div>
           <div
-            className="truncate text-[11px] leading-4 text-muted-foreground"
-            title={summary}
+            className="flex min-w-0 items-baseline gap-1 text-[11px] leading-4 text-muted-foreground"
+            title={
+              mentioned ? `${t("sidebar.mentionedYou")} ${summary}` : summary
+            }
           >
-            {summary}
+            {mentioned && (
+              <span className="shrink-0 font-medium text-destructive">
+                {t("sidebar.mentionedYou")}
+              </span>
+            )}
+            <span className="truncate">{summary}</span>
           </div>
         </div>
       </button>

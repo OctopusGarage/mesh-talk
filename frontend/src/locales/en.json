@@ -140,6 +140,7 @@
     "newUsernamePlaceholder": "Choose a local username"
   },
   "sidebar": {
+    "mentionedYou": "[Mentioned you]",
     "hideChannel": "Hide channel",
     "hiddenChannels": "Hidden channels ({{count}})",
     "restoreChannel": "Restore",

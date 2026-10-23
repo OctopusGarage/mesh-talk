@@ -1,3 +1,5 @@
+import { mentionsName } from "@/lib/mentions";
+import { useAuth } from "./auth";
 import { createRosterRefresh } from "./rosterRefresh";
 import {
   notifySyncInvalidation,
@@ -1337,7 +1339,17 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
     set((state) =>
       receptionPatch(
         state,
-        receiveIdentity(state, key, { ...e, own_device: own }),
+        receiveIdentity(
+          state,
+          key,
+          { ...e, own_device: own },
+          mentionsName(
+            e.text,
+            useAuth.getState().user?.display_name ||
+              useAuth.getState().user?.username ||
+              "",
+          ),
+        ),
       ),
     );
   } else if (!e.own_device) bump(set, key, isActive && isConversationVisible());

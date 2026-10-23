@@ -140,6 +140,7 @@
     "newUsernamePlaceholder": "設定本機用戶名"
   },
   "sidebar": {
+    "mentionedYou": "[有人@我]",
     "hideChannel": "隱藏頻道",
     "hiddenChannels": "已隱藏頻道（{{count}}）",
     "restoreChannel": "恢復",

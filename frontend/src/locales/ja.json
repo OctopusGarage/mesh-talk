@@ -140,6 +140,7 @@
     "newUsernamePlaceholder": "ローカルユーザー名を設定"
   },
   "sidebar": {
+    "mentionedYou": "[メンションあり]",
     "hideChannel": "チャンネルを非表示",
     "hiddenChannels": "非表示のチャンネル（{{count}}）",
     "restoreChannel": "復元",

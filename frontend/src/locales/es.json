@@ -140,6 +140,7 @@
     "newUsernamePlaceholder": "Elige un nombre de usuario local"
   },
   "sidebar": {
+    "mentionedYou": "[Te mencionaron]",
     "hideChannel": "Ocultar canal",
     "hiddenChannels": "Canales ocultos ({{count}})",
     "restoreChannel": "Restaurar",
