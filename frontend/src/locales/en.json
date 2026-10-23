@@ -970,12 +970,12 @@
     "idConflict": "A different library type already uses this pack ID."
   },
   "memberProfile": {
-    "discoveredVia": "Discovered via",
+    "discoveredVia": "Discovery source",
     "discoveryLocal": "Local LAN · UDP multicast",
     "discoveryPostOffice": "Post office · {{name}}",
-    "discoveryUnnamedOffice": "Post office · name unavailable",
+    "discoveryUnnamedOffice": "Post office · origin unknown",
     "discoveryUnavailable": "No current discovery information",
-    "discoveryHint": "How this client discovered the member; message routes may differ.",
+    "discoveryHint": "Shows the closest known post office to the member’s original presence announcement. Communication chooses its path automatically.",
     "originalName": "Original name",
     "remark": "Remark",
     "title": "Member profile",
