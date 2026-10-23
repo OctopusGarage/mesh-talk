@@ -797,6 +797,18 @@
     "reverify": "Re-verify"
   },
   "members": {
+    "historyTitle": "History for new members",
+    "historyHelp": "Choose the recent messages shared with new members. This does not change existing members’ history.",
+    "historyLoading": "Loading history setting…",
+    "historySaving": "Saving history setting…",
+    "historyError": "Could not load or save the history setting. Try again.",
+    "historyRetry": "Retry",
+    "historyPolicy": {
+      "off": "Off",
+      "last_ten": "Latest 10 messages",
+      "last_three_days": "Messages from the last 3 days",
+      "last_ten_within_three_days": "Latest 10 messages from the last 3 days"
+    },
     "activity": "Activity",
     "activity_created": "{{actor}} created this channel",
     "activity_joined": "{{actor}} added {{target}}",

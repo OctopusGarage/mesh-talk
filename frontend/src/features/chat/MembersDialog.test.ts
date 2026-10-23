@@ -246,7 +246,7 @@ it("ignores a fetch started before a membership update", async () => {
 });
 
 it("uses the fetched owner with the fetched member list", async () => {
-  channelApi.channelMembers.mockResolvedValueOnce({
+  channelApi.channelMembers.mockResolvedValue({
     owner: "peer-device",
     members: [
       ...chatState.members,

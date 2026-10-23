@@ -398,6 +398,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::dissolve_channel,
                 crate::chat_commands::channel_members,
                 crate::chat_commands::set_channel_replica_enabled,
+                crate::chat_commands::set_channel_history_policy,
                 crate::chat_commands::channel_custody_statuses,
                 crate::chat_commands::channel_activity,
                 crate::chat_commands::send_channel_message,

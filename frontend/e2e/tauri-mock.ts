@@ -4,7 +4,11 @@ import type {
   MessageFavorite,
 } from "../src/lib/api/messageFavorites";
 import { test as base, expect } from "@playwright/test";
-import type { PeerInfo, PresenceInfo } from "../src/lib/types";
+import type {
+  ChannelHistoryPolicy,
+  PeerInfo,
+  PresenceInfo,
+} from "../src/lib/types";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -193,6 +197,7 @@ export const test = base.extend({
           pending_invite: dataMode === "invite",
         },
       ];
+      const channelHistoryPolicies: Record<string, ChannelHistoryPolicy> = {};
       let channelOwner = dataMode === "invite" ? BOB.device_id : SELF.device;
 
       (window as unknown as Record<string, unknown>).__mockClearRoster = () => {
@@ -955,7 +960,10 @@ export const test = base.extend({
           list_channels: () => channels.map((channel) => ({ ...channel })),
           // The test user (SELF) is the channel owner, so the member-management controls
           // (add/remove) stay visible to the existing e2e flow.
-          channel_members: () => ({
+          channel_members: (a) => ({
+            history_policy:
+              channelHistoryPolicies[String(a.channelId)] ??
+              "last_ten_within_three_days",
             owner: channelOwner,
             members: channelMembers,
           }),
@@ -1036,6 +1044,15 @@ export const test = base.extend({
 
           // channels
           create_channel: () => "chan_new_eeee5555",
+          set_channel_history_policy: (a) => {
+            if (channelOwner !== SELF.device)
+              throw new Error(
+                "Only the channel owner may change history policy",
+              );
+            channelHistoryPolicies[String(a.channelId)] =
+              a.policy as ChannelHistoryPolicy;
+            return null;
+          },
           add_channel_member: ok,
           remove_channel_member: ok,
           dissolve_channel: () => {

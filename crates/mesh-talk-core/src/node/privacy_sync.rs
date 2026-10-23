@@ -851,6 +851,12 @@ impl GuardedSyncStore<'_> {
                 visible.iter().map(|event| event.id).collect(),
             ),
             len: visible.len(),
+            requires_v3: visible.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory
+                )
+            }),
             requires_v2: visible
                 .iter()
                 .any(|event| event.kind == EventKind::ChannelReplica),
@@ -1080,6 +1086,27 @@ impl GuardedSyncStore<'_> {
     }
 }
 impl SyncStore for GuardedSyncStore<'_> {
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
+        if let Some(metadata) = self.public_projection_metadata(conversation) {
+            return metadata.requires_v3;
+        }
+        if !self
+            .node
+            .log
+            .lock()
+            .expect("log lock not poisoned")
+            .requires_channel_v3(conversation)
+        {
+            return false;
+        }
+        self.visible(conversation).iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory
+            )
+        })
+    }
+
     fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
         if let Some(metadata) = self.public_projection_metadata(conversation) {
             return metadata.requires_v2;

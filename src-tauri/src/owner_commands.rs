@@ -602,6 +602,8 @@ mod tests {
                     crate::chat_commands::probe_peer_endpoint,
                     crate::chat_commands::rename_channel,
                     crate::chat_commands::set_channel_replica_enabled,
+                    crate::chat_commands::set_channel_history_policy,
+                    crate::chat_commands::channel_members,
                     crate::chat_commands::add_channel_member,
                     crate::chat_commands::remove_channel_member,
                     crate::chat_commands::transfer_channel_owner,
@@ -1849,6 +1851,67 @@ mod tests {
     }
 
     #[test]
+    fn registered_channel_history_policy_round_trips_and_rejects_locked_mutation() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let channel = fixture
+            .invoke(
+                "create_channel",
+                serde_json::json!({"name":"History settings", "memberIds":[]}),
+            )
+            .unwrap();
+        for policy in [
+            "off",
+            "last_ten",
+            "last_three_days",
+            "last_ten_within_three_days",
+        ] {
+            fixture
+                .invoke(
+                    "set_channel_history_policy",
+                    serde_json::json!({"channelId":channel,"policy":policy}),
+                )
+                .unwrap();
+            let info = fixture
+                .invoke("channel_members", serde_json::json!({"channelId":channel}))
+                .unwrap();
+            assert_eq!(info["history_policy"], policy);
+        }
+        assert!(
+            fixture
+                .invoke(
+                    "set_channel_history_policy",
+                    serde_json::json!({"channelId":channel,"policy":"unbounded"})
+                )
+                .is_err()
+        );
+        crate::app_lock::lock_app(
+            fixture.webview.state::<AppState>(),
+            fixture.webview.state::<crate::app_lock::AppLock>(),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .invoke(
+                    "set_channel_history_policy",
+                    serde_json::json!({"channelId":channel,"policy":"off"})
+                )
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+        let runtime = fixture.node.0.blocking_read();
+        let channel_id = crate::chat_commands::parse_channel_id(channel.as_str().unwrap()).unwrap();
+        assert_eq!(
+            runtime
+                .as_ref()
+                .unwrap()
+                .handle()
+                .channel_history_policy(channel_id),
+            mesh_talk_core::channel::HistoryPolicy::LastTenWithinThreeDays
+        );
+    }
+
+    #[test]
     fn queued_channel_mutation_rejects_lock_and_same_owner_relogin() {
         use tauri::Manager;
         let fixture = Fixture::new();
@@ -1870,6 +1933,10 @@ mod tests {
             (
                 "rename_channel",
                 serde_json::json!({"channelId":channel, "name":"must not rename"}),
+            ),
+            (
+                "set_channel_history_policy",
+                serde_json::json!({"channelId":channel,"policy":"off"}),
             ),
             (
                 "set_channel_replica_enabled",

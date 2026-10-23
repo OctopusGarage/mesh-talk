@@ -797,6 +797,18 @@
     "reverify": "重新驗證"
   },
   "members": {
+    "historyTitle": "新成員可見的歷史訊息",
+    "historyHelp": "選擇與新成員分享的近期訊息。這不會變更現有成員的歷史訊息。",
+    "historyLoading": "正在載入歷史訊息設定…",
+    "historySaving": "正在儲存歷史訊息設定…",
+    "historyError": "無法載入或儲存歷史訊息設定，請重試。",
+    "historyRetry": "重試",
+    "historyPolicy": {
+      "off": "關閉",
+      "last_ten": "最近 10 則訊息",
+      "last_three_days": "最近 3 天的訊息",
+      "last_ten_within_three_days": "最近 3 天內的最近 10 則訊息"
+    },
     "activity": "頻道動態",
     "activity_created": "{{actor}} 建立了頻道",
     "activity_joined": "{{actor}} 邀請了 {{target}}",

@@ -226,6 +226,7 @@ pub struct ChannelBook {
     activities: HashMap<ConversationId, Vec<ChannelActivity>>,
     activity_emitted: HashSet<EventId>,
     lineage_owner: HashMap<ConversationId, String>,
+    history_policies: HashMap<ConversationId, crate::channel::HistoryPolicy>,
     replica_preferences: HashMap<(ConversationId, String), (u64, EventId, bool)>,
 }
 
@@ -237,6 +238,7 @@ pub(in crate::node) struct ChannelReplay<'a> {
     cursor: usize,
     after_accept: HashSet<EventId>,
     dissolved: bool,
+    history: Option<std::collections::VecDeque<ReceivedChannelMessage>>,
 }
 
 impl<'a> ChannelReplay<'a> {
@@ -252,6 +254,7 @@ impl<'a> ChannelReplay<'a> {
             cursor: 0,
             after_accept: HashSet::new(),
             dissolved: false,
+            history: None,
         }
     }
 }
@@ -287,6 +290,7 @@ pub(in crate::node) struct ChannelInfoProjection {
     dissolved: bool,
     pending: bool,
     members: Vec<(PublicIdentity, bool, bool)>,
+    history_policy: crate::channel::HistoryPolicy,
 }
 
 impl ChannelBook {
@@ -296,6 +300,11 @@ impl ChannelBook {
     ) -> Option<ChannelInfoProjection> {
         let state = self.state(&channel)?;
         Some(ChannelInfoProjection {
+            history_policy: self
+                .history_policies
+                .get(&channel)
+                .copied()
+                .unwrap_or_default(),
             name: state.name().to_owned(),
             owner: state.owner().to_owned(),
             dissolved: state.is_dissolved(),
@@ -323,7 +332,7 @@ impl ChannelBook {
     /// Replay signed channel metadata without opening sender keys or messages.
     /// Late-invite reconstruction, admission and archived summaries share these
     /// membership/ownership/terminal-state rules.
-    fn membership_view(
+    pub(super) fn membership_view(
         channel_id: ConversationId,
         events: &[&Event],
         before: Option<EventId>,
@@ -612,12 +621,19 @@ impl ChannelBook {
         byte_budget: usize,
     ) -> (Vec<ReceivedChannelMessage>, bool) {
         let my_author = Author::from_ed25519(me.public().ed25519_pub);
+        if replay.history.is_none() {
+            self.history_policies
+                .insert(channel_id, super::join_history::policy(&replay.events));
+            replay.history =
+                Some(super::join_history::received(me, channel_id, &replay.events).into());
+        }
         let ChannelReplay {
             events,
             by_id,
             cursor,
             after_accept,
             dissolved,
+            history,
         } = replay;
         let events = events.as_slice();
         let by_id: &HashMap<EventId, &Event> = by_id;
@@ -969,6 +985,25 @@ impl ChannelBook {
                         target,
                         wall_clock: event.wall_clock,
                     });
+            }
+        }
+        if !limited {
+            let history = history.as_mut().expect("history projection initialized");
+            while let Some(message) = history.front() {
+                if self.emitted.contains(&message.event_id) {
+                    history.pop_front();
+                    continue;
+                }
+                if out.len() >= limit
+                    || retained_upper_bound.saturating_add(message.retained_bytes()) > byte_budget
+                {
+                    limited = true;
+                    break;
+                }
+                let message = history.pop_front().expect("front exists");
+                retained_upper_bound += message.retained_bytes();
+                self.emitted.insert(message.event_id);
+                out.push(message);
             }
         }
         (out, limited)

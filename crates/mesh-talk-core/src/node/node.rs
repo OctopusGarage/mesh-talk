@@ -1094,6 +1094,12 @@ impl Node {
                 "file manifest exceeds transport frame".into(),
             ));
         }
+        if event.kind == EventKind::ChannelJoinHistory && !super::session::event_fits_frame(&event)
+        {
+            return Err(NodeError::Channel(
+                "history control exceeds transport frame".into(),
+            ));
+        }
         let id = event.id;
         log.append(event).map_err(NodeError::Log)?;
         Ok((seq, id))

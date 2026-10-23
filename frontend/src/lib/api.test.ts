@@ -417,3 +417,18 @@ it("preserves exact search namespaces and owner payloads", async () => {
     });
   }
 });
+
+it("sends each channel history policy through the typed IPC command", async () => {
+  for (const policy of [
+    "off",
+    "last_ten",
+    "last_three_days",
+    "last_ten_within_three_days",
+  ] as const) {
+    await chat.setChannelHistoryPolicy("channel", policy);
+    expect(invoke).toHaveBeenLastCalledWith("set_channel_history_policy", {
+      channelId: "channel",
+      policy,
+    });
+  }
+});

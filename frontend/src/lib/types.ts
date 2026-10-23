@@ -100,7 +100,11 @@ export interface ChannelActivityInfo {
 // A channel's membership plus its owner. The owner is the only principal allowed to
 // change membership (enforced in core) — the UI shows the owner badge and reveals the
 // add/remove controls only to the owner.
+export type ChannelHistoryPolicy =
+  "off" | "last_ten" | "last_three_days" | "last_ten_within_three_days";
+
 export interface ChannelMembersInfo {
+  history_policy: ChannelHistoryPolicy;
   owner: string;
   members: ChannelMemberInfo[];
 }

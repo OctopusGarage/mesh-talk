@@ -32,6 +32,7 @@ import type {
   AccountInfo,
   ChannelInfo,
   ChannelMembersInfo,
+  ChannelHistoryPolicy,
   ChannelActivityInfo,
   HistoryItem,
   FileStatus,
@@ -307,6 +308,8 @@ export const chat = {
     invoke<string>("create_channel", { name, memberIds }),
   channelMembers: (channelId: string) =>
     invoke<ChannelMembersInfo>("channel_members", { channelId }),
+  setChannelHistoryPolicy: (channelId: string, policy: ChannelHistoryPolicy) =>
+    invoke<void>("set_channel_history_policy", { channelId, policy }),
   setChannelReplicaEnabled: (channelId: string, enabled: boolean) =>
     invoke<void>("set_channel_replica_enabled", { channelId, enabled }),
   channelCustodyStatuses: (channelId: string, ids: string[]) =>

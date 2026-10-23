@@ -3,6 +3,8 @@
 //! `crate::channel::{GroupKey, ChannelState, …}`.
 
 pub mod crypto;
+mod history;
+pub use history::HistoryPolicy;
 pub mod model;
 pub mod sender_key;
 

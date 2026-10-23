@@ -2544,12 +2544,14 @@ impl DeliveryStore {
             } => {
                 if events.is_empty()
                     || events.len() > 2
-                    || senders.is_empty()
+                    || (senders.is_empty()
+                        && !super::join_history::valid_invitation_transaction(events))
                     || events.last().is_none_or(|e| {
                         !matches!(
                             e.kind,
                             EventKind::Message | EventKind::FileManifest | EventKind::KeyRotation
-                        ) || e.conversation_id != sent.conversation
+                        ) && !super::join_history::valid_invitation_transaction(events)
+                            || e.conversation_id != sent.conversation
                             || e.seq != sent.seq
                     })
                     || events.iter().any(|e| {

@@ -483,3 +483,14 @@ archive verification and transactional profile restore; `core/recovery/` owns fo
 and cryptography. `ui/lib/api/googleDrive.ts` adapts IPC, and
 `ui/features/recovery/` provides shared connection/progress presentation for the
 existing export/restore dialogs. See [backup and recovery](backup-recovery.md#google-drive-security-and-boundaries).
+
+## Bounded history for channel invitations
+
+`channel/history.rs` owns the four fixed history policy presets. The existing
+channel lifecycle in `node/channels.rs` owns invitations; `node/join_history.rs`
+owns frozen encrypted copies, owner-policy validation and post-acceptance row-key
+release. It reuses the delivery journal, channel crypto primitives, causal
+membership projection and received-history store. Desktop IPC delegates authority
+to core; the member dialog presents the policy without independently deciding
+history eligibility. The [channel guide](help/topics/channels.md#history-for-new-members)
+owns user-visible limits and availability.
