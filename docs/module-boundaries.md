@@ -99,9 +99,12 @@ Active history and reaction reads use the shared native-read deadline so a stall
 IPC request releases the loading indicator into the existing retry state. Late
 results from a timed-out read cannot replace a newer snapshot. The chat identity
 boot window is thirty seconds of elapsed monotonic time, including native waits;
-expiry exposes the existing retry action rather than silently extending startup
-for every slow attempt. These presentation deadlines do not cancel native work
-or establish whether the participant runtime is healthy.
+expiry exposes failure and the existing retry action. While failed, the same
+owner/run ticker performs one bounded identity recovery attempt at most every ten
+seconds, preserving the failure label until identity resolves. Successful recovery
+clears failure and reloads favorites and roster without a restart. Logout or a
+superseding run invalidates delayed results and stops its ticker. These presentation
+deadlines do not cancel native work or establish whether the participant runtime is healthy.
 The history module defines its own state/context interface; `chat.ts` composes it
 and supplies runtime generations plus status refresh. Its patches cannot mutate
 that session context. `conversationModel.ts` owns shared Conversation/message data

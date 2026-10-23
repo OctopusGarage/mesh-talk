@@ -197,15 +197,16 @@
         "frontend/src/store/chat.ts",
         "frontend/src/store/chat.test.ts",
         "frontend/src/store/chatRuntimeEffects.ts",
-        "frontend/src/store/rosterRefresh.ts"
+        "frontend/src/store/rosterRefresh.ts",
+        "frontend/e2e/connection-recovery.spec.ts"
       ],
       "frontend": ["src/store/chat.test.ts"],
       "capability": {
-        "summary": "Bound identity startup waits and expose retry while retaining owner and runtime authority.",
+        "summary": "Bound identity startup waits and recover automatically after transient identity failures while retaining owner and runtime authority.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
         "invariants": [
           {
-            "name": "The thirty-second identity boot window includes native read waits",
+            "name": "The thirty-second identity boot window includes native read waits; failure retains bounded background recovery without crossing owner/run lifetimes",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
@@ -843,6 +844,15 @@
         "crates/mesh-talk-core/src/node/delivery_runtime.rs"
       ],
       "browser": ["e2e/unread-badge.spec.ts"]
+    },
+    {
+      "id": "frontend-identity-recovery-acceptance",
+      "paths": [
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/e2e/connection-recovery.spec.ts"
+      ],
+      "browser": ["e2e/connection-recovery.spec.ts"]
     },
     {
       "id": "frontend-presence-recovery-acceptance",
