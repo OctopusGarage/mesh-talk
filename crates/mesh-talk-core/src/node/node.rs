@@ -248,6 +248,8 @@ pub struct Node {
     pub(in crate::node) account: Account,
     pub(in crate::node) account_devices: Mutex<super::account_devices::AccountDevices>,
     pub(in crate::node) account_suppression: Mutex<super::account_suppression::AccountSuppression>,
+    pub(in crate::node) favorites: Mutex<super::favorites::FavoriteStore>,
+    pub(in crate::node) favorite_media: super::media_store::MediaStore,
     pub(in crate::node) account_sync_policy:
         Mutex<super::account_sync_policy::DeviceSyncPolicyStore>,
     pub(in crate::node) account_preferences: Mutex<super::account_preferences::AccountPreferences>,
@@ -707,6 +709,19 @@ impl Node {
         let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
         let (call_signal_tx, call_signal_rx) =
             mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
+        let favorites = super::favorites::FavoriteStore::open(
+            &dir.join(format!("favorites-{}.log", account.account_id())),
+            password,
+        )?;
+        let favorite_media = super::media_store::MediaStore::open(
+            &dir.join(format!("favorites-{}", account.account_id())),
+            password,
+            &account.account_id(),
+        )
+        .map_err(LogError::Io)?;
+        favorite_media
+            .prune_unreferenced(&favorites.live_files(now_millis()))
+            .map_err(LogError::Io)?;
         let account_sync_policy = super::account_sync_policy::DeviceSyncPolicyStore::open(
             &dir.join(format!("account-sync-policy-{}.log", account.account_id())),
             password,
@@ -740,6 +755,8 @@ impl Node {
             account,
             account_devices: Mutex::new(account_devices),
             account_suppression: Mutex::new(account_suppression),
+            favorites: Mutex::new(favorites),
+            favorite_media,
             account_sync_policy: Mutex::new(account_sync_policy),
             account_preferences: Mutex::new(account_preferences),
             account_file_proofs: Mutex::new(account_file_proofs),

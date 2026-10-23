@@ -108,6 +108,10 @@ test("city avatar thumbnails load after scrolling the gallery", async ({
   await page.getByRole("button", { name: "Change group photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   const gallery = page.getByTestId("avatar-gallery");
+  // Cold Windows module transforms need the startup budget before image checks.
+  await expect(gallery).toBeVisible({
+    timeout: process.platform === "win32" ? 90_000 : 15_000,
+  });
   await expect(gallery.locator("img")).toHaveCount(36);
 
   await gallery.evaluate((element) => {

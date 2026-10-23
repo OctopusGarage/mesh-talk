@@ -34,7 +34,7 @@ conversation, locking the app or changing the signed-in session closes it.
 
 Recipient confirmation replaces the awaiting disclosure. For files, confirmation
 applies to the file card; downloading the bytes and reading the file remain
-separate. Group copy information and Saved Messages retain their own meanings.
+separate. Group copy information and Message Yourself retain their own meanings.
 Use **More → Connection** to inspect connection settings and diagnostics.
 
 ## If a message stays pending
@@ -59,7 +59,7 @@ controls and recovery status, and [Files](send-files.md) for attachment availabi
 
 Choose an expiry duration in the composer before sending. The countdown starts when you send and appears beside each expiring message. Updated clients remove the message from both sender and recipient history when the deadline passes, even while the conversation stays open. Delayed arrivals have only the remaining time; messages arriving after their deadline are hidden. Reading does not restart the countdown.
 
-Expiry does not change messages already sent. Saved Messages do not expire automatically. Locally managed media is removed with the expired message; separately saved or copied content can remain. A recipient can still copy content or modify their client, so remote deletion cannot be guaranteed. Local history retention is configured separately in [History & backup](history.md).
+Expiry does not change messages already sent. Messages sent to yourself do not expire automatically. Locally managed media is removed with the expired message; separately saved or copied content can remain. A recipient can still copy content or modify their client, so remote deletion cannot be guaranteed. Local history retention is configured separately in [History & backup](history.md).
 
 ## Further reference
 
