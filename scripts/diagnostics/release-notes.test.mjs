@@ -177,6 +177,8 @@ test("highlights reject invalid numeric versions and missing, duplicate or empty
   for (const text of [
     "## 0.4.5\n\n## 0.4.4\n- Older.",
     "## 0.4.5\n<!-- TODO -->",
+    "## 0.4.5\n<!-- hidden without a closing delimiter",
+    "## 0.4.5\n <!-- one --> \n <!-- two -->",
     "## 0.4.5\n- One.\n## [0.4.5](https://example.com)\n- Two.",
   ]) {
     for (const required of [true, false])

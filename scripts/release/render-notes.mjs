@@ -4,6 +4,21 @@ import { pathToFileURL } from "node:url";
 import { validateReleaseTag } from "./release-state.mjs";
 import { compareVersions } from "./version.mjs";
 
+// This is an emptiness predicate, not an HTML sanitizer. Return the original
+// curated text unchanged; comment-only sections do not describe a release.
+function hasNonCommentText(body) {
+  let offset = 0;
+  while (offset < body.length) {
+    const comment = body.indexOf("<!--", offset);
+    if (comment === -1) return Boolean(body.slice(offset).trim());
+    if (body.slice(offset, comment).trim()) return true;
+    const end = body.indexOf("-->", comment + 4);
+    if (end === -1) return false;
+    offset = end + 3;
+  }
+  return false;
+}
+
 // Only maintained h2 release sections are eligible. Fenced examples are not headings.
 export function releaseHighlights(
   changelog,
@@ -57,10 +72,7 @@ export function releaseHighlights(
     .slice(start, end ?? lines.length)
     .join("\n")
     .trim();
-  assert.ok(
-    body.replace(/<!--[\s\S]*?-->/g, "").trim(),
-    `empty changelog section for ${version}`,
-  );
+  assert.ok(hasNonCommentText(body), `empty changelog section for ${version}`);
   return body;
 }
 
