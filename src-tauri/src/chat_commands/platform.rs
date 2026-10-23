@@ -229,10 +229,11 @@ fn current_ssid() -> Option<String> {
 ///   not granted, the produced PNG is blank/empty; the user must grant it in
 ///   System Settings → Privacy & Security → Screen Recording.
 /// - Windows: captures the app window's monitor through xcap.
-/// - Linux: requests a display image from the desktop Screenshot portal.
+/// - Linux: uses the Screenshot portal, or an optional XFCE helper on native X11
+///   when the portal cannot provide screen capture.
 /// All platforms return the capture to the shared select/annotate/send editor.
 #[tauri::command]
-pub async fn screenshot_available() -> bool {
+pub async fn screenshot_available(_app: tauri::AppHandle) -> bool {
     #[cfg(target_os = "macos")]
     {
         true // The OS can prompt for Screen Recording permission when needed.
@@ -247,15 +248,7 @@ pub async fn screenshot_available() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        use ashpd::desktop::screenshot::{AvailableTargets, ScreenshotProxy};
-        let Ok(proxy) = ScreenshotProxy::new().await else {
-            return false;
-        };
-        proxy.version() < 3
-            || proxy
-                .available_targets()
-                .await
-                .is_ok_and(|targets| targets.contains(AvailableTargets::Screen))
+        linux_screenshot_backend(&_app).await.is_some()
     }
 }
 
@@ -265,6 +258,15 @@ pub async fn capture_screen(
     hide_window: bool,
 ) -> Result<Vec<u8>, CommandError> {
     let window = app.get_webview_window("main").map(|w| w.as_ref().window());
+
+    // Resolve once before hiding. Never switch backends after a portal denial or cancel.
+    #[cfg(target_os = "linux")]
+    let backend = linux_screenshot_backend(&app).await.ok_or_else(|| {
+        CommandError::Internal(
+            "screenshot unavailable: requires a Screenshot portal or X11 with xfce4-screenshooter"
+                .into(),
+        )
+    })?;
 
     // Resolve the target before hiding: capture and the later overlay use the same display.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -287,7 +289,14 @@ pub async fn capture_screen(
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let captured = capture_png(monitor).await;
     #[cfg(target_os = "linux")]
-    let captured = capture_png().await;
+    let captured = match backend {
+        super::linux_screenshot::Backend::Portal => capture_png().await,
+        super::linux_screenshot::Backend::X11(tool) => {
+            super::linux_screenshot::capture_x11(&tool, std::time::Duration::from_secs(15))
+                .await
+                .map_err(CommandError::Internal)
+        }
+    };
     let result = captured.and_then(|bytes| {
         if bytes.is_empty() || valid_screenshot_png(&bytes) {
             Ok(bytes)
@@ -304,6 +313,29 @@ pub async fn capture_screen(
     }
 
     result
+}
+
+#[cfg(target_os = "linux")]
+async fn linux_screenshot_backend(
+    app: &tauri::AppHandle,
+) -> Option<super::linux_screenshot::Backend> {
+    use ashpd::desktop::screenshot::{AvailableTargets, ScreenshotProxy};
+    let portal = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let Ok(proxy) = ScreenshotProxy::new().await else {
+            return false;
+        };
+        proxy.version() < 3
+            || proxy
+                .available_targets()
+                .await
+                .is_ok_and(|targets| targets.contains(AvailableTargets::Screen))
+    })
+    .await
+    .unwrap_or(false);
+    let x11 = app
+        .get_webview_window("main")
+        .is_some_and(|window| crate::window_visibility::is_x11(&window.as_ref().window()));
+    super::linux_screenshot::select_backend(portal, x11, super::linux_screenshot::find_x11_tool())
 }
 
 /// Platform-specific capture, returning PNG bytes (empty = user cancelled).
@@ -466,7 +498,7 @@ async fn capture_png() -> Result<Vec<u8>, CommandError> {
         .map_err(|e| CommandError::Internal(format!("cannot read portal screenshot: {e}")))
 }
 
-fn valid_screenshot_png(bytes: &[u8]) -> bool {
+pub(super) fn valid_screenshot_png(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.get(12..16) == Some(b"IHDR")
 }
 

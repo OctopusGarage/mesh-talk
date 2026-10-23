@@ -2,6 +2,41 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-screenshot-capture",
+      "paths": [
+        "src-tauri/src/chat_commands/platform.rs",
+        "src-tauri/src/chat_commands/linux_screenshot.rs",
+        "src-tauri/src/window_visibility.rs",
+        "specifications/platform_permissions.md"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "chat_commands::platform::",
+            "chat_commands::linux_screenshot::tests::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Capture through the Linux Screenshot portal or an optional native X11 helper into the shared screenshot editor.",
+        "guide": "docs/help/topics/screenshots.md#platform-behavior",
+        "invariants": [
+          {
+            "name": "Portal capture takes precedence; only native X11 windows without portal screen capability can use the helper; portal cancellation and errors never trigger fallback",
+            "reference": "specifications/platform_permissions.md#screenshots"
+          },
+          {
+            "name": "X11 helper output is a bounded PNG in a private temporary directory, with bounded execution and cleanup on every result",
+            "reference": "specifications/platform_permissions.md#screenshots"
+          }
+        ]
+      },
+      "escalation": [
+        "Run native Linux capture on XFCE/X11 without a Screenshot portal, including normal and hide-window capture, editor confirmation/cancel and window restoration. Also check portal cancellation and a native Wayland session; unit/helper tests alone do not certify native webview behavior."
+      ]
+    },
+    {
       "id": "desktop-search",
       "paths": [
         "src-tauri/src/owner_commands/search.rs"
