@@ -228,7 +228,7 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   one-time 128-bit code (SHA-256 authenticator binding both device keys, constant-time
   check) → account secret + cert + history backfill transferred over the Noise channel.
   Self-account sends also work with no known siblings: the delivery WAL accepts a
-  durable local projection without reserving a remote queue slot. Saved Messages
+  durable local projection without reserving a remote queue slot. Message Yourself
   reuses the self-account conversation and logical message IDs. Personal file
   cards retain encrypted managed content and a detached signed manifest proof
   (`MTPFM1`) binding the exact expiry-wrapped manifest digest to that conversation.

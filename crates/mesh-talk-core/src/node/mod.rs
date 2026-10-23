@@ -36,6 +36,7 @@ pub(crate) mod dm;
 pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
 pub(crate) mod expiry_policy;
+mod favorites;
 mod file_completion;
 mod file_consent;
 mod file_consent_store;
@@ -144,3 +145,8 @@ mod trust_card;
 pub use trust_card::{Introduction, TimestampWitness, TrustCard};
 
 mod trust_card_io;
+
+pub use favorites::{
+    FavoriteFile, FavoriteInspection, FavoriteMessage, FavoriteMetadata, FavoriteSource,
+    MessageFavorite, MessageFavoriteList,
+};

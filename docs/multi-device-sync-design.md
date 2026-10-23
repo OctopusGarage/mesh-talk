@@ -1,6 +1,6 @@
 # Linked-device synchronization design boundaries
 
-For current user behavior, use [Saved Messages and linked devices](settings.md#saved-messages-and-linked-devices).
+For current user behavior, use [Message Yourself and linked devices](settings.md#message-yourself-and-linked-devices).
 [Architecture](ARCHITECTURE.md) owns implemented account synchronization and
 [network architecture](network-design-reference.md) owns routes and resource
 budgets. This document owns extension decisions; it is not an implementation
@@ -9,7 +9,7 @@ plan or a record of completed validation.
 ## Keep the existing replication owners
 
 Personal messages/files and authorized group content reuse existing event,
-account-history and encrypted media paths. Saved Messages is the account's own
+account-history and encrypted media paths. Message Yourself is the account's own
 conversation; it must not depend on another device being discoverable. Group
 content still requires accepted membership for each participating device.
 Possession of the same account secret does not bypass channel admission.

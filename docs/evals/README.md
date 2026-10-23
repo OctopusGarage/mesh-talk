@@ -102,6 +102,9 @@ app-lock authentication and session/runtime authority, the 30-second reveal and
 Blob URL lifecycle, and captured send policies across image batches and retry.
 Separate frontend and native admission cases keep each model input bounded while
 retaining the production owners that establish its guarantees.
+A separate Favorites case reviews atomic capture refusal, selection redaction,
+retained file access and sibling synchronization without changing ordinary
+Favorites' independent lifetime or wire layout.
 Its scope is accidental-disclosure control in supported clients, as defined by
 the [privacy guide](../privacy-controls.md#protected-messages), rather than
 resistance to a modified recipient or secure browser-memory erasure. Supplied

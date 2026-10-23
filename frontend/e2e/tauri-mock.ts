@@ -1,9 +1,24 @@
+import type {
+  FavoriteSource,
+  FavoriteMetadata,
+  MessageFavorite,
+} from "../src/lib/api/messageFavorites";
 import { test as base, expect } from "@playwright/test";
 import type { PeerInfo, PresenceInfo } from "../src/lib/types";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import v8ToIstanbul from "v8-to-istanbul";
+
+/** Controls only for retained-attachment scenarios; no product test hooks. */
+export interface FavoriteAttachmentMock {
+  bytes: number[];
+  calls: Array<{ command: string; args: Record<string, unknown> }>;
+  saved: Array<{ path: string; bytes: number[] }>;
+  authorized: boolean;
+  releaseRead?: () => void;
+  releaseSaveDialog?: () => void;
+}
 
 /**
  * Headless E2E runs the React frontend in plain Chromium — there is no Tauri runtime, so
@@ -486,6 +501,77 @@ export const test = base.extend({
         );
         return null;
       };
+
+      // Account-owned message collections, separate from conversation pins.
+      const messageCollections: Record<
+        string,
+        Record<string, MessageFavorite>
+      > = {};
+      let collectionRevision = 0;
+
+      // Retained bytes deliberately have no source-chat message or ordinary media entry.
+      let favoriteAttachment: FavoriteAttachmentMock | undefined;
+      if (dataMode?.startsWith("favorites-attachment")) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 2;
+        canvas.height = 2;
+        const context = canvas.getContext("2d")!;
+        context.fillStyle = "#cc5533";
+        context.fillRect(0, 0, 2, 2);
+        const bytes = Array.from(atob(canvas.toDataURL().split(",")[1]), (c) =>
+          c.charCodeAt(0),
+        );
+        favoriteAttachment = { bytes, calls: [], saved: [], authorized: true };
+        (
+          window as unknown as { __favoriteAttachment: FavoriteAttachmentMock }
+        ).__favoriteAttachment = favoriteAttachment;
+        messageCollections.u_self = {
+          retained: {
+            id: "retained",
+            source: {
+              kind: "account",
+              target: BOB.account_id,
+              message_ids: ["removed-photo"],
+            },
+            source_label: BOB.name,
+            metadata: {
+              title: "Retained field photo",
+              description: "After source history was cleared",
+              notes: { "removed-photo": "Keep for the field report" },
+            },
+            messages: [
+              {
+                id: "removed-photo",
+                who: BOB.device_id,
+                sender_name: BOB.name,
+                text: "",
+                wall_clock: BASE,
+                expires_at_ms: null,
+                sticker: null,
+                file: {
+                  file_conv: "retained-photo",
+                  name: "field-photo.png",
+                  size: bytes.length,
+                  mime: "image/png",
+                  media: true,
+                },
+              },
+            ],
+            saved_at_ms: BASE,
+            revision: ++collectionRevision,
+            device_id: SELF.device,
+          },
+        };
+      }
+      const retainedFileAuthorized = (a: Record<string, unknown>) =>
+        !!favoriteAttachment?.authorized &&
+        a.owner === "u_self" &&
+        a.fileConv === "retained-photo" &&
+        Object.values(messageCollections.u_self ?? {}).some((item) =>
+          item.messages.some(
+            (message) => message.file?.file_conv === a.fileConv,
+          ),
+        );
 
       // --- Favorites (pin + alias), persisted in-memory ---------------------
       const favorites: Record<
@@ -1249,7 +1335,7 @@ export const test = base.extend({
             const index = rows.findIndex(
               (row) => row.id === reference.message_id,
             );
-            return {
+            const response = {
               status: index >= 0 ? "found" : "unavailable",
               reference,
               messages:
@@ -1258,6 +1344,13 @@ export const test = base.extend({
                   : [],
               newer_entries: index >= 0 ? rows.length - index - 1 : null,
             };
+            if (dataMode === "favorites-delayed-context")
+              return new Promise((resolve) => {
+                (
+                  window as unknown as { __releaseFavoriteContext?: () => void }
+                ).__releaseFavoriteContext = () => resolve(response);
+              });
+            return response;
           },
           // search
           search: (a) => {
@@ -1443,6 +1536,148 @@ export const test = base.extend({
               });
             localStorage.setItem(key, JSON.stringify(next));
             return { owner: String(a.owner), contacts: next };
+          },
+          owner_inspect_message_favorites: (a) => {
+            const source = a.source as FavoriteSource;
+            const items = Object.values(
+              messageCollections[String(a.owner)] ?? {},
+            ).filter(
+              (item) =>
+                item.source.kind === source.kind &&
+                item.source.target === source.target,
+            );
+            return {
+              existing: structuredClone(
+                items.find(
+                  (item) =>
+                    item.source.message_ids.length ===
+                      new Set(source.message_ids).size &&
+                    item.source.message_ids.every((id) =>
+                      source.message_ids.includes(id),
+                    ),
+                ) ?? null,
+              ),
+              saved_message_ids: [
+                ...new Set(items.flatMap((item) => item.source.message_ids)),
+              ].filter((id) => source.message_ids.includes(id)),
+            };
+          },
+          owner_favorite_file_available: (a) => retainedFileAuthorized(a),
+          owner_read_favorite_file: async (a) => {
+            if (!retainedFileAuthorized(a))
+              throw new Error("Favorite file unavailable");
+            const bytes = new Uint8Array(favoriteAttachment!.bytes).buffer;
+            if (dataMode === "favorites-attachment-delayed-read")
+              await new Promise<void>((resolve) => {
+                favoriteAttachment!.releaseRead = resolve;
+              });
+            // Native read commands return raw IPC bytes, not a JSON array.
+            return bytes;
+          },
+          owner_save_favorite_file: (a) => {
+            if (!retainedFileAuthorized(a))
+              throw new Error("Favorite file unavailable");
+            const path = String(a.dest);
+            favoriteAttachment!.saved.push({
+              path,
+              bytes: [...favoriteAttachment!.bytes],
+            });
+            return path;
+          },
+          owner_list_message_favorites: (a) => {
+            const q = String(a.query ?? "")
+              .trim()
+              .toLowerCase();
+            const items = Object.values(
+              messageCollections[String(a.owner)] ?? {},
+            )
+              .filter((item) =>
+                [
+                  item.metadata.title,
+                  item.metadata.description,
+                  item.source_label,
+                  ...Object.values(item.metadata.notes),
+                  ...item.messages.flatMap((message) => [
+                    message.text,
+                    message.sender_name,
+                    message.file?.name ?? "",
+                  ]),
+                ].some((value) => value.toLowerCase().includes(q)),
+              )
+              .sort((a, b) => b.saved_at_ms - a.saved_at_ms);
+            const offset = Number(a.offset ?? 0),
+              limit = Number(a.limit ?? 20);
+            return {
+              items: items.slice(offset, offset + limit),
+              has_more: items.length > offset + limit,
+            };
+          },
+          owner_save_message_favorite: (a) => {
+            if (dataMode === "favorites-write-fail")
+              throw new Error("disk full");
+            const source = a.source as FavoriteSource;
+            const metadata = a.metadata as FavoriteMetadata;
+            const key =
+              source.kind === "channel"
+                ? `ch:${source.target}`
+                : `acc:${source.target}`;
+            const selected = (msgs[key] ?? []).filter((message) =>
+              source.message_ids.includes(message.id!),
+            );
+            if (selected.length !== source.message_ids.length)
+              throw new Error("Message unavailable");
+            const canonical = {
+              ...source,
+              message_ids: selected.map((message) => message.id!),
+            };
+            const id = `${source.kind}:${source.target}:${canonical.message_ids.join(":")}`;
+            const collection = (messageCollections[String(a.owner)] ??= {});
+            if (collection[id]) return structuredClone(collection[id]);
+            const item: MessageFavorite = {
+              id,
+              source: canonical,
+              source_label: source.kind === "channel" ? CHANNEL.name : BOB.name,
+              metadata: structuredClone(metadata),
+              messages: selected.map((message) => ({
+                id: message.id!,
+                who: message.who,
+                sender_name: message.from_me ? "Me" : BOB.name,
+                text: message.text,
+                wall_clock: message.wall_clock,
+                expires_at_ms: message.expires_at_ms ?? null,
+                sticker: message.sticker ?? null,
+                file: message.file ?? null,
+              })),
+              saved_at_ms: Date.now(),
+              revision: ++collectionRevision,
+              device_id: SELF.device,
+            };
+            collection[id] = item;
+            return structuredClone(item);
+          },
+          owner_edit_message_favorite: (a) => {
+            const item = messageCollections[String(a.owner)]?.[String(a.id)];
+            if (
+              !item ||
+              item.revision !== a.expectedRevision ||
+              item.device_id !== a.expectedDeviceId
+            )
+              throw new Error("Favorite was modified; refresh and retry");
+            item.metadata = structuredClone(a.metadata as FavoriteMetadata);
+            item.revision = ++collectionRevision;
+            return structuredClone(item);
+          },
+          owner_remove_message_favorite: (a) => {
+            const collection = messageCollections[String(a.owner)] ?? {};
+            const item = collection[String(a.id)];
+            if (
+              !item ||
+              item.revision !== a.expectedRevision ||
+              item.device_id !== a.expectedDeviceId
+            )
+              throw new Error("Favorite was modified; refresh and retry");
+            delete collection[item.id];
+            return null;
           },
           get_favorites: () => Object.values(favorites),
           set_favorite: (a) => {
@@ -1674,6 +1909,23 @@ export const test = base.extend({
             if (cmd === deferredCommand) {
               deferredCommand = null;
               await deferredBarrier;
+            }
+            if (
+              favoriteAttachment &&
+              /^(owner_.*favorite|read_media$|read_file$|save_file|plugin:dialog\|save$)/.test(
+                cmd,
+              )
+            )
+              favoriteAttachment.calls.push({
+                command: cmd,
+                args: structuredClone(args ?? {}),
+              });
+            if (favoriteAttachment && cmd === "plugin:dialog|save") {
+              if (dataMode === "favorites-attachment-delayed-dialog")
+                await new Promise<void>((resolve) => {
+                  favoriteAttachment!.releaseSaveDialog = resolve;
+                });
+              return "/home/tester/Downloads/field-photo.png";
             }
             if (cmd === failNextCommand) {
               failNextCommand = null;

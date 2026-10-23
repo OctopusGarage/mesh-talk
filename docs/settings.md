@@ -52,8 +52,8 @@ conversation header. Message admission and delivery never await permission. A
 stalled permission check cannot hold the composer; incoming history and updates
 to an existing outgoing intent do not trigger the reminder. Dismissal lasts for
 the login generation, including conversation changes. Disabling notifications
-hides guidance without changing the saved preview preference. Saved Messages do
-not trigger a reply-notification reminder.
+hides guidance without changing the saved preview preference. Messages sent to
+yourself do not trigger a reply-notification reminder.
 
 macOS checks the installed application's UserNotifications authorization and alert
 settings; quiet/provisional access is shown as limited. Windows checks the
@@ -73,9 +73,9 @@ state transitions and recovery. Real packaged-app permission dialogs, settings
 navigation and notification presentation still require native platform evidence;
 browser mocks do not certify those boundaries.
 
-## Saved Messages and linked devices
+## Message Yourself and linked devices
 
-**Saved Messages** is always available after the account is ready, including when
+**Message Yourself** is always available after the account is ready, including when
 no peers are online. Text, stickers and file cards use the account's ordinary
 conversation history. Acceptance saves them locally; it does not promise that
 another device has received them. Personal messages do not expire automatically.
@@ -95,6 +95,15 @@ must be upgraded rather than transferring history first.
 Synchronization resumes when a trusted source is reachable and still retains the
 selected data. Local retention and deletion can remove that source; this feature
 is not an unlimited cloud archive. A local save remains useful while offline.
+
+## Favorites and linked-device permissions
+
+**Favorites** is separate from the self-chat **Message Yourself**. It stores useful
+message snapshots with editable searchable descriptions and per-message notes.
+Both linked devices must enable **Message history** to exchange Favorites,
+including notes and removals, and **Attachments** to exchange retained file bytes.
+Disabling sharing preserves local favorites. See [Favorites](favorites.md) for
+retention, compatibility and file-size limits.
 
 ## Network preferences and effective behavior
 

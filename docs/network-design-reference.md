@@ -737,7 +737,15 @@ Upgraded pairing uses `MTPQ2` to authenticate the requested history choice befor
 
 Channel archive, file-card and attachment-byte exports require both source and requester to be accepted channel members. A pending invitation alone is not read permission.
 
-Saved Messages is the self-account route. With no siblings, acceptance commits local history and encrypted file retention without reserving remote delivery capacity. A later certified sibling can reconcile retained records with their original logical IDs. Signed personal file evidence binds the exact manifest to its personal host; it does not grant access to unrelated account or channel files. Local acceptance and a completed selected exchange are distinct facts, and neither promises indefinite availability.
+Message Yourself is the self-account route. With no siblings, acceptance commits local history and encrypted file retention without reserving remote delivery capacity. A later certified sibling can reconcile retained records with their original logical IDs. Signed personal file evidence binds the exact manifest to its personal host; it does not grant access to unrelated account or channel files. Local acceptance and a completed selected exchange are distinct facts, and neither promises indefinite availability.
+
+Favorites is a separate account-owned encrypted snapshot collection. Its optional,
+explicitly versioned sibling request preserves frozen history encodings and uses
+bounded pages/chunks. Both endpoints' history permission gates snapshots, notes
+and removal tombstones; attachment permission additionally gates retained bytes.
+The ordinary self-chat and contact preference journals do not own this capability.
+See [Favorites](favorites.md) for revision ordering, resource limits, independent
+retention and exact-reference acceptance requirements.
 
 After restart, the account-device registry reconstructs expected bindings and obsolete roster presence stays retired. Certified siblings use their own live authenticated account-sync path and device-local category controls for ongoing history/settings/media catch-up. Ordinary message fanout or directory visibility does not replace that protocol. Pairing/replay must retain original logical IDs and avoid duplicating local history.
 

@@ -60,7 +60,9 @@ Revealed content stays in the local message view rather than the shared chat
 cache. Protected images have no thumbnail before reveal, and their temporary
 preview is released when concealed. Ordinary image reads and exports cannot
 bypass protection; copying, forwarding and saving are unavailable for protected
-messages.
+messages. Protected messages cannot be added to Favorites, individually or as
+part of a selection; the core rejects the entire selection before retaining any
+snapshot or attachment. Favorites does not provide a separate unprotected view.
 
 The 30-second period controls screen visibility, not message retention. Existing
 expiry and recall rules continue to apply. Protected content remains in the

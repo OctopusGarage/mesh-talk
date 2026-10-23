@@ -264,3 +264,80 @@ test("protected pasted image reveals through a local revocable URL and expires w
   await page.getByTestId("conversation-row-acc_carol_cccc3333").click();
   await expect(page.getByTestId("protected-message-body")).toHaveCount(0);
 });
+
+test("protected text and images are excluded from Favorites menus and selection snapshots", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId("conversation-row-acc_bob_bbbb2222").click();
+  const selectProtection = async () => {
+    await page.getByTestId("composer-protection").click();
+    await page.getByTestId("composer-protection-click").click();
+  };
+  await selectProtection();
+  await page
+    .getByTestId("composer-input")
+    .fill("Private favorite snapshot content");
+  await page.getByTestId("composer-send").click();
+  await expect(page.getByTestId("protected-message")).toHaveCount(1);
+  await selectProtection();
+  await page.getByTestId("composer-input").evaluate((input) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 10;
+    canvas.height = 10;
+    const bytes = Uint8Array.from(
+      atob(canvas.toDataURL("image/png").split(",")[1]),
+      (char) => char.charCodeAt(0),
+    );
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([bytes], "private-favorite-filename.png", { type: "image/png" }),
+    );
+    input.dispatchEvent(
+      new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: transfer,
+      }),
+    );
+  });
+  await page.getByTestId("composer-send").click();
+  await expect(page.getByTestId("protected-message")).toHaveCount(2);
+  for (let index = 0; index < 2; index++) {
+    await page
+      .getByTestId("protected-message")
+      .nth(index)
+      .click({ button: "right" });
+    await expect(page.getByTestId("message-context-menu")).toBeVisible();
+    await expect(page.getByTestId("msg-collect")).toHaveCount(0);
+    await expect(page.getByTestId("msg-select-messages")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+  }
+  await page
+    .getByRole("log")
+    .getByText("hey, welcome to the mesh")
+    .click({ button: "right" });
+  await page.getByTestId("msg-select-messages").click();
+  await expect(
+    page.getByRole("log").locator('input[type="checkbox"]:disabled'),
+  ).toHaveCount(2);
+  await expect(page.getByRole("log")).not.toContainText(
+    "Private favorite snapshot content",
+  );
+  await expect(page.getByRole("log")).not.toContainText(
+    "private-favorite-filename.png",
+  );
+  await page
+    .getByTestId("favorite-selection-toolbar")
+    .getByRole("button", { name: "Collect", exact: true })
+    .click();
+  await expect(page.getByTestId("favorite-editor")).toContainText(
+    "hey, welcome to the mesh",
+  );
+  await expect(page.getByTestId("favorite-editor")).not.toContainText(
+    "Private favorite snapshot content",
+  );
+  await expect(page.getByTestId("favorite-editor")).not.toContainText(
+    "private-favorite-filename.png",
+  );
+});

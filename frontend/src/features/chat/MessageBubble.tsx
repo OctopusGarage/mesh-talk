@@ -1,3 +1,4 @@
+import { canCollect } from "./favorites/selection";
 import { ProtectedMessage } from "./ProtectedMessage";
 import {
   retryAutomaticDownload,
@@ -7,6 +8,8 @@ import { createAttachmentDecision } from "./attachments/attachmentDecision";
 import { useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
+  Bookmark,
+  ListChecks,
   Copy,
   CornerUpLeft,
   Download,
@@ -324,7 +327,13 @@ export function MessageBubble({
   onDelete,
   onRecall,
   onReEdit,
+  onCollect,
+  onSelectMessages,
+  collected = false,
 }: {
+  onCollect?: (m: ChatMessage) => void;
+  onSelectMessages?: (m: ChatMessage) => void;
+  collected?: boolean;
   m: ChatMessage;
   parent: ChatMessage | null;
   showAuthor: boolean;
@@ -656,6 +665,28 @@ export function MessageBubble({
               </div>
             </ContextMenuTrigger>
             <ContextMenuContent data-testid="message-context-menu">
+              {onCollect && canCollect(m) && (
+                <ContextMenuItem
+                  data-testid="msg-collect"
+                  onSelect={() => onCollect(m)}
+                >
+                  <Bookmark className="h-3.5 w-3.5 opacity-70" />
+                  {t(
+                    collected
+                      ? "messageFavorites.saved"
+                      : "messageFavorites.add",
+                  )}
+                </ContextMenuItem>
+              )}
+              {onSelectMessages && canCollect(m) && (
+                <ContextMenuItem
+                  data-testid="msg-select-messages"
+                  onSelect={() => onSelectMessages(m)}
+                >
+                  <ListChecks className="h-3.5 w-3.5 opacity-70" />
+                  {t("messageFavorites.selectMessages")}
+                </ContextMenuItem>
+              )}
               <ContextMenuItem
                 data-testid="msg-copy"
                 disabled={!m.text || !!m.protection}

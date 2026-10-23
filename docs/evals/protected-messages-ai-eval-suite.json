@@ -208,6 +208,39 @@
         "Protected image sends enforce the existing raster-image and size boundary, reject unsupported inputs explicitly, and never downgrade a selected protected send to the ordinary path.",
         "Managed temporary inputs remain available after failed admission for the sole outgoing retry owner, while successful durable acceptance cleans them; ordinary user-selected source files are not deleted."
       ]
+    },
+    {
+      "id": "MT-PROTECTED-007",
+      "name": "Favorites cannot turn protected messages into unprotected snapshots",
+      "subject_file": "crates/mesh-talk-core/src/node/favorites/collection.rs",
+      "context_files": [
+        "crates/mesh-talk-core/src/node/favorites.rs",
+        "crates/mesh-talk-core/src/node/favorites/capture_tests.rs",
+        "crates/mesh-talk-core/src/node/account_sync/favorites.rs",
+        "crates/mesh-talk-core/src/node/queries.rs",
+        "crates/mesh-talk-core/src/node/search.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/node/filebook.rs",
+        "crates/mesh-talk-core/src/node/media_store.rs",
+        "crates/mesh-talk-core/src/file/manifest.rs",
+        "crates/mesh-talk-core/src/protection.rs",
+        "src-tauri/src/message_favorites.rs",
+        "frontend/src/features/chat/favorites/selection.ts",
+        "frontend/src/features/chat/favorites/useMessageCollection.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "docs/privacy-controls.md",
+        "docs/favorites.md"
+      ],
+      "min_score": 0.85,
+      "scenario": "Favorites was added as an independent supported-client consumer of canonical message snapshots and retained attachment bytes. Review its interaction with click/authenticate protected text and images, including single/mixed captures, retained or sibling snapshots whose canonical source is protected, selection accessibility, attachment reads/exports and ordinary Favorites after source-history removal. Protected messages are intentionally unavailable for collection: this feature must not create an unprotected permanent view. Preserve the existing ordinary Favorites wire layout and independent history lifetime. The contract covers supported clients and canonical protection authority, not arbitrary plaintext invented by a malicious certified sibling or modified recipient.",
+      "rubric": [
+        "Canonical capture rejects a protected text or image before committing any favorite or copying bytes, and a mixed selection fails atomically rather than silently omitting protected members.",
+        "Frontend single-message and multi-selection paths exclude protected messages; accessibility and labels do not expose hidden text or original protected filenames.",
+        "Existing or sibling records with a known canonical protected source or file cannot be observed through Favorites list, inspection, retained image/file reads, exports or synchronization; UI state alone is not authorization.",
+        "Ordinary Favorites preserve their independent lifetime after source history is cleared, existing encrypted persistence and frozen wire encodings remain compatible, and expired/removed or unauthorized records keep their existing denial rules.",
+        "Focused tests exercise the cross-feature bypass and ordinary behavior; source/mocked evidence is not represented as physical authentication or resistance to modified recipients."
+      ]
     }
   ]
 }

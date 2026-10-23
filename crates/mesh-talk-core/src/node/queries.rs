@@ -64,7 +64,7 @@ impl Node {
         &self,
         conversation: ConversationId,
         account: Option<&str>,
-        selection: HistorySelection,
+        selection: HistorySelection<'_>,
     ) -> Option<super::search::SearchContext> {
         use super::delivery_store::DeliveryTransaction;
         use std::collections::{HashMap, HashSet};
@@ -286,7 +286,11 @@ impl Node {
         } else {
             rows.sort_by_key(|row| (row.wall_clock, row.id));
         }
+        if let HistorySelection::Selected(ids) = selection {
+            rows.retain(|row| ids.contains(&row.id));
+        }
         let (start, end, newer_entries) = match selection {
+            HistorySelection::Selected(_) => (0, rows.len(), 0),
             HistorySelection::Recent(limit) => (rows.len().saturating_sub(limit), rows.len(), 0),
             HistorySelection::Protected(id) => {
                 let target = rows.iter().position(|row| row.id == id)?;
@@ -354,7 +358,8 @@ impl Node {
 }
 
 #[derive(Clone, Copy)]
-pub(in crate::node) enum HistorySelection {
+pub(in crate::node) enum HistorySelection<'a> {
+    Selected(&'a [EventId]),
     Recent(usize),
     Context(EventId),
     Protected(EventId),
