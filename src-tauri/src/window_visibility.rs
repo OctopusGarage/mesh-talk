@@ -12,7 +12,7 @@ use tauri::{Manager, PhysicalPosition};
 pub(crate) struct HiddenPositions(Mutex<HashMap<String, PhysicalPosition<i32>>>);
 
 #[cfg(target_os = "linux")]
-fn is_x11(window: &Window) -> bool {
+pub(crate) fn is_x11<R: tauri::Runtime>(window: &Window<R>) -> bool {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     matches!(
         window.window_handle().map(|handle| handle.as_raw()),
