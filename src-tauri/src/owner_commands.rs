@@ -1732,10 +1732,10 @@ mod tests {
         use tauri::Manager;
         let fixture = Fixture::new();
         for (command, body) in account_profile_command_cases("bob") {
-            assert_eq!(
-                fixture.invoke(command, body).unwrap_err()["kind"],
-                "authorization",
-                "{command} must reject another owner before reading profiles"
+            let response = fixture.invoke(command, body);
+            assert!(
+                matches!(response, Err(ref error) if error["kind"] == "authorization"),
+                "profile commands must reject another owner before reading profiles"
             );
         }
         crate::app_lock::lock_app(
@@ -1744,10 +1744,10 @@ mod tests {
         )
         .unwrap();
         for (command, body) in account_profile_command_cases("alice") {
-            assert_eq!(
-                fixture.invoke(command, body).unwrap_err()["kind"],
-                "authorization",
-                "{command} must reject a locked app before reading or saving profiles"
+            let response = fixture.invoke(command, body);
+            assert!(
+                matches!(response, Err(ref error) if error["kind"] == "authorization"),
+                "profile commands must reject a locked app before reading or saving profiles"
             );
         }
     }
@@ -1900,12 +1900,11 @@ mod tests {
                 let result = pending.join().unwrap();
                 assert!(
                     captured.is_ok(),
-                    "{command} must capture authority before waiting"
+                    "profile commands must capture authority before waiting"
                 );
-                assert_eq!(
-                    result.unwrap_err()["kind"],
-                    "authorization",
-                    "{command}: {change}"
+                assert!(
+                    matches!(result, Err(ref error) if error["kind"] == "authorization"),
+                    "profile commands must reject retired authority after {change}"
                 );
                 *fixture.app_state.owner_command_captured.lock().unwrap() = None;
             }
