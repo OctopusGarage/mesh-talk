@@ -1103,5 +1103,31 @@
       "linux": "檢查桌面環境的通知設定並允許 Mesh-Talk。",
       "other": "開啟裝置的通知設定並允許 Mesh-Talk。"
     }
+  },
+  "drive": {
+    "connect": "連接 Google 雲端硬碟",
+    "connecting": "正在等待 Google 登入…",
+    "connected": "已為本次工作階段連接 Google 雲端硬碟。",
+    "privacy": "僅上傳加密備份。請分開保存每份備份的復原金鑰；Google 登入不能取代金鑰。",
+    "unavailable": "此版本尚未設定 Google 雲端硬碟。你仍可儲存和還原本機備份檔案。",
+    "destination": "備份目的地",
+    "local": "本機檔案",
+    "cloud": "Google 雲端硬碟",
+    "backUpNow": "立即備份",
+    "complete": "已將加密備份儲存至 Google 雲端硬碟",
+    "snapshot": "正在建立並驗證加密備份…",
+    "uploading": "正在上傳加密備份…",
+    "downloading": "正在下載加密備份…",
+    "cancel": "取消傳輸",
+    "restore": "從 Google 雲端硬碟還原",
+    "load": "載入備份",
+    "choose": "選擇備份",
+    "download": "下載選取的備份",
+    "empty": "此 Google 帳號中沒有已完成的 Mesh-Talk 備份。",
+    "downloaded": "備份已下載。請輸入對應的復原金鑰以驗證備份。",
+    "reconnect": "中斷連線 / 更換 Google 帳號",
+    "loading": "正在載入備份…",
+    "selected": "選取的備份",
+    "source": "備份來源"
   }
 }

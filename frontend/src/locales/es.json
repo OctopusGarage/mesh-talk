@@ -1103,5 +1103,31 @@
       "linux": "Revisa los ajustes de notificaciones de tu escritorio y permite Mesh-Talk.",
       "other": "Abre los ajustes de notificaciones del dispositivo y permite Mesh-Talk."
     }
+  },
+  "drive": {
+    "connect": "Conectar Google Drive",
+    "connecting": "Esperando el inicio de sesión de Google…",
+    "connected": "Google Drive conectado para esta sesión.",
+    "privacy": "Solo se suben copias cifradas. Guarda cada clave de recuperación por separado; iniciar sesión en Google no la sustituye.",
+    "unavailable": "Google Drive no está configurado en esta compilación. Puedes seguir guardando y restaurando archivos de copia locales.",
+    "destination": "Destino de la copia",
+    "local": "Archivo local",
+    "cloud": "Google Drive",
+    "backUpNow": "Crear copia ahora",
+    "complete": "Copia cifrada guardada en Google Drive",
+    "snapshot": "Creando y verificando la copia cifrada…",
+    "uploading": "Subiendo la copia cifrada…",
+    "downloading": "Descargando la copia cifrada…",
+    "cancel": "Cancelar transferencia",
+    "restore": "Restaurar desde Google Drive",
+    "load": "Cargar copias",
+    "choose": "Elegir una copia",
+    "download": "Descargar la copia seleccionada",
+    "empty": "No se encontraron copias completas de Mesh-Talk en esta cuenta de Google.",
+    "downloaded": "Copia descargada. Introduce su clave de recuperación para verificarla.",
+    "reconnect": "Desconectar / cambiar cuenta de Google",
+    "loading": "Cargando copias…",
+    "selected": "Copia seleccionada",
+    "source": "Origen de la copia"
   }
 }

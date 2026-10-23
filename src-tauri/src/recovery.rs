@@ -112,6 +112,7 @@ fn create_backup_offline(
     key: &RecoveryKey,
     username: &str,
     auth_password: &str,
+    record_status: bool,
 ) -> Result<BackupCreated, CommandError> {
     let parent = destination
         .parent()
@@ -174,8 +175,14 @@ fn create_backup_offline(
     // Local status contains no key. The archive itself is already durable, so a
     // failed status update does not invalidate the successful backup.
     let manager = FileManager::new(scratch.to_path_buf());
-    let _ =
-        manager.write_encrypted_file(username, "meta/backup_status.enc", &status, auth_password);
+    if record_status {
+        let _ = manager.write_encrypted_file(
+            username,
+            "meta/backup_status.enc",
+            &status,
+            auth_password,
+        );
+    }
     Ok(BackupCreated {
         recovery_key: key.display(),
         preview,
@@ -193,12 +200,38 @@ pub async fn create_backup<R: tauri::Runtime>(
     destination: String,
     recovery_key: String,
 ) -> Result<BackupCreated, CommandError> {
+    create_backup_with_status(
+        app_handle,
+        &app_state,
+        &node_state,
+        destination,
+        recovery_key,
+        true,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    app_state: &AppState,
+    node_state: &NodeState,
+    destination: String,
+    recovery_key: String,
+    record_status: bool,
+    expected_generation: Option<u64>,
+) -> Result<BackupCreated, CommandError> {
     let key = RecoveryKey::parse(&recovery_key)
         .map_err(|_| CommandError::InvalidInput("Recovery key format is invalid".into()))?;
     let lease = app_state
         .session()
         .capture()
         .map_err(CommandError::Authentication)?;
+    if expected_generation.is_some_and(|generation| lease.generation() != generation) {
+        return Err(CommandError::Authorization(
+            "Backup session was replaced".into(),
+        ));
+    }
     let password = app_state
         .session()
         .matching(&lease, |info| info.password.clone())
@@ -208,7 +241,7 @@ pub async fn create_backup<R: tauri::Runtime>(
         .matching(&lease, |info| info.user.name.clone())
         .map_err(CommandError::Authentication)?;
     let auth_password = password.trim().to_string();
-    let node = node_state.inner().clone();
+    let node = node_state.clone();
     let session = app_state.session().clone();
     let authority = RuntimeAuthority::request(session.clone(), lease.clone(), node.clone())
         .map_err(CommandError::Authorization)?;
@@ -230,6 +263,7 @@ pub async fn create_backup<R: tauri::Runtime>(
                 &key,
                 &username,
                 &auth_password,
+                record_status,
             )
         })
         .await
@@ -492,9 +526,36 @@ pub async fn restore_backup(
     username: String,
     new_password: String,
 ) -> Result<RestoreComplete, CommandError> {
+    restore_backup_with_generation(
+        &app_state,
+        &node_state,
+        path,
+        recovery_key,
+        username,
+        new_password,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn restore_backup_with_generation(
+    app_state: &AppState,
+    node_state: &NodeState,
+    path: String,
+    recovery_key: String,
+    username: String,
+    new_password: String,
+    expected_generation: Option<u64>,
+) -> Result<RestoreComplete, CommandError> {
     let key = RecoveryKey::parse(&recovery_key)
         .map_err(|_| CommandError::InvalidInput("Recovery key format is invalid".into()))?;
     let auth_guard = app_state.auth_operation.clone().lock_owned().await;
+    if let Some(generation) = expected_generation {
+        app_state
+            .session()
+            .unchanged(generation, || ())
+            .map_err(CommandError::Authorization)?;
+    }
     if app_state.session().get().is_some() {
         return Err(CommandError::Authorization(
             "Sign out before restoring a backup".into(),

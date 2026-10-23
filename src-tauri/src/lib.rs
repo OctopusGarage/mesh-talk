@@ -27,6 +27,7 @@ pub mod diagnostics;
 mod easytier_discovery;
 pub mod events;
 pub mod favorites;
+mod google_drive;
 mod integrations;
 mod linked_account;
 pub mod logger;
@@ -314,6 +315,7 @@ pub fn run_tauri_configured(
         .manage(avatars_state)
         .manage(crate::contact_policy::HiddenContactsState::default())
         .manage(crate::chat_commands::NodeState::empty())
+        .manage(crate::google_drive::DriveState::default())
         .invoke_handler({
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 owner_commands::owner_node_identity,
@@ -346,6 +348,15 @@ pub fn run_tauri_configured(
                 crate::app_lock::set_call_active,
                 commands::clear_saved_session,
                 commands::adopt_linked_account,
+                google_drive::google_drive_available,
+                google_drive::google_drive_connect,
+                google_drive::google_drive_disconnect,
+                google_drive::google_drive_progress,
+                google_drive::google_drive_list,
+                google_drive::google_drive_create_backup,
+                google_drive::google_drive_download,
+                google_drive::google_drive_inspect,
+                google_drive::google_drive_restore,
                 recovery::create_backup,
                 recovery::prepare_backup_key,
                 recovery::backup_status,

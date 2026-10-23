@@ -13,7 +13,11 @@ import {
 } from "@/components/ui/dialog";
 import { useAuth } from "@/store/auth";
 import { useChat, captureChatOwnership } from "@/store/chat";
+import { captureRuntimeOwner } from "@/store/ownership";
 import { recovery } from "@/lib/api";
+import { googleDrive } from "@/lib/api/googleDrive";
+import { GoogleDriveConnection } from "@/features/recovery/GoogleDriveConnection";
+import { GoogleDriveProgress } from "@/features/recovery/GoogleDriveProgress";
 import { errorMessage } from "@/lib/error";
 import type { BackupCreated, BackupStatus } from "@/lib/api/recovery";
 
@@ -58,7 +62,7 @@ export function BackupStatusSummary({
   const [retry, setRetry] = useState(0);
   useEffect(() => {
     let current = true;
-    const lease = captureChatOwnership();
+    const lease = captureRuntimeOwner();
     setStatus(null);
     setLoading(true);
     setFailed(null);
@@ -128,6 +132,9 @@ function BackupDialog({
   const [challenge, setChallenge] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [destinationKind, setDestinationKind] = useState("local");
+  const [connectionId, setConnectionId] = useState(() => crypto.randomUUID());
+  const [driveConnected, setDriveConnected] = useState(false);
   const [created, setCreated] = useState<BackupCreated | null>(null);
   const pending = useRef(false);
   useEffect(
@@ -168,6 +175,7 @@ function BackupDialog({
     setChallenge("");
     setCreated(null);
     setError("");
+    setDriveConnected(false);
     if (open) void prepare();
   }, [open, prepare]);
 
@@ -179,20 +187,28 @@ function BackupDialog({
       challenge.trim().toLowerCase() !== challengeAnswer
     )
       return;
-    const lease = captureChatOwnership();
-    if (!lease.current()) return;
+    if (!captureChatOwnership().current()) return;
+    // Snapshot creation intentionally pauses the node. A temporary readiness
+    // change must not hide completion or strand the dialog in its busy state.
+    const lease = captureRuntimeOwner();
     const generation = preparation.current;
     const current = () => generation === preparation.current && lease.current();
     pending.current = true;
     setBusy(true);
     setError("");
     try {
-      const destination = await save({
-        defaultPath: `mesh-talk-${new Date().toISOString().slice(0, 10)}.mtbackup`,
-        filters: [{ name: "Mesh-Talk backup", extensions: ["mtbackup"] }],
-      });
-      if (!destination || !current()) return;
-      const backup = await recovery.create(destination, key);
+      let backup: BackupCreated;
+      if (destinationKind === "drive") {
+        if (!driveConnected) return;
+        backup = await googleDrive.create(connectionId, key);
+      } else {
+        const destination = await save({
+          defaultPath: `mesh-talk-${new Date().toISOString().slice(0, 10)}.mtbackup`,
+          filters: [{ name: "Mesh-Talk backup", extensions: ["mtbackup"] }],
+        });
+        if (!destination || !current()) return;
+        backup = await recovery.create(destination, key);
+      }
       if (current()) {
         setCreated(backup);
         onBackupCreated?.();
@@ -233,6 +249,35 @@ function BackupDialog({
             <p className="mt-2">{t("recovery.excluded")}</p>
           </div>
           <p className="text-muted-foreground">{t("recovery.pauseNotice")}</p>
+          <div className="space-y-2">
+            <label
+              className="block text-xs font-medium"
+              htmlFor="backup-destination"
+            >
+              {t("drive.destination")}
+            </label>
+            <select
+              id="backup-destination"
+              className="w-full rounded-md border bg-background p-2"
+              value={destinationKind}
+              disabled={busy || !!created}
+              onChange={(event) => {
+                setDestinationKind(event.target.value);
+                setDriveConnected(false);
+              }}
+            >
+              <option value="local">{t("drive.local")}</option>
+              <option value="drive">{t("drive.cloud")}</option>
+            </select>
+            {open && destinationKind === "drive" && (
+              <GoogleDriveConnection
+                key={connectionId}
+                connectionId={connectionId}
+                disabled={busy}
+                onConnected={() => setDriveConnected(true)}
+              />
+            )}
+          </div>
           {key && (
             <div className="space-y-2">
               <p className="font-medium">{t("recovery.saveKey")}</p>
@@ -255,11 +300,42 @@ function BackupDialog({
                 id="recovery-key-check"
                 data-testid="recovery-key-check"
                 value={challenge}
+                disabled={busy || !!created}
                 onChange={(event) => setChallenge(event.target.value)}
                 autoComplete="off"
                 placeholder="XXXXXXXX-XXXXXXXX"
               />
             </div>
+          )}
+          {busy && destinationKind === "drive" && (
+            <>
+              <GoogleDriveProgress connectionId={connectionId} />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setDriveConnected(false);
+                  void googleDrive
+                    .disconnect(connectionId)
+                    .catch((cause) => setError(errorMessage(cause)))
+                    .finally(() => setConnectionId(crypto.randomUUID()));
+                }}
+              >
+                {t("drive.cancel")}
+              </Button>
+            </>
+          )}
+          {!busy && driveConnected && !created && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setDriveConnected(false);
+                setConnectionId(crypto.randomUUID());
+              }}
+            >
+              {t("drive.reconnect")}
+            </Button>
           )}
           {error && (
             <p role="alert" className="text-destructive">
@@ -271,7 +347,11 @@ function BackupDialog({
               role="status"
               className="rounded-md border border-signal/40 bg-signal/5 p-3"
             >
-              <p className="font-medium">{t("recovery.backupComplete")}</p>
+              <p className="font-medium">
+                {destinationKind === "drive"
+                  ? t("drive.complete")
+                  : t("recovery.backupComplete")}
+              </p>
               <p className="mt-1 text-xs text-muted-foreground">
                 {t("recovery.backupSummary", {
                   count: created.preview.messages,
@@ -298,11 +378,16 @@ function BackupDialog({
                 busy ||
                 !key ||
                 !!created ||
+                (destinationKind === "drive" && !driveConnected) ||
                 challenge.trim().toLowerCase() !== challengeAnswer
               }
               onClick={() => void create()}
             >
-              {busy ? t("recovery.exporting") : t("recovery.chooseDestination")}
+              {busy
+                ? t("recovery.exporting")
+                : destinationKind === "drive"
+                  ? t("drive.backUpNow")
+                  : t("recovery.chooseDestination")}
             </Button>
           </div>
         </div>

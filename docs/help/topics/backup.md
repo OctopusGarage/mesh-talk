@@ -11,6 +11,15 @@ Create an encrypted archive and keep its recovery key separately.
 
 Each backup has its own recovery key. The app does not save that key, and an old backup still needs its original key.
 
+## Use Google Drive
+
+In a configured build, choose **Google Drive** as the backup destination and connect
+through your browser. Save the separate recovery key, then choose **Back up now**.
+To restore, choose **Google Drive** as the backup source on the signed-out recovery
+screen, connect the same Google account and download a backup before verifying it.
+Google sign-in does not replace the recovery key. Backups are manual and are stored
+in Mesh-Talk's private Drive folder. Local-file backups remain available.
+
 ## Restore on a new installation
 
 1. On the signed-out screen, choose **Restore from encrypted backup**.

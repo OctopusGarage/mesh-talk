@@ -1103,5 +1103,31 @@
       "linux": "Check your desktop’s notification settings and allow Mesh-Talk.",
       "other": "Open your device’s notification settings and allow Mesh-Talk."
     }
+  },
+  "drive": {
+    "connect": "Connect Google Drive",
+    "connecting": "Waiting for Google sign-in…",
+    "connected": "Google Drive connected for this session.",
+    "privacy": "Only encrypted backups are uploaded. Keep each recovery key separately; Google sign-in cannot replace it.",
+    "unavailable": "Google Drive is not configured in this build. You can still save and restore local backup files.",
+    "destination": "Backup destination",
+    "local": "Local file",
+    "cloud": "Google Drive",
+    "backUpNow": "Back up now",
+    "complete": "Encrypted backup saved to Google Drive",
+    "snapshot": "Creating and verifying encrypted backup…",
+    "uploading": "Uploading encrypted backup…",
+    "downloading": "Downloading encrypted backup…",
+    "cancel": "Cancel transfer",
+    "restore": "Restore from Google Drive",
+    "load": "Load backups",
+    "choose": "Choose a backup",
+    "download": "Download selected backup",
+    "empty": "No completed Mesh-Talk backups were found in this Google account.",
+    "downloaded": "Backup downloaded. Enter its recovery key to verify it.",
+    "reconnect": "Disconnect / change Google account",
+    "loading": "Loading backups…",
+    "selected": "Selected backup",
+    "source": "Backup source"
   }
 }

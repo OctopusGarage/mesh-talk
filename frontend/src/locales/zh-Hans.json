@@ -1103,5 +1103,31 @@
       "linux": "检查桌面环境的通知设置并允许 Mesh-Talk。",
       "other": "打开设备的通知设置并允许 Mesh-Talk。"
     }
+  },
+  "drive": {
+    "connect": "连接 Google 云端硬盘",
+    "connecting": "正在等待 Google 登录…",
+    "connected": "已为本次会话连接 Google 云端硬盘。",
+    "privacy": "仅上传加密备份。请单独保存每份备份的恢复密钥；Google 登录不能替代密钥。",
+    "unavailable": "此构建尚未配置 Google 云端硬盘。你仍可保存和恢复本地备份文件。",
+    "destination": "备份目标",
+    "local": "本地文件",
+    "cloud": "Google 云端硬盘",
+    "backUpNow": "立即备份",
+    "complete": "已将加密备份保存到 Google 云端硬盘",
+    "snapshot": "正在创建并验证加密备份…",
+    "uploading": "正在上传加密备份…",
+    "downloading": "正在下载加密备份…",
+    "cancel": "取消传输",
+    "restore": "从 Google 云端硬盘恢复",
+    "load": "加载备份",
+    "choose": "选择备份",
+    "download": "下载选中的备份",
+    "empty": "此 Google 账号中没有已完成的 Mesh-Talk 备份。",
+    "downloaded": "备份已下载。请输入对应的恢复密钥以验证备份。",
+    "reconnect": "断开连接 / 更换 Google 账号",
+    "loading": "正在加载备份…",
+    "selected": "选中的备份",
+    "source": "备份来源"
   }
 }
