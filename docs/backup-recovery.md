@@ -38,7 +38,7 @@ locally managed bytes remain visible but their contents may be unavailable.
 Some direct messages after the backup date may return through peer sync.
 
 The backup includes visible message history, received peer avatars, file
-cards, and locally managed media referenced by those cards. It excludes local UI
+cards, and locally managed media referenced by those cards. It excludes Favorites and their independently retained attachments, local UI
 customizations (including your own avatar override), machine settings, pending
 deliveries, old device keys, and files outside Mesh-Talk's media store. It never
 merges a backup into an existing local profile.

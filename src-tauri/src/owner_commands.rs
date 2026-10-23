@@ -632,6 +632,14 @@ mod tests {
                     crate::chat_commands::write_temp_file,
                     super::owner_search_recent,
                     super::owner_search_context,
+                    crate::message_favorites::owner_list_message_favorites,
+                    crate::message_favorites::owner_save_message_favorite,
+                    crate::message_favorites::owner_edit_message_favorite,
+                    crate::message_favorites::owner_remove_message_favorite,
+                    crate::message_favorites::owner_inspect_message_favorites,
+                    crate::message_favorites::owner_favorite_file_available,
+                    crate::message_favorites::owner_read_favorite_file,
+                    crate::message_favorites::owner_save_favorite_file,
                     super::owner_node_identity,
                     super::owner_enqueue_text,
                     super::owner_enqueue_channel_text,
@@ -836,6 +844,124 @@ mod tests {
             )
             .unwrap();
         assert_eq!(context["status"], "found");
+    }
+
+    fn message_favorite_command_cases(owner: &str) -> Vec<(&'static str, serde_json::Value)> {
+        vec![
+            (
+                "owner_inspect_message_favorites",
+                serde_json::json!({"owner":owner,"source":{"kind":"account","target":"01".repeat(16),"message_ids":["01".repeat(32)]}}),
+            ),
+            (
+                "owner_favorite_file_available",
+                serde_json::json!({"owner":owner,"fileConv":"01".repeat(32)}),
+            ),
+            (
+                "owner_read_favorite_file",
+                serde_json::json!({"owner":owner,"fileConv":"01".repeat(32)}),
+            ),
+            (
+                "owner_save_favorite_file",
+                serde_json::json!({"owner":owner,"fileConv":"01".repeat(32),"dest":"/unused-test-output","toDirectory":false}),
+            ),
+            (
+                "owner_list_message_favorites",
+                serde_json::json!({"owner":owner,"query":"","offset":0,"limit":20}),
+            ),
+            (
+                "owner_save_message_favorite",
+                serde_json::json!({"owner":owner,"source":{"kind":"account","target":"01".repeat(16),"message_ids":["01".repeat(32)]},"metadata":{"title":"","description":"","notes":{}}}),
+            ),
+            (
+                "owner_edit_message_favorite",
+                serde_json::json!({"owner":owner,"id":"01".repeat(32),"expectedRevision":1,"expectedDeviceId":"01".repeat(16),"metadata":{"title":"","description":"","notes":{}}}),
+            ),
+            (
+                "owner_remove_message_favorite",
+                serde_json::json!({"owner":owner,"id":"01".repeat(32),"expectedRevision":1,"expectedDeviceId":"01".repeat(16)}),
+            ),
+        ]
+    }
+
+    #[test]
+    fn registered_message_favorites_validate_owner_and_reject_queued_session_changes() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        for (command, body) in message_favorite_command_cases("bob") {
+            assert_eq!(
+                fixture.invoke(command, body).unwrap_err()["kind"],
+                "authorization"
+            );
+        }
+        for change in ["relogin", "logout", "lock"] {
+            for (command, body) in message_favorite_command_cases("alice") {
+                fixture.app_state.app_lock().clear();
+                fixture
+                    .app_state
+                    .session()
+                    .set("entry".into(), user("alice"), "pw".into());
+                let (entered, captured) = std::sync::mpsc::channel();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+                let lifecycle = fixture.node.0.blocking_write();
+                let webview = fixture.webview.clone();
+                let pending = std::thread::spawn(move || invoke(&webview, command, body));
+                let captured = captured.recv_timeout(std::time::Duration::from_secs(2));
+                match change {
+                    "logout" => fixture.app_state.session().clear(),
+                    "relogin" => fixture.app_state.session().set(
+                        "replacement".into(),
+                        user("alice"),
+                        "pw".into(),
+                    ),
+                    _ => crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap(),
+                }
+                drop(lifecycle);
+                let result = pending.join().unwrap();
+                assert!(captured.is_ok(), "{command} captures entry before waiting");
+                assert_eq!(
+                    result.unwrap_err()["kind"],
+                    "authorization",
+                    "{command}: {change}"
+                );
+                *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+            }
+        }
+    }
+
+    #[test]
+    fn registered_message_favorites_save_search_edit_remove_and_keep_original() {
+        let fixture = Fixture::new();
+        let target = fixture.offline_peer();
+        let sent = fixture.invoke("owner_enqueue_text", serde_json::json!({"owner":"alice","account":target,"text":"useful original","replyTo":null})).unwrap();
+        let item = fixture.invoke("owner_save_message_favorite", serde_json::json!({"owner":"alice","source":{"kind":"account","target":target,"message_ids":[sent]},"metadata":{"title":"Runbook","description":"deployment steps","notes":{}}})).unwrap();
+        let list = fixture
+            .invoke(
+                "owner_list_message_favorites",
+                serde_json::json!({"owner":"alice","query":"deployment","offset":0,"limit":20}),
+            )
+            .unwrap();
+        assert_eq!(list["items"][0]["id"], item["id"]);
+        let edited = fixture.invoke("owner_edit_message_favorite", serde_json::json!({"owner":"alice","id":item["id"],"expectedRevision":item["revision"],"expectedDeviceId":item["device_id"],"metadata":{"title":"Updated","description":"new note","notes":{}}})).unwrap();
+        assert!(fixture.invoke("owner_remove_message_favorite", serde_json::json!({"owner":"alice","id":item["id"],"expectedRevision":item["revision"],"expectedDeviceId":item["device_id"]})).is_err());
+        fixture.invoke("owner_remove_message_favorite", serde_json::json!({"owner":"alice","id":edited["id"],"expectedRevision":edited["revision"],"expectedDeviceId":edited["device_id"]})).unwrap();
+        let list = fixture
+            .invoke(
+                "owner_list_message_favorites",
+                serde_json::json!({"owner":"alice","query":"","offset":0,"limit":20}),
+            )
+            .unwrap();
+        assert_eq!(list["items"], serde_json::json!([]));
+        let history = fixture
+            .invoke(
+                "owner_account_history",
+                serde_json::json!({"owner":"alice","account":target,"limit":20}),
+            )
+            .unwrap();
+        assert_eq!(history[0]["text"], "useful original");
     }
 
     #[test]

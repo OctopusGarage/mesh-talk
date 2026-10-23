@@ -22,7 +22,7 @@ fn open_sibling(dir: &std::path::Path, account: &Account) -> Arc<Node> {
     .unwrap()
 }
 
-fn sibling_nodes() -> (tempfile::TempDir, Arc<Node>, Arc<Node>) {
+pub(super) fn sibling_nodes() -> (tempfile::TempDir, Arc<Node>, Arc<Node>) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let source = open_sibling(&dir.path().join("source"), &account);
@@ -41,7 +41,11 @@ fn sibling_nodes() -> (tempfile::TempDir, Arc<Node>, Arc<Node>) {
     (dir, source, receiver)
 }
 
-fn sibling_peer(receiver: &Node, source: &Node, address: std::net::SocketAddr) -> PeerRecord {
+pub(super) fn sibling_peer(
+    receiver: &Node,
+    source: &Node,
+    address: std::net::SocketAddr,
+) -> PeerRecord {
     receiver.roster.lock().unwrap().update(
         &crate::discovery::Announce::new_with_account(
             &source.identity,

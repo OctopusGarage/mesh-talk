@@ -1,3 +1,8 @@
+import type {
+  FavoriteSource,
+  FavoriteMetadata,
+  MessageFavorite,
+} from "../src/lib/api/messageFavorites";
 import { test as base, expect } from "@playwright/test";
 import type { PeerInfo, PresenceInfo } from "../src/lib/types";
 import { randomUUID } from "node:crypto";
@@ -483,6 +488,13 @@ export const test = base.extend({
         );
         return null;
       };
+
+      // Account-owned message collections, separate from conversation pins.
+      const messageCollections: Record<
+        string,
+        Record<string, MessageFavorite>
+      > = {};
+      let collectionRevision = 0;
 
       // --- Favorites (pin + alias), persisted in-memory ---------------------
       const favorites: Record<
@@ -1179,7 +1191,7 @@ export const test = base.extend({
             const index = rows.findIndex(
               (row) => row.id === reference.message_id,
             );
-            return {
+            const response = {
               status: index >= 0 ? "found" : "unavailable",
               reference,
               messages:
@@ -1188,6 +1200,13 @@ export const test = base.extend({
                   : [],
               newer_entries: index >= 0 ? rows.length - index - 1 : null,
             };
+            if (dataMode === "favorites-delayed-context")
+              return new Promise((resolve) => {
+                (
+                  window as unknown as { __releaseFavoriteContext?: () => void }
+                ).__releaseFavoriteContext = () => resolve(response);
+              });
+            return response;
           },
           // search
           search: (a) => {
@@ -1373,6 +1392,127 @@ export const test = base.extend({
               });
             localStorage.setItem(key, JSON.stringify(next));
             return { owner: String(a.owner), contacts: next };
+          },
+          owner_inspect_message_favorites: (a) => {
+            const source = a.source as FavoriteSource;
+            const items = Object.values(
+              messageCollections[String(a.owner)] ?? {},
+            ).filter(
+              (item) =>
+                item.source.kind === source.kind &&
+                item.source.target === source.target,
+            );
+            return {
+              existing: structuredClone(
+                items.find(
+                  (item) =>
+                    item.source.message_ids.length ===
+                      new Set(source.message_ids).size &&
+                    item.source.message_ids.every((id) =>
+                      source.message_ids.includes(id),
+                    ),
+                ) ?? null,
+              ),
+              saved_message_ids: [
+                ...new Set(items.flatMap((item) => item.source.message_ids)),
+              ].filter((id) => source.message_ids.includes(id)),
+            };
+          },
+          owner_favorite_file_available: () => false,
+          owner_list_message_favorites: (a) => {
+            const q = String(a.query ?? "")
+              .trim()
+              .toLowerCase();
+            const items = Object.values(
+              messageCollections[String(a.owner)] ?? {},
+            )
+              .filter((item) =>
+                [
+                  item.metadata.title,
+                  item.metadata.description,
+                  item.source_label,
+                  ...Object.values(item.metadata.notes),
+                  ...item.messages.flatMap((message) => [
+                    message.text,
+                    message.sender_name,
+                    message.file?.name ?? "",
+                  ]),
+                ].some((value) => value.toLowerCase().includes(q)),
+              )
+              .sort((a, b) => b.saved_at_ms - a.saved_at_ms);
+            const offset = Number(a.offset ?? 0),
+              limit = Number(a.limit ?? 20);
+            return {
+              items: items.slice(offset, offset + limit),
+              has_more: items.length > offset + limit,
+            };
+          },
+          owner_save_message_favorite: (a) => {
+            if (dataMode === "favorites-write-fail")
+              throw new Error("disk full");
+            const source = a.source as FavoriteSource;
+            const metadata = a.metadata as FavoriteMetadata;
+            const key =
+              source.kind === "channel"
+                ? `ch:${source.target}`
+                : `acc:${source.target}`;
+            const selected = (msgs[key] ?? []).filter((message) =>
+              source.message_ids.includes(message.id!),
+            );
+            if (selected.length !== source.message_ids.length)
+              throw new Error("Message unavailable");
+            const canonical = {
+              ...source,
+              message_ids: selected.map((message) => message.id!),
+            };
+            const id = `${source.kind}:${source.target}:${canonical.message_ids.join(":")}`;
+            const collection = (messageCollections[String(a.owner)] ??= {});
+            if (collection[id]) return structuredClone(collection[id]);
+            const item: MessageFavorite = {
+              id,
+              source: canonical,
+              source_label: source.kind === "channel" ? CHANNEL.name : BOB.name,
+              metadata: structuredClone(metadata),
+              messages: selected.map((message) => ({
+                id: message.id!,
+                who: message.who,
+                sender_name: message.from_me ? "Me" : BOB.name,
+                text: message.text,
+                wall_clock: message.wall_clock,
+                expires_at_ms: message.expires_at_ms ?? null,
+                sticker: message.sticker ?? null,
+                file: message.file ?? null,
+              })),
+              saved_at_ms: Date.now(),
+              revision: ++collectionRevision,
+              device_id: SELF.device,
+            };
+            collection[id] = item;
+            return structuredClone(item);
+          },
+          owner_edit_message_favorite: (a) => {
+            const item = messageCollections[String(a.owner)]?.[String(a.id)];
+            if (
+              !item ||
+              item.revision !== a.expectedRevision ||
+              item.device_id !== a.expectedDeviceId
+            )
+              throw new Error("Favorite was modified; refresh and retry");
+            item.metadata = structuredClone(a.metadata as FavoriteMetadata);
+            item.revision = ++collectionRevision;
+            return structuredClone(item);
+          },
+          owner_remove_message_favorite: (a) => {
+            const collection = messageCollections[String(a.owner)] ?? {};
+            const item = collection[String(a.id)];
+            if (
+              !item ||
+              item.revision !== a.expectedRevision ||
+              item.device_id !== a.expectedDeviceId
+            )
+              throw new Error("Favorite was modified; refresh and retry");
+            delete collection[item.id];
+            return null;
           },
           get_favorites: () => Object.values(favorites),
           set_favorite: (a) => {
