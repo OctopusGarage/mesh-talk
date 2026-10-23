@@ -11,7 +11,8 @@ const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 fs.writeFileSync(process.env.ARG_LOG, JSON.stringify(args));
-const pages = JSON.parse(fs.readFileSync(process.env.API_PAGES));
+let pages = JSON.parse(fs.readFileSync(process.env.API_PAGES));
+if (process.env.STALE_RELEASE_CACHE === '1' && !args.includes('Cache-Control: no-cache')) pages = [[]];
 const filter = args[args.indexOf('--jq') + 1];
 if (!args.includes('--jq')) { process.stdout.write(JSON.stringify(pages)); process.exit(0); }
 const result = spawnSync('jq', ['-cr', filter], { input: pages.map(JSON.stringify).join('\\n'), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
@@ -19,6 +20,22 @@ process.stdout.write(result.stdout ?? '');
 process.stderr.write(result.stderr ?? '');
 process.exit(result.status ?? 1);
 `;
+
+test("release state reads revalidate cached empty release listings", { skip: process.platform === "win32" }, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-release-cache-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "bin"));
+  writeFileSync(join(root, "bin/gh"), fakeGh, { mode: 0o755 });
+  const release = { id: 42, tag_name: "v0.4.4", draft: true, prerelease: false };
+  const pages = join(root, "pages.json");
+  writeFileSync(pages, JSON.stringify([[release]]));
+  const module = new URL("../release/release-api.mjs", import.meta.url).href;
+  const result = execFileSync(process.execPath, ["--input-type=module", "-e", `import {getReleaseByTag} from ${JSON.stringify(module)}; console.log(JSON.stringify(getReleaseByTag('owner/repo', 'v0.4.4')));`], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${join(root, "bin")}${delimiter}${process.env.PATH}`, API_PAGES: pages, ARG_LOG: join(root, "args.json"), STALE_RELEASE_CACHE: "1" },
+  });
+  assert.deepEqual(JSON.parse(result), release, "a cached absence must not hide the actual draft");
+});
 
 test("release API filters large paginated histories before Node captures metadata", { skip: process.platform === "win32" }, (t) => {
   const root = mkdtempSync(join(tmpdir(), "mesh-release-api-"));

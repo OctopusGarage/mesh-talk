@@ -1,3 +1,4 @@
+import { cn } from "@/lib/utils";
 import {
   cloneElement,
   isValidElement,
@@ -39,6 +40,7 @@ export function SettingsRow({
   desc,
   control,
   reason,
+  controlAlignment = "center",
 }: {
   id?: string;
   icon?: ReactNode;
@@ -46,6 +48,7 @@ export function SettingsRow({
   desc: ReactNode;
   control: ReactNode;
   reason?: ReactNode;
+  controlAlignment?: "center" | "start";
 }) {
   const generated = useId();
   const helpId = `${id ?? generated}-help`;
@@ -55,7 +58,12 @@ export function SettingsRow({
       })
     : control;
   return (
-    <div className="flex min-w-0 items-center justify-between gap-4 border-b py-3 last:border-b-0 max-[700px]:flex-col max-[700px]:items-stretch max-[700px]:gap-2">
+    <div
+      className={cn(
+        "flex min-w-0 justify-between gap-4 border-b py-3 last:border-b-0 max-[700px]:flex-col max-[700px]:items-stretch max-[700px]:gap-2",
+        controlAlignment === "start" ? "items-start" : "items-center",
+      )}
+    >
       <div className="flex min-w-0 flex-1 items-start gap-3">
         {icon && (
           <div className="mt-0.5 shrink-0 text-muted-foreground">{icon}</div>

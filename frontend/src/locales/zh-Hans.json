@@ -1079,5 +1079,30 @@
     "previousFingerprint": "之前：{{fingerprint}}",
     "currentFingerprint": "当前：{{fingerprint}}",
     "noDeviceChanges": "没有已记录的设备变更。"
+  },
+  "notificationPermission": {
+    "denied": "系统设置已阻止通知",
+    "granted": "系统已允许通知",
+    "prompt": "允许此设备上的通知",
+    "limited": "通知提醒受到限制",
+    "unknown": "无法确认系统通知权限",
+    "checking": "正在检查系统权限…",
+    "settingsHint": "偏好设置已保存。显示新消息提醒还需要系统通知权限。",
+    "messageHint": "消息仍可发送，但你可能错过回复通知。",
+    "allowedHint": "专注模式或勿扰模式仍可能静音提醒。",
+    "openSettings": "打开系统设置",
+    "checkAgain": "重新检查",
+    "allow": "允许通知",
+    "requesting": "正在等待授权…",
+    "returnHint": "更改设置后返回此处，应用将自动检查权限。",
+    "openFailed": "无法打开系统设置。",
+    "reminder": "通知权限",
+    "dismiss": "关闭通知权限提醒",
+    "instructions": {
+      "macos": "前往系统设置 → 通知 → Mesh-Talk，打开“允许通知”。",
+      "windows": "前往设置 → 系统 → 通知，启用通知并允许 Mesh-Talk。",
+      "linux": "检查桌面环境的通知设置并允许 Mesh-Talk。",
+      "other": "打开设备的通知设置并允许 Mesh-Talk。"
+    }
   }
 }

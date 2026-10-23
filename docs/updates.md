@@ -164,6 +164,9 @@ proposal. Scoped updates change Cargo's canonical field; `scripts/release/mainte
 uses the trusted main-branch version owner to synchronize the validated same-repository bot
 PR. It never executes code from the bot's proposed branch. Release tracking records the last
 released version; it is not another authority for the current development target.
+An absent PR output is expected on idle runs and after a release is created. The
+synchronization environment must tolerate that absence even when its step is skipped,
+so it cannot prevent the subsequent exact tagged draft-build dispatch.
 
 The fixed release-history migration floor handles the existing `v0.4.3` publication. Its
 published source commit (`9b9f91b`) has exactly the same Git tree as the corresponding
@@ -188,6 +191,10 @@ Review compatibility and the intended target rather than accepting a generated n
 Merging a release PR permits automation to create an immutable `vX.Y.Z` tag and **unpublished
 draft only**, then explicitly dispatches **Tauri Release** on that tag with both publication
 flags disabled. The existing workflow builds and verifies the complete asset set into the draft.
+Before dispatch, maintenance fills the draft from `.github/release-notes.md` with
+download, installation and verification instructions bound to the exact tag/source.
+The verified build refreshes those notes and adds the changelog; useful draft notes
+must not depend on a successful build or an external attestation request.
 It cannot publish Stable merely because a version PR merged. A maintainer must select the
 version tag in **Tauri Release → Run workflow** and enable **publish_release** for the existing
 exact-source, signatures, provenance, downloaded-draft and container gates to publish it.
@@ -234,6 +241,8 @@ owning workflow rather than bypassing version or source checks.
 An incomplete or failed draft stays unpublished. Hosted automation acceptance must establish
 bot-PR permissions/check execution, draft-only behavior, explicit build dispatch and next-target
 PR creation; local mocked tests do not prove GitHub settings or real signing/publication.
+Release-state API reads request cache revalidation: a stale empty listing must not
+hide an existing draft or replace the fresh asset identity/digest checks.
 
 The numeric target and channel build identity have separate responsibilities. The target
 supports native package formats; `BASE-dev`, `BASE-nightly.RUN.ATTEMPT`, and tagged `BASE`
