@@ -16,9 +16,9 @@ const candidate = {
   is_newer: true,
   release_url: "https://example.com/release",
   notes: "Preview",
-  package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
+  package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64.zip",
   package_size: 42,
-  edition: "lite",
+  edition: "default",
 } satisfies UpdateCheck;
 
 beforeEach(() => {
@@ -61,7 +61,7 @@ it("persists channel choice without checking and invalidates the previous candid
   expect(api.check).not.toHaveBeenCalled();
 });
 
-it("forwards the selected channel and full candidate identity for a lite download", async () => {
+it("forwards the selected channel and full candidate identity for a desktop download", async () => {
   const { useUpdates } = await import("./updates");
   api.check.mockResolvedValue(candidate);
   api.download.mockResolvedValue({

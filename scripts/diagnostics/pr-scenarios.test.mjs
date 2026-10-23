@@ -191,7 +191,7 @@ test("publication rejects development native runs and unverified prebuilt binari
 test("changed pack and composer browser scenarios require their own acceptance specs", async () => {
   const { loadRequirements } = await import("../validation/pr-scenarios.mjs");
   const { fileURLToPath } = await import("node:url");
-  for (const name of ["packs", "ui-audit-composer"]) {
+  for (const name of ["packs", "packs-empty", "stickers", "theme-picker", "theme-contrast", "avatar-gallery", "avatar-gallery-loading", "ui-audit-composer"]) {
     const spec = `e2e/${name}.spec.ts`;
     const requirements = await loadRequirements([`frontend/${spec}`], fileURLToPath(new URL("../../", import.meta.url)));
     assert.deepEqual(requirements.browser, [spec]);

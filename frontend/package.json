@@ -5,7 +5,6 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:lite": "vite build --mode lite",
     "check:build-syntax": "node --test scripts/check-build-syntax.test.mjs && node scripts/check-build-syntax.mjs",
     "preview": "vite preview",
     "lint": "eslint .",
