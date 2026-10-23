@@ -100,6 +100,8 @@ The [protected messages suite](protected-messages-ai-eval-suite.json) reviews te
 and image framing/default redaction, exact retained image reads and export guards,
 app-lock authentication and session/runtime authority, the 30-second reveal and
 Blob URL lifecycle, and captured send policies across image batches and retry.
+Separate frontend and native admission cases keep each model input bounded while
+retaining the production owners that establish its guarantees.
 Its scope is accidental-disclosure control in supported clients, as defined by
 the [privacy guide](../privacy-controls.md#protected-messages), rather than
 resistance to a modified recipient or secure browser-memory erasure. Supplied

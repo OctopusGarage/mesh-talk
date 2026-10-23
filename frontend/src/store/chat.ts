@@ -1023,7 +1023,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           expiresAtMs,
           protection,
         },
-        { waitForHydration: false },
+        { waitForHydration: false, retainFailure: !protection },
       ) ?? false
     );
   },

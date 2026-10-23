@@ -425,6 +425,10 @@
         "summary": "Retry immutable delivery work across routed latency with bounded independent control lanes and cancellation-owned tasks.",
         "invariants": [
           {
+            "name": "Accepted channel files retain one durable event identity and their protected manifest across failed sidecar projection, lock transitions and restart; recovery never requests send authorization again",
+            "reference": "docs/ARCHITECTURE.md#protected-messages"
+          },
+          {
             "name": "Bounded runtime observations describe only exact recipient attempts; stale or missing details never change durable delivery confirmation",
             "reference": "docs/network-design-reference.md#runtime-delivery-observations"
           },
@@ -484,6 +488,7 @@
         "guide": "docs/ARCHITECTURE.md"
       },
       "escalation": [
+        "Channel file acceptance and projection changes require accepted_channel_file_sidecar_failure_recovers_same_identity_and_protection and channel_file_authorization_rejects_before_staging_or_wal_acceptance, covering ordinary and protected images, pending canonical history, live recovery and restart.",
         "Channel acceptance/custody changes require registered owner enqueue tests, exact-ID frontend reconciliation, and loopback post-office durable-wrapper confirmation evidence.",
         "Producer/session lock-order changes require send_authorization_never_retains_the_delivery_journal_lock plus concurrent signed-card publication and account/channel send evidence.",
         "Channel media retention/completion changes also require cargo test -p mesh-talk-core --bin mesh-talk-node file_saves:: --features fast-test-kdf; library-only selection cannot exercise delayed CLI export after a non-sharing receiver prunes chunks.",

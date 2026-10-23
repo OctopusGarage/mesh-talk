@@ -94,6 +94,10 @@ protection requirement, so another filename or offer cannot grant ordinary acces
 to the same protected transfer. The explicit image reveal resolves the retained
 message reference before reading image bytes. Ordinary media reads require a known
 unprotected manifest; retiring metadata before blob cleanup cannot grant access.
+Channel image admission retains the manifest and protection policy in the existing
+delivery WAL. Recovery projects manifest history and retained chunk scope before
+retiring the transaction; projection failure preserves the accepted message ID
+instead of reporting a new send failure.
 
 The desktop reveal command captures `RuntimeAdmission`, validates an exact
 account/channel message reference, and reuses the app-lock credential verifier

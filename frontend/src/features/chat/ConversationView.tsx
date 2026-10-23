@@ -822,8 +822,8 @@ export function ConversationView() {
               );
             };
             if (!current()) return false;
-            // Transfer the submitted text to the bounded outgoing intent once.
-            // Its bubble owns acceptance/retry feedback; it is no longer a draft.
+            // Ordinary text transfers immediately; protected text keeps its draft
+            // and retry ownership until durable acceptance.
             const admitted = protection
               ? (drafts.current
                   .admit(draftKey, text, () =>

@@ -281,7 +281,11 @@ export function beginSendIntent(
   get: Get,
   c: Conversation,
   payload: SendPayload,
-  options: { waitForHydration?: boolean; onAccepted?: () => void } = {},
+  options: {
+    waitForHydration?: boolean;
+    onAccepted?: () => void;
+    retainFailure?: boolean;
+  } = {},
 ): Promise<boolean> | null {
   if (Object.keys(get().intents).length >= SEND_INTENT_CAP) {
     get().setError(
@@ -339,7 +343,10 @@ export async function dispatchIntent(
   set: Set,
   get: Get,
   intent: SendIntent,
-  { waitForHydration = true }: { waitForHydration?: boolean } = {},
+  {
+    waitForHydration = true,
+    retainFailure = true,
+  }: { waitForHydration?: boolean; retainFailure?: boolean } = {},
 ): Promise<boolean> {
   const lease = captureChatOwner(get);
   const guarded: Set = (partial) => {
@@ -482,6 +489,11 @@ export async function dispatchIntent(
     // Durable acceptance survives hydration failure, even if history already removed the intent.
     if (admitted) return true;
     if (payload.kind === "file") useTransfers.getState().clear(clientId);
+    // A durable protected-text composer retains its rejected draft and sole retry ownership.
+    if (!retainFailure) {
+      update(null);
+      return false;
+    }
     update({
       ...message,
       pending: false,

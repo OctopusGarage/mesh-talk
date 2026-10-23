@@ -397,9 +397,11 @@ export function MessageBubble({
     : m.failed
       ? t(`message.fail.${m.failReason ?? "unknown"}`)
       : "";
-  const body = isFile
-    ? t("files.sentFile", { name: m.file!.name })
-    : displayedText;
+  const body = m.protection
+    ? displayedText
+    : isFile
+      ? t("files.sentFile", { name: m.file!.name })
+      : displayedText;
   const ariaLabel = `${speaker}: ${body} · ${formatTime(m.wallClock)}${
     status ? ` · ${status}` : ""
   }`;

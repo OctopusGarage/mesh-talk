@@ -216,3 +216,27 @@ it("excludes details for recalled, pending, failed and unaccepted messages", () 
     );
   }
 });
+
+it.each([true, false])(
+  "conceals protected image filenames from accessible summaries (optimistic: %s)",
+  async (pending) => {
+    await i18n.changeLanguage("en");
+    const html = render({
+      ...base,
+      id: pending ? null : "history-image",
+      protection: "authenticate",
+      text: "",
+      pending,
+      metadataPending: pending,
+      file: {
+        name: "confidential-medical-results.png",
+        size: 10,
+        mime: "image/png",
+        fileConv: pending ? "" : "file-conv",
+        media: true,
+      },
+    });
+    expect(html).not.toContain("confidential-medical-results.png");
+    expect(html).toMatch(/aria-label="[^"]*Protected message/);
+  },
+);

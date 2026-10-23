@@ -1971,6 +1971,198 @@ async fn protected_image_loopback_retains_policy_and_blocks_ordinary_receive_rea
 }
 
 #[tokio::test]
+async fn accepted_channel_file_sidecar_failure_recovers_same_identity_and_protection() {
+    for protection in [
+        None,
+        Some(MessageProtection::Click),
+        Some(MessageProtection::Authenticate),
+    ] {
+        for reopen in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let proof = Announce::new_with_account(
+                &DeviceIdentity::generate(),
+                &Account::generate(),
+                "Peer",
+                9,
+            );
+            let identity = DeviceIdentity::generate();
+            let account = Account::generate();
+            let keys = identity.secret_bytes();
+            let account_keys = account.secret_bytes();
+            let (mut node, _) = node(dir.path(), identity, account, &proof);
+            let channel = node.create_channel("images", vec![]).await.unwrap();
+            node.received_files
+                .lock()
+                .unwrap()
+                .fail_appends_for_test(true)
+                .unwrap();
+            let bytes = b"\x89PNG\r\n\x1a\nchannel image";
+            let path = dir.path().join("image.png");
+            std::fs::write(&path, bytes).unwrap();
+            let mut checks = 0;
+            let mut authorize = |accept: &mut dyn FnMut() -> Result<(), NodeError>| {
+                checks += 1;
+                if checks <= 2 {
+                    accept()
+                } else {
+                    Err(NodeError::Authorization(
+                        "locked after durable acceptance".into(),
+                    ))
+                }
+            };
+            let accepted = if let Some(mode) = protection {
+                node.enqueue_protected_file_channel_progress_expiring_if(
+                    channel,
+                    &path,
+                    crate::file::FileKind::Media,
+                    |_| {},
+                    None,
+                    mode,
+                    &mut authorize,
+                )
+                .await
+            } else {
+                node.enqueue_file_channel_progress_expiring_if(
+                    channel,
+                    &path,
+                    crate::file::FileKind::Media,
+                    |_| {},
+                    None,
+                    &mut authorize,
+                )
+                .await
+            };
+            let (id, file) =
+                accepted.expect("durable acceptance must not become a retryable rejection");
+            assert_eq!(checks, 2, "no authorization after WAL acceptance");
+            let history = node.channel_history(channel, 10);
+            assert_eq!(history.len(), 1, "pending WAL card remains visible");
+            assert_eq!(history[0].id, id);
+            assert_eq!(history[0].protection, protection);
+            assert_eq!(history[0].file.as_ref().unwrap().file_conv, file);
+            assert_eq!(
+                node.delivery.lock().unwrap().pending_transactions().len(),
+                1
+            );
+            node.received_files
+                .lock()
+                .unwrap()
+                .fail_appends_for_test(false)
+                .unwrap();
+            if reopen {
+                drop(node);
+                node = self::node(
+                    dir.path(),
+                    DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+                    Account::from_secret_bytes(account_keys),
+                    &proof,
+                )
+                .0;
+            } else {
+                node.recover_delivery(&mut node.delivery.lock().unwrap())
+                    .unwrap();
+            }
+            let history = node.channel_history(channel, 10);
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].id, id);
+            assert_eq!(history[0].protection, protection);
+            assert!(
+                node.delivery
+                    .lock()
+                    .unwrap()
+                    .pending_transactions()
+                    .is_empty()
+            );
+            let log = node.log.lock().unwrap();
+            let manifests: Vec<_> = log
+                .events(&channel)
+                .into_iter()
+                .filter(|event| event.kind == crate::eventlog::EventKind::FileManifest)
+                .collect();
+            assert_eq!(manifests.len(), 1);
+            assert_eq!(manifests[0].id, id);
+            drop(log);
+            if let Some(protection) = protection {
+                assert!(node.read_file(file).is_err());
+                assert!(node.read_media(file).is_none());
+                assert_eq!(
+                    node.protected_image_content(&SearchReference::Channel {
+                        channel_id: channel,
+                        message_id: Some(id),
+                    }),
+                    Some((protection, bytes.to_vec()))
+                );
+            } else {
+                assert_eq!(node.read_file(file).unwrap(), bytes);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn channel_file_authorization_rejects_before_staging_or_wal_acceptance() {
+    for reject_at in [1, 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Peer",
+            9,
+        );
+        let (node, _) = node(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node.create_channel("images", vec![]).await.unwrap();
+        let before = node.log.lock().unwrap().conversations().len();
+        let path = dir.path().join("image.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nchannel image").unwrap();
+        let mut checks = 0;
+        let result = node
+            .enqueue_protected_file_channel_progress_expiring_if(
+                channel,
+                &path,
+                crate::file::FileKind::Media,
+                |_| {},
+                None,
+                MessageProtection::Authenticate,
+                |accept| {
+                    checks += 1;
+                    if checks == reject_at {
+                        Err(NodeError::Authorization("locked before acceptance".into()))
+                    } else {
+                        accept()
+                    }
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(NodeError::Authorization(_))));
+        assert_eq!(checks, reject_at);
+        assert!(node.channel_history(channel, 10).is_empty());
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        assert!(
+            node.log
+                .lock()
+                .unwrap()
+                .events(&channel)
+                .iter()
+                .all(|event| event.kind != crate::eventlog::EventKind::FileManifest)
+        );
+        if reject_at == 1 {
+            assert_eq!(node.log.lock().unwrap().conversations().len(), before);
+        }
+    }
+}
+
+#[tokio::test]
 async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
     for reopen in [false, true] {
         let dir = tempfile::tempdir().unwrap();

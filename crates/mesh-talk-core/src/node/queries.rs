@@ -251,6 +251,30 @@ impl Node {
                 });
             }
         }
+        // Channel file acceptance is durable before its history sidecar is
+        // projected. Read the same retained manifest from that pending WAL entry.
+        for transaction in pending {
+            if let DeliveryTransaction::ChannelOutgoing { events, sent, .. } = transaction.body()
+                && sent.conversation == conversation
+                && let Some(event) = events.last()
+                && event.kind == crate::eventlog::EventKind::FileManifest
+                && !seen.contains(&event.id)
+                && !delivery.file_erased(conversation, event.id)
+                && !self.recipient_expired(&sent.plaintext, event.id, sent.wall_clock)
+                && crate::file::decode_manifest(&sent.plaintext).is_some()
+            {
+                seen.insert(event.id);
+                rows.push(HistoryRow {
+                    id: event.id,
+                    wall_clock: sent.wall_clock,
+                    from_me: true,
+                    who: "you",
+                    plaintext: &sent.plaintext,
+                    expires_at_ms: crate::expiry::deadline(&sent.plaintext),
+                    file: true,
+                });
+            }
+        }
         if is_channel {
             let archive: Vec<_> = rows.iter().map(|row| (row.id, row.wall_clock)).collect();
             let ranks: HashMap<_, _> = super::timeline::ordered_ids(&events, &archive, false)

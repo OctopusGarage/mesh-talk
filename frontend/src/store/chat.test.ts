@@ -3939,7 +3939,7 @@ it("conceals pending protected messages, preserves failed retry payload, and scr
   );
 });
 
-it("retries a failed protected send with its original protection and reply without exposing the body", async () => {
+it("retains bubble retry ownership for immediate protected text admission with its original protection and reply", async () => {
   useChat.setState({
     active: { kind: "channel", id: "channel", name: "Channel" },
     ready: true,
@@ -3953,10 +3953,11 @@ it("retries a failed protected send with its original protection and reply witho
       : Promise.resolve([]),
   );
   expect(
-    await useChat
-      .getState()
-      .admitTextAndWait("retry secret", "parent", null, "click"),
-  ).toBe(false);
+    useChat.getState().admitText("retry secret", "parent", null, "click"),
+  ).toBe(true);
+  await vi.waitFor(() =>
+    expect(useChat.getState().messages["channel:channel"][0].failed).toBe(true),
+  );
   const failed = useChat.getState().messages["channel:channel"][0];
   expect(failed).toMatchObject({ text: "", failed: true, protection: "click" });
   expect(useChat.getState().intents[failed.clientId!].payload).toMatchObject({

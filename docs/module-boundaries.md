@@ -133,6 +133,10 @@ creates no bubble. An admitted submission clears the input immediately; its bubb
 alone owns pending acceptance, failure and retry. Backend acceptance and recipient
 confirmation remain distinct states, and later completion cannot overwrite a new
 draft or put submitted text back into the composer.
+Protected text uses durable acceptance before clearing its captured draft, reply
+and protection choice. If that attempt is rejected, its temporary optimistic
+intent is removed and the composer remains the sole retry owner. Protected images
+transfer their source to the outgoing intent, whose failed bubble alone owns retry.
 Channel text, stickers and file offers use owner-scoped acceptance IPC returning
 an exact durable event ID (and file-conversation ID for attachments). Network
 fanout retains its own runtime admission and cannot hold the acceptance response

@@ -1060,23 +1060,6 @@ impl Node {
             None,
             &mut authorize,
         )?;
-        let seq = self
-            .log
-            .lock()
-            .expect("log lock")
-            .get(&id)
-            .ok_or_else(|| NodeError::File("accepted manifest awaits recovery".into()))?
-            .seq;
-        authorize(&mut || {
-            self.record_sent_manifest_with_protection(
-                channel,
-                channel,
-                seq,
-                &manifest,
-                expires_at_ms,
-                protection,
-            )
-        })?;
         Ok((id, file_conv))
     }
 
@@ -1252,70 +1235,6 @@ impl Node {
             kind,
         };
         Ok((manifest, file_conv))
-    }
-
-    /// Record a manifest we just SENT into the durable file stores so the file shows as an
-    /// outgoing message in OUR history (and is previewable/saveable), persisting across
-    /// restart. Records into `received_files` keyed by `record_conv` (the UI's host
-    /// conversation: the DM/channel conv, or the ACCOUNT conv for an account send) with
-    /// `from = our own user-id` (so `conversation_files` derives `from_me`), and into the
-    /// FileBook so `read_file`/`save_file` resolve the manifest (our own chunks are in the
-    /// file_conv log). The manifest event's id + wall-clock are read from `event_conv` by
-    /// `seq` (the value `append_event` returned) — for a DM/channel send `event_conv ==
-    /// record_conv`; for an account send the event lives in a per-device DM conv while we
-    /// file it under the account conv. Idempotent: the `received_files`/FileBook dedup on
-    /// the event id, so the account path's repeated calls (one per device, same manifest)
-    /// record it once.
-    pub(in crate::node) fn record_sent_manifest_with_protection(
-        &self,
-        record_conv: ConversationId,
-        event_conv: ConversationId,
-        seq: u64,
-        manifest: &FileManifestV3,
-        expires_at_ms: Option<u64>,
-        protection: Option<MessageProtection>,
-    ) -> Result<(), NodeError> {
-        let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-        // Resolve the just-appended manifest event's content-addressed id + wall-clock.
-        let appended = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&event_conv)
-                .into_iter()
-                .find(|e| {
-                    e.kind == EventKind::FileManifest && e.author == self_author && e.seq == seq
-                })
-                .map(|e| (e.id, e.wall_clock))
-        };
-        let Some((event_id, wall_clock)) = appended else {
-            return Err(NodeError::File("sent manifest event unavailable".into()));
-        };
-        self.remember_sent_manifest_scope(manifest.v2.file_conv, event_conv, self_author, event_id)
-            .map_err(NodeError::Log)?;
-        let plaintext = crate::expiry::wrap(
-            &protected_manifest_bytes(manifest, protection),
-            expires_at_ms,
-        );
-        self.received_files
-            .lock()
-            .expect("received_files mutex not poisoned")
-            .record(
-                record_conv,
-                self.identity.public().user_id(),
-                wall_clock,
-                &plaintext,
-                event_id,
-            )
-            .map_err(NodeError::Log)?;
-        let mut files = self.files.lock().expect("files mutex not poisoned");
-        files.mark_emitted(event_id);
-        files.record_event(
-            event_id,
-            Author::from_ed25519(self.identity.public().ed25519_pub),
-            protected_manifest(manifest, protection),
-        );
-        drop(files);
-        self.note_account_local_change();
-        Ok(())
     }
 
     fn validate_staged_protected_image(&self, manifest: &FileManifestV3) -> Result<(), NodeError> {

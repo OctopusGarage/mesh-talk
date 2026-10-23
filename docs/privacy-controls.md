@@ -30,7 +30,9 @@ Choose a protection mode beside the message composer before sending text or an i
 
 The choice applies to text messages, including text replies, and images selected,
 pasted, dropped or captured as screenshots. It returns to Normal after successful
-acceptance. An image transferred to the local outgoing queue is retried from its
+acceptance. Protected text waits for durable acceptance: a rejection preserves the
+composer text, reply and selected mode, and removes its temporary outgoing bubble
+so the composer is its only retry owner. An image transferred to the local outgoing queue is retried from its
 message bubble if native acceptance fails; it is not also retained as a second
 composer retry. Images refused before that transfer stay in the composer. Failed
 images and the remaining items of a partial batch retain their captured protection

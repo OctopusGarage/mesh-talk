@@ -12,6 +12,7 @@ import { useAttachmentIntake } from "./useAttachmentIntake";
 import { ConversationView } from "../ConversationView";
 
 const originalAdmitImage = useChat.getState().admitImage;
+const originalAdmitTextAndWait = useChat.getState().admitTextAndWait;
 const originalRetry = useChat.getState().retry;
 
 const native = vi.hoisted(() => ({
@@ -37,6 +38,32 @@ vi.mock("@tauri-apps/api/webview", () => ({
       return native.register(callback);
     },
   }),
+}));
+vi.mock("react-virtuoso", () => ({
+  Virtuoso: ({
+    data = [],
+    itemContent,
+  }: {
+    data?: import("@/store/chat").ChatMessage[];
+    itemContent: (
+      index: number,
+      message: import("@/store/chat").ChatMessage,
+    ) => import("react").ReactNode;
+  }) => data.map((message, index) => itemContent(index, message)),
+}));
+vi.mock("../MessageBubble", () => ({
+  MessageBubble: ({
+    m,
+    onReply,
+  }: {
+    m: import("@/store/chat").ChatMessage;
+    onReply: (message: import("@/store/chat").ChatMessage) => void;
+  }) =>
+    createElement(
+      "button",
+      { onClick: () => onReply(m), "data-testid": `reply-${m.id}` },
+      "Reply",
+    ),
 }));
 vi.mock("../Composer", () => ({
   Composer: (props: ComponentProps<typeof Composer>) => {
@@ -1231,3 +1258,82 @@ it.each(["drop", "picker"])(
     );
   },
 );
+
+it("keeps rejected protected text solely in its quoted composer draft before a single successful resubmission", async () => {
+  const { Composer: ActualComposer } =
+    await vi.importActual<typeof import("../Composer")>("../Composer");
+  const quoted = {
+    id: "quoted",
+    text: "Original message",
+    fromMe: false,
+    who: "peer",
+    wallClock: 1,
+    replyTo: null,
+  };
+  useChat.setState({
+    admitTextAndWait: originalAdmitTextAndWait,
+    intents: {},
+    messages: { "account:alice": [quoted] },
+    reload: vi.fn().mockResolvedValue(true),
+  });
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  actualComposer = ActualComposer;
+  await act(async () => root.render(createElement(ConversationView)));
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[data-testid="reply-quoted"]')!
+      .click(),
+  );
+  await act(async () => {
+    const input = container.querySelector("textarea")!;
+    Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(input, "Private reply");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  let attempts = 0;
+  native.invoke.mockImplementation((command: string) =>
+    command === "owner_enqueue_text"
+      ? ++attempts === 1
+        ? Promise.reject(new Error("offline"))
+        : Promise.resolve("accepted-text")
+      : Promise.resolve([]),
+  );
+  const send = () =>
+    container
+      .querySelector<HTMLButtonElement>('[data-testid="composer-send"]')!
+      .click();
+  await act(async () => send());
+  expect(container.querySelector("textarea")!.value).toBe("Private reply");
+  expect(composer.replyTo?.id).toBe("quoted");
+  expect(container.textContent).toContain(
+    "Text & images · hides after 30 seconds",
+  );
+  expect(Object.values(useChat.getState().intents)).toHaveLength(0);
+  expect(useChat.getState().messages["account:alice"]).toEqual([quoted]);
+  await act(async () => send());
+  expect(attempts).toBe(2);
+  expect(container.querySelector("textarea")!.value).toBe("");
+  expect(composer.replyTo).toBeNull();
+  expect(container.textContent).not.toContain(
+    "Text & images · hides after 30 seconds",
+  );
+  expect(
+    useChat
+      .getState()
+      .messages["account:alice"].filter((message) => message.fromMe),
+  ).toHaveLength(1);
+  expect(
+    native.invoke.mock.calls
+      .filter(([command]) => command === "owner_enqueue_text")
+      .map(([, args]) => ({
+        text: args.text,
+        replyTo: args.replyTo,
+        protection: args.protection,
+      })),
+  ).toEqual([
+    { text: "Private reply", replyTo: "quoted", protection: "authenticate" },
+    { text: "Private reply", replyTo: "quoted", protection: "authenticate" },
+  ]);
+});

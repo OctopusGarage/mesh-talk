@@ -380,11 +380,11 @@
         "src/features/chat/conversationDrafts.test.ts"
       ],
       "capability": {
-        "summary": "Move submitted text from the composer into one owner-scoped outgoing intent immediately, retaining draft text only when local admission refuses.",
+        "summary": "Give each text submission one retry owner: ordinary text transfers immediately to its outgoing intent; protected text retains its captured composer draft until durable acceptance and removes a rejected temporary intent.",
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
         "invariants": [
           {
-            "name": "Submitted content is owned by its outgoing bubble, independently of backend acceptance and recipient confirmation",
+            "name": "Each submission has one retry owner; acceptance and recipient confirmation remain separate",
             "reference": "CONTEXT.md#acceptance-and-delivery"
           },
           {

@@ -136,7 +136,7 @@
     },
     {
       "id": "MT-PROTECTED-005",
-      "name": "send admission captures text and image protection across batches and retry",
+      "name": "frontend send handoff preserves protection and a single retry owner",
       "subject_file": "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
       "context_files": [
         "frontend/src/features/chat/attachments/attachmentBatch.ts",
@@ -153,7 +153,28 @@
         "frontend/src/lib/mediaTypes.ts",
         "frontend/src/features/chat/attachments/conversationIntake.test.ts",
         "frontend/src/store/protectedMessages.test.ts",
-        "src-tauri/src/owner_commands.rs",
+        "docs/privacy-controls.md",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/ProtectedMessage.tsx",
+        "frontend/src/features/chat/protectedReveal.ts",
+        "frontend/src/features/chat/protectedImage.ts",
+        "frontend/src/store/auth.ts"
+      ],
+      "min_score": 0.85,
+      "scenario": "The sender chooses click/authenticate for a text reply or images acquired through picker, paste, drop and screenshot. A multi-image acquisition is partially accepted, later items fail, the composer resets after acceptance, and the user edits or switches conversation while staging or retrying. Trace the acquired batch's captured policy through durable outgoing admission and retry payloads. Existing ordinary sends must stay ordinary. The selected policy must apply to the entire captured batch even if the first item resets the visible composer; no remaining image or failed retry may silently downgrade. This case evaluates frontend ownership, policy propagation and the typed IPC call boundary. The separate MT-PROTECTED-006 case evaluates native durable acceptance and temporary-file authority; do not treat frontend invoke calls as native runtime proof.",
+      "rubric": [
+        "Text/reply and all supported image acquisition routes capture intended protection and forward the captured owner and policy through the typed IPC boundary; failed-send retry retains that policy and unsupported protected attachments fail explicitly.",
+        "A batch snapshots its policy once, including staged screenshots, so partial acceptance and composer reset cannot downgrade remaining items; already accepted items are not resent when retrying the rejected remainder.",
+        "Normal mode resets only on successful acceptance under the original draft revision/owner, and stale completion cannot erase a newer edit, affect another conversation, or reset an unrelated policy selection.",
+        "Optimistic and canonical cards remain content-free for protected sends; accepted intent payloads do not retain protected plaintext or local image paths unnecessarily, while failed intents retain what the established retry lifecycle requires.",
+        "Frontend size/format rejection, temporary-source handoff and stale acquisition respect the captured owner/conversation. Refusal before intent transfer leaves the composer responsible; after transfer exactly one outgoing bubble owns retry, without silently using the ordinary send API."
+      ]
+    },
+    {
+      "id": "MT-PROTECTED-006",
+      "name": "native protected admission preserves durable policy and temporary retry sources",
+      "subject_file": "src-tauri/src/owner_commands.rs",
+      "context_files": [
         "src-tauri/src/chat_commands/files.rs",
         "src-tauri/src/chat_commands/state.rs",
         "src-tauri/src/runtime_admission.rs",
@@ -168,25 +189,24 @@
         "crates/mesh-talk-core/src/node/filebook.rs",
         "crates/mesh-talk-core/src/node/media_store.rs",
         "crates/mesh-talk-core/src/file/manifest.rs",
-        "docs/privacy-controls.md",
         "crates/mesh-talk-core/src/node/dm.rs",
         "crates/mesh-talk-core/src/node/channels.rs",
         "crates/mesh-talk-core/src/node/message.rs",
         "crates/mesh-talk-core/src/expiry.rs",
         "crates/mesh-talk-core/src/node/expiry_policy.rs",
-        "frontend/src/features/chat/MessageBubble.tsx",
-        "frontend/src/features/chat/ProtectedMessage.tsx",
-        "frontend/src/features/chat/protectedReveal.ts",
-        "frontend/src/features/chat/protectedImage.ts"
+        "frontend/src/lib/api/chat.ts",
+        "docs/privacy-controls.md",
+        "crates/mesh-talk-core/src/node/outgoing_message.rs",
+        "crates/mesh-talk-core/src/node/channel.rs"
       ],
       "min_score": 0.85,
-      "scenario": "The sender chooses click/authenticate for a text reply or images acquired through picker, paste, drop and screenshot. A multi-image acquisition is partially accepted, later items fail, the composer resets after acceptance, and the user edits or switches conversation while staging or retrying. Trace the acquired batch's captured policy through durable outgoing admission and retry payloads. Existing ordinary sends must stay ordinary. The selected policy must apply to the entire captured batch even if the first item resets the visible composer; no remaining image or failed retry may silently downgrade.",
+      "scenario": "A captured desktop owner sends protected account/channel text replies or raster images. The session locks or retires during staging, core admission fails, or accepted work is still awaiting network delivery. Review the native IPC and its supplied core owners for durable policy persistence and temporary-source lifecycle. This case supplies native admission authority separately from the frontend retry lifecycle in MT-PROTECTED-005. Judge production authority and supported-client presentation guarantees; do not require screenshots, physical authentication evidence or modified-client resistance from this source review.",
       "rubric": [
-        "Text/reply and all supported image acquisition routes capture their intended protection and carry it through owner-scoped IPC admission and failed-send retry; unsupported protected attachments fail explicitly.",
-        "A batch snapshots its policy once, including staged screenshots, so partial acceptance and composer reset cannot downgrade remaining items; already accepted items are not resent when retrying the rejected remainder.",
-        "Normal mode resets only on successful acceptance under the original draft revision/owner, and stale completion cannot erase a newer edit, affect another conversation, or reset an unrelated policy selection.",
-        "Optimistic and canonical cards remain content-free for protected sends; accepted intent payloads do not retain protected plaintext or local image paths unnecessarily, while failed intents retain what the established retry lifecycle requires.",
-        "Image size/format rejection, temporary file cleanup and stale acquisition respect the current owner/conversation; no protection path silently falls back to the ordinary send API."
+        "Owner-scoped text/reply and image commands preserve click/authenticate policy in authenticated core bodies or manifests and return an exact durable accepted event identity.",
+        "The original desktop session/runtime authority is rechecked at the actual core commit seam; stale ownership or app lock cannot authorize a new protected send.",
+        "Accepted identity is distinct from network delivery; an unaccepted operation cannot be reported as durable acceptance solely because staging or optimistic UI succeeded.",
+        "Protected image sends enforce the existing raster-image and size boundary, reject unsupported inputs explicitly, and never downgrade a selected protected send to the ordinary path.",
+        "Managed temporary inputs remain available after failed admission for the sole outgoing retry owner, while successful durable acceptance cleans them; ordinary user-selected source files are not deleted."
       ]
     }
   ]
