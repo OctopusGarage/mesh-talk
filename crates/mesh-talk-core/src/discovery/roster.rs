@@ -33,6 +33,8 @@ pub struct PeerEndpoint {
     pub presence_expires_at: Option<Instant>,
     /// Original directory expiry in Unix seconds, retained across repeated old-relay evidence.
     pub presence_origin_expires_at: Option<u64>,
+    /// Trusted directory forwarding distance; zero denotes a direct registration.
+    pub origin_hops: Option<u8>,
 }
 
 impl PeerEndpoint {
@@ -409,6 +411,30 @@ impl Roster {
         }
     }
 
+    pub(crate) fn set_directory_origin_hops(
+        &mut self,
+        id: &str,
+        relay: SocketAddr,
+        origin_secs: u64,
+        hops: Option<u8>,
+    ) {
+        let mut changed = false;
+        if let Some(peer) = self.peers.get_mut(id) {
+            for route in &mut peer.routes {
+                if route.source == RouteSource::PostOffice
+                    && route.addr == relay
+                    && route.presence_origin_expires_at == Some(origin_secs)
+                {
+                    changed |= route.origin_hops != hops;
+                    route.origin_hops = hops;
+                }
+            }
+        }
+        if changed {
+            self.publish_observation();
+        }
+    }
+
     pub fn update_routed(
         &mut self,
         announce: &Announce,
@@ -526,6 +552,7 @@ impl Roster {
             .find(|route| route.addr == relay && route.source == RouteSource::PostOffice);
         let prior_expiry = prior.and_then(|route| route.presence_expires_at);
         let prior_origin = prior.and_then(|route| route.presence_origin_expires_at);
+        let prior_hops = prior.and_then(|route| route.origin_hops);
         routes.retain(|route| route.addr != relay || route.source != RouteSource::PostOffice);
         routes.push(PeerEndpoint {
             addr: relay,
@@ -534,6 +561,7 @@ impl Roster {
             last_authenticated: None,
             presence_expires_at: prior_expiry,
             presence_origin_expires_at: prior_origin,
+            origin_hops: prior_hops,
         });
         if routes.len() > MAX_ROUTES_PER_PEER {
             routes.remove(0);
@@ -732,6 +760,7 @@ impl Roster {
             presence_expires_at: (source == RouteSource::Authenticated)
                 .then_some(now + PUBLIC_PRESENCE_TTL),
             presence_origin_expires_at: None,
+            origin_hops: None,
         });
         if routes.len() > MAX_ROUTES_PER_PEER {
             routes.remove(0);
@@ -804,6 +833,7 @@ impl Roster {
                 last_authenticated: Some(now),
                 presence_expires_at: None,
                 presence_origin_expires_at: None,
+                origin_hops: None,
             });
             if peer.routes.len() > MAX_ROUTES_PER_PEER {
                 peer.routes.remove(0);

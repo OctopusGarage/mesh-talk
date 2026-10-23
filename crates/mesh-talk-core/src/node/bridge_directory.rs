@@ -15,6 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const REQUEST_V1: &[u8] = b"MTBD1Q";
 const REQUEST_V2: &[u8] = b"MTBD2Q";
 const REQUEST_V3: &[u8] = b"MTBD3Q";
+const REQUEST_V5: &[u8] = b"MTBD5Q";
+const RESPONSE_V5: &[u8] = b"MTBD5R";
+pub const MAX_ORIGIN_HOPS: u8 = 16;
 const REQUEST_V4: &[u8] = b"MTBD4Q";
 const RESPONSE_V4: &[u8] = b"MTBD4R";
 const RESPONSE: &[u8] = b"MTBD1R";
@@ -39,11 +42,19 @@ pub struct FederatedPresence {
     pub expires_at_secs: u64,
 }
 
+/// Versioned metadata; legacy FederatedPresence bytes remain unchanged.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FederatedPresenceSource {
+    pub presence: FederatedPresence,
+    pub origin_hops: Option<u8>,
+}
+
 /// Both clocks are needed: monotonic aging and exact origin identity across re-queries.
 #[derive(Clone, Copy)]
 pub(crate) struct PresenceDeadline {
     pub expires_at: Instant,
     pub origin_secs: u64,
+    pub origin_hops: Option<u8>,
 }
 
 pub type GatewayRoute = (String, u16);
@@ -63,6 +74,7 @@ fn valid_gateway_route(proofs: &[Announce], gateway: &(String, u16)) -> bool {
 pub struct BridgeDirectory {
     members: HashMap<String, (Announce, Instant)>,
     remote_members: HashMap<String, FederatedPresence>,
+    remote_hops: HashMap<String, u8>,
     gateway: Option<Arc<Mutex<Option<GatewayProof>>>>,
     changes: tokio::sync::watch::Sender<u64>,
 }
@@ -72,6 +84,7 @@ impl Default for BridgeDirectory {
         Self {
             members: HashMap::new(),
             remote_members: HashMap::new(),
+            remote_hops: HashMap::new(),
             gateway: None,
             changes: tokio::sync::watch::channel(0).0,
         }
@@ -83,6 +96,7 @@ impl BridgeDirectory {
         Self {
             members: HashMap::new(),
             remote_members: HashMap::new(),
+            remote_hops: HashMap::new(),
             gateway: Some(gateway),
             changes: tokio::sync::watch::channel(0).0,
         }
@@ -186,32 +200,93 @@ impl BridgeDirectory {
         proofs
     }
 
+    pub fn export_presence_sources(
+        &self,
+        now: Instant,
+        unix_now: u64,
+    ) -> Vec<FederatedPresenceSource> {
+        self.export_federated(now, unix_now)
+            .into_iter()
+            .map(|presence| {
+                let origin_hops = if self
+                    .members
+                    .get(&presence.announce.user_id)
+                    .is_some_and(|(_, seen)| now.saturating_duration_since(*seen) < TTL)
+                {
+                    Some(0)
+                } else {
+                    self.remote_hops.get(&presence.announce.user_id).copied()
+                };
+                FederatedPresenceSource {
+                    presence,
+                    origin_hops,
+                }
+            })
+            .collect()
+    }
+
+    pub fn import_presence_sources(&mut self, entries: &[FederatedPresenceSource], unix_now: u64) {
+        self.import_presence(
+            entries
+                .iter()
+                .map(|entry| (&entry.presence, entry.origin_hops)),
+            unix_now,
+        );
+    }
+
     pub fn import_federated(&mut self, proofs: &[FederatedPresence], unix_now: u64) {
+        self.import_presence(proofs.iter().map(|proof| (proof, None)), unix_now);
+    }
+
+    fn import_presence<'a>(
+        &mut self,
+        entries: impl Iterator<Item = (&'a FederatedPresence, Option<u8>)>,
+        unix_now: u64,
+    ) {
         self.remote_members
             .retain(|_, proof| proof.expires_at_secs > unix_now);
-        for proof in proofs.iter().take(MAX_MEMBERS) {
+        self.remote_hops
+            .retain(|id, _| self.remote_members.contains_key(id));
+        let mut changed = false;
+        for (proof, hops) in entries.take(MAX_MEMBERS) {
+            let id = &proof.announce.user_id;
             if proof.announce.post_office
                 || !valid_directory_proof(&proof.announce)
                 || proof.expires_at_secs <= unix_now
                 || proof.expires_at_secs > unix_now.saturating_add(MAX_WIRE_TTL.as_secs())
-                || self.members.contains_key(&proof.announce.user_id)
+                || self.members.contains_key(id)
             {
                 continue;
             }
-            if self.remote_members.len() >= MAX_MEMBERS
-                && !self.remote_members.contains_key(&proof.announce.user_id)
-            {
-                break;
-            }
-            let id = &proof.announce.user_id;
-            if self
-                .remote_members
-                .get(id)
-                .is_some_and(|old| old.expires_at_secs >= proof.expires_at_secs)
-            {
+            let distance = hops
+                .and_then(|h| h.checked_add(1))
+                .filter(|h| *h <= MAX_ORIGIN_HOPS);
+            if let Some(old) = self.remote_members.get(id) {
+                if old.expires_at_secs > proof.expires_at_secs {
+                    continue;
+                }
+                if old.expires_at_secs == proof.expires_at_secs {
+                    if old.announce.public() == proof.announce.public()
+                        && let Some(distance) = distance
+                        && self.remote_hops.get(id).is_none_or(|old| distance < *old)
+                    {
+                        self.remote_hops.insert(id.clone(), distance);
+                        changed = true;
+                    }
+                    continue;
+                }
+            } else if self.remote_members.len() >= MAX_MEMBERS {
                 continue;
             }
             self.remote_members.insert(id.clone(), proof.clone());
+            if let Some(distance) = distance {
+                self.remote_hops.insert(id.clone(), distance);
+            } else {
+                self.remote_hops.remove(id);
+            }
+            changed = true;
+        }
+        if changed {
             self.changes
                 .send_modify(|generation| *generation = generation.wrapping_add(1));
         }
@@ -219,7 +294,15 @@ impl BridgeDirectory {
 }
 
 pub fn is_request(bytes: &[u8]) -> bool {
-    bytes == REQUEST_V1 || bytes == REQUEST_V2 || bytes == REQUEST_V3 || bytes == REQUEST_V4
+    bytes == REQUEST_V1
+        || bytes == REQUEST_V2
+        || bytes == REQUEST_V3
+        || bytes == REQUEST_V4
+        || bytes == REQUEST_V5
+}
+
+pub fn provenance_request() -> &'static [u8] {
+    REQUEST_V5
 }
 
 /// Existing directory introductions with original expiry metadata, explicitly negotiated.
@@ -233,6 +316,38 @@ impl BridgeDirectory {
         request: &[u8],
         proofs: &[Announce],
     ) -> Option<Vec<Vec<u8>>> {
+        if request == REQUEST_V5 {
+            let now = unix_seconds_now();
+            let metadata: HashMap<_, _> = self
+                .export_presence_sources(Instant::now(), now)
+                .into_iter()
+                .map(|p| (p.presence.announce.user_id.clone(), p))
+                .collect();
+            let gateway = self.gateway_route();
+            return encode_pages(proofs, |selected, last| {
+                let entries: Vec<_> = selected
+                    .iter()
+                    .map(|proof| {
+                        metadata.get(&proof.user_id).cloned().unwrap_or_else(|| {
+                            FederatedPresenceSource {
+                                presence: FederatedPresence {
+                                    announce: proof.clone(),
+                                    expires_at_secs: now,
+                                },
+                                origin_hops: None,
+                            }
+                        })
+                    })
+                    .collect();
+                let mut bytes = Vec::from(RESPONSE_V5);
+                bytes.push(u8::from(last));
+                bytes.extend_from_slice(
+                    &bincode::serialize(&(entries, gateway_on_page(selected, gateway.as_ref())))
+                        .ok()?,
+                );
+                (bytes.len() <= MAX_PLAINTEXT).then_some(bytes)
+            });
+        }
         if request != REQUEST_V4 {
             return encode_for_request(request, proofs, self.gateway_route());
         }
@@ -427,7 +542,7 @@ pub(crate) struct DirectoryResponse {
     gateway: Option<GatewayRoute>,
     finished: bool,
     pub(crate) expiries: HashMap<String, PresenceDeadline>,
-    freshness_version: Option<bool>,
+    freshness_version: Option<u8>,
 }
 
 impl DirectoryResponse {
@@ -446,31 +561,60 @@ impl DirectoryResponse {
         if self.finished {
             return None;
         }
-        let fresh = bytes.starts_with(RESPONSE_V4);
-        if self.freshness_version.is_some_and(|old| old != fresh) {
+        let version = if bytes.starts_with(RESPONSE_V5) {
+            5
+        } else if bytes.starts_with(RESPONSE_V4) {
+            4
+        } else {
+            0
+        };
+        let fresh = version >= 4;
+        if self.freshness_version.is_some_and(|old| old != version) {
             return None;
         }
-        self.freshness_version = Some(fresh);
+        self.freshness_version = Some(version);
         let decoded = if fresh {
-            let body = bytes.strip_prefix(RESPONSE_V4)?;
+            let body = bytes.strip_prefix(if version == 5 {
+                RESPONSE_V5
+            } else {
+                RESPONSE_V4
+            })?;
             if bytes.len() > MAX_PLAINTEXT || body.is_empty() || body[0] > 1 {
                 return None;
             }
-            let (entries, route): (Vec<FederatedPresence>, Option<GatewayRoute>) =
-                bincode::DefaultOptions::new()
-                    .with_fixint_encoding()
-                    .with_limit(MAX_PLAINTEXT as u64)
-                    .reject_trailing_bytes()
-                    .deserialize(&body[1..])
-                    .ok()?;
+            let options = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_limit(MAX_PLAINTEXT as u64)
+                .reject_trailing_bytes();
+            let (entries, route): (Vec<FederatedPresenceSource>, Option<GatewayRoute>) =
+                if version == 5 {
+                    options.deserialize(&body[1..]).ok()?
+                } else {
+                    let (entries, route): (Vec<FederatedPresence>, Option<GatewayRoute>) =
+                        options.deserialize(&body[1..]).ok()?;
+                    (
+                        entries
+                            .into_iter()
+                            .map(|presence| FederatedPresenceSource {
+                                presence,
+                                origin_hops: None,
+                            })
+                            .collect(),
+                        route,
+                    )
+                };
             if entries.len() > MAX_MEMBERS
-                || entries.iter().any(|p| !valid_directory_proof(&p.announce))
+                || entries.iter().any(|p| {
+                    !valid_directory_proof(&p.presence.announce)
+                        || p.origin_hops.is_some_and(|h| h > MAX_ORIGIN_HOPS)
+                })
             {
                 return None;
             }
             let now = unix_seconds_now();
             let mut page = Vec::new();
-            for entry in entries {
+            for routed in entries {
+                let entry = routed.presence;
                 if !entry.announce.post_office
                     && entry.expires_at_secs > now
                     && entry.expires_at_secs <= now.saturating_add(MAX_WIRE_TTL.as_secs())
@@ -481,6 +625,7 @@ impl DirectoryResponse {
                             expires_at: Instant::now()
                                 + Duration::from_secs(entry.expires_at_secs - now),
                             origin_secs: entry.expires_at_secs,
+                            origin_hops: routed.origin_hops,
                         },
                     );
                 }
@@ -532,6 +677,118 @@ mod tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn provenance_pages_reject_invalid_distances_and_mixed_versions() {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Stella", 1);
+        let mut entry = FederatedPresenceSource {
+            presence: FederatedPresence {
+                announce: proof,
+                expires_at_secs: unix_seconds_now() + 15,
+            },
+            origin_hops: Some(MAX_ORIGIN_HOPS + 1),
+        };
+        let frame = |entry: &FederatedPresenceSource, last| {
+            let mut frame = Vec::from(RESPONSE_V5);
+            frame.push(u8::from(last));
+            frame.extend(
+                bincode::serialize(&(vec![entry.clone()], Option::<GatewayRoute>::None)).unwrap(),
+            );
+            frame
+        };
+        let mut response = DirectoryResponse::new(device.public());
+        assert!(response.add_page(&frame(&entry, true)).is_none());
+        entry.origin_hops = Some(0);
+        let mut response = DirectoryResponse::new(device.public());
+        assert!(response.add_page(&frame(&entry, false)).is_some());
+        let mut legacy = Vec::from(RESPONSE_V4);
+        legacy.push(1);
+        legacy.extend(
+            bincode::serialize(&(vec![entry.presence], Option::<GatewayRoute>::None)).unwrap(),
+        );
+        assert!(response.add_page(&legacy).is_none());
+    }
+
+    #[test]
+    fn versioned_directory_preserves_distance_and_legacy_is_unknown() {
+        let account = Account::generate();
+        let device = DeviceIdentity::generate();
+        let querying = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &account, "Stella", 47475);
+        let query = Announce::new_with_account(&querying, &account, "Query", 47475);
+        let mut directory = BridgeDirectory::default();
+        directory
+            .register(&device.public(), Some(&proof), true, Instant::now())
+            .unwrap();
+        let proofs = directory
+            .register(&querying.public(), Some(&query), true, Instant::now())
+            .unwrap();
+        for request in [provenance_request(), freshness_request()] {
+            let mut response = DirectoryResponse::new(DeviceIdentity::generate().public());
+            for page in directory.encode_snapshot(request, &proofs).unwrap() {
+                response.add_page(&page).unwrap();
+            }
+            let metadata = response.expiries.get(&proof.user_id).unwrap();
+            assert_eq!(
+                metadata.origin_hops,
+                if request == provenance_request() {
+                    Some(0)
+                } else {
+                    None
+                }
+            );
+        }
+        let mut legacy = BridgeDirectory::default();
+        legacy.import_federated(
+            &directory.export_federated(Instant::now(), unix_seconds_now()),
+            unix_seconds_now(),
+        );
+        assert!(
+            legacy
+                .export_presence_sources(Instant::now(), unix_seconds_now())
+                .iter()
+                .all(|p| p.origin_hops.is_none())
+        );
+    }
+
+    #[test]
+    fn origin_distance_survives_forwarding_without_extending_presence() {
+        let account = crate::identity::account::Account::generate();
+        let device = crate::identity::device::DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &account, "Stella", 47475);
+        let now = Instant::now();
+        let unix = unix_seconds_now();
+        let mut origin = BridgeDirectory::default();
+        origin
+            .register(&device.public(), Some(&proof), true, now)
+            .unwrap();
+        let original = origin.export_presence_sources(now, unix);
+        assert_eq!(original[0].origin_hops, Some(0));
+        let mut middle = BridgeDirectory::default();
+        middle.import_presence_sources(&original, unix);
+        let forwarded = middle.export_presence_sources(now, unix);
+        assert_eq!(forwarded[0].origin_hops, Some(1));
+        assert_eq!(
+            forwarded[0].presence.expires_at_secs,
+            original[0].presence.expires_at_secs
+        );
+        let mut last = BridgeDirectory::default();
+        last.import_presence_sources(&forwarded, unix);
+        assert_eq!(
+            last.export_presence_sources(now, unix)[0].origin_hops,
+            Some(2)
+        );
+        last.import_presence_sources(&original, unix);
+        assert_eq!(
+            last.export_presence_sources(now, unix)[0].origin_hops,
+            Some(1)
+        );
+        assert!(
+            last.export_presence_sources(now + TTL, unix + TTL.as_secs())
+                .is_empty()
+        );
+    }
 
     #[test]
     fn federated_duplicate_presence_is_quiet_but_newer_origin_wakes_subscribers() {

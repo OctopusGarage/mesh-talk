@@ -434,6 +434,12 @@ impl Node {
                         expiry.expires_at,
                         expiry.origin_secs,
                     );
+                    roster.set_directory_origin_hops(
+                        id,
+                        relay.addr,
+                        expiry.origin_secs,
+                        expiry.origin_hops,
+                    );
                 }
             }
         }
@@ -465,6 +471,7 @@ impl Node {
                 return Err(QueryFailure::Unavailable);
             }
             let requests = [
+                bridge_directory::provenance_request(),
                 bridge_directory::freshness_request(),
                 bridge_directory::request(),
                 bridge_directory::gateway_request(),
@@ -859,7 +866,9 @@ mod tests {
                     .unwrap();
                 let request = channel.recv().await.unwrap();
                 received.lock().unwrap().push(request.clone());
-                if request == bridge_directory::freshness_request() {
+                if request == bridge_directory::provenance_request()
+                    || request == bridge_directory::freshness_request()
+                {
                     continue;
                 }
                 for page in bridge_directory::encode_for_request(&request, &[], None).unwrap() {
@@ -872,6 +881,7 @@ mod tests {
         assert_eq!(
             *requests.lock().unwrap(),
             vec![
+                bridge_directory::provenance_request().to_vec(),
                 bridge_directory::freshness_request().to_vec(),
                 bridge_directory::request().to_vec(),
                 bridge_directory::request().to_vec(),
@@ -994,6 +1004,7 @@ mod tests {
                 bridge_directory::PresenceDeadline {
                     expires_at: Instant::now() + DIRECTORY_MEMBERSHIP_TTL,
                     origin_secs: 15,
+                    origin_hops: None,
                 },
             )]);
             let publish = tokio::spawn(async move {

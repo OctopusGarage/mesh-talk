@@ -971,12 +971,12 @@
     "idConflict": "別の種類のライブラリがこのパックIDを使用しています。"
   },
   "memberProfile": {
-    "discoveredVia": "検出元",
+    "discoveredVia": "オンライン情報の発信元",
     "discoveryLocal": "ローカルLAN · UDPマルチキャスト",
     "discoveryPostOffice": "ポストオフィス · {{name}}",
-    "discoveryUnnamedOffice": "ポストオフィス · 名前不明",
+    "discoveryUnnamedOffice": "ポストオフィス · 発信元不明",
     "discoveryUnavailable": "現在の検出元情報はありません",
-    "discoveryHint": "このクライアントがメンバーを検出した経路です。メッセージの経路は異なる場合があります。",
+    "discoveryHint": "このクライアントが識別できる、元のオンライン通知に最も近いポストオフィスを表示します。通信経路は自動的に選択されます。",
     "originalName": "元の名前",
     "remark": "メモ名",
     "title": "メンバープロフィール",
