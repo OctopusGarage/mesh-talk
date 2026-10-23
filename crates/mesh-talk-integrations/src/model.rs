@@ -1,6 +1,7 @@
 //! Transport-independent commands and safe errors.
 use mesh_talk_core::eventlog::event::{ConversationId, EventId};
 use mesh_talk_core::node::{MessageDestination, NodeError};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_TEXT_BYTES: usize = 8192;
@@ -61,7 +62,7 @@ impl From<NodeError> for IntegrationError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Destination {
     Account { id: String },
@@ -110,7 +111,7 @@ pub(crate) fn decode_id(value: &str) -> Result<[u8; 32], IntegrationError> {
         .map_err(|_| IntegrationError::new("INVALID_INPUT", "Invalid fingerprint"))?;
     Ok(out)
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessage {
     pub destination: Destination,
@@ -121,6 +122,13 @@ pub struct SendMessage {
     pub expires_at_ms: Option<u64>,
     pub idempotency_key: String,
 }
+/// The retry receipt query shared by all integration adapters.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StatusRequest {
+    pub idempotency_key: String,
+}
+
 impl SendMessage {
     pub fn validate(&self) -> Result<(), IntegrationError> {
         self.destination.validate()?;

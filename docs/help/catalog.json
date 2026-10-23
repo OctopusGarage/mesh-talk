@@ -485,6 +485,33 @@
         "kind": "settings",
         "category": "appearance"
       }
+    },
+    {
+      "id": "local-agent-access",
+      "title": "Let a local agent send messages",
+      "summary": "Enable scoped local automation and copy a short API help hint for your agent.",
+      "category": "personalization",
+      "keywords": [
+        "agent",
+        "automation",
+        "HTTP API",
+        "local API",
+        "AGENTS.md",
+        "本地调用",
+        "自动化",
+        "智能体"
+      ],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "document": "topics/local-agent-access.md",
+      "target": {
+        "kind": "settings",
+        "category": "general",
+        "controlId": "setting-local-agent-access"
+      }
     }
   ]
 }

@@ -1104,5 +1104,24 @@
       "linux": "检查桌面环境的通知设置并允许 Mesh-Talk。",
       "other": "打开设备的通知设置并允许 Mesh-Talk。"
     }
+  },
+  "agentAccess": {
+    "title": "本地 Agent 接入",
+    "description": "允许本机 Agent 使用当前登录账号发送文本和回复。",
+    "selectFirst": "请先选择至少一个会话，再开启接入。",
+    "running": "运行中 · 本机 Agent 可调用",
+    "unavailable": "已开启 · 服务暂不可用",
+    "off": "已关闭",
+    "conversations": "允许访问的会话",
+    "noConversations": "联系人和已加入的群聊会显示在这里。",
+    "unavailableConversation": "暂不可用的会话 · {{id}}",
+    "scopeHint": "最多选择 16 个会话。Agent 无法读取聊天历史。",
+    "fileHint": "开启后会向 {{path}} 写入简短说明；关闭时只移除 Mesh-Talk 管理的部分。",
+    "showInstructions": "展开 Agent 使用说明",
+    "copy": "复制说明",
+    "copied": "已复制",
+    "copyFailed": "复制失败，请选择上方说明并手动复制。",
+    "group": "群聊",
+    "person": "联系人"
   }
 }

@@ -174,7 +174,7 @@ test("mapped source owners with no executable tests cannot produce a successful 
   assert.match(plan.blockers.join(" "), /no executable tests/i);
 });
 
-test("repository grant policy expands through service, IPC, client, host and desktop/MCP consumers", async () => {
+test("repository grant policy expands through service, HTTP, IPC and desktop/UI/MCP consumers", async () => {
   const registered = await loadContracts(fileURLToPath(new URL("../../", import.meta.url)));
   const plan = buildAffectedPlan(
     ["crates/mesh-talk-integrations/src/policy.rs"],
@@ -184,14 +184,18 @@ test("repository grant policy expands through service, IPC, client, host and des
     plan.owners.map((owner) => owner.id),
     [
       "desktop-integrations",
+      "frontend-local-agent-access",
       "integration-client",
       "integration-host",
+      "integration-http",
       "integration-ipc",
       "integration-policy",
       "integration-service",
       "mcp-adapter",
     ],
   );
+  assert.ok(plan.frontend.includes("src/features/chat/settings/LocalAgentSettings.test.ts"));
+  assert.ok(plan.rust.some((entry) => entry.package === "mesh-talk-integrations" && entry.filters.includes("http::tests::")));
 });
 
 test("misspelled contract fields cannot silently drop downstream checks", () => {

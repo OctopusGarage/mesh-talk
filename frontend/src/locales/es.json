@@ -1104,5 +1104,24 @@
       "linux": "Revisa los ajustes de notificaciones de tu escritorio y permite Mesh-Talk.",
       "other": "Abre los ajustes de notificaciones del dispositivo y permite Mesh-Talk."
     }
+  },
+  "agentAccess": {
+    "title": "Acceso de agentes locales",
+    "description": "Permite que agentes locales envíen texto y respuestas con tu cuenta iniciada.",
+    "selectFirst": "Selecciona al menos una conversación antes de activar el acceso.",
+    "running": "En ejecución · disponible para agentes locales",
+    "unavailable": "Activado · servicio no disponible",
+    "off": "Desactivado",
+    "conversations": "Conversaciones permitidas",
+    "noConversations": "Tus contactos y grupos aparecerán aquí.",
+    "unavailableConversation": "Conversación no disponible · {{id}}",
+    "scopeHint": "Elige hasta 16 conversaciones. Los agentes no pueden leer el historial.",
+    "fileHint": "Al activar se añade una breve indicación a {{path}}. Al desactivar solo se elimina la sección de Mesh-Talk.",
+    "showInstructions": "Ver instrucciones para agentes",
+    "copy": "Copiar instrucciones",
+    "copied": "Copiado",
+    "copyFailed": "No se pudo copiar. Selecciona las instrucciones y cópialas manualmente.",
+    "group": "Grupo",
+    "person": "Persona"
   }
 }

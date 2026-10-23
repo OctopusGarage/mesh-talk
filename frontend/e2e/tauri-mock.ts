@@ -543,6 +543,20 @@ export const test = base.extend({
         confirm_sensitive_copy: false,
         clipboard_clear_seconds: 0,
       };
+      const localAgentAccess = {
+        enabled: false,
+        running: false,
+        destinations: [] as { kind: string; id: string }[],
+        available_destinations: [
+          {
+            destination: { kind: "account", id: BOB.account_id },
+            label: BOB.name,
+          },
+        ],
+        instructions_path: "/home/tester/.codex/AGENTS.md",
+        instructions: "",
+        error: null,
+      };
       let nativeLocked = false;
       let attachmentGlobalAuto = false;
       const attachmentContactAuto: Record<string, boolean> = {};
@@ -1473,6 +1487,24 @@ export const test = base.extend({
             can_open_settings: true,
           }),
           open_notification_settings: () => null,
+          get_local_agent_access: () => localAgentAccess,
+          set_local_agent_access: (a) => {
+            const destinations = a.destinations as {
+              kind: string;
+              id: string;
+            }[];
+            if (a.enabled && destinations.length === 0)
+              throw new Error("Select a conversation");
+            Object.assign(localAgentAccess, {
+              enabled: a.enabled,
+              running: a.enabled,
+              destinations,
+              instructions: a.enabled
+                ? 'Mesh Talk local API: "http://127.0.0.1:12345/v1/help".\nRead this help URL before using the API for user-authorized tasks.\nThe desktop app must be running and unlocked, with agent access enabled.\n'
+                : "",
+            });
+            return localAgentAccess;
+          },
           get_app_settings: () => appSettings,
           set_app_settings: (a) => {
             Object.assign(appSettings, (a.settings as object) ?? {});

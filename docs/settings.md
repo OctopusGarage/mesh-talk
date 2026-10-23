@@ -11,7 +11,7 @@ settings to confirm the value before editing it again.
 
 | Category              | Controls                                                                                                   |
 | --------------------- | ---------------------------------------------------------------------------------------------------------- |
-| General               | Display language, launch at OS login, close to tray.                                 |
+| General               | Display language, launch at OS login, close to tray and scoped local agent access.                                 |
 | Appearance            | Theme/library, available theme wallpapers and wallpaper visibility.                                        |
 | Notifications & calls | Notifications, message previews, experimental calling and ringtone.                                        |
 | Connection & delivery | Invisible mode, reply permissions, discovery scope, relay master/send/receive and preferred post office.   |
@@ -28,6 +28,24 @@ not export the device's settings; see [backup and recovery](backup-recovery.md).
 Before issuing a pairing code, only explicitly saved local appearance choices
 seed missing account preferences. Fresh-device defaults remain local, and
 existing account values are preserved.
+
+## Local agent access
+
+In **General**, choose the contacts or joined groups a local agent may send to,
+then enable **Local agent access**. The switch starts the desktop's existing
+integration service with a loopback HTTP adapter. No CLI or additional download
+is needed. Agents can send text and replies; they cannot read chat history.
+
+**View agent instructions** expands a short bootstrap containing the live API help
+URL; **Copy instructions** copies the same text. Enabling also maintains a single
+Mesh-Talk block in the displayed Codex user-level `AGENTS.md`. Disabling stops
+admission, removes the scoped credential and removes only that block, preserving
+other instructions. Saved choices belong to the signed-in account on this device.
+Running, disabled and unavailable states are reported separately, with retry for
+failures. The app must remain running and unlocked; normal login restores enabled
+access and updates the bootstrap to its new endpoint. See the
+[local API guide](bot-integrations.md#desktop-local-agent-access) for discovery,
+authority, credential handling and transport limits.
 
 ## System notification permission
 

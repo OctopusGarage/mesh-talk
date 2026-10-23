@@ -24,10 +24,17 @@ that every module or crate is a separate DDD bounded context.
 
 The bot integration service in `crates/mesh-talk-integrations` depends on the core
 and host-supplied admission ports. It owns grants, bounded metadata audit and
-private IPC; `crates/mesh-talk-mcp` owns SDK/stdio translation only. Core
+private IPC and its fixed-route loopback HTTP adapter; `crates/mesh-talk-mcp` owns SDK/stdio translation only. Core
 `node/outgoing_message.rs` owns retry-safe event acceptance and sender-state WAL
 recovery. Desktop `src-tauri/src/integrations.rs` binds exact-session leases and
-graceful listener retirement. See [bot integration setup](bot-integrations.md).
+graceful listener retirement. `integrations/local_access.rs` owns serialized
+settings/startup control and the single desktop service handle;
+`integrations/instructions.rs` owns only the marked user-level bootstrap file.
+Both transports share one integration service/registry and core sending path.
+`http.rs` owns public static discovery, request limits and fixed scoped routes;
+request schemas derive from the existing models. The General settings UI uses
+the shared save coordinator and an explicit-owner typed adapter. See
+[desktop local access](bot-integrations.md#desktop-local-agent-access).
 
 The headless CLI uses the core directly. A protocol change should not require
 Tauri; a presentation change should not alter the wire protocol. Not every helper

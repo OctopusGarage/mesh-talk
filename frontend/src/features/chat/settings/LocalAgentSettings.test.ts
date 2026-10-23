@@ -1,0 +1,183 @@
+// @vitest-environment jsdom
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import i18n from "@/lib/i18n";
+import type { LocalAgentAccess } from "@/lib/api/localAgentAccess";
+import type { SettingsController } from "./useSettingsController";
+const mocks = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), copy: vi.fn() }));
+vi.mock("@/lib/api/localAgentAccess", () => ({ localAgentAccess: mocks }));
+import { LocalAgentSettings } from "./LocalAgentSettings";
+let host: HTMLDivElement;
+let root: Root;
+let controller: SettingsController;
+const destination = { kind: "channel" as const, id: "ab".repeat(32) };
+let access: LocalAgentAccess;
+beforeEach(async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.resetAllMocks();
+  await i18n.changeLanguage("en");
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: mocks.copy.mockResolvedValue(undefined) },
+  });
+  access = {
+    enabled: false,
+    running: false,
+    destinations: [],
+    available_destinations: [{ destination, label: "Release team" }],
+    instructions_path: "/home/user/.codex/AGENTS.md",
+    instructions: "",
+    error: null,
+  };
+  mocks.get.mockImplementation(async () => access);
+  mocks.set.mockImplementation(async (_owner, enabled, destinations) => {
+    access = {
+      ...access,
+      enabled,
+      running: enabled,
+      destinations,
+      instructions: enabled
+        ? "Mesh-Talk local API: http://127.0.0.1:12345/v1/help"
+        : "",
+    };
+    return access;
+  });
+  controller = {
+    identity: "alice:1",
+    owner: "alice",
+    settings: {},
+    saving: false,
+    runSettingAction: async (
+      _category: string,
+      write: () => Promise<LocalAgentAccess>,
+      apply: (value: LocalAgentAccess) => void,
+    ) => {
+      try {
+        apply(await write());
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  } as unknown as SettingsController;
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+});
+afterEach(async () => {
+  await act(async () => root.unmount());
+  host.remove();
+  vi.unstubAllGlobals();
+});
+async function render() {
+  await act(async () =>
+    root.render(createElement(LocalAgentSettings, { controller })),
+  );
+}
+it("requires an explicit conversation before enabling and sends the exact selected scope", async () => {
+  await render();
+  expect(
+    host.querySelector<HTMLButtonElement>("#setting-local-agent-access")!
+      .disabled,
+  ).toBe(true);
+  await act(async () =>
+    host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(),
+  );
+  expect(mocks.set).toHaveBeenLastCalledWith("alice", false, [destination]);
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>("#setting-local-agent-access")!
+      .click(),
+  );
+  expect(mocks.set).toHaveBeenLastCalledWith("alice", true, [destination]);
+  expect(host.textContent).toContain("Running");
+});
+it("discloses and copies the same short help bootstrap without exposing credentials", async () => {
+  access = {
+    ...access,
+    enabled: true,
+    running: true,
+    destinations: [destination],
+    instructions: "Mesh-Talk local API: http://127.0.0.1:12345/v1/help",
+  };
+  await render();
+  const details = host.querySelector("details")!;
+  expect(details.open).toBe(false);
+  details.open = true;
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="copy-agent-instructions"]',
+      )!
+      .click(),
+  );
+  expect(mocks.copy).toHaveBeenCalledWith(access.instructions);
+  expect(host.querySelector("pre")!.textContent).toBe(access.instructions);
+  expect(host.textContent).not.toContain("Bearer");
+});
+it("offers retry after a load failure", async () => {
+  mocks.get.mockRejectedValueOnce(new Error("Node not ready"));
+  await render();
+  expect(host.querySelector('[role="alert"]')!.textContent).toContain(
+    "Node not ready",
+  );
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>('[data-testid="retry-agent-access"]')!
+      .click(),
+  );
+  expect(host.querySelector("#setting-local-agent-access")).not.toBeNull();
+});
+it("reloads canonical readiness after a failed mutation", async () => {
+  access = {
+    ...access,
+    enabled: true,
+    running: true,
+    destinations: [destination],
+    instructions: "help",
+  };
+  await render();
+  mocks.set.mockImplementationOnce(async () => {
+    access = { ...access, enabled: false, running: false, instructions: "" };
+    throw new Error("Instructions could not be removed");
+  });
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>("#setting-local-agent-access")!
+      .click(),
+  );
+  expect(
+    host
+      .querySelector("#setting-local-agent-access")!
+      .getAttribute("aria-checked"),
+  ).toBe("false");
+  expect(mocks.get).toHaveBeenCalledTimes(2);
+});
+
+it("discards a delayed load from a replaced settings session", async () => {
+  let finish!: (value: LocalAgentAccess) => void;
+  mocks.get.mockReturnValueOnce(
+    new Promise<LocalAgentAccess>((resolve) => {
+      finish = resolve;
+    }),
+  );
+  await render();
+  const stale = {
+    ...access,
+    enabled: true,
+    running: true,
+    instructions: "stale account help",
+  };
+  controller = { ...controller, identity: "bob:2", owner: "bob" };
+  await render();
+  await act(async () => {
+    finish(stale);
+  });
+  expect(host.textContent).not.toContain("stale account help");
+  expect(
+    host
+      .querySelector("#setting-local-agent-access")!
+      .getAttribute("aria-checked"),
+  ).toBe("false");
+});

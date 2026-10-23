@@ -3247,12 +3247,16 @@ dependencies = [
 name = "mesh-talk-integrations"
 version = "0.4.5"
 dependencies = [
+ "axum",
  "clap",
  "hex",
+ "hyper",
+ "hyper-util",
  "libc",
  "log",
  "mesh-talk-core",
  "rand_core 0.6.4",
+ "schemars 1.0.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",

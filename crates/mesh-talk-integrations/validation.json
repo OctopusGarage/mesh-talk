@@ -2,6 +2,40 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "integration-http",
+      "paths": [
+        "crates/mesh-talk-integrations/src/http.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-integrations",
+          "filters": [
+            "http::tests::"
+          ]
+        }
+      ],
+      "consumers": [
+        "desktop-integrations"
+      ],
+      "capability": {
+        "summary": "Expose a bounded loopback HTTP adapter and public static discovery over the existing scoped integration service.",
+        "guide": "docs/bot-integrations.md#api-discovery-and-authentication",
+        "invariants": [
+          {
+            "name": "Public discovery contains no credential values, principal or conversation scope; operation routes retain existing grant and session authority.",
+            "reference": "docs/bot-integrations.md#api-discovery-and-authentication"
+          },
+          {
+            "name": "Numeric loopback Host, browser-origin rejection, bounded input/requests/connections and deadlines guard the local transport.",
+            "reference": "docs/bot-integrations.md#api-discovery-and-authentication"
+          }
+        ]
+      },
+      "escalation": [
+        "Run real loopback HTTP discovery/auth/size/deadline/connection/shutdown tests. Native desktop enable/disable and lock/logout require platform evidence."
+      ]
+    },
+    {
       "id": "integration-policy",
       "paths": ["crates/mesh-talk-integrations/src/policy.rs"],
       "rust": [
@@ -27,6 +61,7 @@
       "consumers": [
         "integration-host",
         "integration-ipc",
+        "integration-http",
         "desktop-integrations"
       ],
       "escalation": [
@@ -89,7 +124,8 @@
         "desktop-integrations",
         "integration-ipc",
         "integration-policy",
-        "integration-host"
+        "integration-host",
+        "integration-http"
       ],
       "escalation": [
         "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
@@ -104,7 +140,7 @@
           "filters": ["model::"]
         }
       ],
-      "consumers": ["integration-policy", "integration-client"],
+      "consumers": ["integration-policy", "integration-client", "integration-http"],
       "escalation": [
         "Public grant/request/response serialization requires private IPC and MCP schema compatibility evidence."
       ]
@@ -119,7 +155,8 @@
         "integration-model",
         "integration-private-files",
         "integration-service",
-        "integration-host"
+        "integration-host",
+        "integration-http"
       ],
       "escalation": [
         "Public exports and dependency/build inputs require affected CLI, desktop and MCP consumer compile checks."
