@@ -76,7 +76,9 @@ impl Node {
     }
 
     pub(in crate::node) fn prune_expired_received(&self) -> Result<usize, NodeError> {
-        self.prune_received_deadlines(false)
+        let removed = self.prune_received_deadlines(false)?;
+        self.prune_favorite_files()?;
+        Ok(removed)
     }
 
     // After restart the previous monotonic anchor is gone. Fail closed for recipient

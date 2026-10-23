@@ -12,7 +12,7 @@ An attachment card and completed local file bytes are separate things. A file ca
 
 ## Keep files across your devices
 
-Open **Saved Messages** to keep a file for yourself, even before another device is linked. In **Your devices**, choose whether linked devices synchronize history, file cards and attachment contents. Contents require an eligible trusted device that still retains them and is reachable. Synchronizing a card alone does not copy the file bytes.
+Open **Message Yourself** to keep a file for yourself, even before another device is linked. In **Your devices**, choose whether linked devices synchronize history, file cards and attachment contents. Contents require an eligible trusted device that still retains them and is reachable. Synchronizing a card alone does not copy the file bytes.
 
 ## Recover channel attachments
 
