@@ -29,6 +29,7 @@ use tokio::net::TcpStream;
 use super::account_sync_wire::VERSION;
 
 mod archive;
+mod favorites;
 mod wake;
 pub(in crate::node) use wake::AccountWake;
 mod page;
@@ -64,6 +65,11 @@ pub struct DeviceSyncStatus {
 
 #[derive(Default)]
 struct PeerCursor {
+    favorite_next: Option<String>,
+    favorite_digest: [u8; 32],
+    favorite_sweep_digest: [u8; 32],
+    favorites_supported: bool,
+    favorite_error: Option<String>,
     next: Option<HistoryCursor>,
     known_digest: [u8; 32],
     sweep_digest: [u8; 32],
@@ -103,6 +109,10 @@ struct FileCardPayload {
 struct FileCardPayloadRef<'a> {
     manifest: &'a [u8],
     proof: &'a Event,
+}
+
+fn attachment_deadline(size: u64) -> Duration {
+    Duration::from_secs(30).saturating_add(Duration::from_secs(size.div_ceil(16 * 1024)))
 }
 
 fn transport(error: crate::transport::TransportError) -> NodeError {
@@ -748,8 +758,7 @@ impl Node {
             .expect("files mutex not poisoned")
             .manifest(&file_conv)
             .map_or(0, |manifest| manifest.size());
-        let deadline =
-            Duration::from_secs(30).saturating_add(Duration::from_secs(size.div_ceil(16 * 1024)));
+        let deadline = attachment_deadline(size);
         tokio::time::timeout(
             deadline,
             self.serve_account_attachment_inner(channel, version, account_id, file_conv),
@@ -1385,7 +1394,7 @@ impl Node {
                 if !active.insert(id.clone()) {
                     continue;
                 }
-                let state = cursors.remove(&id).unwrap_or_default();
+                let mut state = cursors.remove(&id).unwrap_or_default();
                 let node = self.clone();
                 let Some(permit) = self.runtime_work.admit() else {
                     return;
@@ -1402,6 +1411,48 @@ impl Node {
                             "account history exchange timed out".into(),
                         ))
                     });
+                    state.favorite_error = None;
+                    if result.is_ok() && node.device_sync_policy().history {
+                        let first = state.favorite_next.is_none();
+                        match tokio::time::timeout(
+                            Duration::from_secs(10),
+                            node.pull_message_favorites_page_at_digest(
+                                &peer,
+                                state.favorite_next.clone(),
+                                state.favorite_digest,
+                                &mut state.favorites_supported,
+                            ),
+                        )
+                        .await
+                        {
+                            Ok(Ok((next, digest))) => {
+                                if first {
+                                    state.favorite_sweep_digest = digest;
+                                }
+                                state.favorite_next = next;
+                                if state.favorite_next.is_none() {
+                                    state.favorite_digest = if state.favorite_sweep_digest == digest
+                                    {
+                                        digest
+                                    } else {
+                                        [0; 32]
+                                    };
+                                }
+                            }
+                            failure => {
+                                state.favorite_next = None;
+                                state.favorite_digest = [0; 32];
+                                if state.favorites_supported {
+                                    state.favorite_error = Some(match failure {
+                                        Ok(Err(error)) => error.to_string(),
+                                        _ => "favorites exchange timed out".into(),
+                                    });
+                                }
+                            }
+                        }
+                    } else {
+                        state.favorite_next = None;
+                    }
                     (id, peer, state, result)
                 }));
                 history_owners.insert(task.id(), owner);
@@ -1426,12 +1477,14 @@ impl Node {
                         else {
                             let mut status = DeviceSyncStatus { device_id: id.clone(), phase: SyncPhase::CatchingUp,
                                 pending_attachments: 0, legacy_file_metadata: false, error: None };
-                            let mut continuation = false;
+                            let favorites_pending = state.favorite_next.is_some() || (state.favorites_supported && state.favorite_digest==[0;32] && state.favorite_error.is_none());
+                            let mut continuation = favorites_pending;
                             match result {
                                 Ok((next, digest, version)) => {
                                     status.legacy_file_metadata = version == AccountSyncVersion::V1;
-                                    if state.complete_page(next, digest) { status.phase = SyncPhase::UpToDate; }
+                                    if state.complete_page(next, digest) && !favorites_pending { status.phase = SyncPhase::UpToDate; }
                                     else { continuation = true; }
+                                    if let Some(error)=&state.favorite_error {status.phase=SyncPhase::Error;status.error=Some(error.chars().take(160).collect());continuation=false;}
                                 }
                                 Err(error) => {
                                     status.phase = SyncPhase::Error;
@@ -1439,32 +1492,37 @@ impl Node {
                                 }
                             }
                             if policy.attachments {
-                                let missing = self.account_blocking(|node| {
+                                let favorites_supported=state.favorites_supported;
+                                let missing = self.account_blocking(move |node| {
                                     let mut missing = node.files.lock().expect("files mutex not poisoned").file_convs();
                                     missing.sort_by_key(|id| *id.as_bytes());
                                     missing.retain(|file| !node.media.contains(*file));
-                                    Ok(missing)
+                                    let mut queue:Vec<_>=missing.into_iter().map(|file|(file,false)).collect();
+                                    if favorites_supported && node.device_sync_policy().history {queue.extend(node.missing_favorite_files().into_iter().map(|file|(file,true)));}
+                                    Ok(queue)
                                 }).await.unwrap_or_default();
                                 status.pending_attachments = missing.len();
                                 if !missing.is_empty() && attachments.len() < ATTACHMENT_WORKERS
                                     && !active_attachments.contains(&id)
                                     && retry_attachment.get(&id).is_none_or(|at| *at <= std::time::Instant::now()) {
-                                    let file = missing[state.next_file % missing.len()];
+                                    let (file,favorite) = missing[state.next_file % missing.len()];
                                     state.next_file = state.next_file.wrapping_add(1);
                                     active_attachments.insert(id.clone());
                                     let node = self.clone(); let peer = peer.clone(); let id = id.clone();
                                     let version = if status.legacy_file_metadata { AccountSyncVersion::V1 } else { AccountSyncVersion::V2 };
-                                    let transfer_size = self.files.lock().expect("files mutex not poisoned")
-                                        .manifest(&file).map_or(0, |manifest| manifest.size());
+                                    let transfer_size = if favorite { self.favorite_file_size(file).unwrap_or(0) } else { self.files.lock().expect("files mutex not poisoned")
+                                        .manifest(&file).map_or(0, |manifest| manifest.size()) };
                                     // Bound the complete exchange without rejecting large legitimate
                                     // archives solely because they need more than a fixed short timeout.
-                                    let deadline = Duration::from_secs(30).saturating_add(
-                                        Duration::from_secs(transfer_size.div_ceil(16 * 1024)));
+                                    let deadline = attachment_deadline(transfer_size);
                                     let Some(permit) = self.runtime_work.admit() else { return; };
                                     let owner = id.clone();
                                     let task = attachments.spawn(permit.track(async move {
                                         let result = tokio::time::timeout(deadline, async {
-                                            if node.account_blocking(move |node| node.preserve_available_attachment(file, revision)).await? {
+                                            if favorite {
+                                                if node.account_blocking(move |node|node.preserve_favorite_file(file,revision)).await? {Ok(())}
+                                                else {node.pull_favorite_attachment(&peer,file,revision).await}
+                                            } else if node.account_blocking(move |node| node.preserve_available_attachment(file, revision)).await? {
                                                 Ok(())
                                             } else { node.pull_account_attachment(&peer, file, version).await }
                                         }).await.unwrap_or_else(|_| Err(NodeError::File("account attachment exchange timed out".into())));

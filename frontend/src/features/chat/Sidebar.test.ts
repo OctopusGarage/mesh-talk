@@ -139,13 +139,13 @@ beforeEach(async () => {
   await i18n.changeLanguage("en");
 });
 
-it("keeps Saved Messages available without peers or loaded contacts", () => {
+it("keeps Message Yourself available without peers or loaded contacts", () => {
   chatState.accounts = [];
   policyState.loaded = false;
   policyState.contacts = { "my-account": true };
   const html = renderToStaticMarkup(createElement(Sidebar));
   expect(html).toContain('data-testid="conversation-row-my-account"');
-  expect(html).toContain("Saved Messages");
+  expect(html).toContain("Message Yourself");
   expect(html).not.toContain('data-testid="contact-profile-my-account"');
   expect(html).not.toContain('data-testid="conversation-actions-my-account"');
 });
@@ -160,7 +160,7 @@ it("shows the personal conversation once even when its account is discovered", (
   expect(html.match(/data-testid="conversation-row-my-account"/g)).toHaveLength(
     1,
   );
-  expect(html).toContain("Saved Messages");
+  expect(html).toContain("Message Yourself");
 });
 
 it("replaces the personal row with the current runtime account", () => {

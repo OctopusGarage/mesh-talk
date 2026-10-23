@@ -14,10 +14,10 @@ for (const viewport of [
     await enterChatShell(page, "personal", "/?data=empty");
     const entry = page.getByTestId(`conversation-row-${PERSONAL}`);
     await expect(entry).toHaveCount(1);
-    await expect(entry).toHaveAccessibleName(/Saved Messages/);
+    await expect(entry).toHaveAccessibleName(/Message Yourself/);
     await entry.click();
     const header = page.getByTestId("conversation-header");
-    await expect(header).toContainText("Saved Messages");
+    await expect(header).toContainText("Message Yourself");
     const devices = page.getByTestId("personal-devices");
     await expect(devices).toHaveCount(0);
     await header.getByTestId("personal-devices-trigger").click();
@@ -72,7 +72,7 @@ test("personal entry participates in keyboard navigation without contact actions
   await entry.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByTestId("conversation-header")).toContainText(
-    "Saved Messages",
+    "Message Yourself",
   );
   await expect(
     page.getByTestId(`conversation-actions-${PERSONAL}`),
@@ -126,7 +126,7 @@ test("older linked devices explain the file metadata limitation without enabling
   ).not.toBeChecked();
 });
 
-test("Saved Messages shows certified online and offline devices without exposing other accounts", async ({
+test("Message Yourself shows certified online and offline devices without exposing other accounts", async ({
   page,
 }, testInfo) => {
   await enterChat(page);

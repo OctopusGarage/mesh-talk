@@ -157,10 +157,8 @@ for (const viewport of VIEWPORTS) {
             : process.platform;
         const needsPlatformReference =
           viewport.width === 760 &&
-          ((theme === "oled" &&
-            ["linux", "win32"].includes(process.platform)) ||
-            (["light", "dark"].includes(theme) &&
-              process.platform === "linux"));
+          ["light", "dark", "oled"].includes(theme) &&
+          ["linux", "win32"].includes(process.platform);
         const reference = needsPlatformReference
           ? name.replace(".png", `-${profile}.png`)
           : name;
