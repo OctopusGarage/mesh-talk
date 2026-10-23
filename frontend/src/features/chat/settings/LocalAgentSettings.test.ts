@@ -283,3 +283,156 @@ it("discards mutation completion after the settings identity changes", async () 
       .getAttribute("aria-checked"),
   ).toBe("false");
 });
+
+it("retries an unavailable enabled service with its exact account scope", async () => {
+  const person = { kind: "account" as const, id: "acc_bob_bbbb2222" };
+  access = {
+    ...access,
+    enabled: true,
+    running: false,
+    destinations: [person],
+    available_destinations: [{ destination: person, label: "Bob" }],
+    error: "Service startup failed",
+  };
+  await render();
+  const retry = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+    (button) => button.textContent === i18n.t("contactVisibility.retry"),
+  )!;
+  await act(async () => retry.click());
+  expect(mocks.set).toHaveBeenLastCalledWith("alice", true, [person]);
+  expect(host.querySelector('[role="status"]')!.textContent).toContain(
+    i18n.t("agentAccess.running"),
+  );
+  expect(host.textContent).toContain(i18n.t("agentAccess.person"));
+});
+
+it("keeps a failed reload actionable and clears its error after a successful retry", async () => {
+  mocks.get.mockRejectedValueOnce(new Error("Initial startup failure"));
+  await render();
+  mocks.get.mockRejectedValueOnce(new Error("Still unavailable"));
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>('[data-testid="retry-agent-access"]')!
+      .click(),
+  );
+  expect(host.querySelector('[role="alert"]')!.textContent).toContain(
+    "Still unavailable",
+  );
+  expect(
+    host.querySelector<HTMLButtonElement>('[data-testid="retry-agent-access"]')!
+      .disabled,
+  ).toBe(false);
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>('[data-testid="retry-agent-access"]')!
+      .click(),
+  );
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  expect(host.querySelector("#setting-local-agent-access")).not.toBeNull();
+});
+
+it("discards a failed reload after its settings identity retires", async () => {
+  mocks.get.mockRejectedValueOnce(new Error("Initial failure"));
+  await render();
+  let fail!: (reason: Error) => void;
+  mocks.get.mockReturnValueOnce(
+    new Promise<LocalAgentAccess>((_resolve, reject) => {
+      fail = reject;
+    }),
+  );
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>('[data-testid="retry-agent-access"]')!
+      .click(),
+  );
+  controller = { ...controller, identity: "bob:2", owner: "bob" };
+  await render();
+  await act(async () => fail(new Error("Alice reload failed")));
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  expect(host.textContent).not.toContain("Alice reload failed");
+  expect(mocks.get).toHaveBeenLastCalledWith("bob");
+});
+
+for (const outcome of ["success", "failure"] as const) {
+  it(`ignores ${outcome} clipboard completion from a retired settings identity`, async () => {
+    access = {
+      ...access,
+      enabled: true,
+      running: true,
+      destinations: [destination],
+      instructions: "Alice bootstrap",
+    };
+    let finish!: () => void;
+    mocks.copy.mockReturnValueOnce(
+      new Promise<void>((resolve, reject) => {
+        finish =
+          outcome === "success"
+            ? resolve
+            : () => reject(new Error("Clipboard unavailable"));
+      }),
+    );
+    await render();
+    await act(async () =>
+      host
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="copy-agent-instructions"]',
+        )!
+        .click(),
+    );
+    controller = { ...controller, identity: "bob:2", owner: "bob" };
+    access = { ...access, instructions: "Bob bootstrap" };
+    await render();
+    await act(async () => finish());
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      host.querySelector('[data-testid="copy-agent-instructions"]')!
+        .textContent,
+    ).toContain(i18n.t("agentAccess.copy"));
+    expect(host.textContent).not.toContain(i18n.t("agentAccess.copied"));
+    expect(host.querySelector("pre")!.textContent).toBe("Bob bootstrap");
+  });
+}
+
+it("does not publish an old owner's reload or error after its mutation fails", async () => {
+  access = { ...access, destinations: [destination] };
+  await render();
+  let fail!: (reason: Error) => void;
+  mocks.set.mockReturnValueOnce(
+    new Promise<LocalAgentAccess>((_resolve, reject) => {
+      fail = reject;
+    }),
+  );
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>("#setting-local-agent-access")!
+      .click(),
+  );
+  controller = { ...controller, identity: "bob:2", owner: "bob" };
+  access = { ...access, destinations: [] };
+  await render();
+  mocks.get.mockResolvedValueOnce({
+    ...access,
+    enabled: true,
+    running: true,
+    instructions: "Alice stale reload",
+  });
+  await act(async () => fail(new Error("Alice write failed")));
+  expect(mocks.get).toHaveBeenLastCalledWith("alice");
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  expect(host.textContent).not.toContain("Alice stale reload");
+  expect(
+    host
+      .querySelector("#setting-local-agent-access")!
+      .getAttribute("aria-checked"),
+  ).toBe("false");
+});
+
+it("does not load private settings before an owner is available", async () => {
+  controller = { ...controller, identity: "signed-out:2", owner: "" };
+  await render();
+  expect(mocks.get).not.toHaveBeenCalled();
+  expect(
+    host.querySelector<HTMLButtonElement>("#setting-local-agent-access")!
+      .disabled,
+  ).toBe(true);
+});
