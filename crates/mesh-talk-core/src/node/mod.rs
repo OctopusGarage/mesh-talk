@@ -143,4 +143,7 @@ pub use channels::ChannelRecovery;
 mod trust_card;
 pub use trust_card::{Introduction, TimestampWitness, TrustCard};
 
-mod trust_card_io;
+mod account_profile_data;
+pub use account_profile_data::AccountProfile;
+
+mod account_profile_io;

@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use zeroize::Zeroize;
 
-pub const SNAPSHOT_SCHEMA_VERSION: u16 = 3;
+pub const SNAPSHOT_SCHEMA_VERSION: u16 = 4;
 const MAGIC: &[u8; 8] = b"MTSNAP1\0";
 const MAX_RECORDS: u64 = 10_000_000;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
@@ -117,6 +117,13 @@ pub enum SnapshotRecordV1 {
     /// Schema 3 appends this tag; earlier positional tags stay unchanged.
     PeerTrustCard {
         card: crate::node::TrustCard,
+    },
+    /// Schema 4 stores authoritative account metadata independently of profiles.
+    AccountCreation {
+        created_at_ms: Option<u64>,
+    },
+    AccountProfile {
+        profile: crate::node::AccountProfile,
     },
 }
 
@@ -295,6 +302,10 @@ pub struct SnapshotValidator {
     recalls: HashSet<([u8; 32], [u8; 32])>,
     profiles: HashSet<String>,
     trust_cards: HashSet<String>,
+    current_profiles: HashSet<String>,
+    current_profile_bytes: usize,
+    account_created_at_ms: Option<Option<u64>>,
+    own_profile_created_at_ms: Option<Option<u64>>,
     trust_card_bytes: usize,
     account_contacts: HashSet<String>,
     event_ids: HashMap<[u8; 32], SignedEventInfo>,
@@ -363,6 +374,10 @@ impl SnapshotValidator {
             recalls: HashSet::new(),
             profiles: HashSet::new(),
             trust_cards: HashSet::new(),
+            current_profiles: HashSet::new(),
+            current_profile_bytes: 0,
+            account_created_at_ms: None,
+            own_profile_created_at_ms: None,
             trust_card_bytes: 0,
             account_contacts: HashSet::new(),
             event_ids: HashMap::new(),
@@ -424,6 +439,45 @@ impl SnapshotValidator {
                 }
                 if !self.profiles.insert(account_id.clone()) {
                     return Err(SnapshotError::DuplicateRecord);
+                }
+            }
+            SnapshotRecordV1::AccountCreation { created_at_ms } => {
+                if self.schema_version < 4 {
+                    return Err(SnapshotError::UnsupportedVersion);
+                }
+                if crate::identity::account::Account::from_secret_bytes_with_created_at(
+                    [0; 32],
+                    *created_at_ms,
+                )
+                .is_none()
+                {
+                    return Err(SnapshotError::InvalidAccount);
+                }
+                if self.account_created_at_ms.is_some() {
+                    return Err(SnapshotError::DuplicateRecord);
+                }
+                self.account_created_at_ms = Some(*created_at_ms);
+            }
+            SnapshotRecordV1::AccountProfile { profile } => {
+                if self.schema_version < 4 {
+                    return Err(SnapshotError::UnsupportedVersion);
+                }
+                if !profile.verify() {
+                    return Err(SnapshotError::InvalidEncoding);
+                }
+                if profile.account_id() == self.own_account_id {
+                    self.own_profile_created_at_ms = Some(profile.created_at_ms);
+                }
+                if !self.current_profiles.insert(profile.account_id()) {
+                    return Err(SnapshotError::DuplicateRecord);
+                }
+                self.current_profile_bytes = self
+                    .current_profile_bytes
+                    .saturating_add(profile.encode().len());
+                if self.current_profiles.len() > 1024
+                    || self.current_profile_bytes > 32 * 1024 * 1024
+                {
+                    return Err(SnapshotError::SizeLimit);
                 }
             }
             SnapshotRecordV1::PeerTrustCard { card } => {
@@ -587,6 +641,14 @@ impl SnapshotValidator {
     pub fn finish(self) -> Result<(), SnapshotError> {
         if self.accepted != self.expected {
             return Err(SnapshotError::RecordCount);
+        }
+        if self.schema_version >= 4 && self.account_created_at_ms.is_none() {
+            return Err(SnapshotError::InvalidAccount);
+        }
+        if self.own_profile_created_at_ms.is_some()
+            && self.own_profile_created_at_ms != self.account_created_at_ms
+        {
+            return Err(SnapshotError::InvalidAccount);
         }
         for progress in self.media.values() {
             if progress.written != progress.size

@@ -39,7 +39,8 @@ export const test = base.extend({
       // adding test controls to the product UI: ?data=worst|huge|peers-huge|members-huge|empty|offline.
       const dataMode = new URLSearchParams(window.location.search).get("data");
       // --- Identity ---------------------------------------------------------
-      const trustCardStore: Record<string, Record<string, unknown>> = {};
+      const accountProfiles: Record<string, Record<string, unknown>> = {};
+      let ownDisplayName = "tester";
       const SELF = { device: "device_self_0001", account: "acc_self_aaaa1111" };
       (window as unknown as Record<string, unknown>).__mockReplaceIdentity = (
         accountId: string,
@@ -819,11 +820,16 @@ export const test = base.extend({
               },
             };
           },
-          rename_account: (a) => ({
-            id: "u_self",
-            username: "tester",
-            display_name: String(a.newDisplayName ?? "tester"),
-          }),
+          rename_account: (a) => {
+            ownDisplayName = String(a.newDisplayName ?? "tester");
+            if (accountProfiles[SELF.account])
+              accountProfiles[SELF.account].display_name = ownDisplayName;
+            return {
+              id: "u_self",
+              username: "tester",
+              display_name: String(a.newDisplayName ?? "tester"),
+            };
+          },
           logout: () => {
             nativeLocked = false;
             return { success: true };
@@ -956,68 +962,26 @@ export const test = base.extend({
             return null;
           },
 
-          // Signed public cards are separate from private verifiedAccounts.
-          get_trust_card: (a) => trustCardStore[String(a.accountId)] ?? null,
-          publish_trust_card: (a) => {
-            trustCardStore[SELF.account] = {
+          // Public profiles contain no private trust history or editable identity metadata.
+          get_account_profile: (a) =>
+            accountProfiles[String(a.accountId)] ?? {
+              account_id: String(a.accountId),
+              display_name:
+                String(a.accountId) === SELF.account ? ownDisplayName : "Bob",
+              bio:
+                String(a.accountId) === BOB.account_id ? "Hello from Bob" : "",
+              created_at_ms:
+                String(a.accountId) === SELF.account ? null : 1700000000000,
+            },
+          save_account_bio: (a) => {
+            accountProfiles[SELF.account] = {
               account_id: SELF.account,
-              revision: 1,
-              display_name: String(a.displayName),
+              display_name: ownDisplayName,
               bio: String(a.bio),
-              created_at_ms: a.createdAtMs ?? null,
-              avatar: null,
-              introductions: [],
-              witnesses: [],
-              signed_json: JSON.stringify({
-                schema: 1,
-                kind: "card",
-                payload: {
-                  account_id: SELF.account,
-                  display_name: a.displayName,
-                  bio: a.bio,
-                  created_at_ms: a.createdAtMs ?? null,
-                },
-              }),
+              created_at_ms: null,
             };
             return null;
           },
-          import_trust_artifact: (a) => {
-            const artifact = JSON.parse(String(a.json));
-            if (artifact.schema !== 1 || !artifact.payload)
-              throw new Error("Invalid signed artifact envelope");
-            if (artifact.payload.invalid_signature)
-              throw new Error("Invalid signature");
-            if (artifact.kind === "card") {
-              trustCardStore[artifact.payload.account_id] = {
-                ...artifact.payload,
-                revision: 1,
-                avatar: null,
-                introductions: [],
-                witnesses: [],
-                signed_json: String(a.json),
-              };
-            }
-            return null;
-          },
-          create_trust_introduction: (a) =>
-            JSON.stringify({
-              schema: 1,
-              kind: "introduction",
-              payload: {
-                account_id: a.accountId,
-                note: a.note,
-                issuer_account_id: SELF.account,
-              },
-            }),
-          witness_trust_creation: (a) =>
-            JSON.stringify({
-              schema: 1,
-              kind: "witness",
-              payload: {
-                account_id: a.accountId,
-                issuer_account_id: SELF.account,
-              },
-            }),
           // trust
           get_trust: (a) => ({
             account_id: String(a.accountId),
@@ -1553,6 +1517,17 @@ export const test = base.extend({
           // autostart plugin (invoked as plugin commands; mocked as no-ops below)
         };
 
+      (window as unknown as Record<string, unknown>).__mockSetAccountBio = (
+        accountId: string,
+        bio: string,
+      ) => {
+        accountProfiles[accountId] = {
+          account_id: accountId,
+          display_name: accountId === SELF.account ? ownDisplayName : "Bob",
+          bio,
+          created_at_ms: accountId === SELF.account ? null : 1700000000000,
+        };
+      };
       // Expose deterministic event emission for tests that simulate inbound traffic.
       (window as unknown as Record<string, unknown>).__mockEmit = (
         event: string,

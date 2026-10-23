@@ -49,8 +49,8 @@ The [group reception guide](group-conversation-reception.md) owns ordering, unre
 tracking, catch-up notifications and local recovery observations. For embedding
 the UI-free protocol core, see the [core crate guide](../crates/mesh-talk-core/README.md).
 
-[Peer trust cards](peer-trust.md) explains signed public profiles, creation claims,
-independent witness receipts and private relationship evidence.
+[Profiles and contact verification](peer-trust.md) explains automatic profile
+signatures, immutable account creation metadata and private relationship evidence.
 
 ## Bots and local agents
 

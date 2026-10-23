@@ -1,113 +1,103 @@
-# Peer trust cards
+# Account profiles and contact verification
 
-A trust card is an account-signed public statement. Its signature authenticates
-which account published its contents; it does not establish a person's identity,
-honesty, or a trustworthy wall clock. Account IDs remain derived from the account
-public key and never depend on a profile name or timestamp.
+An account profile contains one display name, an optional biography (About), an
+avatar and an optional creation timestamp. Editing the ordinary nickname or About
+saves the profile locally; signing and synchronization happen automatically.
+The conversation header shows the contact's About text in the available space;
+its full text is available in the contact's profile. Account ID copying and QR
+sharing identify the account. They do not grant verification.
 
-## Evidence and its limits
+## Creation metadata
 
-| Evidence | Meaning | Authority |
-| --- | --- | --- |
-| Signed name, bio and avatar | The account signed these presentation claims. | Account key |
-| Creation date | The account declares this date; it may be backdated. | Account key and owner's clock |
-| First observed by this installation | This installation first recorded a certified account/device observation at this local time. | Private local history and local clock |
-| Device-change history | This installation observed different certified device identities for the account. A multi-device account can legitimately alternate devices. | Private local history |
-| Verified contact | You explicitly compared the device safety number through a trusted independent channel. | Your local decision |
-| Signed introduction | An identifiable issuer made the displayed statement about the account. | Issuer key; credibility depends on your relationship with the issuer |
-| Creation witness receipt | An independent account states it observed this account's signed creation declaration by its stated local time. | Witness key and clock; not a trusted timestamp authority |
+New accounts record their creation timestamp when their account key is generated.
+The encrypted account keystore installs the key and timestamp together, before
+profile initialization. Concurrent creation cannot overwrite an already created
+account. The new file framing makes old clients fail authentication rather than
+misinterpret metadata as a different secret. Use an updated client for these
+account files. A failed startup can retry without losing or replacing that timestamp.
+Neither the desktop edit commands nor the ordinary profile edit intent accepts a
+creation timestamp. An established timestamp cannot change through profile edits,
+rename, avatar changes, login, recovery or device linking.
 
-A valid witness signature alone does not establish an accurate date. Multiple
-receipts do not create a consensus clock or prevent collusion, and an old account
-can be compromised. No global trust score, automatic verification, or human
-identity badge is derived from these fields.
+The timestamp uses the originating device's local clock. Automatic recording and
+an immutable application field do not establish independently trusted wall time.
+A modified client or an account-key holder can sign false presentation data.
+Account IDs derive only from the public key, never from names or timestamps.
 
-New desktop mesh accounts receive a signed creation claim when their account key
-is first generated. That timestamp still uses the local clock and remains
-self-declared. Missing creation evidence remains unknown. Existing local sign-in user creation
-and backup dates are different facts and must not be relabeled as mesh account
-creation. Once published, a known creation claim is preserved by the normal edit
-path. This application rule does not prevent an account owner using a modified
-client to sign a false or conflicting claim.
+Legacy accounts without creation metadata remain unknown. Local user registration,
+first login, backup creation and filesystem timestamps are different facts and
+must never fill that gap. Old `MTC1` cards may contain manually declared dates;
+those dates and their witness receipts never become account creation metadata.
+Legacy peer names and biographies remain readable, with the creation date unknown.
 
-## Public card and private overlay
+Versioned pairing transfers creation metadata independently of message-history
+sharing. New initiators require metadata-capable responders: a failed negotiation fails
+without silently retrying an older format that would lose creation metadata.
+Upgrade the other device before linking if it lacks that support. Legacy request
+encodings remain readable by the responder; absent historical metadata stays unknown. Snapshot schema 4 requires a singleton
+`AccountCreation` record even when the timestamp is unknown. A snapshot's own
+profile must agree with that record. Recovery installs the original metadata
+before opening the restored account; a backup's timestamp is never substituted.
+Schemas 1–3 remain readable without inventing a creation timestamp.
 
-Open your profile to publish a signed display name and short bio, with an optional
-self-declared creation date. Open a contact's verification dialog to inspect their
-public card alongside your private first-observed time and device history.
-Account QR codes identify the account; they do not encode verification approval
-or the entire signed profile.
+## Private verification
 
-Publishing finishes once the signed card and its outgoing events are committed
-locally. Peer and post-office fanout continues independently; an unavailable
-contact must not hold the profile dialog busy or block unrelated chat commands.
-Local send commits acquire host session authority before the delivery journal so
-concurrent card/legacy-avatar publication cannot reverse that lock order.
+| Information | Meaning |
+| --- | --- |
+| Signed profile | This account authenticated these presentation fields. |
+| Account creation time | The originating client recorded this local-clock time when generating the account. |
+| First observed | This installation first recorded a certified account/device observation at this local time. |
+| Device changes | This installation observed different certified devices for the account; multi-device use can be legitimate. |
+| Verified contact | You explicitly compared the device safety number through an independent trusted channel. |
 
-Copy or download the signed JSON to share a machine-verifiable artifact. Import
-checks the version, bounds, signatures and account bindings. A card import never
-marks a contact verified. Introductions and witness receipts can be generated for
-a contact, shared with that person and imported into their own card. Witnessing
-requires a known creation claim. An issuer's credibility must be checked
-separately; a card or screenshot cannot transfer your private verification.
+A valid profile signature never establishes a person's identity, honesty or
+verification status. Profiles never grant verified-contact message pulls.
+First-observed time, device history, aliases and verification flags remain private
+local state. Legacy observation records without a date remain unknown.
 
-Public exports contain the signed card or proof only. They never contain your
-first-observed time, local device-change history, aliases or verification flags.
-Sharing a signed card makes its account identifier and included introductions
-linkable; publish only information you intend other peers to retain.
+The application has no public introduction, creation-witness, signed JSON import
+or export, or separate profile-publication workflow. Frozen legacy signatures and
+snapshot tags remain readable for compatibility; they do not restore those user
+capabilities or convert private observations into public statements.
 
-Private observation history uses a versioned local format. Legacy trust records
-remain readable without inventing observation dates. Older clients see the new
-format as unknown trust, so they cannot mistake an original observation for the
-current verification pin. Using an older client can replace that local history.
+## Storage and delivery
 
-## Implementation ownership
+`identity/account.rs` and `identity/account_keystore.rs` own creation metadata.
+`node/account_profile_data.rs` owns bounded `MTP3` profile signatures and encrypted
+current-profile storage. `node/account_profile_io.rs` owns admitted local edits,
+legacy migration and authenticated reception. `src-tauri/src/account_profile.rs`
+exposes session-bound profile reads and biography edits; the ordinary nickname
+uses the existing authentication owner and updates the same profile.
 
-The protocol core owns signed artifact domains, bounded decoding, authenticated
-account bindings, durable revisions, encrypted storage and profile-event delivery.
-Desktop commands retain exact-session authority through local acceptance and
-adapt bounded versioned JSON; they do not implement signatures. The desktop trust
-store owns private observation history and explicit device verification. Frontend
-adapters pass typed intents, and existing profile/verification dialogs render the
-source and limits of each claim.
+The new profile store retains at most 1,024 current accounts and 32 MiB of encoded
+profiles, with bounded journal compaction. Names are capped at 256 UTF-8 bytes,
+biographies at 2 KiB and avatars at 128 KiB. Wire decoding is bounded before
+deserialization, rejects trailing bytes and rechecks signatures. Equal profile
+revisions use the same clear-first avatar order as compatibility profiles, with
+signature ordering resolving metadata-only ties; an established creation timestamp cannot
+be changed by a later profile. These are resource and consistency rules, not
+reputation measures.
 
-Legacy avatar profiles remain readable. Each new publication emits the signed
-card followed by its legacy avatar under one publication lock. The avatar event
-names the card event as a required parent, so missing-card delivery cannot cause
-an avatar compatibility update to supersede unseen card metadata. Profile-log
-compaction retains the latest unreferenced leaves per author and every referenced
-card parent; superseded parents become eligible after their old children are
-removed.
-The runtime remembers successful public-profile revisions per present peer.
-Failed direct and relay publication remains eligible on the next bounded poll;
-retries reuse the accepted profile events rather than appending duplicate events.
-At most two profile deliveries run concurrently, with untouched peers ahead of
-retries and older attempts ahead of newer ones. Direct delivery and relay
-publication race within the existing bounded control-exchange deadlines, so an
-unresponsive peer cannot indefinitely stop publication to other contacts. These
-futures remain owned by the runtime task and are dropped during retirement.
-Opaque mailbox pages may deliver an avatar before its required signed-card
-parent. The receiver defers that child for the current mailbox operation, fetches
-later pages, and retries it in a subsequent drain. The child is never accepted or
-marked durably seen until its ordinary parent and signature checks succeed.
-Loopback coverage also requires messages in that mailbox and their authenticated
-recipient receipts to converge without a direct TCP route.
-A newer profile or avatar clear is eligible even if the peer never disconnects.
-Peer disappearance removes its cached publication, so reconnects receive the
-current profile again. Relay permissions and recipient pull authorization remain
-owned by their existing delivery policies.
-Trust cards are an additive capability;
-older clients cannot display their new fields. Portable backup records preserve
-signed public cards without converting private observations into public evidence.
-See [account and device identity](ARCHITECTURE.md), [module ownership](module-boundaries.md)
-and [contact verification](help/topics/verify-contact.md).
+The durable profile is the accepted edit intent. Its avatar projection is repaired
+on retry or reopening if a secondary write fails. Local acceptance returns without
+waiting for network fanout. Host authority is entered before the delivery journal;
+profile and avatar publication share the publication lock. A biography edit derives
+the current nickname inside that lock, preventing a queued edit from undoing a
+concurrent rename.
 
-## Resource bounds
+Each new publication emits `MTP3` followed by its `MTPF1` compatibility avatar. The
+avatar event requires the profile event as a parent. Old `MTC1` and `MTPF2` records
+remain authenticated and readable; their retired metadata is not reissued. Profile
+compaction retains required parents and current leaves. Child-first opaque mailbox
+pages defer the child until ordinary parent validation succeeds, without blocking
+messages and authenticated recipient receipts in the same mailbox.
 
-The core accepts at most 256 UTF-8 bytes for the signed name, 2 KiB each for
-bio and introduction text, 128 KiB for an avatar, and 16 introductions plus 16
-witness receipts per card. Wire decoding rejects inputs larger than 224 KiB
-before deserializing. Public JSON import is capped at 1 MiB to allow the byte-array
-expansion of an avatar. The encrypted card store retains at most 1,024 current
-accounts and 32 MiB of current encoded cards; superseded journal entries are
-compacted separately. These are resource limits, not reputation thresholds.
+The runtime tracks successful profile revisions per present peer. Failed direct
+or relay attempts retry accepted events rather than appending duplicates. At most
+two profile deliveries run concurrently, with untouched peers ahead of retries.
+Existing bounded control deadlines and runtime cancellation apply. A new revision,
+including an avatar clear, is eligible without a reconnect; disappearing peers
+lose their publication cache and receive the current profile when they return.
+
+See [account and device identity](ARCHITECTURE.md), [module ownership](module-boundaries.md),
+[backup recovery](backup-recovery.md) and [contact verification](help/topics/verify-contact.md).

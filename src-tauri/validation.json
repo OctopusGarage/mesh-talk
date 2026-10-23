@@ -92,7 +92,7 @@
         "guide": "docs/module-boundaries.md#coordinated-state-owners",
         "invariants": [
           {
-            "name": "Signed-card acceptance releases the UI before admitted network fanout completes",
+            "name": "Profile acceptance releases the UI before admitted network fanout completes",
             "reference": "docs/peer-trust.md"
           },
           {
@@ -439,24 +439,26 @@
       ]
     },
     {
-      "id": "desktop-trust-cards",
+      "id": "desktop-account-profile",
       "paths": [
-        "src-tauri/src/trust_cards.rs"
+        "src-tauri/src/trust_cards.rs",
+        "src-tauri/src/account_profile.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk",
           "filters": [
-            "trust_cards::tests::",
-            "owner_commands::tests::registered_trust_card_commands_reject_wrong_owner_and_locked_app",
-            "owner_commands::tests::registered_trust_card_commands_round_trip_public_evidence_without_verifying",
-            "owner_commands::tests::registered_trust_card_commands_reject_replaced_queued_authority",
+            "account_profile::tests::",
+            "owner_commands::tests::registered_account_profile_commands_reject_wrong_owner_and_locked_app",
+            "owner_commands::tests::registered_account_profile_commands_save_bio_without_accepting_identity_edits",
+            "owner_commands::tests::registered_account_profile_commands_reject_replaced_queued_authority",
+            "owner_commands::tests::account_profile_save_returns_after_local_commit_with_a_stalled_peer",
             "trust::tests::"
           ]
         }
       ],
       "capability": {
-        "summary": "Adapt signed public trust evidence behind exact-session authority without importing private verification.",
+        "summary": "Read ordinary public profiles and save biographies behind exact-session authority without exposing creation timestamps or proof editing.",
         "guide": "docs/peer-trust.md",
         "invariants": [
           {
@@ -464,13 +466,13 @@
             "reference": "docs/peer-trust.md"
           },
           {
-            "name": "Logout and replacement invalidate trust card mutation authority",
+            "name": "Logout and replacement invalidate profile mutation authority",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       },
       "escalation": [
-        "Run trust-card browser interaction and native owner/lock/replacement command evidence; JSON parser unit tests alone do not prove runtime wiring."
+        "Run account-profile browser interaction and native owner/lock/replacement command evidence; verify ordinary rename updates the same signed profile."
       ]
     },
     {
@@ -546,13 +548,14 @@
       ]
     },
     {
-      "id": "desktop-trust-card-acceptance",
+      "id": "desktop-account-profile-acceptance",
       "paths": [
         "src-tauri/src/trust_cards.rs",
-        "src-tauri/src/trust.rs"
+        "src-tauri/src/trust.rs",
+        "src-tauri/src/account_profile.rs"
       ],
       "browser": [
-        "e2e/trust-cards.spec.ts"
+        "e2e/account-profiles.spec.ts"
       ],
       "native": [
         "host"

@@ -27,9 +27,10 @@ not depend on a desktop login, IP address or display name.
 _Avoid_: local user, machine, device.
 
 **Account profile**:
-Signed account-level avatar state, with
-revisions that order updates across devices.
-_Avoid_: local login profile, device identity, unverified display label.
+Account-authenticated nickname, biography and avatar, saved through ordinary
+profile editing and synchronized automatically. It carries read-only creation
+metadata when known; revisions order updates across devices.
+_Avoid_: local login profile, device identity, proof of a person's identity.
 
 **Device**:
 A participant identified by its persistent signing and key-agreement identity.
@@ -239,16 +240,16 @@ _Avoid_: post-office membership, global archive.
 
 ## Peer trust evidence
 
-- **Trust card**: an Account-signed public profile statement, not proof of a human
-  identity or honesty. A valid signature identifies the claiming Account.
-- **Creation claim**: a self-declared Account creation date. Unknown dates remain
-  unknown; local User registration and backup dates are not Account creation.
-- **Creation witness receipt**: an independent Account’s signed observation of an
-  Account creation claim, using the witness’s clock. It is not a trusted clock or
-  timestamp-authority certificate.
-- **Signed introduction**: an Account-attributed statement about another Account;
-  its credibility depends on the issuer, not the number of signatures.
+- **Public profile signature**: authenticates the Account publishing a profile,
+  not a person's identity or honesty. It never grants private verification.
+- **Account creation time**: immutable metadata recorded with a newly generated
+  Account key using the originating device's clock. Unknown legacy dates remain
+  unknown; local User registration, backup dates and retired self-declared card
+  claims are different facts.
 - **First observed by this installation**: private local evidence of the first
   recorded certified Account/Device observation. It is never a public account age.
+- **Legacy trust card**: a frozen signed profile/proof format retained only for
+  old events and backups. Introductions and creation-witness receipts provide no
+  current application workflow or verification authority.
 
-The [peer trust guide](docs/peer-trust.md) owns evidence limits and sharing rules.
+The [profile and verification guide](docs/peer-trust.md) owns evidence limits and sharing rules.

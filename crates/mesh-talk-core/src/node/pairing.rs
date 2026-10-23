@@ -17,6 +17,8 @@ const REQ_MAGIC: &[u8] = b"MTPQ1";
 const SELECTED_REQ_MAGIC: &[u8] = b"MTPQ2";
 const SELECTED_PAIR_DOMAIN: &[u8] = b"mesh-talk-pairing-v2";
 const RESP_MAGIC: &[u8] = b"MTPS1";
+const METADATA_REQ_MAGIC: &[u8] = b"MTPQ3";
+const METADATA_RESP_MAGIC: &[u8] = b"MTPS2";
 const BACKFILL_MAGIC: &[u8] = b"MTBF1";
 
 /// A one-time, high-entropy linking code shown by the linker and entered on the joiner.
@@ -79,6 +81,34 @@ impl PairingCode {
         h.finalize().into()
     }
 
+    pub fn authenticator_metadata(
+        &self,
+        linker_ed: &[u8; 32],
+        joiner_ed: &[u8; 32],
+        history: bool,
+    ) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(b"mesh-talk-pairing-v3");
+        h.update(self.0);
+        h.update(linker_ed);
+        h.update(joiner_ed);
+        h.update([u8::from(history)]);
+        h.finalize().into()
+    }
+
+    pub fn verify_metadata(
+        &self,
+        linker_ed: &[u8; 32],
+        joiner_ed: &[u8; 32],
+        history: bool,
+        tag: &[u8; 32],
+    ) -> bool {
+        ct_eq(
+            &self.authenticator_metadata(linker_ed, joiner_ed, history),
+            tag,
+        )
+    }
+
     /// Verify a V2 selection without accepting a V1 proof in its place.
     pub fn verify_selected(
         &self,
@@ -135,10 +165,21 @@ impl PairingRequest {
         frame(SELECTED_REQ_MAGIC, &(self, history))
     }
 
-    /// Recognize either version. Authorization must use `decode_selected` so the
-    /// selection and its proof domain are preserved.
+    pub fn encode_metadata(&self, history: bool) -> Vec<u8> {
+        frame(METADATA_REQ_MAGIC, &(self, history))
+    }
+
+    pub fn decode_negotiated(bytes: &[u8]) -> Option<(Self, Option<bool>, bool)> {
+        if let Some((request, history)) = unframe(METADATA_REQ_MAGIC, bytes) {
+            return Some((request, Some(history), true));
+        }
+        Self::decode_selected(bytes).map(|(request, history)| (request, history, false))
+    }
+
+    /// Recognize all versions. Authorization must use `decode_negotiated` so
+    /// the selection and its proof domain are preserved.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        Self::decode_selected(bytes).map(|(request, _)| request)
+        Self::decode_negotiated(bytes).map(|(request, _, _)| request)
     }
 
     /// `None` selection denotes the unchanged V1 request, which requests history.
@@ -163,6 +204,19 @@ impl PairingResponse {
     pub fn encode(&self) -> Vec<u8> {
         frame(RESP_MAGIC, self)
     }
+    pub fn encode_metadata(&self, created_at_ms: Option<u64>) -> Vec<u8> {
+        frame(METADATA_RESP_MAGIC, &(self, created_at_ms))
+    }
+
+    pub fn decode_metadata(bytes: &[u8]) -> Option<(Self, Option<u64>)> {
+        let (response, created_at_ms) = unframe(METADATA_RESP_MAGIC, bytes)?;
+        crate::identity::account::Account::from_secret_bytes_with_created_at(
+            [0; 32],
+            created_at_ms,
+        )?;
+        Some((response, created_at_ms))
+    }
+
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         unframe(RESP_MAGIC, bytes)
     }
@@ -195,6 +249,26 @@ mod tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn pairing_v3_metadata_proof_is_not_interchangeable_with_v2_or_v1() {
+        let code = PairingCode::generate();
+        let tag = code.authenticator_metadata(&[1; 32], &[2; 32], false);
+        assert!(code.verify_metadata(&[1; 32], &[2; 32], false, &tag));
+        assert!(!code.verify_metadata(&[1; 32], &[2; 32], true, &tag));
+        assert!(!code.verify_metadata(&[9; 32], &[2; 32], false, &tag));
+        assert!(!code.verify_metadata(&[1; 32], &[9; 32], false, &tag));
+        assert!(!code.verify_selected(&[1; 32], &[2; 32], false, &tag));
+        assert!(!code.verify(&[1; 32], &[2; 32], &tag));
+        let request = PairingRequest {
+            joiner: DeviceIdentity::generate().public(),
+            tag,
+        };
+        assert_eq!(
+            PairingRequest::decode_negotiated(&request.encode_metadata(false)),
+            Some((request, Some(false), true))
+        );
+    }
 
     #[test]
     fn pairing_v2_request_is_recognized_without_changing_legacy_bytes() {

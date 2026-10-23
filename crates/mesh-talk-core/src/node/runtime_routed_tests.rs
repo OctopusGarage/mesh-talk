@@ -408,7 +408,10 @@ async fn start_opens_a_node_and_exposes_its_identity() {
     assert_eq!(runtime.user_id().len(), 32); // user_id is 32 hex chars
     assert!(runtime.peers().is_empty());
     assert!(runtime.peer_public("nobody").is_none());
-    let card = runtime.handle().trust_card(runtime.account_id()).unwrap();
+    let card = runtime
+        .handle()
+        .account_profile(runtime.account_id())
+        .unwrap();
     assert_eq!(card.display_name, "Alice");
     assert!(card.created_at_ms.is_some());
     assert!(card.verify());
@@ -450,12 +453,28 @@ async fn start_opens_a_node_and_exposes_its_identity() {
 
 #[tokio::test]
 async fn existing_account_without_creation_evidence_stays_unknown() {
+    use crate::storage::encryption::{EncryptionKey, encrypt_data, generate_salt};
+
     let dir = tempfile::tempdir().unwrap();
     let profile = dir.path().join("accounts").join("legacy");
     std::fs::create_dir_all(&profile).unwrap();
     let account = crate::identity::account::Account::generate();
-    crate::identity::account_keystore::save(&profile.join("account.keystore"), "pw", &account)
-        .unwrap();
+    // An actual pre-metadata keystore contains only the encrypted secret.
+    // Saving a newly generated account now correctly persists its creation date.
+    let salt = generate_salt();
+    let key = EncryptionKey::from_password("pw", &salt).unwrap();
+    let (ciphertext, nonce) = encrypt_data(&account.secret_bytes(), &key).unwrap();
+    let mut legacy = salt.to_vec();
+    legacy.extend_from_slice(&nonce);
+    legacy.extend_from_slice(&ciphertext);
+    let keystore = profile.join("account.keystore");
+    std::fs::write(&keystore, legacy).unwrap();
+    assert_eq!(
+        crate::identity::account_keystore::load(&keystore, "pw")
+            .unwrap()
+            .created_at_ms(),
+        None
+    );
     let runtime = NodeRuntime::start(
         dir.path(),
         "legacy",
@@ -470,7 +489,14 @@ async fn existing_account_without_creation_evidence_stays_unknown() {
     )
     .await
     .unwrap();
-    assert!(runtime.handle().trust_card(&account.account_id()).is_none());
+    assert!(
+        runtime
+            .handle()
+            .account_profile(&account.account_id())
+            .unwrap()
+            .created_at_ms
+            .is_none()
+    );
     runtime.stop().await;
 }
 
@@ -497,6 +523,14 @@ async fn set_display_name_updates_advertised_name_and_own_record() {
 
     // Rename to a permissive (spaces + emoji) display name.
     runtime.set_display_name("Alice Renamed 🐻");
+    assert_eq!(
+        runtime
+            .handle()
+            .account_profile(runtime.account_id())
+            .unwrap()
+            .display_name,
+        "Alice Renamed 🐻"
+    );
 
     // The advertised name and our own durable record both reflect the change; the
     // identity (user_id/account_id) is untouched.

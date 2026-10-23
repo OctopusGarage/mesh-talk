@@ -311,7 +311,11 @@ export async function executePlan(
       throw Error(`Selected diagnostic ran zero passing Node tests: ${file}`);
   }
   for (const selection of prepared) {
-    const output = await execute(selection.executable, selection.filters, cwd);
+    // Cargo applies repository configuration (including RUST_TEST_THREADS).
+    // Executing the inventoried binary directly bypasses that environment.
+    const output = await execute("cargo", [
+      "test", "--locked", "-p", selection.package, "--lib", "--", ...selection.filters,
+    ], cwd);
     if (rustTestCount(output) < selection.count)
       throw Error(
         `Expected ${selection.count} nonignored ${selection.package} tests; fewer executed`,
@@ -343,6 +347,22 @@ export async function executePlan(
       log(
         `Frontend: ${count} passing test cases in ${plan.frontend.length} selected files`,
       );
+    } catch (error) {
+      // Vitest's JSON reporter writes assertion failures only to this file.
+      // Preserve their diagnostics before cleaning up the temporary report.
+      try {
+        const results = JSON.parse(await readFile(report, "utf8"));
+        const failures = (results.testResults ?? []).flatMap(suite => [
+          ...(suite.message ? [`${suite.name}: ${suite.message}`] : []),
+          ...(suite.assertionResults ?? [])
+            .filter(assertion => assertion.status === "failed")
+            .map(assertion => `${suite.name}: ${assertion.fullName}\n${(assertion.failureMessages ?? []).join("\n")}`),
+        ]);
+        if (failures.length) error.message += `\n${failures.join("\n").slice(0, 6000)}`;
+      } catch {
+        // Missing/malformed reports must not hide the original execution error.
+      }
+      throw error;
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

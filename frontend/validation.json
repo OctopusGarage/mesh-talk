@@ -458,7 +458,7 @@
       ]
     },
     {
-      "id": "frontend-trust-cards",
+      "id": "frontend-account-profile",
       "paths": [
         "frontend/src/features/chat/TrustCardPanel.tsx",
         "frontend/src/lib/api/trustCards.ts",
@@ -467,30 +467,41 @@
         "frontend/e2e/trust-cards.spec.ts",
         "frontend/src/features/chat/TrustCardPanel.test.ts",
         "frontend/src/locales/en.json",
-        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png"
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png",
+        "frontend/src/features/chat/AccountProfilePanel.tsx",
+        "frontend/src/features/chat/AccountProfilePanel.test.ts",
+        "frontend/src/lib/api/accountProfile.ts",
+        "frontend/src/lib/accountProfile.test.ts",
+        "frontend/src/store/accountProfiles.ts",
+        "frontend/src/store/accountProfiles.test.ts",
+        "frontend/e2e/account-profiles.spec.ts",
+        "frontend/src/features/chat/ConversationHeadersSession.test.ts"
       ],
       "frontend": [
-        "src/lib/trustCard.test.ts",
+        "src/lib/accountProfile.test.ts",
         "src/features/chat/VerifyContactDialog.test.ts",
-        "src/features/chat/TrustCardPanel.test.ts"
+        "src/features/chat/AccountProfilePanel.test.ts",
+        "src/store/accountProfiles.test.ts",
+        "src/features/chat/ConversationHeaders.test.ts",
+        "src/features/chat/ConversationHeadersSession.test.ts"
       ],
       "consumers": ["frontend-chat"],
       "capability": {
-        "summary": "Present signed public profiles and explicit proofs separately from device-local verification and observation history.",
-        "guide": "docs/ARCHITECTURE.md",
+        "summary": "Edit one ordinary profile and show the same About text in conversation headers and contact details with session-bound refresh.",
+        "guide": "docs/peer-trust.md",
         "invariants": [
           {
-            "name": "Signed statements do not automatically verify people or export local trust",
-            "reference": "docs/ARCHITECTURE.md"
+            "name": "Creation dates are read-only metadata; legacy unknown dates stay unknown",
+            "reference": "docs/peer-trust.md"
           },
           {
-            "name": "Creation dates remain unknown until explicitly declared",
-            "reference": "docs/ARCHITECTURE.md"
+            "name": "Retired asynchronous reads cannot populate a replacement account or contact; accepted profile changes refresh visible biographies",
+            "reference": "docs/peer-trust.md"
           }
         ]
       },
       "escalation": [
-        "Run e2e/trust-cards.spec.ts for publish/import/export/proof controls. Native signatures, persistence and transport require owning Rust evidence."
+        "Run e2e/account-profiles.spec.ts for ordinary profile editing, read-only dates, removed proof controls and header/detail biography consistency. Native identity, persistence and transport require owning Rust evidence."
       ]
     },
     {
@@ -863,7 +874,7 @@
       "native": ["host"]
     },
     {
-      "id": "frontend-trust-cards-acceptance",
+      "id": "frontend-account-profile-acceptance",
       "paths": [
         "frontend/src/features/chat/TrustCardPanel.tsx",
         "frontend/src/lib/api/trustCards.ts",
@@ -872,9 +883,23 @@
         "frontend/e2e/trust-cards.spec.ts",
         "frontend/src/features/chat/ProfileDialog.tsx",
         "frontend/src/features/chat/VerifyContactDialog.tsx",
-        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png"
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png",
+        "frontend/src/features/chat/AccountProfilePanel.tsx",
+        "frontend/src/features/chat/AccountProfilePanel.test.ts",
+        "frontend/src/lib/api/accountProfile.ts",
+        "frontend/src/lib/accountProfile.test.ts",
+        "frontend/src/store/accountProfiles.ts",
+        "frontend/src/store/accountProfiles.test.ts",
+        "frontend/e2e/account-profiles.spec.ts",
+        "frontend/src/features/chat/ConversationHeaders.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/MemberProfileDialog.tsx"
       ],
-      "browser": ["e2e/trust-cards.spec.ts", "e2e/ui-audit-dialogs.spec.ts"]
+      "browser": [
+        "e2e/account-profiles.spec.ts",
+        "e2e/ui-audit-dialogs.spec.ts",
+        "e2e/ui-visual-regression.spec.ts"
+      ]
     },
     {
       "id": "group-sync",

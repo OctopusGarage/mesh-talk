@@ -423,17 +423,19 @@ Markdown rendering, static publication and read-only documentation MCP. These
 modules consume no private messaging state and introduce no core protocol
 responsibility. See [help system maintenance](help-system.md).
 
-### Peer trust evidence
+### Account profiles and private trust
 
-`core/node/trust_card.rs` owns signed public card and proof validation; its node
-I/O owner owns authenticated publication and encrypted current-card persistence.
-Send preparation and final WAL mutation enter host authority before acquiring the
-delivery journal; cached request lookups release that journal before requesting
-host authority. Profile publication must never be blocked by the opposite order.
-The desktop replies to signed-card publication after durable local acceptance,
-while a detached admitted task finishes best-effort peer/relay fanout.
-`src-tauri/src/trust_cards.rs` adapts admitted commands and bounded versioned JSON.
-`src-tauri/src/trust.rs` owns private first-observed time, device-change history
-and manual verification. Profile renderers must not derive verification from a
-valid public signature. The [peer trust guide](peer-trust.md) owns claim meanings
-and evidence limits.
+`identity/account.rs` and `identity/account_keystore.rs` own immutable creation
+metadata persisted with the account key. Pairing and recovery preserve it without
+inferring missing dates. `node/account_profile_data.rs` owns signed bounded
+ordinary profile data and current-profile persistence; `node/account_profile_io.rs`
+owns admitted edits, authenticated reception and legacy compatibility.
+Send preparation enters host authority before acquiring the delivery journal.
+Desktop biography saves reply after durable local acceptance while admitted fanout
+continues independently. The ordinary nickname and bio edit share the publication
+mutex, preventing a stale bio save from undoing a rename.
+`src-tauri/src/account_profile.rs` exposes reads and bio edits, with no caller-supplied
+names, timestamps or public proofs. `src-tauri/src/trust.rs` owns private observation
+history and manual verification. Frontend `store/accountProfiles.ts` shares
+session-bound profile reads and live invalidations across the header and dialogs.
+The [profile and verification guide](peer-trust.md) owns meanings and evidence limits.
