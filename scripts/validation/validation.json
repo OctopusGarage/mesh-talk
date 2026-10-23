@@ -277,6 +277,7 @@
         "docs/evals/README.md",
         "docs/evals/ai-eval-suite.json",
         "docs/evals/group-reception-ai-eval-suite.json",
+        "docs/evals/local-agent-access-ai-eval-suite.json",
         "docs/evals/linked-device-sync-ai-eval-suite.json",
         "docs/evals/person-presence-ai-eval-suite.json",
         "docs/evals/tray-menu-ai-eval-suite.json",

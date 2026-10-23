@@ -225,6 +225,11 @@ MCP host or HTTP server process is required. Only the desktop Rust backend runs
 the local adapters; it reuses the same integration service, grants and encrypted
 message acceptance path.
 
+New account scopes follow the current user's hidden-contact presentation policy;
+joined groups remain available. Existing grants remain listed for explicit
+revocation, including grants for subsequently hidden contacts. Hiding a contact
+does not change an existing authorization.
+
 The switch starts a numeric-loopback HTTP listener on an available port.
 **View agent instructions** expands a short English bootstrap containing its
 complete `http://127.0.0.1:PORT/v1/help` URL. **Copy instructions** copies exactly

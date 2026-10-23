@@ -552,6 +552,10 @@ export const test = base.extend({
             destination: { kind: "account", id: BOB.account_id },
             label: BOB.name,
           },
+          {
+            destination: { kind: "channel", id: CHANNEL.channel_id },
+            label: CHANNEL.name,
+          },
         ],
         instructions_path: "/home/tester/.codex/AGENTS.md",
         instructions: "",

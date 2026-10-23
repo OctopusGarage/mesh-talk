@@ -3,6 +3,8 @@ import { Copy, Plug } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { isContactVisible } from "@/lib/contactVisibility";
+import { useContactPolicy } from "@/store/contactPolicy";
 import { errorMessage } from "@/lib/error";
 import {
   localAgentAccess,
@@ -22,6 +24,7 @@ export function LocalAgentSettings({
   controller: SettingsController;
 }) {
   const { t } = useTranslation();
+  const policy = useContactPolicy();
   const [access, setAccess] = useState<LocalAgentAccess | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
@@ -121,7 +124,17 @@ export function LocalAgentSettings({
   };
   const busy = c.saving || loading;
   const selected = new Set(access?.destinations.map(key));
-  const options = [...(access?.available_destinations ?? [])];
+  // Hiding is presentation only. Existing grants stay visible for revocation.
+  const options = (access?.available_destinations ?? []).filter(
+    ({ destination }) =>
+      selected.has(key(destination)) ||
+      destination.kind === "channel" ||
+      isContactVisible(
+        destination.id,
+        policy.contacts,
+        policy.owner === c.owner && policy.loaded,
+      ),
+  );
   for (const destination of access?.destinations ?? []) {
     if (!options.some((item) => key(item.destination) === key(destination)))
       options.push({

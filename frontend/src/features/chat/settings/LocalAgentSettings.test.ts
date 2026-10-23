@@ -3,6 +3,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import i18n from "@/lib/i18n";
+import { useContactPolicy } from "@/store/contactPolicy";
 import type { LocalAgentAccess } from "@/lib/api/localAgentAccess";
 import type { SettingsController } from "./useSettingsController";
 const mocks = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), copy: vi.fn() }));
@@ -16,6 +17,8 @@ let access: LocalAgentAccess;
 beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.resetAllMocks();
+  useContactPolicy.getState().reset();
+  useContactPolicy.setState({ owner: "alice", loaded: true });
   await i18n.changeLanguage("en");
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
@@ -435,4 +438,52 @@ it("does not load private settings before an owner is available", async () => {
     host.querySelector<HTMLButtonElement>("#setting-local-agent-access")!
       .disabled,
   ).toBe(true);
+});
+
+it("omits hidden accounts from new scopes while keeping channels available", async () => {
+  const account = { kind: "account" as const, id: "bob" };
+  access.available_destinations.push({ destination: account, label: "Bob" });
+  useContactPolicy.setState({
+    contacts: { bob: { account_id: "bob", name: "Bob" } },
+  });
+  await render();
+  expect(host.textContent).not.toContain("Bob");
+  expect(host.textContent).toContain("Release team");
+  expect(mocks.set).not.toHaveBeenCalled();
+});
+it.each([
+  { owner: "alice", loaded: false },
+  { owner: "other", loaded: true },
+])("waits for the current owner's contact policy: %j", async (policy) => {
+  access.available_destinations.push({
+    destination: { kind: "account", id: "bob" },
+    label: "Bob",
+  });
+  useContactPolicy.setState(policy);
+  await render();
+  expect(host.textContent).not.toContain("Bob");
+  expect(host.textContent).toContain("Release team");
+  await act(async () =>
+    useContactPolicy.setState({ owner: "alice", loaded: true }),
+  );
+  expect(host.textContent).toContain("Bob");
+});
+it("keeps a hidden granted scope manageable until explicitly revoked", async () => {
+  const account = { kind: "account" as const, id: "bob" };
+  access.available_destinations.push({ destination: account, label: "Bob" });
+  access.destinations = [account];
+  await render();
+  await act(async () =>
+    useContactPolicy.setState({
+      contacts: { bob: { account_id: "bob", name: "Bob" } },
+    }),
+  );
+  const checkbox = Array.from(
+    host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+  ).find((input) => input.parentElement?.textContent?.includes("Bob"))!;
+  expect(checkbox.checked).toBe(true);
+  expect(mocks.set).not.toHaveBeenCalled();
+  await act(async () => checkbox.click());
+  expect(mocks.set).toHaveBeenLastCalledWith("alice", false, []);
+  expect(host.textContent).not.toContain("Bob");
 });

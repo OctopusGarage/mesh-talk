@@ -35,6 +35,8 @@ In **General**, choose the contacts or joined groups a local agent may send to,
 then enable **Local agent access**. The switch starts the desktop's existing
 integration service with a loopback HTTP adapter. No CLI or additional download
 is needed. Agents can send text and replies; they cannot read chat history.
+Hidden contacts are omitted from new scope choices. Already granted conversations
+stay listed for explicit removal; hiding alone does not revoke an agent's access.
 
 **View agent instructions** expands a short bootstrap containing the live API help
 URL; **Copy instructions** copies the same text. Enabling also maintains a single

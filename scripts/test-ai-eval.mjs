@@ -217,7 +217,7 @@ test("source rubric cases include the owners of delegated guarantees", () => {
     ["local-agent-access", "MT-LOCAL-AGENT-002", ["src-tauri/src/integrations.rs", "crates/mesh-talk-core/src/node/participant_runtime.rs", "crates/mesh-talk-core/src/node/dm.rs"]],
     ["local-agent-access", "MT-LOCAL-AGENT-003", ["src-tauri/src/desktop_session.rs", "src-tauri/src/app_lock.rs", "src-tauri/src/chat_commands/state.rs", "crates/mesh-talk-core/src/node/participant_runtime.rs", "crates/mesh-talk-integrations/src/ipc.rs", "crates/mesh-talk-core/src/node/delivery_store.rs"]],
     ["local-agent-access", "MT-LOCAL-AGENT-004", ["src-tauri/src/integrations/local_access.rs"]],
-    ["local-agent-access", "MT-LOCAL-AGENT-005", ["frontend/src/features/chat/settings/useSettingsController.ts", "frontend/src/features/chat/settingsDialogSession.ts", "frontend/src/features/chat/settingSaveQueue.ts", "src-tauri/src/integrations/instructions.rs"]],
+    ["local-agent-access", "MT-LOCAL-AGENT-005", ["frontend/src/features/chat/settings/useSettingsController.ts", "frontend/src/features/chat/settingsDialogSession.ts", "frontend/src/features/chat/settingSaveQueue.ts", "src-tauri/src/integrations/instructions.rs", "frontend/src/lib/contactVisibility.ts", "frontend/src/store/contactPolicy.ts"]],
   );
   for (const [name, id, owners] of contracts) {
     const suite = JSON.parse(readFileSync(new URL(`../docs/evals/${name === "base" ? "ai-eval-suite" : `${name}-ai-eval-suite`}.json`, import.meta.url), "utf8"));

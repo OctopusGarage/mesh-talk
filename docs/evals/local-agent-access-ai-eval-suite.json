@@ -115,7 +115,9 @@
         "frontend/src/features/chat/settings/useSettingsController.ts",
         "src-tauri/src/integrations/instructions.rs",
         "frontend/src/features/chat/settingsDialogSession.ts",
-        "frontend/src/features/chat/settingSaveQueue.ts"
+        "frontend/src/features/chat/settingSaveQueue.ts",
+        "frontend/src/lib/contactVisibility.ts",
+        "frontend/src/store/contactPolicy.ts"
       ],
       "min_score": 0.9,
       "scenario": "A user selects a conversation, enables access, expands and copies the prompt, then encounters a failed save or changes accounts while loading.",
@@ -123,7 +125,8 @@
         "No selected destination prevents enable; maximum scope and actual running/error readiness are represented rather than assuming a saved switch proves a running service.",
         "Disclosure is expandable and copy uses exactly the backend bootstrap without token or a second API manual.",
         "Mutations coordinate through the existing settings queue, failed updates refresh canonical state, and stale account/load responses cannot overwrite the new view.",
-        "Executable browser evidence covers toggle, selection, copy and constrained viewport behavior, while mocked IPC is not claimed as native platform evidence."
+        "Executable browser evidence covers toggle, selection, copy and constrained viewport behavior, while mocked IPC is not claimed as native platform evidence.",
+        "New account scope choices reuse the current owner's loaded contact presentation policy, while channels remain available and previously granted hidden scopes remain explicitly revocable without silent authorization changes."
       ]
     }
   ]

@@ -48,3 +48,20 @@ for (const viewport of [
     await expect(panel.locator("summary")).toHaveCount(1);
   });
 }
+
+test("hidden contacts cannot receive a new agent scope while groups remain available", async ({
+  page,
+}) => {
+  await enterChat(page);
+  const bob = "acc_bob_bbbb2222";
+  await page.getByTestId(`conversation-row-${bob}`).click({ button: "right" });
+  await page.getByTestId(`hide-contact-menu-${bob}`).click();
+  await page.getByTestId("hide-contact-confirm").click();
+  await expect(page.getByTestId(`conversation-row-${bob}`)).toHaveCount(0);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  const panel = page.getByTestId("local-agent-settings");
+  await expect(panel.getByRole("checkbox", { name: /bob/i })).toHaveCount(0);
+  await panel.getByRole("checkbox", { name: /team/i }).check();
+  await panel.locator("#setting-local-agent-access").click();
+  await expect(panel.getByRole("status")).toContainText("Running");
+});

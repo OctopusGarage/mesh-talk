@@ -36,6 +36,8 @@
         "src/features/chat/settings/LocalAgentSettings.test.ts",
         "src/features/chat/settings/useSettingsController.test.ts",
         "src/lib/api/localAgentAccess.test.ts",
+        "src/lib/contactVisibility.test.ts",
+        "src/store/contactPolicy.test.ts",
         "src/lib/settingsTranslations.test.ts"
       ],
       "capability": {
@@ -43,7 +45,7 @@
         "guide": "docs/settings.md#local-agent-access",
         "invariants": [
           {
-            "name": "Only explicitly selected conversations are granted and no bearer token is exposed in the UI or copied prompt.",
+            "name": "Only explicitly selected conversations are granted and no bearer token is exposed in the UI or copied prompt. New account scopes reuse current-owner contact visibility; existing grants remain revocable.",
             "reference": "docs/settings.md#local-agent-access"
           },
           {
@@ -77,7 +79,7 @@
         "src/lib/contactVisibility.test.ts",
         "src/store/conversationHistory.test.ts"
       ],
-      "consumers": ["frontend-chat", "frontend-history"],
+      "consumers": ["frontend-chat", "frontend-history", "frontend-local-agent-access"],
       "capability": {
         "summary": "Navigate recent search results by exact owner-scoped namespace and message identity with separate read-only context and explicit coverage.",
         "guide": "docs/ARCHITECTURE.md#recent-search-references",
@@ -602,7 +604,8 @@
       "consumers": [
         "frontend-chat",
         "frontend-outgoing",
-        "frontend-channel-refresh"
+        "frontend-channel-refresh",
+        "frontend-local-agent-access"
       ],
       "capability": {
         "summary": "Consume scoped push invalidations with bounded read recovery, fair snapshot publication and batched preference convergence.",
