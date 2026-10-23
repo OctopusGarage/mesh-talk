@@ -1,5 +1,8 @@
 //! Session-bound desktop host for the local integrations service.
 
+pub(crate) mod instructions;
+pub(crate) mod local_access;
+
 use crate::{
     chat_commands::NodeState,
     runtime_admission::RuntimeAdmission,
@@ -12,6 +15,7 @@ use mesh_talk_core::{
 use mesh_talk_integrations::{
     IntegrationError, IntegrationService,
     client::{ClientConfig, EndpointManifest, endpoint_reference},
+    http::LocalHttpServer,
     ipc::LocalServer,
     policy::{GrantRegistry, new_token},
     private_files::{replace_private_json, write_private_json},
@@ -22,7 +26,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 type FlushRequest = (MessageDestination, EventId);
 
@@ -49,6 +53,7 @@ struct DesktopHost {
     account_id: String,
     flush: Option<mpsc::Sender<FlushRequest>>,
     on_accept: Option<AcceptanceCallback>,
+    enabled: Arc<std::sync::Mutex<bool>>,
 }
 impl DesktopHost {
     fn new(app: AppState, node: NodeState, lease: SessionLease, account_id: String) -> Self {
@@ -59,6 +64,7 @@ impl DesktopHost {
             account_id,
             flush: None,
             on_accept: None,
+            enabled: Arc::new(std::sync::Mutex::new(true)),
         }
     }
     fn admission(&self) -> Result<RuntimeAdmission, IntegrationError> {
@@ -85,7 +91,19 @@ impl IntegrationHost for DesktopHost {
             let acceptance = runtime
                 .handle()
                 .enqueue_message_once_if(&request, |operation| {
-                    admission.authorize_accept(runtime, &mut || authorization.commit(operation))
+                    admission.authorize_accept(runtime, &mut || {
+                        let enabled = self.enabled.lock().map_err(|_| {
+                            mesh_talk_core::node::NodeError::Authorization(
+                                "Integration state unavailable".into(),
+                            )
+                        })?;
+                        if !*enabled {
+                            return Err(mesh_talk_core::node::NodeError::Authorization(
+                                "Integrations disabled".into(),
+                            ));
+                        }
+                        authorization.commit(operation)
+                    })
                 })
                 .await?;
             if !acceptance.duplicate
@@ -123,21 +141,88 @@ impl IntegrationHost for DesktopHost {
     fn with_node<'a>(&'a self, operation: HostOperation<'a>) -> HostFuture<'a, Value> {
         Box::pin(async move {
             self.admission()?
-                .with_runtime(|runtime| Ok(operation(&runtime.handle())))
+                .with_runtime(|runtime| {
+                    let enabled = self.enabled.lock().map_err(|_| {
+                        crate::commands::CommandError::Authorization(
+                            "Integration state unavailable".into(),
+                        )
+                    })?;
+                    if !*enabled {
+                        return Err(crate::commands::CommandError::Authorization(
+                            "Integrations disabled".into(),
+                        ));
+                    }
+                    Ok(operation(&runtime.handle()))
+                })
                 .await
                 .map_err(denied)?
         })
     }
 }
 
+/// Control of the existing desktop listener, not another integration service.
+/// The runtime retains ownership of every producer and its retirement barrier.
+pub(crate) struct DesktopIntegration {
+    // The runtime owns the service; retaining it here would cycle through DesktopHost.app.
+    service: std::sync::Weak<IntegrationService>,
+    admin_token: String,
+    pub(crate) http_endpoint: String,
+    client_files: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    enabled: Arc<std::sync::Mutex<bool>>,
+    shutdown: watch::Sender<bool>,
+    stopped: watch::Receiver<bool>,
+}
+impl DesktopIntegration {
+    pub(crate) fn track_client_file(&self, path: PathBuf) {
+        self.client_files.lock().unwrap().push(path);
+    }
+    pub(crate) fn is_running(&self) -> bool {
+        !*self.stopped.borrow() && self.enabled.lock().is_ok_and(|enabled| *enabled)
+    }
+    pub(crate) fn close_admission(&self) -> Result<(), IntegrationError> {
+        *self.enabled.lock().map_err(|_| {
+            IntegrationError::new("STORAGE_FAILURE", "Integration state unavailable")
+        })? = false;
+        Ok(())
+    }
+    pub(crate) async fn admin(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, IntegrationError> {
+        let service = self.service.upgrade().ok_or_else(|| {
+            IntegrationError::new("SCOPE_DENIED", "Integration service is no longer running")
+        })?;
+        service.handle(&self.admin_token, method, params).await
+    }
+    pub(crate) async fn stop(&mut self) -> Result<(), IntegrationError> {
+        self.close_admission()?;
+        self.shutdown.send_replace(true);
+        let _ = self.stopped.wait_for(|stopped| *stopped).await;
+        Ok(())
+    }
+}
+
 struct AdminConfig {
     admin: PathBuf,
     manifest: PathBuf,
+    enabled: Arc<std::sync::Mutex<bool>>,
+    stopped: watch::Sender<bool>,
+    client_files: Arc<std::sync::Mutex<Vec<PathBuf>>>,
 }
 impl Drop for AdminConfig {
     fn drop(&mut self) {
+        if let Ok(mut enabled) = self.enabled.lock() {
+            *enabled = false;
+        }
         let _ = std::fs::remove_file(&self.admin);
         let _ = std::fs::remove_file(&self.manifest);
+        if let Ok(paths) = self.client_files.lock() {
+            for path in paths.iter() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        self.stopped.send_replace(true);
     }
 }
 
@@ -151,7 +236,7 @@ pub(crate) async fn start(
     base_dir: &Path,
     password: &str,
     on_accept: AcceptanceCallback,
-) -> Result<(), IntegrationError> {
+) -> Result<DesktopIntegration, IntegrationError> {
     let admission = RuntimeAdmission::capture_lease(app, node, lease).map_err(denied)?;
     let account_id = runtime.account_id().to_owned();
     let grants_path =
@@ -169,11 +254,31 @@ pub(crate) async fn start(
             .ok_or_else(|| IntegrationError::new("INVALID_INPUT", "Invalid host profile"))?;
     let endpoint_reference = endpoint_reference(&manifest_path)?;
     let listener = LocalServer::bind(&base_dir.join("ipc")).await?;
-    let registry = admission
+    let mut registry = admission
         .checked(runtime, || {
             Ok(GrantRegistry::open(&grants_path, password, &account_id))
         })
         .map_err(denied)??;
+    // Managed desktop credentials never carry authority into another listener
+    // generation. CLI/MCP grants retain their existing restart behavior.
+    admission
+        .checked(runtime, || {
+            Ok((|| {
+                for grant in registry
+                    .list()?
+                    .into_iter()
+                    .filter(|grant| grant.client_id == local_access::CLIENT_ID)
+                {
+                    registry.revoke(&grant.id)?;
+                }
+                Ok::<_, IntegrationError>(())
+            })())
+        })
+        .map_err(denied)??;
+    let http = LocalHttpServer::bind()
+        .await?
+        .with_client_config(base_dir.join("agent-access.json"));
+    let http_endpoint = http.endpoint();
     let admin_token = new_token();
     admission
         .checked(runtime, || {
@@ -186,9 +291,15 @@ pub(crate) async fn start(
             ))
         })
         .map_err(denied)??;
+    let enabled = Arc::new(std::sync::Mutex::new(true));
+    let (stopped, stopped_rx) = watch::channel(false);
+    let client_files = Arc::new(std::sync::Mutex::new(Vec::new()));
     let cleanup = AdminConfig {
         admin: admin_path,
         manifest: manifest_path.clone(),
+        enabled: enabled.clone(),
+        stopped,
+        client_files: client_files.clone(),
     };
     // Producer files retain the manifest reference across host restarts while
     // random private socket addresses and the admin credential rotate each time.
@@ -204,6 +315,7 @@ pub(crate) async fn start(
         .map_err(denied)??;
     let (flush, mut pending) = mpsc::channel::<FlushRequest>(64);
     let mut host = DesktopHost::new(app.clone(), node.clone(), lease.clone(), account_id);
+    host.enabled = enabled.clone();
     host.flush = Some(flush);
     host.on_accept = Some(on_accept);
     let service = Arc::new(IntegrationService::new(
@@ -212,30 +324,70 @@ pub(crate) async fn start(
         &admin_token,
     ));
     let participant = runtime.handle();
-    runtime.register_host_task(tokio::spawn(async move {
-        while let Some((destination, id)) = pending.recv().await {
-            participant.flush_accepted_message(&destination, id).await;
-        }
-    }));
+    let (stop, mut stop_rx) = watch::channel(false);
+    let handle = DesktopIntegration {
+        service: Arc::downgrade(&service),
+        admin_token,
+        http_endpoint,
+        client_files,
+        enabled: enabled.clone(),
+        shutdown: stop.clone(),
+        stopped: stopped_rx,
+    };
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+    // One runtime-owned supervisor owns both transport adapters and the flush
+    // producer. JoinSet also aborts its children if runtime Drop cancels it.
     runtime.register_graceful_host_task(
         shutdown,
         tokio::spawn(async move {
             let _cleanup = cleanup;
-            if let Err(error) = listener
-                .run_until(service, async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-            {
-                log::warn!("Desktop integration listener stopped: {}", error.code);
+            let mut workers = tokio::task::JoinSet::new();
+            let flush = workers.spawn(async move {
+                while let Some((destination, id)) = pending.recv().await {
+                    participant.flush_accepted_message(&destination, id).await;
+                }
+            });
+            let mut uds_stop = stop.subscribe();
+            let uds_service = service.clone();
+            workers.spawn(async move {
+                let _ = listener
+                    .run_until(uds_service, async move {
+                        let _ = uds_stop.wait_for(|stop| *stop).await;
+                    })
+                    .await;
+            });
+            let mut http_stop = stop.subscribe();
+            workers.spawn(async move {
+                let _ = http
+                    .run_until(service, async move {
+                        let _ = http_stop.wait_for(|stop| *stop).await;
+                    })
+                    .await;
+            });
+            tokio::select! {
+                _ = shutdown_rx => {},
+                _ = stop_rx.wait_for(|stop| *stop) => {},
+                _ = workers.join_next() => {},
+            }
+            if let Ok(mut enabled) = enabled.lock() {
+                *enabled = false;
+            }
+            stop.send_replace(true);
+            flush.abort();
+            let drained = tokio::time::timeout(std::time::Duration::from_secs(32), async {
+                while workers.join_next().await.is_some() {}
+            })
+            .await;
+            if drained.is_err() {
+                workers.abort_all();
+                while workers.join_next().await.is_some() {}
             }
         }),
     );
     // The filename locates the private configuration without logging credentials
     // or persisting the host account identifier in diagnostics.
     log::info!("Desktop integrations enabled; account admin configuration: {filename}");
-    Ok(())
+    Ok(handle)
 }
 
 #[cfg(test)]
@@ -271,6 +423,102 @@ mod tests {
         };
         let lease = app.session().publish("session".into(), user, "pw".into());
         (root, app, crate::chat_commands::NodeState::empty(), lease)
+    }
+
+    #[tokio::test]
+    async fn desktop_control_handle_does_not_retain_retired_service() {
+        let (root, app, node, lease) = fixture();
+        let mut runtime = NodeRuntime::start(
+            root.path(),
+            lease.owner(),
+            "Integration",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let integration = start(
+            &app,
+            &node,
+            &lease,
+            &mut runtime,
+            root.path(),
+            "pw",
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        let service = integration.service.clone();
+        *node.0.write().await = Some(runtime);
+        node.0.write().await.take().unwrap().stop().await;
+        assert!(
+            service.upgrade().is_none(),
+            "a retired service must not be retained by its settings control handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_integrations_can_stop_without_retiring_the_node() {
+        let (root, app, node, lease) = fixture();
+        let mut runtime = NodeRuntime::start(
+            root.path(),
+            lease.owner(),
+            "Integration",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let mut integration = start(
+            &app,
+            &node,
+            &lease,
+            &mut runtime,
+            root.path(),
+            "pw",
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert!(integration.is_running());
+        *node.0.write().await = Some(runtime);
+        assert!(
+            integration
+                .admin("admin_context", serde_json::json!({}))
+                .await
+                .is_ok()
+        );
+        integration.close_admission().unwrap();
+        assert!(
+            integration
+                .admin("admin_context", serde_json::json!({}))
+                .await
+                .is_err()
+        );
+        integration.stop().await.unwrap();
+        assert!(!integration.is_running());
+        assert!(
+            node.0
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .create_channel("Still running", vec![])
+                .await
+                .is_ok()
+        );
+        drop(integration);
+        node.0.write().await.take().unwrap().stop().await;
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ export function canCollect(message: ChatMessage, now = Date.now()) {
   return (
     !!message.id &&
     message.id !== "0".repeat(64) &&
+    !message.protection &&
     !message.pending &&
     !message.failed &&
     !message.metadataPending &&
@@ -28,6 +29,8 @@ export function selectionSource(
   conversation: Conversation,
   selected: ChatMessage[],
 ): FavoriteSource {
+  if (selected.some((message) => message.protection))
+    throw new Error("Protected messages cannot be added to Favorites.");
   return {
     kind: conversation.kind,
     target: conversation.id,

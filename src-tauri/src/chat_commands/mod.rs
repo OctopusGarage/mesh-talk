@@ -9,6 +9,8 @@ mod account;
 mod channels;
 mod diagnostics;
 mod files;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod linux_screenshot;
 mod messaging;
 mod models;
 mod platform;

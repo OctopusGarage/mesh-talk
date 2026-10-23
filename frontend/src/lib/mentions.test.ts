@@ -91,3 +91,11 @@ describe("renderWithMentions", () => {
     expect(link?.props.className).not.toContain("var(--message-link)");
   });
 });
+
+it("matches Chinese and spaced display names without matching longer names or emails", () => {
+  expect(mentionsName("@亏麻了 !!!", "亏麻了")).toBe(true);
+  expect(mentionsName("hi @Alice Smith!", "Alice Smith")).toBe(true);
+  expect(mentionsName("@亏麻了啊", "亏麻了")).toBe(false);
+  expect(mentionsName("@alice_2", "alice")).toBe(false);
+  expect(mentionsName("mail@alice.com", "alice")).toBe(false);
+});

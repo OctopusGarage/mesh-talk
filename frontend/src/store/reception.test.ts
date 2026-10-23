@@ -316,3 +316,72 @@ it("moves merged boot identities beyond the retained budget into persistent over
       restored.overflowUnread["channel:a"],
   ).toBe(2048);
 });
+
+it("persists unread mention evidence until that exact message is viewed", () => {
+  const key = "channel:a";
+  let state = reconcileHistory(
+    emptyReception(),
+    key,
+    [
+      { id: "mention", fromMe: false, mentioned: true },
+      { id: "ordinary", fromMe: false },
+      { id: "own", fromMe: true, mentioned: true },
+    ],
+    true,
+  );
+  expect(state.ledger[key].mention.mentioned).toBe(true);
+  expect(state.ledger[key].own.mentioned).not.toBe(true);
+  saveReceptionLedger("host", "account", state.ledger);
+  state = emptyReception(loadReceptionLedger("host", "account"));
+  expect(state.ledger[key].mention.mentioned).toBe(true);
+  expect(loadReceptionLedger("other", "account")).toEqual({});
+  state = viewIdentities(state, key, ["ordinary"]);
+  expect(state.ledger[key].mention).toMatchObject({
+    mentioned: true,
+    seen: false,
+  });
+  state = viewIdentities(state, key, ["mention"]);
+  state = receiveIdentity(state, key, { event_id: "mention" }, true);
+  expect(state.ledger[key].mention.seen).toBe(true);
+});
+
+it("enriches existing unseen history receipts without reviving read mentions", () => {
+  const key = "channel:a";
+  let state = receiveIdentity(emptyReception(), key, { event_id: "mention" });
+  state = reconcileHistory(
+    state,
+    key,
+    [{ id: "mention", fromMe: false, mentioned: true }],
+    false,
+  );
+  expect(state.ledger[key].mention).toMatchObject({
+    mentioned: true,
+    seen: false,
+  });
+  state = viewIdentities(state, key, ["mention"]);
+  state = reconcileHistory(
+    state,
+    key,
+    [{ id: "mention", fromMe: false, mentioned: true }],
+    true,
+  );
+  expect(state.unreadIds[key]).toEqual([]);
+});
+
+it.each([false, true])(
+  "classifies a duplicate with late mention text without changing read state (own=%s)",
+  (own) => {
+    const key = "channel:a";
+    const event = { event_id: "late-text", own_device: own };
+    let state = receiveIdentity(emptyReception(), key, event);
+    state = receiveIdentity(state, key, event, true);
+    expect(state.ledger[key]["late-text"].mentioned === true).toBe(!own);
+    expect(state.unreadIds[key]).toEqual(own ? [] : ["late-text"]);
+    state = receiveIdentity(state, key, event);
+    expect(state.ledger[key]["late-text"].mentioned === true).toBe(!own);
+    state = viewIdentities(state, key, ["late-text"]);
+    state = receiveIdentity(state, key, event, true);
+    expect(state.ledger[key]["late-text"].seen).toBe(true);
+    expect(state.unreadIds[key]).toEqual([]);
+  },
+);

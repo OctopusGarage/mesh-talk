@@ -66,8 +66,8 @@ export function renderWithMentions(
 export function mentionsName(text: string, name: string): boolean {
   if (!name) return false;
   const re = new RegExp(
-    `@${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
-    "i",
+    `(?:^|[^\\p{L}\\p{N}_@])@${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_-])`,
+    "iu",
   );
   return re.test(text);
 }

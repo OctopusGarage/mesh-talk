@@ -125,6 +125,17 @@ pub trait SyncStore {
             .iter()
             .any(|event| event.kind == EventKind::ChannelReplica)
     }
+    /// True when visible history controls require kinds 15/16 support.
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
+        self.events_excluding(conversation, &HashSet::new())
+            .iter()
+            .any(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory
+                )
+            })
+    }
     /// Digest and size of the currently visible event set. Implementations with
     /// unfiltered durable logs may cache this across idle recovery ticks.
     fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
@@ -178,6 +189,9 @@ pub enum FileConsentStatus {
 // NOTE: this impl is structurally identical to `impl SyncStore for
 // PersistentEventLog` in persist.rs — keep the two in sync.
 impl SyncStore for EventLog {
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
+        EventLog::requires_channel_v3(self, conversation)
+    }
     fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
         EventLog::requires_channel_v2(self, conversation)
     }

@@ -19,6 +19,23 @@ Group messages can arrive after reconnecting through another authorized member o
 
 Opening a conversation does not mark every offscreen message read. Newly recovered content can remain unread even when it was authored before messages you already read. Catch-up notifications summarize recovered messages rather than treating every row as a new live alert. If the app cannot open a tracked message or asks you to review more unread history, use the offered review or explicit mark-read action. See [Channels](channels.md) for recovery and sharing limits.
 
+## Keep an unfinished message
+
+Text drafts stay with their conversation when you switch between contacts, groups
+and personal notes. Other conversations show a red **[Draft]** label and preview;
+opening the conversation restores the original text, including line breaks.
+
+Drafts are encrypted on this device and restore after restarting and signing in
+as the same local user. Saving happens after ten seconds without typing; continued typing restarts
+the idle timer. Switching conversations or leaving the
+window also requests a save. Quitting abruptly can lose recent edits. Drafts do
+not sync to other devices and do not include attachments or reply targets. Protected
+drafts restore their protection mode with their text and show a concealed sidebar
+preview. Protected text remains a draft until local durable acceptance; a rejected
+send keeps both its text and protection mode for retry.
+Sending or clearing the text removes its draft. A save error keeps your text in
+the current window and offers **Retry**.
+
 ## Change retention
 
 1. Open **More → Settings → History & backup**.

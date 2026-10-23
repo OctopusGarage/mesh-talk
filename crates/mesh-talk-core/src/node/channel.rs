@@ -150,17 +150,18 @@ pub(in crate::node) const CHANNEL_PENDING_BYTES: usize = 8 * 1024 * 1024;
 /// event's id + wall-clock and the decoded plaintext body so the node can persist it
 /// to the received store (sender-key wire keys are single-use, so history is served
 /// from the store, not by re-opening the event).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReceivedChannelMessage {
     pub channel_id: ConversationId,
     pub channel_name: String,
     pub from: String,
     pub text: Vec<u8>,
+    pub protection: Option<super::MessageProtection>,
     pub reply_to: Option<EventId>,
     pub event_id: EventId,
     pub wall_clock: u64,
     /// The wrapped `MessageBody` plaintext (text + reply_to), for the received store.
-    pub wrapped: Vec<u8>,
+    pub(in crate::node) wrapped: Vec<u8>,
     /// Local first successful decryption observation; not persisted in signed events.
     pub received_at: u64,
     pub arrival_kind: &'static str,
@@ -172,6 +173,15 @@ pub struct ReceivedChannelMessage {
     pub reception_only: bool,
 }
 
+impl std::fmt::Debug for ReceivedChannelMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceivedChannelMessage")
+            .field("event_id", &self.event_id)
+            .field("protection", &self.protection)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ReceivedChannelMessage {
     pub(in crate::node) fn terminal(&self, batch_id: Option<String>, batch_size: usize) -> Self {
         Self {
@@ -179,6 +189,7 @@ impl ReceivedChannelMessage {
             channel_name: self.channel_name.clone(),
             from: self.from.clone(),
             text: Vec::new(),
+            protection: None,
             reply_to: None,
             event_id: self.event_id,
             wall_clock: self.wall_clock,
@@ -226,6 +237,7 @@ pub struct ChannelBook {
     activities: HashMap<ConversationId, Vec<ChannelActivity>>,
     activity_emitted: HashSet<EventId>,
     lineage_owner: HashMap<ConversationId, String>,
+    history_policies: HashMap<ConversationId, crate::channel::HistoryPolicy>,
     replica_preferences: HashMap<(ConversationId, String), (u64, EventId, bool)>,
 }
 
@@ -237,6 +249,7 @@ pub(in crate::node) struct ChannelReplay<'a> {
     cursor: usize,
     after_accept: HashSet<EventId>,
     dissolved: bool,
+    history: Option<std::collections::VecDeque<ReceivedChannelMessage>>,
 }
 
 impl<'a> ChannelReplay<'a> {
@@ -252,6 +265,7 @@ impl<'a> ChannelReplay<'a> {
             cursor: 0,
             after_accept: HashSet::new(),
             dissolved: false,
+            history: None,
         }
     }
 }
@@ -287,6 +301,7 @@ pub(in crate::node) struct ChannelInfoProjection {
     dissolved: bool,
     pending: bool,
     members: Vec<(PublicIdentity, bool, bool)>,
+    history_policy: crate::channel::HistoryPolicy,
 }
 
 impl ChannelBook {
@@ -296,6 +311,11 @@ impl ChannelBook {
     ) -> Option<ChannelInfoProjection> {
         let state = self.state(&channel)?;
         Some(ChannelInfoProjection {
+            history_policy: self
+                .history_policies
+                .get(&channel)
+                .copied()
+                .unwrap_or_default(),
             name: state.name().to_owned(),
             owner: state.owner().to_owned(),
             dissolved: state.is_dissolved(),
@@ -323,7 +343,7 @@ impl ChannelBook {
     /// Replay signed channel metadata without opening sender keys or messages.
     /// Late-invite reconstruction, admission and archived summaries share these
     /// membership/ownership/terminal-state rules.
-    fn membership_view(
+    pub(super) fn membership_view(
         channel_id: ConversationId,
         events: &[&Event],
         before: Option<EventId>,
@@ -612,12 +632,19 @@ impl ChannelBook {
         byte_budget: usize,
     ) -> (Vec<ReceivedChannelMessage>, bool) {
         let my_author = Author::from_ed25519(me.public().ed25519_pub);
+        if replay.history.is_none() {
+            self.history_policies
+                .insert(channel_id, super::join_history::policy(&replay.events));
+            replay.history =
+                Some(super::join_history::received(me, channel_id, &replay.events).into());
+        }
         let ChannelReplay {
             events,
             by_id,
             cursor,
             after_accept,
             dissolved,
+            history,
         } = replay;
         let events = events.as_slice();
         let by_id: &HashMap<EventId, &Event> = by_id;
@@ -938,6 +965,7 @@ impl ChannelBook {
                             channel_name: state.name().to_string(),
                             from: event.author.user_id(),
                             text: body.text,
+                            protection: body.protection,
                             reply_to: body.reply_to,
                             event_id: event.id,
                             wall_clock: event.wall_clock,
@@ -969,6 +997,25 @@ impl ChannelBook {
                         target,
                         wall_clock: event.wall_clock,
                     });
+            }
+        }
+        if !limited {
+            let history = history.as_mut().expect("history projection initialized");
+            while let Some(message) = history.front() {
+                if self.emitted.contains(&message.event_id) {
+                    history.pop_front();
+                    continue;
+                }
+                if out.len() >= limit
+                    || retained_upper_bound.saturating_add(message.retained_bytes()) > byte_budget
+                {
+                    limited = true;
+                    break;
+                }
+                let message = history.pop_front().expect("front exists");
+                retained_upper_bound += message.retained_bytes();
+                self.emitted.insert(message.event_id);
+                out.push(message);
             }
         }
         (out, limited)

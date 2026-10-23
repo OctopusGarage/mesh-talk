@@ -12,6 +12,9 @@ const preview = {
   file_cards: 3,
   media_files: 2,
   missing_media: 1,
+  favorites: 4,
+  favorite_files: 2,
+  missing_favorite_files: 1,
 };
 
 test.beforeEach(async ({ page }) => {
@@ -106,6 +109,12 @@ test("restore verifies the archive, shows its limits, and offers a fresh identit
   await page.getByTestId("restore-inspect").click();
   await expect(page.getByTestId("restore-preview")).toContainText(
     "12 messages",
+  );
+  await expect(page.getByTestId("restore-preview")).toContainText(
+    "4 favorites · 2 retained favorite files",
+  );
+  await expect(page.getByTestId("restore-preview")).toContainText(
+    "Favorite files without retained bytes: 1",
   );
   await expect(page.getByTestId("restore-preview")).toContainText(
     "1 file cards have no local media bytes",

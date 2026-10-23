@@ -1,3 +1,4 @@
+import { ConversationBio } from "./ConversationHeaders";
 import { useMessageCollection } from "./favorites/useMessageCollection";
 import {
   CollectionToolbar,
@@ -22,7 +23,7 @@ import { useTranslation } from "react-i18next";
 import { needsCustomWindowControls } from "@/lib/platform";
 import { ReceptionStatus } from "./ReceptionStatus";
 import { Composer } from "./Composer";
-import { ConversationDrafts } from "./conversationDrafts";
+import { useDrafts } from "@/store/drafts";
 import {
   EmptyState,
   StartupFailureState,
@@ -95,6 +96,7 @@ export function ConversationView() {
   const channels = useChat((s) => s.channels);
   const favorites = useChat((s) => s.favorites);
   const admitText = useChat((s) => s.admitText);
+  const admitProtectedText = useChat((s) => s.admitTextAndWait);
   const retry = useChat((s) => s.retry);
   const [expiryDurationMs, setExpiryDurationMs] = useState<number | null>(null);
   const expiresAtSend = () =>
@@ -115,6 +117,25 @@ export function ConversationView() {
   const attachments = useAttachmentIntake(t, {
     expiresAtSend,
     onHandoff: () => setExpiryDurationMs(null),
+    captureProtection: () => {
+      const snapshot = useDrafts.getState().captureProtection(...draftScope);
+      return {
+        protection: snapshot.protection,
+        onAccepted: (batch) => {
+          if (
+            (useDrafts.getState().texts[key] ?? "") ||
+            (!batch && (attachmentDraftCounts.current.get(draftKey) ?? 0) > 0)
+          )
+            return;
+          if (!snapshot.accept()) return;
+          setProtectionReset((previous) => ({
+            key: draftKey,
+            n: (previous?.n ?? 0) + 1,
+            applyIf: () => !useDrafts.getState().protections[key],
+          }));
+        },
+      };
+    },
   });
   const recallMessage = useChat((s) => s.recallMessage);
   const sendSticker = useChat((s) => s.sendSticker);
@@ -139,8 +160,32 @@ export function ConversationView() {
   useEffect(() => {
     setPendingDelete(null);
   }, [key]);
-  const drafts = useRef(new ConversationDrafts());
+  const draftsLoaded = useDrafts(
+    (s) => s.owner === owner && s.generation === authGeneration && s.loaded,
+  );
+  useEffect(
+    () => () => {
+      void useDrafts.getState().flush();
+    },
+    [key],
+  );
+  const attachmentDraftCounts = useRef(new Map<string, number>());
+  const [protectionReset, setProtectionReset] = useState<{
+    key: string;
+    n: number;
+    applyIf: () => boolean;
+  } | null>(null);
+  const [acceptedClear, setAcceptedClear] = useState<{
+    key: string;
+    n: number;
+    applyIf: () => boolean;
+  } | null>(null);
   const draftKey = `${owner}:${authGeneration}:${key}`;
+  const draftScope = [owner!, authGeneration, key] as const;
+  const admissionPending = useDrafts(
+    (s) =>
+      s.owner === owner && s.generation === authGeneration && !!s.pending[key],
+  );
   const historyMessages = useChat((s) =>
     active ? (s.messages[key] ?? NO_MESSAGES) : NO_MESSAGES,
   );
@@ -434,7 +479,11 @@ export function ConversationView() {
         ) : (
           <DmHeader id={active.id} name={headerName} />
         )}
-        <div className="flex-1" />
+        {active.kind === "account" && !isPersonal ? (
+          <ConversationBio accountId={active.id} />
+        ) : (
+          <div className="flex-1" />
+        )}
         <ConversationHistoryDialog
           conversation={{ ...active, name: headerName }}
         />
@@ -668,7 +717,9 @@ export function ConversationView() {
                         className="h-4 w-4 accent-[hsl(var(--signal))]"
                       />
                       {t("messageFavorites.selectMessage", {
-                        text: (m.text || m.file?.name || "").slice(0, 60),
+                        text: m.protection
+                          ? t("protectedMessage.label")
+                          : (m.text || m.file?.name || "").slice(0, 60),
                       })}
                     </label>
                   )}
@@ -815,6 +866,13 @@ export function ConversationView() {
                 : "conversation.archivedChannelHint",
           )}
         </div>
+      ) : !draftsLoaded ? (
+        <div
+          className="border-t bg-card px-5 py-4 text-sm text-muted-foreground"
+          role="status"
+        >
+          {t("drafts.loading")}
+        </div>
       ) : (
         <Composer
           expiryDurationMs={isPersonal ? null : expiryDurationMs}
@@ -822,9 +880,24 @@ export function ConversationView() {
           screenshotAvailable={attachments.screenshotAvailable}
           stagedScreenshot={attachments.stagedScreenshot}
           key={`${owner}:${authGeneration}:${key}`}
-          initialDraft={drafts.current.get(draftKey)}
+          protectionReset={
+            protectionReset?.key === draftKey ? protectionReset : undefined
+          }
+          acceptedClear={
+            acceptedClear?.key === draftKey ? acceptedClear : undefined
+          }
+          onAttachmentDraftChange={(count, edited = true) => {
+            attachmentDraftCounts.current.set(draftKey, count);
+            if (edited) useDrafts.getState().touch(...draftScope);
+          }}
+          initialDraft={useDrafts.getState().texts[key] ?? ""}
+          initialProtection={useDrafts.getState().protections[key]}
+          onProtectionChange={(mode) =>
+            useDrafts.getState().setProtection(...draftScope, mode)
+          }
+          admissionPending={admissionPending}
           onDraftChange={(text) => {
-            drafts.current.set(draftKey, text);
+            useDrafts.getState().edit(owner!, authGeneration, key, text);
           }}
           placeholder={
             isChannel
@@ -843,7 +916,7 @@ export function ConversationView() {
           onAttach={attachments.attachFile}
           onAttachDirectory={attachments.attachDirectory}
           onImage={attachments.pickMedia}
-          onSend={(text) => {
+          onSend={(text, protection) => {
             const current = () => {
               const auth = useAuth.getState();
               const conversation = useChat.getState().active;
@@ -855,19 +928,42 @@ export function ConversationView() {
               );
             };
             if (!current()) return false;
-            // Transfer the submitted text to the bounded outgoing intent once.
-            // Its bubble owns acceptance/retry feedback; it is no longer a draft.
-            const admitted = admitText(
-              text,
-              replyTo?.id ?? null,
-              expiresAtSend(),
-            );
-            if (admitted && current()) {
-              setExpiryDurationMs(null);
-              setReply(null);
-              setPrefill(null);
-            }
-            return admitted;
+            // Ordinary text transfers immediately; protected text keeps its draft
+            // and retry ownership until durable acceptance.
+            const admitted = protection
+              ? (useDrafts
+                  .getState()
+                  .admit(...draftScope, text, () =>
+                    admitProtectedText(
+                      text,
+                      replyTo?.id ?? null,
+                      expiresAtSend(),
+                      protection,
+                    ),
+                  )
+                  ?.then((result) => {
+                    if (result.cleared)
+                      setAcceptedClear((previous) => ({
+                        key: draftKey,
+                        n: (previous?.n ?? 0) + 1,
+                        applyIf: () =>
+                          (useDrafts.getState().texts[key] ?? "") === "" &&
+                          !useDrafts.getState().protections[key],
+                      }));
+                    return result.accepted;
+                  }) ?? false)
+              : admitText(text, replyTo?.id ?? null, expiresAtSend());
+            const finish = (accepted: boolean) => {
+              if (accepted && current()) {
+                setExpiryDurationMs(null);
+                setReply(null);
+                setPrefill(null);
+              }
+              return accepted;
+            };
+            return typeof admitted === "boolean"
+              ? finish(admitted)
+              : admitted.then(finish);
           }}
           onPasteFiles={attachments.pasteFiles}
           onScreenshot={attachments.captureScreenshot}

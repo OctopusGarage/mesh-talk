@@ -159,11 +159,106 @@ impl Node {
         response
     }
 
+    /// Return protected image bytes only for an exact currently eligible retained message.
+    /// Hosts must authorize every reveal before calling this method.
+    pub fn protected_image_protection(
+        &self,
+        reference: &SearchReference,
+    ) -> Option<super::MessageProtection> {
+        let context = self.reference_context(reference, true)?;
+        let entry = context.messages.into_iter().next()?;
+        let protection = entry.protection?;
+        let file = entry.file?;
+        if !file.media || !file.mime.starts_with("image/") || file.size > 16 * 1024 * 1024 {
+            return None;
+        }
+        let manifest = self
+            .files
+            .lock()
+            .expect("files lock")
+            .manifest(&file.file_conv)
+            .cloned()?;
+        if manifest.protection() != Some(protection)
+            || !crate::node::media_store::automatic_inline_image(&manifest)
+        {
+            return None;
+        }
+        Some(protection)
+    }
+
+    pub fn protected_image_content(
+        &self,
+        reference: &SearchReference,
+    ) -> Option<(super::MessageProtection, Vec<u8>)> {
+        let context = self.reference_context(reference, true)?;
+        let entry = context.messages.into_iter().next()?;
+        let protection = entry.protection?;
+        let file = entry.file?;
+        if !file.media || !file.mime.starts_with("image/") || file.size > 16 * 1024 * 1024 {
+            return None;
+        }
+        let manifest = self
+            .files
+            .lock()
+            .expect("files lock")
+            .manifest(&file.file_conv)
+            .cloned()?;
+        if manifest.protection() != Some(protection)
+            || !crate::node::media_store::automatic_inline_image(&manifest)
+        {
+            return None;
+        }
+        let bytes = self
+            .media
+            .read(file.file_conv)
+            .or_else(|| self.read_file_internal(file.file_conv).ok())?;
+        if bytes.len() as u64 != manifest.size()
+            || crate::file::file_checksum(&bytes) != manifest.checksum()
+        {
+            return None;
+        }
+        if !crate::node::media_store::raster_signature_matches(manifest.mime(), &bytes)
+            || self.protected_image_protection(reference) != Some(protection)
+        {
+            return None;
+        }
+        Some((protection, bytes))
+    }
+
+    /// Explicit retained content lookup. Hosts must authorize each reveal before calling.
+    pub fn protected_message_content(
+        &self,
+        reference: &SearchReference,
+    ) -> Option<(super::MessageProtection, Vec<u8>)> {
+        let context = self.reference_context(reference, true)?;
+        let id = match reference {
+            SearchReference::Account { message_id, .. }
+            | SearchReference::Channel { message_id, .. }
+            | SearchReference::LegacyDevice { message_id, .. } => (*message_id)?,
+        };
+        let entry = context
+            .messages
+            .into_iter()
+            .find(|entry| entry.id == id && !entry.recalled)?;
+        if entry.file.is_some() {
+            return None;
+        }
+        Some((entry.protection?, entry.text))
+    }
+
     /// Resolve an exact reference against currently eligible canonical history.
     /// Returns at most 25 entries on each side, preserving canonical order. The
     /// retained projection scans identity/order metadata, then decodes only the
     /// context window. Scan time and metadata still scale with retained history.
     pub fn search_context(&self, reference: &SearchReference) -> Option<SearchContext> {
+        self.reference_context(reference, false)
+    }
+
+    fn reference_context(
+        &self,
+        reference: &SearchReference,
+        reveal: bool,
+    ) -> Option<SearchContext> {
         let message_id = match reference {
             SearchReference::Account { message_id, .. }
             | SearchReference::Channel { message_id, .. }
@@ -171,6 +266,19 @@ impl Node {
         };
         if message_id == EventId::new([0; 32]) {
             return None;
+        }
+        if let SearchReference::Account { account_id, .. } = reference
+            && account_id == &self.account_id()
+        {
+            return self.project_history(
+                account_conversation_id(account_id, account_id),
+                Some(account_id),
+                if reveal {
+                    super::queries::HistorySelection::Protected(message_id)
+                } else {
+                    super::queries::HistorySelection::Context(message_id)
+                },
+            );
         }
         let conversation = self
             .search_conversations()
@@ -195,7 +303,11 @@ impl Node {
         self.project_history(
             conversation.id,
             account,
-            super::queries::HistorySelection::Context(message_id),
+            if reveal {
+                super::queries::HistorySelection::Protected(message_id)
+            } else {
+                super::queries::HistorySelection::Context(message_id)
+            },
         )
     }
 

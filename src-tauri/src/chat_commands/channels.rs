@@ -91,9 +91,33 @@ pub async fn channel_members(
         })
         .collect();
     Ok(ChannelMembersInfo {
+        history_policy: rt.handle().channel_history_policy(channel),
         owner: rt.channel_owner(channel),
         members,
     })
+}
+
+#[tauri::command]
+pub async fn set_channel_history_policy(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+    policy: mesh_talk_core::channel::HistoryPolicy,
+) -> Result<(), CommandError> {
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let node = runtime.handle();
+                node.set_channel_history_policy_if(channel, policy, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
+        .await
 }
 
 #[tauri::command]

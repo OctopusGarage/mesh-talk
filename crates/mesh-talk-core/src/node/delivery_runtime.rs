@@ -944,8 +944,44 @@ impl Node {
                         true,
                         false,
                     )),
+                    DeliveryTransaction::ChannelOutgoing { events, sent, .. }
+                        if events.last().is_some_and(|event| {
+                            event.kind == crate::eventlog::EventKind::FileManifest
+                        }) =>
+                    {
+                        Some((
+                            self.identity.public(),
+                            sent.conversation,
+                            super::received_log::ReceivedEntry {
+                                event_id: tx.id(),
+                                conversation: sent.conversation,
+                                from: self.user_id(),
+                                wall_clock: sent.wall_clock,
+                                plaintext: sent.plaintext.clone(),
+                            },
+                            true,
+                            false,
+                        ))
+                    }
                     _ => None,
                 });
+            // Channel manifests already carry their complete plaintext in the WAL.
+            // Retain their signed chunk scope before retiring that transaction; a
+            // failed scope/sidecar write remains recoverable after acceptance.
+            if let Some((_, channel, entry, true, false)) = &notification
+                && matches!(
+                    store.pending_transactions().first().map(|tx| tx.body()),
+                    Some(DeliveryTransaction::ChannelOutgoing { .. })
+                )
+                && let Some(manifest) = crate::file::decode_manifest(&entry.plaintext)
+            {
+                self.remember_sent_manifest_scope(
+                    manifest.file_conv(),
+                    *channel,
+                    crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub),
+                    entry.event_id,
+                )?;
+            }
             let wake_local =
                 store
                     .pending_transactions()
@@ -1069,11 +1105,16 @@ impl Node {
                                 .insert(manifest.file_conv());
                             if !self.certified_sibling(&sender) {
                                 let _ = self.file_incoming.send(ReceivedFile {
+                                    protection: manifest.protection(),
                                     expires_at_ms: crate::expiry::deadline(&entry.plaintext),
                                     conv: original_conv,
                                     is_channel: false,
                                     from: sender.user_id(),
-                                    name: manifest.name().to_owned(),
+                                    name: if manifest.protection().is_some() {
+                                        "Protected image".into()
+                                    } else {
+                                        manifest.name().to_owned()
+                                    },
                                     size: manifest.size(),
                                     mime: manifest.mime().to_owned(),
                                     file_conv: manifest.file_conv(),
@@ -1116,6 +1157,7 @@ impl Node {
                             from: sender.user_id(),
                             from_name,
                             text: body.text,
+                            protection: body.protection,
                             reply_to: body.reply_to,
                         });
                     }

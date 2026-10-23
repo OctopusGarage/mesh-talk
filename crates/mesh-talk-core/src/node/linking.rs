@@ -69,27 +69,14 @@ impl Node {
             .ok_or_else(|| NodeError::Channel("invalid pairing code".into()))?;
         self.initiate_device_if(peer_public, &mut authorize).await?;
         let (wanted, wanted_revision) = self.device_sync_policy_snapshot();
-        let (mut channel, resp) = match self
-            .pairing_response(addr, peer_public, &code, Some(wanted.history))
+        // A generic transport failure is not evidence of legacy support. A
+        // downgrade could silently discard a known immutable creation timestamp.
+        let (mut channel, resp, created_at_ms) = self
+            .pairing_response(addr, peer_public, &code, wanted.history)
             .await
-        {
-            Ok(exchange) => exchange,
-            Err(_) if !wanted.history || !self.device_sync_policy().history => {
-                return Err(NodeError::Channel(
-                    "pairing without history requires a peer upgrade supporting history selection"
-                        .into(),
-                ));
-            }
-            Err(error) => {
-                if self.device_sync_policy_snapshot().1 != wanted_revision {
-                    return Err(error);
-                }
-                // A legacy responder closes on the unknown V2 first frame without
-                // consuming the code. Retry once on a fresh pinned connection.
-                self.pairing_response(addr, peer_public, &code, None)
-                    .await?
-            }
-        };
+            .map_err(|error| NodeError::Channel(format!(
+                "Device linking failed; retry the connection and ensure both devices are upgraded: {error}"
+            )))?;
         // Verify the returned cert really binds THIS device to THAT account.
         if !resp.cert.verify()
             || resp.cert.device_ed25519_pub != self.identity.public().ed25519_pub
@@ -133,7 +120,9 @@ impl Node {
                 None => break,
             }
         }
-        let account = Account::from_secret_bytes(resp.account_secret);
+        let account =
+            Account::from_secret_bytes_with_created_at(resp.account_secret, created_at_ms)
+                .ok_or_else(|| NodeError::Channel("invalid account creation metadata".into()))?;
         // Defense-in-depth: the cert binds `account_ed25519_pub`; make sure the secret we were
         // handed actually derives that same key, so a buggy/malicious linker can't pair us onto
         // a cert for one account while seeding a secret for another.
@@ -161,35 +150,29 @@ impl Node {
         }
         Ok(LinkedAccount {
             secret: resp.account_secret,
+            created_at_ms,
             account_id: account.account_id(),
         })
     }
 
-    /// Only the request/response phase can negotiate a legacy retry. A decoded
-    /// response may already have consumed authorization, so all validation and
-    /// backfill processing happen outside this retry boundary.
+    /// Initiators require the metadata-bearing response. Legacy requests remain
+    /// supported by the responder, but a new link never loses metadata by fallback.
     async fn pairing_response(
         &self,
         addr: std::net::SocketAddr,
         peer_public: &PublicIdentity,
         code: &PairingCode,
-        selected: Option<bool>,
-    ) -> Result<(SecureChannel<TcpStream>, PairingResponse), NodeError> {
+        history: bool,
+    ) -> Result<(SecureChannel<TcpStream>, PairingResponse, Option<u64>), NodeError> {
         let mut channel = self
             .privacy_dial(addr, peer_public)
             .await
             .map_err(|e| NodeError::Session(SessionError::Transport(e)))?;
         let linker_ed = peer_public.ed25519_pub;
         let joiner = self.identity.public();
-        let tag = match selected {
-            Some(history) => code.authenticator_selected(&linker_ed, &joiner.ed25519_pub, history),
-            None => code.authenticator(&linker_ed, &joiner.ed25519_pub),
-        };
+        let tag = code.authenticator_metadata(&linker_ed, &joiner.ed25519_pub, history);
         let request = PairingRequest { joiner, tag };
-        let bytes = match selected {
-            Some(history) => request.encode_selected(history),
-            None => request.encode(),
-        };
+        let bytes = request.encode_metadata(history);
         channel
             .send(&bytes)
             .await
@@ -198,9 +181,11 @@ impl Node {
             .recv()
             .await
             .map_err(|e| NodeError::Session(SessionError::Transport(e)))?;
-        let response = PairingResponse::decode(&bytes)
-            .ok_or_else(|| NodeError::Channel("pairing rejected".into()))?;
-        Ok((channel, response))
+        let (response, created_at_ms) =
+            PairingResponse::decode_metadata(&bytes).ok_or_else(|| {
+                NodeError::Channel("pairing requires metadata-capable peer upgrade".into())
+            })?;
+        Ok((channel, response, created_at_ms))
     }
 
     /// Recovery after a joiner disconnects before saving its adopted secret.
@@ -233,20 +218,12 @@ impl Node {
     /// Linker side: handle a pairing request on an inbound (authenticated) channel.
     /// Releases the account secret only if a code is pending AND the request both
     /// proves it and binds the authenticated channel peer. Clears the code on success.
-    #[cfg(test)]
-    pub(in crate::node) async fn serve_pairing(
-        self: &std::sync::Arc<Self>,
-        channel: &mut SecureChannel<TcpStream>,
-        req: PairingRequest,
-    ) {
-        self.serve_pairing_selected(channel, req, None).await;
-    }
-
-    pub(in crate::node) async fn serve_pairing_selected(
+    pub(in crate::node) async fn serve_pairing_negotiated(
         self: &std::sync::Arc<Self>,
         channel: &mut SecureChannel<TcpStream>,
         req: PairingRequest,
         selected: Option<bool>,
+        metadata: bool,
     ) {
         // Bind the proof to the Noise-authenticated peer.
         if req.joiner != *channel.peer_identity() {
@@ -254,6 +231,9 @@ impl Node {
         }
         let my_ed = self.identity.public().ed25519_pub;
         let verifies = |code: &PairingCode| match selected {
+            Some(history) if metadata => {
+                code.verify_metadata(&my_ed, &req.joiner.ed25519_pub, history, &req.tag)
+            }
             Some(history) => {
                 code.verify_selected(&my_ed, &req.joiner.ed25519_pub, history, &req.tag)
             }
@@ -360,7 +340,12 @@ impl Node {
             account_ed25519_pub: self.account.public().ed25519_pub,
             cert,
         };
-        if channel.send(&resp.encode()).await.is_err() {
+        let response = if metadata {
+            resp.encode_metadata(self.account.created_at_ms())
+        } else {
+            resp.encode()
+        };
+        if channel.send(&response).await.is_err() {
             return;
         }
         // Backfill: stream our account history so the new device starts populated,

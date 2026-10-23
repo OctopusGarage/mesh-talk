@@ -459,6 +459,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &sent_path,
         password,
     )?;
+    node.set_profile_display_name(&args.name)?;
     let verified_path = verified_peer_path(data_dir);
     let mut verified_peers = load_verified_peers(&verified_path);
     node.replace_verified_dm_pull_peers(verified_peers.iter().cloned().collect());

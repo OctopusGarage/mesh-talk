@@ -1,3 +1,5 @@
+import { mentionsName } from "@/lib/mentions";
+import { useAuth } from "./auth";
 import { createRosterRefresh } from "./rosterRefresh";
 import {
   notifySyncInvalidation,
@@ -95,6 +97,7 @@ export type {
 const INCOMING_FILES_CAP = 300;
 
 export interface IncomingFile {
+  protection?: import("@/lib/types").MessageProtection | null;
   expiresAtMs?: number | null;
   fromName: string;
   name: string;
@@ -120,6 +123,7 @@ export function displayName(
 /** Total boot window, including time spent waiting for native reads. */
 const BOOT_TIMEOUT_MS = 30_000;
 const BOOT_POLL_MS = 500;
+const BOOT_RECOVERY_INTERVAL_MS = 10_000;
 
 /**
  * Poll my_id/account_id until the node finishes opening (post-login KDF unlock takes a
@@ -131,6 +135,7 @@ async function pollUntilReady(
   set: Set,
   get: Get,
   isCancelled: () => boolean,
+  singleAttempt = false,
 ): Promise<boolean> {
   const deadline = performance.now() + BOOT_TIMEOUT_MS;
   while (performance.now() < deadline && !isCancelled()) {
@@ -195,6 +200,7 @@ async function pollUntilReady(
           pendingUnknownUnread,
           unreadOwner: owner,
           ready: true,
+          bootFailed: false,
         };
       });
       setPushStateSupport(identity.supports_push_state ? owner : null);
@@ -202,7 +208,7 @@ async function pollUntilReady(
       await get().refreshRoster();
       return true;
     } catch {
-      if (isCancelled()) return false;
+      if (isCancelled() || singleAttempt) return false;
       const remaining = deadline - performance.now();
       if (remaining <= 0) return false;
       await new Promise((r) =>
@@ -254,11 +260,11 @@ export interface ChatState
   // on the Rust side; mirrored here so the sidebar can sort/rename without a roundtrip.
   favorites: Record<string, FavoriteInfo>;
   error: string | null; // transient action error (file/reaction send), surfaced to the user
-  bootFailed: boolean; // the node never came up within the boot window
+  bootFailed: boolean; // identity did not resolve within the latest boot window
 
   resetForLock: () => void;
   start: () => () => void;
-  retryBoot: () => void;
+  retryBoot: (background?: boolean) => void;
   loadFavorites: () => Promise<void>;
   togglePinned: (id: string, pinned: boolean) => Promise<void>;
   setChannelHidden: (id: string, hidden: boolean) => Promise<void>;
@@ -278,11 +284,13 @@ export interface ChatState
     text: string,
     replyTo: string | null,
     expiresAtMs?: number | null,
+    protection?: import("@/lib/types").MessageProtection | null,
   ) => Promise<boolean>;
   admitText: (
     text: string,
     replyTo: string | null,
     expiresAtMs?: number | null,
+    protection?: import("@/lib/types").MessageProtection | null,
   ) => boolean;
   retry: (clientId: string) => Promise<void>;
   sendFile: (
@@ -290,6 +298,12 @@ export interface ChatState
     media: boolean,
     expiresAtMs?: number | null,
   ) => Promise<void>;
+  admitImage: (
+    path: string,
+    protection: import("@/lib/types").MessageProtection,
+    expiresAtMs?: number | null,
+    onAccepted?: () => void,
+  ) => Promise<"refused" | "failed" | "accepted">;
   saveFile: (fileConv: string, dest: string) => Promise<void>;
   toggleReaction: (target: string, emoji: string) => Promise<void>;
   /** Delete one message from this device only (local). */
@@ -597,14 +611,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
   // Re-attempt the node-id poll after a boot failure (events + roster interval from the
   // original start() are still live, so we only need to re-resolve my_id/account_id).
-  retryBoot: () => {
+  retryBoot: (background = false) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     if (get().bootBusy) return;
     const request = get().bootRequest + 1;
     set({
-      bootFailed: false,
+      bootFailed: background && get().bootFailed,
       ready: false,
       bootBusy: true,
       bootRequest: request,
@@ -615,7 +629,10 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         set,
         get,
         () => !lease.current() || get().bootRequest !== request,
+        background,
       );
+      if (ok && lease.current() && get().bootRequest === request)
+        void get().loadFavorites();
       if (get().bootRequest === request)
         set({ bootBusy: false, bootFailed: !ok });
     })();
@@ -723,8 +740,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     };
     let nextRosterFallback = 0;
     let nextStatusFallback = 0;
+    let nextBootRecovery = 0;
+    let bootFailureObserved = false;
     const roster = setInterval(() => {
       if (lease.current() && get().ready) {
+        bootFailureObserved = false;
         const now = performance.now();
         if (!supportsPushState(lease.owner) || now >= nextRosterFallback) {
           nextRosterFallback = now + 30000;
@@ -734,8 +754,20 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           nextStatusFallback = now + 30000;
           void get().refreshStatuses();
         }
-      } else if (lease.current() && !get().bootBusy && !get().bootFailed)
-        get().retryBoot();
+      } else if (lease.current() && !get().bootBusy) {
+        const failed = get().bootFailed;
+        const now = performance.now();
+        if (failed && !bootFailureObserved) {
+          bootFailureObserved = true;
+          nextBootRecovery = now + BOOT_RECOVERY_INTERVAL_MS;
+        }
+        if (!failed || now >= nextBootRecovery) {
+          nextBootRecovery = now + BOOT_RECOVERY_INTERVAL_MS;
+          // A failed boot remains visible while one bounded background read checks
+          // for recovery. Never let a transient identity timeout become terminal.
+          get().retryBoot(failed);
+        }
+      }
     }, 2000);
 
     const unlisten = subscribeNodeEvents({
@@ -974,7 +1006,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
   // The composer needs an immediate admission answer so it never clears a draft that
   // could not enter the local optimistic queue. Delivery still settles asynchronously.
-  admitText: (text, replyTo, expiresAtMs) => {
+  admitText: (text, replyTo, expiresAtMs, protection) => {
     const lease = captureChat(get);
     if (!lease.current()) return false;
     const c = get().active;
@@ -988,6 +1020,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         text,
         replyTo,
         expiresAtMs,
+        protection,
       },
     );
     if (!dispatch) return false;
@@ -996,7 +1029,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   },
 
   // Account composers retain the draft until the core has durably accepted it.
-  admitTextAndWait: async (text, replyTo, expiresAtMs) => {
+  admitTextAndWait: async (text, replyTo, expiresAtMs, protection) => {
     const lease = captureChat(get);
     if (!lease.current()) return false;
     const c = get().active;
@@ -1011,8 +1044,9 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           text,
           replyTo,
           expiresAtMs,
+          protection,
         },
-        { waitForHydration: false },
+        { waitForHydration: false, retainFailure: !protection },
       ) ?? false
     );
   },
@@ -1054,6 +1088,21 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     await dispatchIntent(set, get, { ...intent, message: pending });
   },
 
+  admitImage: async (path, protection, expiresAtMs, onAccepted) => {
+    const lease = captureChat(get);
+    const c = get().active;
+    if (!lease.current() || !get().ready || !c) return "refused";
+    const admission = beginSendIntent(
+      guardedSet(rawSet, lease.current),
+      get,
+      c,
+      { kind: "file", path, media: true, expiresAtMs, protection },
+      { waitForHydration: false, onAccepted },
+    );
+    if (!admission) return "refused";
+    // Local transfer gives the bubble sole retry ownership, including native failure.
+    return (await admission) ? "accepted" : "failed";
+  },
   sendFile: async (path, media, expiresAtMs) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
@@ -1337,7 +1386,17 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
     set((state) =>
       receptionPatch(
         state,
-        receiveIdentity(state, key, { ...e, own_device: own }),
+        receiveIdentity(
+          state,
+          key,
+          { ...e, own_device: own },
+          mentionsName(
+            e.text,
+            useAuth.getState().user?.display_name ||
+              useAuth.getState().user?.username ||
+              "",
+          ),
+        ),
       ),
     );
   } else if (!e.own_device) bump(set, key, isActive && isConversationVisible());
@@ -1388,6 +1447,7 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
           mime: e.mime,
           fileConv: e.file_conv,
           media: e.media,
+          protection: e.protection,
         },
         ...state.incomingFiles,
       ].slice(0, INCOMING_FILES_CAP),

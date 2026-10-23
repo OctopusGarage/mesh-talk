@@ -5,11 +5,16 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import "@/lib/i18n";
 import { useChat } from "@/store/chat";
 import { useAuth } from "@/store/auth";
+import { useDrafts } from "@/store/drafts";
 import type { Composer } from "../Composer";
 import type { ScreenshotEditor } from "../ScreenshotEditor";
 import i18n from "@/lib/i18n";
 import { useAttachmentIntake } from "./useAttachmentIntake";
 import { ConversationView } from "../ConversationView";
+
+const originalAdmitImage = useChat.getState().admitImage;
+const originalAdmitTextAndWait = useChat.getState().admitTextAndWait;
+const originalRetry = useChat.getState().retry;
 
 const native = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -23,6 +28,7 @@ const native = vi.hoisted(() => ({
 }));
 let editor: ComponentProps<typeof ScreenshotEditor> | null;
 let composer: ComponentProps<typeof Composer>;
+let actualComposer: typeof Composer | null = null;
 vi.mock("@tauri-apps/api/core", () => ({ invoke: native.invoke }));
 vi.mock("@/lib/api/language", () => ({}));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: native.open }));
@@ -34,10 +40,36 @@ vi.mock("@tauri-apps/api/webview", () => ({
     },
   }),
 }));
+vi.mock("react-virtuoso", () => ({
+  Virtuoso: ({
+    data = [],
+    itemContent,
+  }: {
+    data?: import("@/store/chat").ChatMessage[];
+    itemContent: (
+      index: number,
+      message: import("@/store/chat").ChatMessage,
+    ) => import("react").ReactNode;
+  }) => data.map((message, index) => itemContent(index, message)),
+}));
+vi.mock("../MessageBubble", () => ({
+  MessageBubble: ({
+    m,
+    onReply,
+  }: {
+    m: import("@/store/chat").ChatMessage;
+    onReply: (message: import("@/store/chat").ChatMessage) => void;
+  }) =>
+    createElement(
+      "button",
+      { onClick: () => onReply(m), "data-testid": `reply-${m.id}` },
+      "Reply",
+    ),
+}));
 vi.mock("../Composer", () => ({
   Composer: (props: ComponentProps<typeof Composer>) => {
     composer = props;
-    return null;
+    return actualComposer ? createElement(actualComposer, props) : null;
   },
 }));
 vi.mock("../ScreenshotEditor", () => ({
@@ -47,6 +79,7 @@ vi.mock("../ScreenshotEditor", () => ({
   },
 }));
 vi.mock("../ConversationHeaders", () => ({
+  ConversationBio: () => null,
   ChannelHeader: () => null,
   DmHeader: () => null,
 }));
@@ -76,10 +109,19 @@ beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.resetAllMocks();
   editor = null;
+  actualComposer = null;
   native.invoke.mockResolvedValue(false);
   native.register.mockResolvedValue(() => {});
   useAuth.setState({
     user: { id: "owner", username: "alice", display_name: "Alice" },
+  });
+  // This fixture mounts ConversationView directly, without ChatApp's draft loader.
+  useDrafts.setState({
+    owner: "owner",
+    generation: useAuth.getState().generation,
+    texts: {},
+    loaded: true,
+    error: null,
   });
   useChat.setState({
     active: { kind: "account", id: "alice", name: "Alice" },
@@ -97,6 +139,8 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await act(async () => root.unmount());
+  useDrafts.getState().reset();
+  container.remove();
   vi.unstubAllGlobals();
 });
 it("deletes a pasted temp file when the conversation changes during staging", async () => {
@@ -767,6 +811,10 @@ it("clears an already staged screenshot when its owning account changes", async 
   await act(async () =>
     useAuth.setState({ generation: useAuth.getState().generation + 1 }),
   );
+  // Resume the composer after ChatApp would finish loading the new session's drafts.
+  await act(async () =>
+    useDrafts.setState({ generation: useAuth.getState().generation }),
+  );
   expect(composer.stagedScreenshot).toBeNull();
   expect(useChat.getState().sendFile).not.toHaveBeenCalled();
 });
@@ -816,4 +864,491 @@ it("does not reopen a cancelled screenshot when an acquisition completes late", 
     await first;
   });
   expect(intake.screenshotBytes).toBeNull();
+});
+
+it("snapshots image-picker protection and preserves a later mode selection", async () => {
+  const picked = deferred<string>();
+  native.open.mockReturnValueOnce(picked.promise);
+  const admitImage = vi.fn().mockResolvedValue("accepted");
+  useChat.setState({ admitImage });
+  await act(async () => composer.onProtectionChange!("click"));
+  let selecting!: Promise<void>;
+  await act(async () => {
+    selecting = composer.onImage!() as unknown as Promise<void>;
+  });
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  await act(async () => {
+    picked.resolve("/tmp/private.png");
+    await selecting;
+  });
+  expect(admitImage).toHaveBeenCalledWith(
+    "/tmp/private.png",
+    "click",
+    null,
+    expect.any(Function),
+  );
+  expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+  await act(async () =>
+    useChat.setState({
+      active: { kind: "account", id: "other", name: "Other" },
+    }),
+  );
+  await act(async () =>
+    useChat.setState({
+      active: { kind: "account", id: "alice", name: "Alice" },
+    }),
+  );
+  expect(composer.initialProtection).toBe("authenticate");
+});
+
+it("rejects a protected mixed attachment batch before any handoff", async () => {
+  await act(async () => composer.onProtectionChange!("click"));
+  const admitImage = vi.fn().mockResolvedValue("accepted");
+  useChat.setState({ admitImage });
+  await expect(
+    composer.onPasteFiles!([
+      new File(["image"], "photo.png", { type: "image/png" }),
+      new File(["video"], "clip.mp4", { type: "video/mp4" }),
+    ]),
+  ).rejects.toThrow("support text and images only");
+  expect(admitImage).not.toHaveBeenCalled();
+  expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+});
+
+it("keeps failed image protection and rejects oversized protected image bytes before writing", async () => {
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  const admitImage = vi.fn().mockResolvedValue("refused");
+  useChat.setState({ admitImage });
+  native.invoke.mockImplementation((command: string) =>
+    command === "write_temp_file"
+      ? Promise.resolve("/tmp/photo.png")
+      : Promise.resolve(false),
+  );
+  const small = new File(["image"], "photo.png", { type: "image/png" });
+  Object.defineProperty(small, "arrayBuffer", {
+    value: async () => new Uint8Array([1]).buffer,
+  });
+  await act(async () => {
+    await expect(composer.onPasteFiles!([small])).rejects.toThrow(
+      "Image not accepted",
+    );
+  });
+  expect(admitImage).toHaveBeenCalledWith(
+    "/tmp/photo.png",
+    "authenticate",
+    null,
+    expect.any(Function),
+  );
+  const huge = new File([], "large.png", { type: "image/png" });
+  Object.defineProperty(huge, "size", { value: 16 * 1024 * 1024 + 1 });
+  await act(async () => {
+    await expect(composer.onPasteFiles!([huge])).rejects.toThrow("16 MiB");
+  });
+  expect(
+    native.invoke.mock.calls.filter(
+      ([command]) => command === "write_temp_file",
+    ),
+  ).toHaveLength(1);
+});
+
+it("applies protected image policy to dropped images and rejects dropped videos explicitly", async () => {
+  await act(async () => composer.onProtectionChange!("click"));
+  const admitImage = vi.fn().mockResolvedValue("accepted");
+  useChat.setState({ admitImage });
+  await act(async () =>
+    native.drop!({ payload: { type: "drop", paths: ["/tmp/photo.png"] } }),
+  );
+  expect(admitImage).toHaveBeenCalledWith(
+    "/tmp/photo.png",
+    "click",
+    null,
+    expect.any(Function),
+  );
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  await act(async () =>
+    native.drop!({ payload: { type: "drop", paths: ["/tmp/clip.mp4"] } }),
+  );
+  expect(admitImage).toHaveBeenCalledTimes(1);
+  expect(useChat.getState().error).toContain("support text and images only");
+});
+
+it("retains verification for a partially accepted pasted batch and its retry", async () => {
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  const admitImage = vi
+    .fn()
+    .mockResolvedValueOnce("accepted")
+    .mockResolvedValueOnce("refused")
+    .mockResolvedValueOnce("accepted");
+  useChat.setState({ admitImage });
+  native.invoke.mockImplementation(
+    (command: string, args: { name?: string }) =>
+      command === "write_temp_file"
+        ? Promise.resolve(`/tmp/${args.name}`)
+        : Promise.resolve(false),
+  );
+  const images = ["one.png", "two.png"].map((name) => {
+    const image = new File(["bytes"], name, { type: "image/png" });
+    Object.defineProperty(image, "arrayBuffer", {
+      value: async () => new Uint8Array([1]).buffer,
+    });
+    return image;
+  });
+  await act(async () => {
+    await expect(composer.onPasteFiles!(images)).rejects.toThrow(
+      "Image not accepted",
+    );
+  });
+  await act(async () => {
+    composer.onProtectionChange!(undefined);
+    await composer.onPasteFiles!([images[1]]);
+  });
+  expect(admitImage.mock.calls.map(([, mode]) => mode)).toEqual([
+    "authenticate",
+    "authenticate",
+    "authenticate",
+  ]);
+});
+
+it("does not consume protected text or staged image policy when an unrelated picker succeeds", async () => {
+  await act(async () => {
+    composer.onProtectionChange!("authenticate");
+    composer.onDraftChange!("Keep this protected text");
+    composer.onAttachmentDraftChange!(1);
+  });
+  const admitImage = vi.fn().mockResolvedValue("accepted");
+  useChat.setState({ admitImage });
+  native.open.mockResolvedValueOnce("/tmp/picked.png");
+  await act(async () => {
+    await composer.onImage!();
+  });
+  await act(async () =>
+    useChat.setState({
+      active: { kind: "account", id: "other", name: "Other" },
+    }),
+  );
+  await act(async () =>
+    useChat.setState({
+      active: { kind: "account", id: "alice", name: "Alice" },
+    }),
+  );
+  expect(composer.initialProtection).toBe("authenticate");
+  expect(composer.initialDraft).toBe("Keep this protected text");
+});
+
+it.each(["none", "mode", "attachment", "replacement"])(
+  "transfers retry ownership and consumes only unchanged protection (later edit: %s)",
+  async (laterEdit) => {
+    const { Composer: ActualComposer } =
+      await vi.importActual<typeof import("../Composer")>("../Composer");
+    useChat.setState({
+      admitImage: originalAdmitImage,
+      retry: originalRetry,
+      intents: {},
+      reload: vi.fn().mockResolvedValue(true),
+    });
+    await act(async () => composer.onProtectionChange!("authenticate"));
+    actualComposer = ActualComposer;
+    await act(async () => root.render(createElement(ConversationView)));
+    let attempts = 0;
+    native.invoke.mockImplementation((command: string) => {
+      if (command === "write_temp_file")
+        return Promise.resolve("/tmp/private.png");
+      if (command === "owner_enqueue_file")
+        return ++attempts === 1
+          ? Promise.reject(new Error("offline"))
+          : Promise.resolve({ id: "accepted-image", fileConv: "image-conv" });
+      return Promise.resolve([]);
+    });
+    await act(async () => {
+      const event = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", {
+        value: { files: [file("private.png")], items: [] },
+      });
+      container.querySelector("textarea")!.dispatchEvent(event);
+    });
+    const send = () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="composer-send"]')!
+        .click();
+    await act(async () => send());
+    expect(
+      container.querySelector('[data-testid="composer-pending-files"]'),
+    ).toBeNull();
+    const intents = Object.values(useChat.getState().intents);
+    expect(intents).toHaveLength(1);
+    expect(intents[0].message.failed).toBe(true);
+    expect(intents[0].payload).toMatchObject({
+      path: "/tmp/private.png",
+      protection: "authenticate",
+    });
+    await act(async () => send());
+    expect(attempts).toBe(1);
+    expect(container.textContent).toContain(
+      "Text & images · hides after 30 seconds",
+    );
+    if (laterEdit === "mode") {
+      document.body.append(container);
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="composer-protection"]',
+          )!
+          .click(),
+      );
+      await act(async () =>
+        document
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="composer-protection-click"]',
+          )!
+          .click(),
+      );
+    }
+    if (laterEdit === "attachment" || laterEdit === "replacement") {
+      const paste = async (name: string) =>
+        act(async () => {
+          const event = new Event("paste", { bubbles: true, cancelable: true });
+          Object.defineProperty(event, "clipboardData", {
+            value: { files: [file(name)], items: [] },
+          });
+          container.querySelector("textarea")!.dispatchEvent(event);
+        });
+      await paste("new.png");
+      if (laterEdit === "replacement") {
+        await act(async () =>
+          container
+            .querySelector<HTMLButtonElement>('[aria-label="Dismiss new.png"]')!
+            .click(),
+        );
+        await paste("replacement.png");
+      }
+    }
+    await act(async () =>
+      useChat.getState().retry(intents[0].message.clientId!),
+    );
+    expect(composer.protectionReset?.applyIf()).toBe(
+      laterEdit !== "none" ? undefined : true,
+    );
+    if (laterEdit === "none")
+      expect(container.textContent).not.toContain(
+        "Text & images · hides after 30 seconds",
+      );
+    else
+      expect(container.textContent).toContain(
+        "Text & images · hides after 30 seconds",
+      );
+    if (laterEdit === "mode")
+      expect(container.textContent).toContain("Click to view");
+    expect(attempts).toBe(2);
+    expect(Object.values(useChat.getState().intents)).toHaveLength(1);
+    expect(Object.values(useChat.getState().intents)[0].payload).toMatchObject({
+      path: "",
+      protection: "authenticate",
+    });
+  },
+);
+
+it("does not retarget a refused remainder into a replacement conversation", async () => {
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  const admitImage = vi.fn().mockResolvedValue("refused");
+  useChat.setState({ admitImage });
+  native.invoke.mockImplementation((command: string) =>
+    command === "write_temp_file"
+      ? Promise.resolve("/tmp/private.png")
+      : Promise.resolve(false),
+  );
+  const image = file("private.png");
+  await act(async () => {
+    await expect(composer.onPasteFiles!([image])).rejects.toThrow(
+      "Image not accepted",
+    );
+  });
+  expect(native.invoke).toHaveBeenCalledWith("delete_temp_file", {
+    path: "/tmp/private.png",
+  });
+  await switchConversation();
+  await act(async () => composer.onPasteFiles!([image]));
+  expect(admitImage).toHaveBeenCalledTimes(1);
+  expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+});
+
+it("consumes unchanged protection after a locally refused partial batch finally succeeds", async () => {
+  const { Composer: ActualComposer } =
+    await vi.importActual<typeof import("../Composer")>("../Composer");
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  useChat.setState({
+    admitImage: originalAdmitImage,
+    intents: {},
+    reload: vi.fn().mockResolvedValue(true),
+  });
+  actualComposer = ActualComposer;
+  await act(async () => root.render(createElement(ConversationView)));
+  let stages = 0;
+  native.invoke.mockImplementation(
+    (command: string, args: { name?: string }) => {
+      if (command === "write_temp_file")
+        return ++stages === 2
+          ? Promise.reject(new Error("disk full"))
+          : Promise.resolve(`/tmp/${args.name}`);
+      if (command === "owner_enqueue_file")
+        return Promise.resolve({
+          id: `image-${stages}`,
+          fileConv: `conv-${stages}`,
+        });
+      return Promise.resolve([]);
+    },
+  );
+  await act(async () => {
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: { files: [file("one.png"), file("two.png")], items: [] },
+    });
+    container.querySelector("textarea")!.dispatchEvent(event);
+  });
+  const send = () =>
+    container
+      .querySelector<HTMLButtonElement>('[data-testid="composer-send"]')!
+      .click();
+  await act(async () => send());
+  expect(
+    container.querySelector('[data-testid="composer-pending-files"]')!
+      .textContent,
+  ).toContain("two.png");
+  expect(container.textContent).toContain(
+    "Text & images · hides after 30 seconds",
+  );
+  await act(async () => send());
+  expect(
+    container.querySelector('[data-testid="composer-pending-files"]'),
+  ).toBeNull();
+  expect(container.textContent).not.toContain(
+    "Text & images · hides after 30 seconds",
+  );
+  expect(
+    native.invoke.mock.calls
+      .filter(([command]) => command === "owner_enqueue_file")
+      .map(([, args]) => args.protection),
+  ).toEqual(["authenticate", "authenticate"]);
+});
+
+it.each(["drop", "picker"])(
+  "keeps failed %s protection and consumes it only when its bubble retry succeeds",
+  async (source) => {
+    const { Composer: ActualComposer } =
+      await vi.importActual<typeof import("../Composer")>("../Composer");
+    await act(async () => composer.onProtectionChange!("authenticate"));
+    useChat.setState({
+      admitImage: originalAdmitImage,
+      retry: originalRetry,
+      intents: {},
+      reload: vi.fn().mockResolvedValue(true),
+    });
+    actualComposer = ActualComposer;
+    await act(async () => root.render(createElement(ConversationView)));
+    let attempts = 0;
+    native.invoke.mockImplementation((command: string) =>
+      command === "owner_enqueue_file"
+        ? ++attempts === 1
+          ? Promise.reject(new Error("offline"))
+          : Promise.resolve({ id: "accepted-image", fileConv: "image-conv" })
+        : Promise.resolve([]),
+    );
+    native.open.mockResolvedValue("/native/private.png");
+    await act(async () => {
+      if (source === "drop")
+        native.drop!({
+          payload: { type: "drop", paths: ["/native/private.png"] },
+        });
+      else await composer.onImage!();
+    });
+    const intent = Object.values(useChat.getState().intents)[0];
+    expect(intent.message.failed).toBe(true);
+    expect(container.textContent).toContain(
+      "Text & images · hides after 30 seconds",
+    );
+    expect(composer.protectionReset).toBeUndefined();
+    await act(async () => useChat.getState().retry(intent.message.clientId!));
+    expect(attempts).toBe(2);
+    expect(container.textContent).not.toContain(
+      "Text & images · hides after 30 seconds",
+    );
+  },
+);
+
+it("keeps rejected protected text solely in its quoted composer draft before a single successful resubmission", async () => {
+  const { Composer: ActualComposer } =
+    await vi.importActual<typeof import("../Composer")>("../Composer");
+  const quoted = {
+    id: "quoted",
+    text: "Original message",
+    fromMe: false,
+    who: "peer",
+    wallClock: 1,
+    replyTo: null,
+  };
+  useChat.setState({
+    admitTextAndWait: originalAdmitTextAndWait,
+    intents: {},
+    messages: { "account:alice": [quoted] },
+    reload: vi.fn().mockResolvedValue(true),
+  });
+  await act(async () => composer.onProtectionChange!("authenticate"));
+  actualComposer = ActualComposer;
+  await act(async () => root.render(createElement(ConversationView)));
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[data-testid="reply-quoted"]')!
+      .click(),
+  );
+  await act(async () => {
+    const input = container.querySelector("textarea")!;
+    Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(input, "Private reply");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  let attempts = 0;
+  native.invoke.mockImplementation((command: string) =>
+    command === "owner_enqueue_text"
+      ? ++attempts === 1
+        ? Promise.reject(new Error("offline"))
+        : Promise.resolve("accepted-text")
+      : Promise.resolve([]),
+  );
+  const send = () =>
+    container
+      .querySelector<HTMLButtonElement>('[data-testid="composer-send"]')!
+      .click();
+  await act(async () => send());
+  expect(container.querySelector("textarea")!.value).toBe("Private reply");
+  expect(composer.replyTo?.id).toBe("quoted");
+  expect(container.textContent).toContain(
+    "Text & images · hides after 30 seconds",
+  );
+  expect(Object.values(useChat.getState().intents)).toHaveLength(0);
+  expect(useChat.getState().messages["account:alice"]).toEqual([quoted]);
+  await act(async () => send());
+  expect(attempts).toBe(2);
+  expect(container.querySelector("textarea")!.value).toBe("");
+  expect(composer.replyTo).toBeNull();
+  expect(container.textContent).not.toContain(
+    "Text & images · hides after 30 seconds",
+  );
+  expect(
+    useChat
+      .getState()
+      .messages["account:alice"].filter((message) => message.fromMe),
+  ).toHaveLength(1);
+  expect(
+    native.invoke.mock.calls
+      .filter(([command]) => command === "owner_enqueue_text")
+      .map(([, args]) => ({
+        text: args.text,
+        replyTo: args.replyTo,
+        protection: args.protection,
+      })),
+  ).toEqual([
+    { text: "Private reply", replyTo: "quoted", protection: "authenticate" },
+    { text: "Private reply", replyTo: "quoted", protection: "authenticate" },
+  ]);
 });

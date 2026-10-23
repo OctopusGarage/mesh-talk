@@ -29,6 +29,7 @@ and the technical [documentation map](../README.md).
 | Search or retain local messages         | [History](topics/history.md)                         |
 | Keep a recoverable copy                 | [Backup and restore](topics/backup.md)               |
 | Change theme or wallpaper               | [Appearance](topics/appearance.md)                   |
+| Let a local agent send updates          | [Local agent access](topics/local-agent-access.md)          |
 | Change language or startup behavior     | [General settings](topics/language.md)               |
 | Install a newer release                 | [Updates](topics/updates.md)                         |
 | Investigate connectivity                | [Diagnostics](topics/diagnostics.md)                 |

@@ -238,6 +238,210 @@ pub async fn owner_search_context(
     admission.with_runtime(move |_| Ok(response)).await
 }
 
+#[derive(Serialize)]
+pub struct RevealedMessageInfo {
+    text: String,
+    visible_for_ms: u64,
+}
+
+#[tauri::command]
+pub async fn owner_reveal_message(
+    owner: String,
+    reference: serde_json::Value,
+    password: Option<String>,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<RevealedMessageInfo, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    let reference = protected_reference(reference)?;
+    let lock_revision = app.app_lock().authorization_revision()?;
+    let admission_lease = admission.lease().clone();
+    reveal_message_with_verifier(
+        admission,
+        app.app_lock().clone(),
+        lock_revision,
+        reference,
+        || {
+            crate::app_lock::verify_session_identity(
+                &app,
+                &admission_lease,
+                password,
+                "view a protected message in Mesh-Talk",
+            )
+        },
+    )
+    .await
+}
+
+fn protected_reference(reference: serde_json::Value) -> Result<SearchReference, CommandError> {
+    let reference: SearchReferenceInfo = serde_json::from_value(reference)
+        .map_err(|_| CommandError::InvalidInput("malformed protected message reference".into()))?;
+    match &reference {
+        SearchReferenceInfo::Account {
+            message_id: Some(_),
+            ..
+        }
+        | SearchReferenceInfo::Channel {
+            message_id: Some(_),
+            ..
+        } => {}
+        _ => {
+            return Err(CommandError::InvalidInput(
+                "an exact account or channel message is required".into(),
+            ));
+        }
+    }
+    reference.to_core()
+}
+
+#[tauri::command]
+pub async fn owner_reveal_image(
+    owner: String,
+    reference: serde_json::Value,
+    password: Option<String>,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<tauri::ipc::Response, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    let reference = protected_reference(reference)?;
+    let lock_revision = app.app_lock().authorization_revision()?;
+    let lease = admission.lease().clone();
+    reveal_image_with_verifier(
+        admission,
+        app.app_lock().clone(),
+        lock_revision,
+        reference,
+        || {
+            crate::app_lock::verify_session_identity(
+                &app,
+                &lease,
+                password,
+                "view a protected image in Mesh-Talk",
+            )
+        },
+    )
+    .await
+}
+
+pub(super) async fn reveal_image_with_verifier<F, Fut>(
+    admission: RuntimeAdmission,
+    app_lock: crate::app_lock::AppLock,
+    lock_revision: u64,
+    reference: SearchReference,
+    verify: F,
+) -> Result<tauri::ipc::Response, CommandError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), CommandError>>,
+{
+    reveal_content_with_verifier(
+        admission,
+        app_lock,
+        lock_revision,
+        reference,
+        ProtectedContentReader {
+            protection: mesh_talk_core::node::Node::protected_image_protection,
+            content: mesh_talk_core::node::Node::protected_image_content,
+        },
+        verify,
+        tauri::ipc::Response::new,
+    )
+    .await
+}
+
+pub(super) async fn reveal_message_with_verifier<F, Fut>(
+    admission: RuntimeAdmission,
+    app_lock: crate::app_lock::AppLock,
+    lock_revision: u64,
+    reference: SearchReference,
+    verify: F,
+) -> Result<RevealedMessageInfo, CommandError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), CommandError>>,
+{
+    reveal_content_with_verifier(
+        admission,
+        app_lock,
+        lock_revision,
+        reference,
+        ProtectedContentReader {
+            protection: |node, reference| {
+                node.protected_message_content(reference)
+                    .map(|(mode, _)| mode)
+            },
+            content: mesh_talk_core::node::Node::protected_message_content,
+        },
+        verify,
+        |text| RevealedMessageInfo {
+            text: String::from_utf8_lossy(&text).into_owned(),
+            visible_for_ms: 30_000,
+        },
+    )
+    .await
+}
+
+type ProtectedContent = (mesh_talk_core::node::MessageProtection, Vec<u8>);
+
+#[derive(Clone, Copy)]
+struct ProtectedContentReader {
+    protection: fn(
+        &mesh_talk_core::node::Node,
+        &SearchReference,
+    ) -> Option<mesh_talk_core::node::MessageProtection>,
+    content: fn(&mesh_talk_core::node::Node, &SearchReference) -> Option<ProtectedContent>,
+}
+
+async fn reveal_content_with_verifier<T, F, Fut>(
+    admission: RuntimeAdmission,
+    app_lock: crate::app_lock::AppLock,
+    lock_revision: u64,
+    reference: SearchReference,
+    reader: ProtectedContentReader,
+    verify: F,
+    project: impl FnOnce(Vec<u8>) -> T + Send + 'static,
+) -> Result<T, CommandError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), CommandError>>,
+{
+    let (protection, original_node) = admission
+        .with_runtime(|runtime| {
+            let handle = runtime.handle();
+            let protection = (reader.protection)(&handle, &reference).ok_or_else(|| {
+                CommandError::Authorization("protected message unavailable".into())
+            })?;
+            Ok((protection, handle))
+        })
+        .await?;
+    if protection == mesh_talk_core::node::MessageProtection::Authenticate {
+        verify().await?;
+    }
+    // Authentication can outlive recall, expiry, app lock, logout or replacement.
+    // Re-read the exact event only while the original session/runtime is admitted.
+    admission
+        .blocking(move |runtime, _| {
+            let handle = runtime.handle();
+            if !std::sync::Arc::ptr_eq(&original_node, &handle) {
+                return Err(CommandError::Authorization(
+                    "runtime replaced during authentication".into(),
+                ));
+            }
+            let (current_protection, content) =
+                (reader.content)(&handle, &reference).ok_or_else(|| {
+                    CommandError::Authorization("protected message unavailable".into())
+                })?;
+            if current_protection != protection {
+                return Err(CommandError::Authorization(
+                    "protected message changed".into(),
+                ));
+            }
+            app_lock.with_unchanged_revision(lock_revision, || Ok(project(content)))
+        })
+        .await
+}
+
 /// Count actual JSON bytes without allocating a second copy of message content.
 fn serialized_bytes(value: &impl Serialize) -> Result<usize, CommandError> {
     struct Counter(usize);

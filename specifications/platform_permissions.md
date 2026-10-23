@@ -41,6 +41,17 @@ Windows toast system).
 
 1. **Debian Package Dependencies**: The Linux configuration includes a section for specifying Debian package dependencies. Currently empty but can be extended as needed.
 
+### Screenshots
+
+Mesh-Talk prefers the desktop Screenshot portal. X11 desktops without that
+capability can use the optional `xfce4-screenshooter` executable (Ubuntu package
+of the same name). The fallback is enabled only for an actual X11 app window;
+an XWayland display variable alone does not enable it for native Wayland apps.
+Portal cancellation and capture errors never invoke a fallback. The helper uses
+a private temporary PNG, a 15-second execution limit and a 128 MiB image limit;
+temporary output is removed on success or failure. See the
+[screenshot guide](../docs/help/topics/screenshots.md#platform-behavior).
+
 ### Secure Storage
 
 Protocol secrets are stored as PBKDF2 + AES-256-GCM encrypted files (see the

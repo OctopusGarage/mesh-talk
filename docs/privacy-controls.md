@@ -13,10 +13,72 @@ Choose **Apply preset** after selecting a preset. Notification preview has its
 editor in **Notifications & calls**; Privacy & security shows its current value
 and links to the same editor. Changing an individual protection switches the
 level to the derived **Custom** state. Network and relay permissions are unaffected.
-**Lock now** hides chats while background delivery continues. Unlock with the
-account password, or with Touch ID on supported macOS systems when **Stay signed
-in** has a saved credential. Clipboard clearing is best effort and only clears
+**Lock now** hides chats while background delivery continues. macOS unlock uses
+system device-owner authentication (Touch ID or the Mac login password); other
+platforms use the Mesh-Talk login password. Clipboard clearing is best effort and only clears
 text while the clipboard still holds this app's copy.
+
+## Protected messages
+
+Choose a protection mode beside the message composer before sending text or an image:
+
+| Mode | Viewing behavior |
+| --- | --- |
+| Normal | Display the message normally. |
+| Click to view | Conceal the body until the viewer explicitly reveals it. |
+| Verify to view | Require the same authentication as the app lock before revealing the body. |
+
+The choice applies to text messages, including text replies, and images selected,
+pasted, dropped or captured as screenshots. It returns to Normal after successful
+acceptance. Protected text waits for durable acceptance: a rejection preserves the
+composer text, reply and selected mode, and removes its temporary outgoing bubble
+so the composer is its only retry owner. An image transferred to the local outgoing queue is retried from its
+message bubble if native acceptance fails; it is not also retained as a second
+composer retry. Images refused before that transfer stay in the composer. Failed
+images and the remaining items of a partial batch retain their captured protection
+for retry, while only durable acceptance resets the selected mode. Videos, generic
+file attachments, folders and stickers do not support protected sending; they
+cannot be sent in a protected mode. Protected images use the existing supported
+raster-image formats and 16 MiB inline-image limit; unsupported formats and larger
+images are rejected before acceptance.
+
+The message keeps its place, author, time and delivery status. A reveal displays
+only that message for 30 seconds, beginning when its content appears. Reading
+or interacting with it does not extend the deadline. Use **Hide** to conceal it
+sooner. Leaving the conversation, moving away from the app, locking or signing
+out also conceals it. Each subsequent reveal starts a new 30-second period;
+Verify to view requires authentication again. Each device reveals independently,
+including the sender's devices. Opening a message never unlocks the app or
+other messages.
+
+Protected content is omitted from ordinary history responses, notification and
+conversation previews, reply quotes, accessibility summaries and text search.
+The desktop retrieves the body through a separate exact-message command after
+checking the current local user, desktop session and participant runtime. A
+message recalled or expired while authentication was pending cannot be revealed.
+Revealed content stays in the local message view rather than the shared chat
+cache. Protected images have no thumbnail before reveal, and their temporary
+preview is released when concealed. Ordinary image reads and exports cannot
+bypass protection; copying, forwarding and saving are unavailable for protected
+messages. Protected messages cannot be added to Favorites, individually or as
+part of a selection; the core rejects the entire selection before retaining any
+snapshot or attachment. Favorites does not provide a separate unprotected view.
+The same exclusion applies to portable Favorites backup and new-member channel
+history copies; protected rows do not consume the invitation history budget.
+
+The 30-second period controls screen visibility, not message retention. Existing
+expiry and recall rules continue to apply. Protected content remains in the
+encrypted history store and follows ordinary eligible history synchronization
+and recovery. Use an updated client on each viewing device. Expiry-aware older
+clients reject the reserved protected-text framing; clients predating expiry may
+show opaque encoded text instead of a useful message. They cannot use the
+protected reveal interface. Protected images do not downgrade to ordinary image
+offers for older clients.
+
+These controls reduce accidental disclosure by supported clients. They cannot
+prevent screenshots, photographs, a modified recipient client or inspection of
+an already compromised device, and do not promise secure erasure of browser
+memory after display.
 
 ## Network privacy and contact lists
 

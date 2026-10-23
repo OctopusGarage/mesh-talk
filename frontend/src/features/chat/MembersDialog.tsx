@@ -33,6 +33,7 @@ import { useContactPolicy } from "@/store/contactPolicy";
 import { peerAccountKey, rosterProjection } from "@/lib/rosterProjection";
 import { visiblePeers } from "@/lib/contactVisibility";
 import { VirtualRosterList, VIRTUALIZE_AT } from "./VirtualRosterList";
+import { ChannelHistorySettings } from "./ChannelHistorySettings";
 import { MemberProfileDialog } from "./MemberProfileDialog";
 import type { MemberProfileTarget } from "./memberProfileDetails";
 
@@ -312,6 +313,18 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             </p>
           )}
         </DialogHeader>
+
+        {open && channelId && (
+          <ChannelHistorySettings
+            channelId={channelId}
+            channelOwner={channelOwner}
+            selfAccepted={members.some(
+              (member) => member.user_id === myId && !member.pending,
+            )}
+            myId={myId}
+            dissolved={dissolved}
+          />
+        )}
 
         <motion.div
           initial={animateMembers ? "hidden" : false}

@@ -10,7 +10,9 @@ The message menu offers **Add to Favorites** and **Select messages**. Select up
 to 100 accepted messages from one direct or group conversation and collect them
 as one item. The core resolves exact canonical message IDs and stores their
 snapshots in original conversation order; UI text is never source authority.
-Pending, failed, recalled, unavailable and explicitly expired sources are rejected.
+Pending, failed, recalled, unavailable, explicitly expired and protected sources
+are rejected. Protected text and images cannot be collected or viewed through
+Favorites; see [protected-message privacy controls](privacy-controls.md#protected-messages).
 A multi-message save is atomic: it never silently omits a selected source.
 
 Each item has an optional title (200 Unicode scalar values), overall description
@@ -39,10 +41,22 @@ not grant transfer consent. File access requires a live unexpired favorite
 reference; removing the last reference permits cleanup. Account-data deletion
 removes the collection with the account's other local encrypted data.
 
-Portable recovery archives currently exclude Favorites and their retained files.
-Linked-device synchronization is the supported way to keep another copy of this
-collection; ordinary message backups do not substitute for it. See
-[backup coverage](backup-recovery.md).
+## Backup and recovery
+
+Manual local-file and Google Drive backups include Favorites, titles,
+descriptions, message notes and independently retained attachment bytes, even
+after source history has been cleared. Both destinations use the same encrypted
+recovery archive; Google sign-in does not replace its separate recovery key.
+
+Snapshot schema 5 carries logical collection records, including durable removal
+tombstones. Restore retains the account identity, generates a fresh device, and
+re-encrypts the collection and retained files under the new local password.
+Expired message content and file access stay unavailable, and removal records
+continue to reject stale edits within the same generation. Retained files remain
+subject to live references and the 64 MiB per-file bound; missing bytes stay
+card-only and are counted separately in the preview. Ordinary media and retained
+Favorite files share the archive's aggregate media budget. Older snapshots remain
+readable but contain no Favorites. See [backup coverage](backup-recovery.md).
 
 ## Synchronization
 
@@ -71,7 +85,10 @@ removal. Tombstones remain until a separately validated reclamation policy exist
 ## Ownership and acceptance
 
 `core/node/favorites.rs` owns canonical capture, encrypted persistence, queries,
-retained-file authorization and metadata transitions. `core/node/account_sync/favorites.rs`
+retained-file authorization and metadata transitions. Its recovery adapter owns
+logical collection encoding and validation; `core/node/recovery.rs` and
+`core/recovery/snapshot.rs` own archive streaming, validation and staged install.
+`core/node/account_sync/favorites.rs`
 owns its optional sibling exchange. Here `core/` abbreviates
 `crates/mesh-talk-core/src/`. Desktop `src-tauri/src/message_favorites.rs` adapts
 commands under exact runtime/session admission through durable IO and plaintext

@@ -2,6 +2,63 @@
 use super::*;
 
 impl Node {
+    /// Favorite snapshots have no reveal policy. Reject a retained canonical
+    /// protected source rather than turning that snapshot into another reveal path.
+    pub(in crate::node) fn favorite_has_protected_content(
+        &self,
+        favorite: &MessageFavorite,
+    ) -> bool {
+        if favorite
+            .messages
+            .iter()
+            .filter_map(|m| m.file.as_ref())
+            .any(|file| {
+                conversation(&file.file_conv).is_some_and(|conv| {
+                    self.files
+                        .lock()
+                        .expect("files mutex")
+                        .manifest(&conv)
+                        .is_some_and(|manifest| manifest.protection().is_some())
+                })
+            })
+        {
+            return true;
+        }
+        let source = &favorite.source;
+        let selected: Vec<_> = source
+            .message_ids
+            .iter()
+            .filter_map(|id| {
+                conversation(id).map(|conv| crate::eventlog::EventId::new(*conv.as_bytes()))
+            })
+            .collect();
+        let (conv, account) = if source.kind == "account" {
+            (
+                crate::node::conversation::account_conversation_id(
+                    &self.account_id(),
+                    &source.target,
+                ),
+                Some(source.target.as_str()),
+            )
+        } else {
+            let Some(conv) = conversation(&source.target) else {
+                return true;
+            };
+            (conv, None)
+        };
+        self.project_history(
+            conv,
+            account,
+            crate::node::queries::HistorySelection::Selected(&selected),
+        )
+        .is_some_and(|context| {
+            context
+                .messages
+                .iter()
+                .any(|entry| entry.protection.is_some())
+        })
+    }
+
     pub fn list_message_favorites(
         &self,
         query: &str,
@@ -19,6 +76,7 @@ impl Node {
             .values()
             .filter(|r| !r.removed)
             .map(|r| &r.favorite)
+            .filter(|favorite| !self.favorite_has_protected_content(favorite))
             .filter(|f| {
                 query.is_empty()
                     || [&f.metadata.title, &f.metadata.description, &f.source_label]
@@ -76,6 +134,7 @@ impl Node {
             !r.removed
                 && r.favorite.source.kind == source.kind
                 && r.favorite.source.target == source.target
+                && !self.favorite_has_protected_content(&r.favorite)
         }) {
             if record
                 .favorite
@@ -167,6 +226,9 @@ impl Node {
             if !selected.contains(&id) {
                 continue;
             }
+            if e.protection.is_some() {
+                return Err(invalid("Protected messages cannot be saved to Favorites"));
+            }
             if e.recalled || e.expires_at_ms.is_some_and(|end| end <= self.expiry_now()) {
                 let position = source
                     .message_ids
@@ -217,12 +279,8 @@ impl Node {
         } else {
             self.favorite_name(&source.target)
         };
-        let mut hasher = Sha256::new();
-        hasher.update(b"mesh-talk-favorite-v1");
-        hasher.update(self.account_id());
-        hasher.update(bincode::serialize(&source).map_err(|_| invalid("invalid favorite"))?);
         Ok(MessageFavorite {
-            id: format!("{:x}", hasher.finalize()),
+            id: super::recovery::canonical_id(&self.account_id(), &source)?,
             source,
             source_label,
             metadata,
@@ -278,7 +336,7 @@ impl Node {
                     }
                     let conv = conversation(&file.file_conv)
                         .ok_or_else(|| invalid("invalid attachment"))?;
-                    let Some(bytes) = self.media.read(conv).or_else(|| self.read_file(conv).ok())
+                    let Some(bytes) = self.read_media(conv).or_else(|| self.read_file(conv).ok())
                     else {
                         continue;
                     };
@@ -328,6 +386,9 @@ impl Node {
                 .filter(|r| !r.removed)
                 .cloned()
                 .ok_or_else(|| invalid("favorite unavailable"))?;
+            if self.favorite_has_protected_content(&record.favorite) {
+                return Err(invalid("Protected messages cannot be saved to Favorites"));
+            }
             if record.favorite.revision != expected_revision
                 || record.favorite.device_id != expected_device_id
             {
@@ -402,6 +463,7 @@ impl Node {
             .current
             .values()
             .filter(|r| !r.removed)
+            .filter(|r| !self.favorite_has_protected_content(&r.favorite))
             .flat_map(|r| &r.favorite.messages)
             .filter(|m| m.expires_at_ms.is_none_or(|end| end > self.expiry_now()))
             .filter_map(|m| m.file.as_ref())
@@ -431,7 +493,7 @@ impl Node {
         if metadata.size > MAX_FAVORITE_FILE_BYTES {
             return Ok(false);
         }
-        let Some(bytes) = self.media.read(file).or_else(|| self.read_file(file).ok()) else {
+        let Some(bytes) = self.read_media(file).or_else(|| self.read_file(file).ok()) else {
             return Ok(false);
         };
         let store = self.favorites.lock().expect("favorites mutex");
@@ -450,6 +512,7 @@ impl Node {
             .current
             .values()
             .filter(|r| !r.removed)
+            .filter(|r| !self.favorite_has_protected_content(&r.favorite))
             .flat_map(|r| &r.favorite.messages)
             .filter(|m| m.expires_at_ms.is_none_or(|end| end > self.expiry_now()))
             .filter_map(|m| m.file.as_ref())

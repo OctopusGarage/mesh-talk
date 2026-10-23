@@ -1,3 +1,4 @@
+import { AccountProfilePanel } from "./AccountProfilePanel";
 import { displayIdentity } from "@/lib/displayIdentity";
 import { MessageCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -85,7 +86,10 @@ function MemberProfileContent({
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm" data-testid="member-profile-dialog">
+      <DialogContent
+        className="max-h-[85dvh] max-w-sm overflow-y-auto"
+        data-testid="member-profile-dialog"
+      >
         <DialogHeader>
           <DialogTitle>{t("memberProfile.title")}</DialogTitle>
           <DialogDescription>
@@ -105,6 +109,10 @@ function MemberProfileContent({
             {presenceLabel(presence, t)}
           </p>
         </div>
+
+        {accountId && (
+          <AccountProfilePanel key={accountId} accountId={accountId} />
+        )}
 
         <section
           aria-label={t("memberProfile.discoveredVia")}
@@ -208,19 +216,6 @@ function MemberProfileContent({
                 </dd>
               </div>
             </dl>
-          )}
-          {accountId && (
-            <div>
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                {t("memberProfile.accountId")}
-              </div>
-              <code
-                data-testid="member-profile-account-id"
-                className="mt-1 block select-text break-all rounded-md bg-muted px-2.5 py-2 text-xs"
-              >
-                {accountId}
-              </code>
-            </div>
           )}
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">

@@ -36,7 +36,7 @@ pub(crate) mod dm;
 pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
 pub(crate) mod expiry_policy;
-mod favorites;
+pub(crate) mod favorites;
 mod file_completion;
 mod file_consent;
 mod file_consent_store;
@@ -46,6 +46,7 @@ pub(crate) mod filebook;
 pub(crate) mod files;
 #[cfg(test)]
 mod group_chain_tests;
+mod join_history;
 pub(crate) mod lifecycle;
 pub(crate) mod linking;
 pub(crate) mod media_store;
@@ -113,10 +114,10 @@ pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;
 pub use filebook::{FileBook, ReceivedFile};
 pub use files::{FileProgress, OutgoingFileProgress};
-pub use message::MessageBody;
+pub use message::{MessageBody, MessageProtection};
 pub use node::{
-    ChannelSummary, HistoryEntry, LinkedAccount, Node, NodeError, ReceivedDm, ReceivedProfile,
-    SearchHit,
+    ChannelSummary, FileHistoryInfo, HistoryEntry, LinkedAccount, Node, NodeError, ReceivedDm,
+    ReceivedProfile, SearchHit,
 };
 pub use pairing::{BackfillRecord, PairingCode, PairingRequest, PairingResponse};
 pub use participant_runtime::{
@@ -144,7 +145,10 @@ pub use channels::ChannelRecovery;
 mod trust_card;
 pub use trust_card::{Introduction, TimestampWitness, TrustCard};
 
-mod trust_card_io;
+mod account_profile_data;
+pub use account_profile_data::AccountProfile;
+
+mod account_profile_io;
 
 pub use favorites::{
     FavoriteFile, FavoriteInspection, FavoriteMessage, FavoriteMetadata, FavoriteSource,

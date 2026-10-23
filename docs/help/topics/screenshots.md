@@ -16,9 +16,11 @@ Confirming an edit does not send it immediately. Cancel closes the editor withou
 
 ## Platform behavior
 
-On macOS and Windows, capture uses the display containing the app window. Linux uses an image supplied through the desktop screenshot portal and edits that image inside the app. Portal prompts and availability depend on the desktop environment. macOS can require Screen Recording permission.
+On macOS and Windows, capture uses the display containing the app window. Linux first uses an image supplied through the desktop screenshot portal. If that portal cannot provide screen capture, an X11 desktop can use the optional `xfce4-screenshooter` tool instead. Both paths open the same in-app editor. Portal prompts and availability depend on the desktop environment. macOS can require Screen Recording permission.
 
-The entry is disabled when capture is unavailable. This feature does not provide scrolling screenshots, OCR, capture spanning multiple displays, or guaranteed redaction of the original screen. Review the exported region and annotations before sending.
+For Ubuntu XFCE sessions, including XFCE running inside WSL2, the X11 fallback requires `xfce4-screenshooter` on the app's executable search path. If it is missing, install it with `sudo apt install xfce4-screenshooter` and restart Mesh-Talk. The fallback captures the X11 desktop, which may include multiple displays; crop the desired area in the editor. It does not capture the surrounding Windows desktop. Native Wayland sessions require a working screenshot portal. Cancelling a portal prompt or receiving a capture error does not trigger a second capture method.
+
+The entry is disabled when capture is unavailable. This feature does not provide scrolling screenshots, OCR, or guaranteed redaction of the original screen. Review the exported region and annotations before sending.
 
 ## Further reference
 

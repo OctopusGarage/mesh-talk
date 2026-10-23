@@ -291,9 +291,10 @@ impl Node {
             // A retired account proof can recover an interrupted authorized link,
             // but can never enter sync, account history, attachments or call IPC.
             if let Ok(Ok(first)) = tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await
-                && let Some((request, history)) = PairingRequest::decode_selected(&first)
+                && let Some((request, history, metadata)) =
+                    PairingRequest::decode_negotiated(&first)
             {
-                self.serve_pairing_selected(&mut channel, request, history)
+                self.serve_pairing_negotiated(&mut channel, request, history, metadata)
                     .await;
             }
             return;
@@ -326,11 +327,11 @@ impl Node {
         if is_relay && !self.relay_allowed(channel.peer_identity()) {
             return;
         }
-        if let Some((req, history)) = PairingRequest::decode_selected(&first) {
+        if let Some((req, history, metadata)) = PairingRequest::decode_negotiated(&first) {
             if !self.account_allowed(channel.peer_identity(), channel.peer_announcement()) {
                 return;
             }
-            self.serve_pairing_selected(&mut channel, req, history)
+            self.serve_pairing_negotiated(&mut channel, req, history, metadata)
                 .await;
             return;
         }
@@ -622,11 +623,16 @@ impl Node {
                 continue;
             }
             let received = ReceivedFile {
+                protection: manifest.protection(),
                 expires_at_ms: crate::expiry::deadline(&plaintext),
                 conv,
                 is_channel,
                 from: event.author.user_id(),
-                name: manifest.name().to_string(),
+                name: if manifest.protection().is_some() {
+                    "Protected image".into()
+                } else {
+                    manifest.name().to_string()
+                },
                 size: manifest.size(),
                 mime: manifest.mime().to_string(),
                 file_conv: manifest.file_conv(),
@@ -1054,6 +1060,12 @@ impl Node {
                     self.note_account_local_change();
                 }
                 received.push(msg);
+            }
+            let (history, received): (Vec<_>, Vec<_>) = received
+                .into_iter()
+                .partition(|message| message.arrival_kind == "history_sync");
+            for message in history {
+                let _ = self.channel_incoming.send(message);
             }
             let total = received.len();
             let kind = if context == "live" && (opened > 1 || retrying) {

@@ -27,9 +27,10 @@ not depend on a desktop login, IP address or display name.
 _Avoid_: local user, machine, device.
 
 **Account profile**:
-Signed account-level avatar state, with
-revisions that order updates across devices.
-_Avoid_: local login profile, device identity, unverified display label.
+Account-authenticated nickname, biography and avatar, saved through ordinary
+profile editing and synchronized automatically. It carries read-only creation
+metadata when known; revisions order updates across devices.
+_Avoid_: local login profile, device identity, proof of a person's identity.
 
 **Device**:
 A participant identified by its persistent signing and key-agreement identity.
@@ -102,6 +103,13 @@ _Avoid_: Event ID before acceptance, transport frame.
 A local attempt to send content to a conversation before or while acceptance is
 resolved. Its local identity is distinct from an accepted event's identity.
 _Avoid_: delivered message, accepted event before acceptance.
+
+**Protected message**:
+A text or image message carrying an authenticated requirement to conceal its content
+until an explicit local reveal, optionally after the viewer authenticates with
+the application's lock mechanism. Each reveal lasts at most 30 seconds on that
+device. Protection is separate from retention, message expiry and read state.
+_Avoid_: disappearing message, view-once message, password shared by the sender.
 
 **History coverage**:
 What this installation has observed of a conversation's retained events. It is
@@ -248,18 +256,26 @@ A retained authorized copy served by an accepted channel member. It is distinct
 from an opaque post-office copy whose holder cannot decrypt channel content.
 _Avoid_: post-office membership, global archive.
 
+**Join-history copy**:
+A bounded, owner-authorized copy of retained channel text offered for a particular
+invitation and readable only after acceptance. Original IDs and authored times
+are retained; the owner attests to the copied content. It does not grant old
+sender-chain keys, attachment access or complete conversation history.
+_Avoid_: full history sync, original-author signature on the copied plaintext.
+See [channel history settings](docs/help/topics/channels.md#history-for-new-members).
+
 ## Peer trust evidence
 
-- **Trust card**: an Account-signed public profile statement, not proof of a human
-  identity or honesty. A valid signature identifies the claiming Account.
-- **Creation claim**: a self-declared Account creation date. Unknown dates remain
-  unknown; local User registration and backup dates are not Account creation.
-- **Creation witness receipt**: an independent Account’s signed observation of an
-  Account creation claim, using the witness’s clock. It is not a trusted clock or
-  timestamp-authority certificate.
-- **Signed introduction**: an Account-attributed statement about another Account;
-  its credibility depends on the issuer, not the number of signatures.
+- **Public profile signature**: authenticates the Account publishing a profile,
+  not a person's identity or honesty. It never grants private verification.
+- **Account creation time**: immutable metadata recorded with a newly generated
+  Account key using the originating device's clock. Unknown legacy dates remain
+  unknown; local User registration, backup dates and retired self-declared card
+  claims are different facts.
 - **First observed by this installation**: private local evidence of the first
   recorded certified Account/Device observation. It is never a public account age.
+- **Legacy trust card**: a frozen signed profile/proof format retained only for
+  old events and backups. Introductions and creation-witness receipts provide no
+  current application workflow or verification authority.
 
-The [peer trust guide](docs/peer-trust.md) owns evidence limits and sharing rules.
+The [profile and verification guide](docs/peer-trust.md) owns evidence limits and sharing rules.

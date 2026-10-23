@@ -21,6 +21,7 @@ export type SearchTarget =
     };
 
 export interface ChatMessage {
+  protection?: import("@/lib/types").MessageProtection | null;
   /** Authenticated absolute send-time deadline; null/absent means keep. */
   expiresAtMs?: number | null;
   receivedAt?: number;
@@ -61,6 +62,7 @@ export interface ChatMessage {
 export type SendPayload =
   | {
       kind: "text";
+      protection?: import("@/lib/types").MessageProtection | null;
       text: string;
       replyTo: string | null;
       expiresAtMs?: number | null;
@@ -71,11 +73,19 @@ export type SendPayload =
       fallback: string;
       expiresAtMs?: number | null;
     }
-  | { kind: "file"; path: string; media: boolean; expiresAtMs?: number | null };
+  | {
+      kind: "file";
+      path: string;
+      media: boolean;
+      expiresAtMs?: number | null;
+      protection?: import("@/lib/types").MessageProtection | null;
+    };
 export interface SendIntent {
   conversation: Conversation;
   payload: SendPayload;
   message: ChatMessage;
+  /** Consumed only on durable acceptance, including a later retry. */
+  onAccepted?: () => void;
   /** Exact deletion protection owned by the bounded intent, never by an LRU scope. */
   deletedIds?: string[];
   /** Capacity fallback: accepted messages need canonical history, never an overlay. */

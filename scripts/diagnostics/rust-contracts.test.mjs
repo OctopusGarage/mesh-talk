@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -175,8 +175,11 @@ test("every Rust selector has nonignored library test evidence in its owning mod
         const exactName = filter.endsWith("::") ? null : segments.pop();
         if (segments.at(-1) === "tests") segments.pop();
         const modulePath = `${directory}/src/${segments.join("/")}`;
+        // Deleted tracked paths still require ownership above, but cannot
+        // provide executable source evidence for a current selector.
         const sourcePaths = sourceFiles.filter(
           (path) =>
+            existsSync(new URL(path, rootUrl)) &&
             path.startsWith(`${directory}/src/`) &&
             !path.startsWith(`${directory}/src/bin/`) &&
             path.endsWith(".rs") &&

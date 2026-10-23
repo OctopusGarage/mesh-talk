@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
   status: vi.fn(),
   create: vi.fn(),
   save: vi.fn(),
-  state: { generation: 0, runEpoch: 0, identityEpoch: 0 },
+  state: { generation: 0, runEpoch: 0, identityEpoch: 0, ready: true },
   dialog: { change: null as null | ((open: boolean) => void) },
 }));
 vi.mock("react-i18next", () => ({
@@ -40,11 +40,23 @@ vi.mock("@/store/chat", () => ({
     const snapshot = { ...mocks.state };
     return {
       current: () =>
+        mocks.state.ready &&
         Object.keys(snapshot).every(
           (key) =>
             snapshot[key as keyof typeof snapshot] ===
             mocks.state[key as keyof typeof snapshot],
         ),
+    };
+  },
+}));
+vi.mock("@/store/ownership", () => ({
+  captureRuntimeOwner: () => {
+    const snapshot = { ...mocks.state };
+    return {
+      current: () =>
+        (Object.keys(snapshot) as (keyof typeof snapshot)[])
+          .filter((key) => key !== "ready")
+          .every((key) => snapshot[key] === mocks.state[key]),
     };
   },
 }));
@@ -93,7 +105,7 @@ let host: HTMLDivElement;
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.resetAllMocks();
-  mocks.state = { generation: 0, runEpoch: 0, identityEpoch: 0 };
+  mocks.state = { generation: 0, runEpoch: 0, identityEpoch: 0, ready: true };
   mocks.policy.mockResolvedValue({ global_auto: false, contact_auto: null });
   mocks.prepare.mockResolvedValue("aaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh");
   mocks.status.mockResolvedValue(null);
@@ -316,4 +328,24 @@ it("invalidates a pending picker when the controlling history page closes the di
   await act(async () => pending.resolve("/tmp/stale.mtbackup"));
   expect(mocks.create).not.toHaveBeenCalled();
   expect(host.querySelector('[data-testid="recovery-export-key"]')).toBeNull();
+});
+
+it("publishes a verified backup and releases busy state while messaging restarts", async () => {
+  const pending = deferred<unknown>();
+  mocks.save.mockResolvedValue("/tmp/current.mtbackup");
+  mocks.create.mockReturnValue(pending.promise);
+  await openBackup();
+  await act(async () => exportButton().click());
+  mocks.state.ready = false;
+  await act(async () =>
+    pending.resolve({
+      archive_bytes: 1024,
+      preview: { messages: 2, created_at_ms: 1 },
+    }),
+  );
+  expect(host.textContent).toContain("recovery.backupComplete");
+  const newKey = Array.from(host.querySelectorAll("button")).find(
+    (button) => button.textContent === "recovery.newKey",
+  )!;
+  expect(newKey.disabled).toBe(false);
 });

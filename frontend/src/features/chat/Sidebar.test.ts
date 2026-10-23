@@ -7,6 +7,7 @@ const { chatState, policyState } = vi.hoisted(() => ({
   chatState: {
     active: null as null | { kind: string; id: string; name: string },
     unread: { "account:alice": 2 },
+    ledger: {},
     messages: {
       "account:alice": [{ text: "See you on the LAN" }],
     } as Record<string, Array<{ text?: string; file?: { name: string } }>>,
@@ -68,10 +69,19 @@ vi.mock("@/store/contactPolicy", () => ({
   useContactPolicy: (selector: (state: typeof policyState) => unknown) =>
     selector(policyState),
 }));
-vi.mock("@/store/auth", () => ({
-  useAuth: (selector: (state: unknown) => unknown) =>
-    selector({ user: { id: "owner", username: "Me" }, logout: () => {} }),
-}));
+vi.mock("@/store/auth", () => {
+  const authState = {
+    user: { id: "owner", username: "Me" },
+    generation: 0,
+    logout: () => {},
+  };
+  return {
+    useAuth: Object.assign(
+      (selector: (state: typeof authState) => unknown) => selector(authState),
+      { getState: () => authState, subscribe: () => () => {} },
+    ),
+  };
+});
 vi.mock("@/store/settings", () => ({
   useSettings: (selector: (state: unknown) => unknown) =>
     selector({ callsEnabled: false }),

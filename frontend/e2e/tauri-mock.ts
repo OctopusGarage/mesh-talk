@@ -4,7 +4,11 @@ import type {
   MessageFavorite,
 } from "../src/lib/api/messageFavorites";
 import { test as base, expect } from "@playwright/test";
-import type { PeerInfo, PresenceInfo } from "../src/lib/types";
+import type {
+  ChannelHistoryPolicy,
+  PeerInfo,
+  PresenceInfo,
+} from "../src/lib/types";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -54,7 +58,8 @@ export const test = base.extend({
       // adding test controls to the product UI: ?data=worst|huge|peers-huge|members-huge|empty|offline.
       const dataMode = new URLSearchParams(window.location.search).get("data");
       // --- Identity ---------------------------------------------------------
-      const trustCardStore: Record<string, Record<string, unknown>> = {};
+      const accountProfiles: Record<string, Record<string, unknown>> = {};
+      let ownDisplayName = "tester";
       const SELF = { device: "device_self_0001", account: "acc_self_aaaa1111" };
       (window as unknown as Record<string, unknown>).__mockReplaceIdentity = (
         accountId: string,
@@ -193,6 +198,7 @@ export const test = base.extend({
           pending_invite: dataMode === "invite",
         },
       ];
+      const channelHistoryPolicies: Record<string, ChannelHistoryPolicy> = {};
       let channelOwner = dataMode === "invite" ? BOB.device_id : SELF.device;
 
       (window as unknown as Record<string, unknown>).__mockClearRoster = () => {
@@ -327,6 +333,7 @@ export const test = base.extend({
       // --- Messages (in-memory, per conversation) ---------------------------
       const BASE = 1_700_000_000_000;
       type Msg = {
+        protection?: "click" | "authenticate" | null;
         expires_at_ms?: number | null;
         id: string | null;
         from_me: boolean;
@@ -421,6 +428,8 @@ export const test = base.extend({
         Array<{ target: string; emoji: string; who: string[] }>
       > = {};
 
+      const protectedBodies: Record<string, string> = {};
+      const protectedModes: Record<string, string> = {};
       const recordSend = (
         conv: string,
         text: string,
@@ -629,6 +638,24 @@ export const test = base.extend({
         confirm_sensitive_copy: false,
         clipboard_clear_seconds: 0,
       };
+      const localAgentAccess = {
+        enabled: false,
+        running: false,
+        destinations: [] as { kind: string; id: string }[],
+        available_destinations: [
+          {
+            destination: { kind: "account", id: BOB.account_id },
+            label: BOB.name,
+          },
+          {
+            destination: { kind: "channel", id: CHANNEL.channel_id },
+            label: CHANNEL.name,
+          },
+        ],
+        instructions_path: "/home/tester/.codex/AGENTS.md",
+        instructions: "",
+        error: null,
+      };
       let nativeLocked = false;
       let attachmentGlobalAuto = false;
       const attachmentContactAuto: Record<string, boolean> = {};
@@ -752,6 +779,19 @@ export const test = base.extend({
       const probedEndpoints: string[] = [];
       (window as unknown as Record<string, unknown>).__mockProbedEndpoints =
         probedEndpoints;
+      let deferredCommand: string | null = null;
+      let releaseCommand: (() => void) | null = null;
+      let deferredBarrier: Promise<void> | null = null;
+      (window as unknown as Record<string, unknown>).__mockDeferNext = (
+        command: string,
+      ) => {
+        deferredCommand = command;
+        deferredBarrier = new Promise<void>((resolve) => {
+          releaseCommand = resolve;
+        });
+      };
+      (window as unknown as Record<string, unknown>).__mockReleaseDeferred =
+        () => releaseCommand?.();
       let failNextCommand: string | null = null;
       let failNextMessage = "network unreachable";
       (window as unknown as Record<string, unknown>).__mockFailNext = (
@@ -801,6 +841,34 @@ export const test = base.extend({
             device_id: SELF.device,
             account_id: SELF.account,
           }),
+          owner_reveal_image: (a) => {
+            const reference = a.reference as { message_id: string };
+            if (!protectedModes[reference.message_id])
+              throw new Error("Image unavailable");
+            if (
+              protectedModes[reference.message_id] === "authenticate" &&
+              a.password !== "password123"
+            )
+              throw new Error("Verification failed");
+            return (
+              (window as unknown as { __lastWrittenFileBytes?: number[] })
+                .__lastWrittenFileBytes ??
+              Array.from(atob(TINY_PNG.split(",")[1]), (char) =>
+                char.charCodeAt(0),
+              )
+            );
+          },
+          owner_reveal_message: (a) => {
+            const reference = a.reference as { message_id: string };
+            const text = protectedBodies[reference.message_id];
+            if (
+              protectedModes[reference.message_id] === "authenticate" &&
+              a.password !== "password123"
+            )
+              throw new Error("Verification cancelled or failed");
+            if (text === undefined) throw new Error("Message unavailable");
+            return { text, visible_for_ms: 30000 };
+          },
           owner_account_history: (a) =>
             (msgs[`acc:${a.account}`] ?? []).slice(-Number(a.limit ?? 200)),
           owner_delivery_statuses: (a) =>
@@ -815,6 +883,14 @@ export const test = base.extend({
               a.replyTo,
               a.expiresAtMs as number | null | undefined,
             );
+            if (a.protection) {
+              const row =
+                msgs[`ch:${a.channelId}`][msgs[`ch:${a.channelId}`].length - 1];
+              protectedBodies[row.id!] = row.text;
+              protectedModes[row.id!] = String(a.protection);
+              row.text = "";
+              row.protection = a.protection as "click" | "authenticate";
+            }
             return msgs[`ch:${a.channelId}`][
               msgs[`ch:${a.channelId}`].length - 1
             ].id;
@@ -832,17 +908,19 @@ export const test = base.extend({
           owner_enqueue_channel_file: (a) => {
             const fileConv = `fc_${++mid}`;
             const row = msg({
+              protection: a.protection as "click" | "authenticate" | undefined,
               from_me: true,
               who: SELF.device,
               file: {
                 name: String(a.path).split(/[\\/]/).pop() || "file",
                 size: 123,
-                mime: "application/octet-stream",
+                mime: a.protection ? "image/png" : "application/octet-stream",
                 file_conv: fileConv,
                 media: Boolean(a.media),
               },
             });
             (msgs[`ch:${a.channelId}`] ||= []).push(row);
+            if (a.protection) protectedModes[row.id!] = String(a.protection);
             return { id: row.id, fileConv };
           },
           channel_custody_statuses: (a) =>
@@ -858,6 +936,14 @@ export const test = base.extend({
               a.replyTo,
               a.expiresAtMs as number | null | undefined,
             );
+            if (a.protection) {
+              const row =
+                msgs[`acc:${a.account}`][msgs[`acc:${a.account}`].length - 1];
+              protectedBodies[row.id!] = row.text;
+              protectedModes[row.id!] = String(a.protection);
+              row.text = "";
+              row.protection = a.protection as "click" | "authenticate";
+            }
             return acceptLast(String(a.account));
           },
           owner_enqueue_sticker: (a) => {
@@ -872,17 +958,25 @@ export const test = base.extend({
             const fileConv = `fc_${++mid}`;
             (msgs[`acc:${a.account}`] ||= []).push(
               msg({
+                protection: a.protection as
+                  "click" | "authenticate" | undefined,
                 from_me: true,
                 who: SELF.device,
                 file: {
                   name: String(a.path).split(/[\\/]/).pop() || "file",
                   size: 123,
-                  mime: "application/octet-stream",
+                  mime: a.protection ? "image/png" : "application/octet-stream",
                   file_conv: fileConv,
                   media: Boolean(a.media),
                 },
               }),
             );
+            if (a.protection)
+              protectedModes[
+                msgs[`acc:${a.account}`][
+                  msgs[`acc:${a.account}`].length - 1
+                ].id!
+              ] = String(a.protection);
             return { id: acceptLast(String(a.account)), fileConv };
           },
           // auth
@@ -905,11 +999,16 @@ export const test = base.extend({
               },
             };
           },
-          rename_account: (a) => ({
-            id: "u_self",
-            username: "tester",
-            display_name: String(a.newDisplayName ?? "tester"),
-          }),
+          rename_account: (a) => {
+            ownDisplayName = String(a.newDisplayName ?? "tester");
+            if (accountProfiles[SELF.account])
+              accountProfiles[SELF.account].display_name = ownDisplayName;
+            return {
+              id: "u_self",
+              username: "tester",
+              display_name: String(a.newDisplayName ?? "tester"),
+            };
+          },
           logout: () => {
             nativeLocked = false;
             return { success: true };
@@ -937,7 +1036,10 @@ export const test = base.extend({
           list_channels: () => channels.map((channel) => ({ ...channel })),
           // The test user (SELF) is the channel owner, so the member-management controls
           // (add/remove) stay visible to the existing e2e flow.
-          channel_members: () => ({
+          channel_members: (a) => ({
+            history_policy:
+              channelHistoryPolicies[String(a.channelId)] ??
+              "last_ten_within_three_days",
             owner: channelOwner,
             members: channelMembers,
           }),
@@ -1018,6 +1120,15 @@ export const test = base.extend({
 
           // channels
           create_channel: () => "chan_new_eeee5555",
+          set_channel_history_policy: (a) => {
+            if (channelOwner !== SELF.device)
+              throw new Error(
+                "Only the channel owner may change history policy",
+              );
+            channelHistoryPolicies[String(a.channelId)] =
+              a.policy as ChannelHistoryPolicy;
+            return null;
+          },
           add_channel_member: ok,
           remove_channel_member: ok,
           dissolve_channel: () => {
@@ -1042,68 +1153,26 @@ export const test = base.extend({
             return null;
           },
 
-          // Signed public cards are separate from private verifiedAccounts.
-          get_trust_card: (a) => trustCardStore[String(a.accountId)] ?? null,
-          publish_trust_card: (a) => {
-            trustCardStore[SELF.account] = {
+          // Public profiles contain no private trust history or editable identity metadata.
+          get_account_profile: (a) =>
+            accountProfiles[String(a.accountId)] ?? {
+              account_id: String(a.accountId),
+              display_name:
+                String(a.accountId) === SELF.account ? ownDisplayName : "Bob",
+              bio:
+                String(a.accountId) === BOB.account_id ? "Hello from Bob" : "",
+              created_at_ms:
+                String(a.accountId) === SELF.account ? null : 1700000000000,
+            },
+          save_account_bio: (a) => {
+            accountProfiles[SELF.account] = {
               account_id: SELF.account,
-              revision: 1,
-              display_name: String(a.displayName),
+              display_name: ownDisplayName,
               bio: String(a.bio),
-              created_at_ms: a.createdAtMs ?? null,
-              avatar: null,
-              introductions: [],
-              witnesses: [],
-              signed_json: JSON.stringify({
-                schema: 1,
-                kind: "card",
-                payload: {
-                  account_id: SELF.account,
-                  display_name: a.displayName,
-                  bio: a.bio,
-                  created_at_ms: a.createdAtMs ?? null,
-                },
-              }),
+              created_at_ms: null,
             };
             return null;
           },
-          import_trust_artifact: (a) => {
-            const artifact = JSON.parse(String(a.json));
-            if (artifact.schema !== 1 || !artifact.payload)
-              throw new Error("Invalid signed artifact envelope");
-            if (artifact.payload.invalid_signature)
-              throw new Error("Invalid signature");
-            if (artifact.kind === "card") {
-              trustCardStore[artifact.payload.account_id] = {
-                ...artifact.payload,
-                revision: 1,
-                avatar: null,
-                introductions: [],
-                witnesses: [],
-                signed_json: String(a.json),
-              };
-            }
-            return null;
-          },
-          create_trust_introduction: (a) =>
-            JSON.stringify({
-              schema: 1,
-              kind: "introduction",
-              payload: {
-                account_id: a.accountId,
-                note: a.note,
-                issuer_account_id: SELF.account,
-              },
-            }),
-          witness_trust_creation: (a) =>
-            JSON.stringify({
-              schema: 1,
-              kind: "witness",
-              payload: {
-                account_id: a.accountId,
-                issuer_account_id: SELF.account,
-              },
-            }),
           // trust
           get_trust: (a) => ({
             account_id: String(a.accountId),
@@ -1708,7 +1777,46 @@ export const test = base.extend({
             can_open_settings: true,
           }),
           open_notification_settings: () => null,
+          get_local_agent_access: () => localAgentAccess,
+          set_local_agent_access: (a) => {
+            const destinations = a.destinations as {
+              kind: string;
+              id: string;
+            }[];
+            if (a.enabled && destinations.length === 0)
+              throw new Error("Select a conversation");
+            Object.assign(localAgentAccess, {
+              enabled: a.enabled,
+              running: a.enabled,
+              destinations,
+              instructions: a.enabled
+                ? 'Mesh Talk local API: "http://127.0.0.1:12345/v1/help".\nRead this help URL before using the API for user-authorized tasks.\nThe desktop app must be running and unlocked, with agent access enabled.\n'
+                : "",
+            });
+            return localAgentAccess;
+          },
           get_app_settings: () => appSettings,
+          // Browser-only persistence stand-in; production drafts use encrypted native storage.
+          load_conversation_drafts: (a) => {
+            const saved = JSON.parse(
+              localStorage.getItem(`mock-drafts-${a.owner}`) ?? "{}",
+            );
+            return {
+              session: "mock-drafts-session",
+              drafts: saved.drafts ?? saved,
+              protections: saved.protections ?? {},
+            };
+          },
+          save_conversation_drafts: (a) => {
+            localStorage.setItem(
+              `mock-drafts-${a.owner}`,
+              JSON.stringify({
+                drafts: a.drafts,
+                protections: a.protections ?? {},
+              }),
+            );
+            return null;
+          },
           set_app_settings: (a) => {
             Object.assign(appSettings, (a.settings as object) ?? {});
             if (appSettings.privacy_level === "balanced") {
@@ -1788,6 +1896,17 @@ export const test = base.extend({
           // autostart plugin (invoked as plugin commands; mocked as no-ops below)
         };
 
+      (window as unknown as Record<string, unknown>).__mockSetAccountBio = (
+        accountId: string,
+        bio: string,
+      ) => {
+        accountProfiles[accountId] = {
+          account_id: accountId,
+          display_name: accountId === SELF.account ? ownDisplayName : "Bob",
+          bio,
+          created_at_ms: accountId === SELF.account ? null : 1700000000000,
+        };
+      };
       // Expose deterministic event emission for tests that simulate inbound traffic.
       (window as unknown as Record<string, unknown>).__mockEmit = (
         event: string,
@@ -1836,6 +1955,10 @@ export const test = base.extend({
             return id;
           },
           async invoke(cmd: string, args: Record<string, unknown>) {
+            if (cmd === deferredCommand) {
+              deferredCommand = null;
+              await deferredBarrier;
+            }
             if (
               favoriteAttachment &&
               /^(owner_.*favorite|read_media$|read_file$|save_file|plugin:dialog\|save$)/.test(

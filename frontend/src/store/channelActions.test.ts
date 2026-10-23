@@ -32,6 +32,7 @@ function session() {
     removeChannelMember: vi.fn(async (_id: string, _member: string) => {}),
     transferChannelOwner: vi.fn(async (_id: string, _member: string) => {}),
     channelMembers: vi.fn(async (_id: string) => ({
+      history_policy: "off" as const,
       owner: "new-owner",
       members: [{ user_id: "new-owner", name: "New" }],
     })),
@@ -110,6 +111,7 @@ it("rejects member completion after same-owner relogin", async () => {
 it("does not apply membership after navigation during its refresh", async () => {
   const s = session();
   const details = deferred<{
+    history_policy: "off";
     owner: string;
     members: { user_id: string; name: string }[];
   }>();
@@ -122,7 +124,7 @@ it("does not apply membership after navigation during its refresh", async () => 
     activeRequest: s.read().activeRequest + 1,
     active: { kind: "account", id: "friend", name: "Friend" },
   });
-  details.resolve({ owner: "stale", members: [] });
+  details.resolve({ history_policy: "off", owner: "stale", members: [] });
   expect(await pending).toBe(false);
   expect(s.read().channelOwner).toBe("old");
   expect(s.refreshRoster).not.toHaveBeenCalled();

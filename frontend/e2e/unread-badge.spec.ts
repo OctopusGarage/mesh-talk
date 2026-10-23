@@ -641,3 +641,47 @@ test("one logical DM remains one unread badge across duplicate live events and h
   ).toHaveCount(1);
   await expect.poll(() => latestBadgeCount(page)).toBe(0);
 });
+
+test("channel mention indicator survives later traffic and clears when the mention is viewed", async ({
+  page,
+}) => {
+  await enterChat(page);
+  const row = page.getByTestId(`conversation-row-${CHANNEL.id}`);
+  await page.evaluate(
+    ({ channel, device }) => {
+      const w = window as unknown as {
+        __mockInject: (
+          conv: string,
+          text: string,
+          who: string,
+          metadata: { id: string },
+        ) => void;
+        __mockEmit: (event: string, payload: unknown) => void;
+      };
+      for (const [id, text] of [
+        ["sidebar-mention", "@tester please check"],
+        ["sidebar-ordinary", "A later ordinary message"],
+      ]) {
+        w.__mockInject(`ch:${channel}`, text, "bob", { id });
+        w.__mockEmit("channel-message", {
+          channel_id: channel,
+          channel_name: "team",
+          from: device,
+          text,
+          event_id: id,
+          reply_to: null,
+        });
+      }
+    },
+    { channel: CHANNEL.id, device: BOB.device },
+  );
+  await expect(row.getByText("[Mentioned you]", { exact: true })).toBeVisible();
+  await expect(row.locator("..").getByText("2", { exact: true })).toBeVisible();
+  await page.getByTestId(`conversation-row-${BOB.account}`).click();
+  await expect(row.getByText("[Mentioned you]", { exact: true })).toBeVisible();
+  await row.click();
+  await expect(
+    page.getByText("@tester please check", { exact: true }),
+  ).toBeVisible();
+  await expect(row).not.toContainText("[Mentioned you]");
+});

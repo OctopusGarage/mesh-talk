@@ -38,6 +38,8 @@ require **Attachments** on both. Removals synchronize as well. Local saves work
 while offline; catch-up waits for a reachable compatible source. Older versions
 may continue ordinary message sync without supporting Favorites.
 
-Encrypted recovery backups currently exclude Favorites and their retained files.
+Encrypted local and Google Drive backups include Favorites, their notes and
+retained files, even after source history is cleared. Keep the backup's recovery
+key separately. Older backups made before this support contain no Favorites.
 
 See [Link devices](link-devices.md) and [History](history.md).

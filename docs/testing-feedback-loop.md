@@ -28,6 +28,12 @@ cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
 
+Changes to configured portable browser specs and the portable configuration
+select the `portable-browser-reporting` diagnostic. It compares both core and extended
+inventories with Playwright discovery without launching browsers. Register new
+scenarios in `requiredBrowserPaths` and additional spec files in the owning
+validation contract. Discovery checks do not replace executed browser evidence.
+
 Portable browser acceptance runs through `scripts/evals/portable-runner.mjs`.
 Windows uses two sequential Playwright shards with separate browser/dev-server
 lifetimes; other platforms use one. Each shard writes a unique nested evidence
@@ -246,6 +252,11 @@ lock order. Build/Clippy and tests retain the existing resource isolation. The
 outer attempt includes retention waiting in its execution envelope; the inner
 `affected-heavy` attempt reports the shared-resource queue separately. Composed
 receipts bind required build outputs as well as source inputs.
+Selected Rust tests execute through Cargo after binary inventory, preserving
+repository environment settings such as the `RUST_TEST_THREADS` limit in
+`.cargo/config.toml`.
+Failed frontend JSON reports are summarized before temporary-file cleanup, so
+the command log retains suite errors and failed assertion diagnostics.
 Each phase recomputes its plan and checks a fingerprint of the source revision,
 changed source bytes (including untracked/deleted paths), obligations and ignored
 frontend environment inputs. Edits while queued or executing require fresh

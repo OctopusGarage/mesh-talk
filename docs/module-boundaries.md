@@ -24,10 +24,17 @@ that every module or crate is a separate DDD bounded context.
 
 The bot integration service in `crates/mesh-talk-integrations` depends on the core
 and host-supplied admission ports. It owns grants, bounded metadata audit and
-private IPC; `crates/mesh-talk-mcp` owns SDK/stdio translation only. Core
+private IPC and its fixed-route loopback HTTP adapter; `crates/mesh-talk-mcp` owns SDK/stdio translation only. Core
 `node/outgoing_message.rs` owns retry-safe event acceptance and sender-state WAL
 recovery. Desktop `src-tauri/src/integrations.rs` binds exact-session leases and
-graceful listener retirement. See [bot integration setup](bot-integrations.md).
+graceful listener retirement. `integrations/local_access.rs` owns serialized
+settings/startup control and the single desktop service handle;
+`integrations/instructions.rs` owns only the marked user-level bootstrap file.
+Both transports share one integration service/registry and core sending path.
+`http.rs` owns public static discovery, request limits and fixed scoped routes;
+request schemas derive from the existing models. The General settings UI uses
+the shared save coordinator and an explicit-owner typed adapter. See
+[desktop local access](bot-integrations.md#desktop-local-agent-access).
 
 The headless CLI uses the core directly. A protocol change should not require
 Tauri; a presentation change should not alter the wire protocol. Not every helper
@@ -84,12 +91,31 @@ their distinct authorization contracts.
 
 ### Coordinated state owners
 
+Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
+`files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary
+projections omit the content. The explicit exact-message content lookup is for
+an authorized host reveal, not a second history/search implementation.
+`src-tauri/src/owner_commands/search.rs` owns that reveal's session/runtime and
+reference checks and reuses the credential verifier in `app_lock.rs` without
+unlocking the application. The frontend message view owns the temporary
+30-second reveal and temporary image URLs; revealed bodies must not enter
+conversation caches, reply
+quotes or notification previews. The [privacy guide](privacy-controls.md#protected-messages)
+owns the product behavior and limitations.
+
 `ui/store/conversationHistory.ts` owns active history reloads, bounded background
 coverage scans and expansion to a requested Event. It shares history selection
 and coverage/reception commits across those paths. The roster supplies discovered
 Conversations and import revisions; `outgoingIntent.ts` retains acceptance and
 retry. `reception.ts` owns identity-based receipt/unread decisions, including the
-legacy unread projection. `conversationState.ts` retains cache, deletion and
+legacy unread projection. Channel receipts retain a content-free mention flag,
+classified with the same display-name matcher as message rendering. The sidebar
+shows a localized mention prefix alongside the latest preview and unread count
+while any retained mention identity is unseen. Opening a conversation or receiving
+ordinary messages does not acknowledge mentions; exact viewport read evidence
+does. Owner/account-scoped receipt persistence preserves the flag independently
+of message-cache eviction. Own-account messages never classify as
+mention alerts. `conversationState.ts` retains cache, deletion and
 optimistic-message reconciliation. History callers do not coordinate those
 internal transitions or import back into the chat composition module at runtime.
 DM file status refresh continues after the file offer's receipt, until the
@@ -99,9 +125,12 @@ Active history and reaction reads use the shared native-read deadline so a stall
 IPC request releases the loading indicator into the existing retry state. Late
 results from a timed-out read cannot replace a newer snapshot. The chat identity
 boot window is thirty seconds of elapsed monotonic time, including native waits;
-expiry exposes the existing retry action rather than silently extending startup
-for every slow attempt. These presentation deadlines do not cancel native work
-or establish whether the participant runtime is healthy.
+expiry exposes failure and the existing retry action. While failed, the same
+owner/run ticker performs one bounded identity recovery attempt at most every ten
+seconds, preserving the failure label until identity resolves. Successful recovery
+clears failure and reloads favorites and roster without a restart. Logout or a
+superseding run invalidates delayed results and stops its ticker. These presentation
+deadlines do not cancel native work or establish whether the participant runtime is healthy.
 The history module defines its own state/context interface; `chat.ts` composes it
 and supplies runtime generations plus status refresh. Its patches cannot mutate
 that session context. `conversationModel.ts` owns shared Conversation/message data
@@ -121,6 +150,29 @@ creates no bubble. An admitted submission clears the input immediately; its bubb
 alone owns pending acceptance, failure and retry. Backend acceptance and recipient
 confirmation remain distinct states, and later completion cannot overwrite a new
 draft or put submitted text back into the composer.
+
+`ui/store/drafts.ts` owns reactive conversation text, protection choices, revision-bound
+admission and one idle-save coordinator
+per local user/session; both composer restoration and inactive sidebar previews
+consume it. Typing updates memory without re-rendering the conversation view.
+Persistence coalesces after ten seconds idle, restarting the timer on each edit;
+navigation and visibility loss request a flush. Session retirement discards
+unsaved memory, and abrupt exits may lose recent edits. `src-tauri/src/drafts.rs`
+owns bounded encrypted snapshots, session admission and atomic replacement using
+the core encrypted record-log implementation. Its cached derived key is reused
+until lock/logout; writes never repeat password derivation. Stable conversation
+keys restore across restarts while exact session handles reject retired writes.
+Text and protection metadata share one encrypted snapshot. Legacy text-only maps
+remain readable; reserved policy entries are validated before restoration. Pending
+admission and callbacks stay in memory. Success clears only its originating draft
+revision and flushes that removal; rejection retains the draft as the sole retry
+owner. Protected inactive previews and tooltips conceal draft text.
+See [draft behavior](help/topics/history.md#keep-an-unfinished-message).
+
+Protected text uses durable acceptance before clearing its captured draft, reply
+and protection choice. If that attempt is rejected, its temporary optimistic
+intent is removed and the composer remains the sole retry owner. Protected images
+transfer their source to the outgoing intent, whose failed bubble alone owns retry.
 Channel text, stickers and file offers use owner-scoped acceptance IPC returning
 an exact durable event ID (and file-conversation ID for attachments). Network
 fanout retains its own runtime admission and cannot hold the acceptance response
@@ -418,6 +470,9 @@ superseded audit findings and implementation reports.
 
 `core/node/favorites.rs` owns the independent encrypted collection, canonical
 snapshot capture, editable metadata and retained-file authorization.
+Its recovery adapter owns logical record encoding, account identity validation
+and expiry projection. The existing recovery owner streams these records and
+independent retained files through the same local/Drive archive and staged install.
 `core/node/account_sync/favorites.rs` owns optional certified-sibling exchange.
 Desktop `src-tauri/src/message_favorites.rs` owns admitted IPC adaptation;
 `ui/store/messageFavorites.ts` owns query lifetimes, and
@@ -434,17 +489,40 @@ Markdown rendering, static publication and read-only documentation MCP. These
 modules consume no private messaging state and introduce no core protocol
 responsibility. See [help system maintenance](help-system.md).
 
-### Peer trust evidence
+### Account profiles and private trust
 
-`core/node/trust_card.rs` owns signed public card and proof validation; its node
-I/O owner owns authenticated publication and encrypted current-card persistence.
-Send preparation and final WAL mutation enter host authority before acquiring the
-delivery journal; cached request lookups release that journal before requesting
-host authority. Profile publication must never be blocked by the opposite order.
-The desktop replies to signed-card publication after durable local acceptance,
-while a detached admitted task finishes best-effort peer/relay fanout.
-`src-tauri/src/trust_cards.rs` adapts admitted commands and bounded versioned JSON.
-`src-tauri/src/trust.rs` owns private first-observed time, device-change history
-and manual verification. Profile renderers must not derive verification from a
-valid public signature. The [peer trust guide](peer-trust.md) owns claim meanings
-and evidence limits.
+`identity/account.rs` and `identity/account_keystore.rs` own immutable creation
+metadata persisted with the account key. Pairing and recovery preserve it without
+inferring missing dates. `node/account_profile_data.rs` owns signed bounded
+ordinary profile data and current-profile persistence; `node/account_profile_io.rs`
+owns admitted edits, authenticated reception and legacy compatibility.
+Send preparation enters host authority before acquiring the delivery journal.
+Desktop biography saves reply after durable local acceptance while admitted fanout
+continues independently. The ordinary nickname and bio edit share the publication
+mutex, preventing a stale bio save from undoing a rename.
+`src-tauri/src/account_profile.rs` exposes reads and bio edits, with no caller-supplied
+names, timestamps or public proofs. `src-tauri/src/trust.rs` owns private observation
+history and manual verification. Frontend `store/accountProfiles.ts` shares
+session-bound profile reads and live invalidations across the header and dialogs.
+The [profile and verification guide](peer-trust.md) owns meanings and evidence limits.
+
+## Google Drive recovery transport
+
+`src-tauri/src/google_drive/` owns ephemeral desktop OAuth grants, exact-session
+admission, bounded Drive HTTP transfers and temporary encrypted file lifetimes.
+`src-tauri/src/recovery.rs` remains the owner of consistent snapshot/runtime restart,
+archive verification and transactional profile restore; `core/recovery/` owns format
+and cryptography. `ui/lib/api/googleDrive.ts` adapts IPC, and
+`ui/features/recovery/` provides shared connection/progress presentation for the
+existing export/restore dialogs. See [backup and recovery](backup-recovery.md#google-drive-security-and-boundaries).
+
+## Bounded history for channel invitations
+
+`channel/history.rs` owns the four fixed history policy presets. The existing
+channel lifecycle in `node/channels.rs` owns invitations; `node/join_history.rs`
+owns frozen encrypted copies, owner-policy validation and post-acceptance row-key
+release. It reuses the delivery journal, channel crypto primitives, causal
+membership projection and received-history store. Desktop IPC delegates authority
+to core; the member dialog presents the policy without independently deciding
+history eligibility. The [channel guide](help/topics/channels.md#history-for-new-members)
+owns user-visible limits and availability.

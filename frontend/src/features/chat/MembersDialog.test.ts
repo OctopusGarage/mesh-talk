@@ -71,10 +71,15 @@ vi.mock("@/store/chat", () => ({
     selector(chatState),
   displayName: (_favorites: unknown, _id: string, name: string) => name,
 }));
-vi.mock("@/store/auth", () => ({
-  useAuth: (selector: (state: unknown) => unknown) =>
-    selector({ user: { display_name: "Me" } }),
-}));
+vi.mock("@/store/auth", () => {
+  const authState = { user: { display_name: "Me" }, generation: 0 };
+  return {
+    useAuth: Object.assign(
+      (selector: (state: typeof authState) => unknown) => selector(authState),
+      { getState: () => authState, subscribe: () => () => {} },
+    ),
+  };
+});
 vi.mock("@/store/contactPolicy", () => ({
   useContactPolicy: (selector: (state: unknown) => unknown) =>
     selector({ contacts: {}, loaded: true }),
@@ -246,7 +251,7 @@ it("ignores a fetch started before a membership update", async () => {
 });
 
 it("uses the fetched owner with the fetched member list", async () => {
-  channelApi.channelMembers.mockResolvedValueOnce({
+  channelApi.channelMembers.mockResolvedValue({
     owner: "peer-device",
     members: [
       ...chatState.members,

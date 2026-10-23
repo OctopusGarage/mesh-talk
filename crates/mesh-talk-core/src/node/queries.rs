@@ -251,6 +251,30 @@ impl Node {
                 });
             }
         }
+        // Channel file acceptance is durable before its history sidecar is
+        // projected. Read the same retained manifest from that pending WAL entry.
+        for transaction in pending {
+            if let DeliveryTransaction::ChannelOutgoing { events, sent, .. } = transaction.body()
+                && sent.conversation == conversation
+                && let Some(event) = events.last()
+                && event.kind == crate::eventlog::EventKind::FileManifest
+                && !seen.contains(&event.id)
+                && !delivery.file_erased(conversation, event.id)
+                && !self.recipient_expired(&sent.plaintext, event.id, sent.wall_clock)
+                && crate::file::decode_manifest(&sent.plaintext).is_some()
+            {
+                seen.insert(event.id);
+                rows.push(HistoryRow {
+                    id: event.id,
+                    wall_clock: sent.wall_clock,
+                    from_me: true,
+                    who: "you",
+                    plaintext: &sent.plaintext,
+                    expires_at_ms: crate::expiry::deadline(&sent.plaintext),
+                    file: true,
+                });
+            }
+        }
         if is_channel {
             let archive: Vec<_> = rows.iter().map(|row| (row.id, row.wall_clock)).collect();
             let ranks: HashMap<_, _> = super::timeline::ordered_ids(&events, &archive, false)
@@ -268,6 +292,10 @@ impl Node {
         let (start, end, newer_entries) = match selection {
             HistorySelection::Selected(_) => (0, rows.len(), 0),
             HistorySelection::Recent(limit) => (rows.len().saturating_sub(limit), rows.len(), 0),
+            HistorySelection::Protected(id) => {
+                let target = rows.iter().position(|row| row.id == id)?;
+                (target, target + 1, rows.len() - target - 1)
+            }
             HistorySelection::Context(id) => {
                 let target = rows.iter().position(|row| row.id == id)?;
                 (
@@ -277,7 +305,20 @@ impl Node {
                 )
             }
         };
-        let mut messages: Vec<_> = rows[start..end].iter().map(HistoryRow::decode).collect();
+        let mut messages: Vec<_> = rows[start..end]
+            .iter()
+            .map(|row| {
+                let mut entry = row.decode();
+                if let HistorySelection::Protected(id) = selection
+                    && row.id == id
+                    && entry.protection.is_some()
+                    && entry.file.is_none()
+                {
+                    entry.text = MessageBody::decode_revealed(row.plaintext).text;
+                }
+                entry
+            })
+            .collect();
         // Recall resolution can acquire the same stores. Release the borrowed
         // snapshot first, then apply the latest authorized recall projection.
         drop(rows);
@@ -295,13 +336,16 @@ impl Node {
         } else {
             HashSet::new()
         };
-        if let HistorySelection::Context(id) = selection
+        if let HistorySelection::Context(id) | HistorySelection::Protected(id) = selection
             && recalled.contains(&id)
         {
             return None;
         }
         tombstone_recalled(&mut messages, &recalled);
-        if matches!(selection, HistorySelection::Context(_)) {
+        if matches!(
+            selection,
+            HistorySelection::Context(_) | HistorySelection::Protected(_)
+        ) {
             for entry in &mut messages {
                 entry.recalled_text = None;
             }
@@ -318,6 +362,7 @@ pub(in crate::node) enum HistorySelection<'a> {
     Selected(&'a [EventId]),
     Recent(usize),
     Context(EventId),
+    Protected(EventId),
 }
 
 struct HistoryRow<'a> {
@@ -344,7 +389,11 @@ impl HistoryRow<'_> {
                 crate::file::decode_manifest(self.plaintext).expect("validated file history");
             Some(FileHistoryInfo {
                 file_conv: manifest.file_conv(),
-                name: manifest.name().to_string(),
+                name: if manifest.protection().is_some() {
+                    "Protected image".into()
+                } else {
+                    manifest.name().to_string()
+                },
                 size: manifest.size(),
                 mime: manifest.mime().to_string(),
                 media: crate::node::media_store::manifest_is_media(&manifest),
@@ -358,6 +407,11 @@ impl HistoryRow<'_> {
             from_me: self.from_me,
             who: self.who.to_string(),
             text: body.text,
+            protection: if self.file {
+                crate::file::decode_manifest(self.plaintext).and_then(|m| m.protection())
+            } else {
+                body.protection
+            },
             reply_to: body.reply_to,
             expires_at_ms: self.expires_at_ms,
             file,

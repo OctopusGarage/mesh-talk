@@ -21,6 +21,7 @@ pub use crate::desktop_session::{SessionInfo, SessionState};
 /// node runs out of [`crate::chat_commands::NodeState`].)
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) drafts: Arc<Mutex<Option<crate::drafts::DraftStorage>>>,
     app_lock: crate::app_lock::AppLock,
     #[cfg(test)]
     pub(crate) rename_hot_gate: HostOperationGate,
@@ -32,6 +33,7 @@ pub struct AppState {
     pub(crate) owner_command_captured: Arc<Mutex<Option<std::sync::mpsc::Sender<&'static str>>>>,
     #[cfg(test)]
     pub(crate) owner_file_progress_hook: FileProgressHook,
+    pub(crate) integrations: crate::integrations::local_access::DesktopIntegrations,
     auth_service: AuthService,
     badge_revision: Arc<Mutex<BadgeRevision>>,
     pub(crate) auth_operation: Arc<tokio::sync::Mutex<()>>,
@@ -40,6 +42,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(auth_service: AuthService) -> Self {
         Self {
+            drafts: Arc::new(Mutex::new(None)),
             app_lock: crate::app_lock::AppLock::default(),
             #[cfg(test)]
             rename_hot_gate: Arc::new(Mutex::new(None)),
@@ -51,6 +54,7 @@ impl AppState {
             owner_command_captured: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             owner_file_progress_hook: Arc::new(Mutex::new(None)),
+            integrations: crate::integrations::local_access::DesktopIntegrations::default(),
             auth_service,
             badge_revision: Arc::new(Mutex::new(BadgeRevision::default())),
             auth_operation: Arc::new(tokio::sync::Mutex::new(())),

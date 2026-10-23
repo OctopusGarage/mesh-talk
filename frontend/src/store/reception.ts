@@ -1,6 +1,8 @@
 import type { ArrivalKind, ReceptionMetadata } from "@/lib/types";
 
 export interface ReceptionEntry {
+  /** Content-free evidence that this external message mentioned the local user. */
+  mentioned?: boolean;
   seen: boolean;
   late: boolean;
   receivedAt?: number;
@@ -142,6 +144,7 @@ export function mergeReception(
                       ...old,
                       seen: old.seen || incoming.seen,
                       late: old.late || incoming.late,
+                      mentioned: old.mentioned || incoming.mentioned,
                       receivedAt: old.receivedAt ?? incoming.receivedAt,
                       arrivalKind: old.arrivalKind ?? incoming.arrivalKind,
                     }
@@ -202,6 +205,7 @@ export function receiveIdentity(
   state: ReceptionState,
   key: string,
   event: ReceptionMetadata,
+  mentioned = false,
 ): ReceptionState {
   if (event.reception_only) {
     const batch = state.reception[key];
@@ -226,7 +230,10 @@ export function receiveIdentity(
     : undefined;
   if (old) {
     let next = state;
-    if (old.receivedAt === undefined && event.received_at !== undefined) {
+    if (
+      (old.receivedAt === undefined && event.received_at !== undefined) ||
+      (mentioned && !old.mentioned && !event.own_device)
+    ) {
       next = {
         ...state,
         ledger: {
@@ -235,7 +242,8 @@ export function receiveIdentity(
             ...state.ledger[key],
             [id]: {
               ...old,
-              receivedAt: event.received_at,
+              mentioned: !event.own_device && (old.mentioned || mentioned),
+              receivedAt: old.receivedAt ?? event.received_at,
               arrivalKind: event.arrival_kind ?? old.arrivalKind,
             },
           },
@@ -257,6 +265,7 @@ export function receiveIdentity(
   const entries = {
     ...(state.ledger[key] ?? {}),
     [id]: {
+      ...(mentioned && !event.own_device ? { mentioned: true } : {}),
       seen: event.own_device === true,
       late: kind !== "live",
       receivedAt: event.received_at,
@@ -325,7 +334,7 @@ export function viewIdentities(
 export function reconcileHistory(
   state: ReceptionState,
   key: string,
-  rows: { id: string | null; fromMe: boolean }[],
+  rows: { id: string | null; fromMe: boolean; mentioned?: boolean }[],
   discover: boolean,
 ): ReceptionState {
   const entries = { ...(state.ledger[key] ?? {}) };
@@ -334,12 +343,18 @@ export function reconcileHistory(
     if (Object.prototype.hasOwnProperty.call(entries, row.id)) {
       // The resolved history owner can classify an own send that arrived before
       // device/account identity was available to the live callback.
-      if (row.fromMe && !entries[row.id].seen)
-        entries[row.id] = { ...entries[row.id], seen: true };
+      const old = entries[row.id];
+      if (row.fromMe || row.mentioned)
+        entries[row.id] = {
+          ...old,
+          seen: old.seen || row.fromMe,
+          mentioned: !row.fromMe && (old.mentioned || row.mentioned),
+        };
       continue;
     }
     Object.defineProperty(entries, row.id, {
       value: {
+        ...(row.mentioned && !row.fromMe ? { mentioned: true } : {}),
         seen: row.fromMe || !discover,
         late: true,
         arrivalKind: "history_sync",

@@ -14,6 +14,7 @@
 
 // Protocol/core modules live in the `mesh_talk_core` crate; this crate is the
 // Tauri desktop shell over it.
+pub mod account_profile;
 pub mod app_lock;
 pub mod avatars;
 mod background_command;
@@ -24,9 +25,11 @@ pub mod config_store;
 pub mod contact_policy;
 mod desktop_session;
 pub mod diagnostics;
+mod drafts;
 mod easytier_discovery;
 pub mod events;
 pub mod favorites;
+mod google_drive;
 mod integrations;
 mod linked_account;
 pub mod logger;
@@ -46,7 +49,6 @@ pub mod state;
 mod tailscale_discovery;
 pub mod tray;
 pub mod trust;
-pub mod trust_cards;
 pub mod updates;
 mod window_geometry;
 mod window_visibility;
@@ -315,10 +317,13 @@ pub fn run_tauri_configured(
         .manage(avatars_state)
         .manage(crate::contact_policy::HiddenContactsState::default())
         .manage(crate::chat_commands::NodeState::empty())
+        .manage(crate::google_drive::DriveState::default())
         .invoke_handler({
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 owner_commands::owner_node_identity,
                 owner_commands::owner_enqueue_text,
+                owner_commands::owner_reveal_message,
+                owner_commands::owner_reveal_image,
                 owner_commands::owner_enqueue_channel_text,
                 owner_commands::owner_enqueue_channel_sticker,
                 owner_commands::owner_enqueue_channel_file,
@@ -347,6 +352,15 @@ pub fn run_tauri_configured(
                 crate::app_lock::set_call_active,
                 commands::clear_saved_session,
                 commands::adopt_linked_account,
+                google_drive::google_drive_available,
+                google_drive::google_drive_connect,
+                google_drive::google_drive_disconnect,
+                google_drive::google_drive_progress,
+                google_drive::google_drive_list,
+                google_drive::google_drive_create_backup,
+                google_drive::google_drive_download,
+                google_drive::google_drive_inspect,
+                google_drive::google_drive_restore,
                 recovery::create_backup,
                 recovery::prepare_backup_key,
                 recovery::backup_status,
@@ -386,6 +400,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::dissolve_channel,
                 crate::chat_commands::channel_members,
                 crate::chat_commands::set_channel_replica_enabled,
+                crate::chat_commands::set_channel_history_policy,
                 crate::chat_commands::channel_custody_statuses,
                 crate::chat_commands::channel_activity,
                 crate::chat_commands::send_channel_message,
@@ -447,15 +462,16 @@ pub fn run_tauri_configured(
                 crate::updates::check_for_update,
                 crate::updates::download_update,
                 crate::updates::cancel_update_download,
+                crate::integrations::local_access::get_local_agent_access,
+                crate::integrations::local_access::set_local_agent_access,
                 crate::settings::get_app_settings,
+                crate::drafts::load_conversation_drafts,
+                crate::drafts::save_conversation_drafts,
                 crate::settings::set_app_settings,
                 crate::trust::get_trust,
                 crate::trust::mark_verified,
-                crate::trust_cards::get_trust_card,
-                crate::trust_cards::publish_trust_card,
-                crate::trust_cards::import_trust_artifact,
-                crate::trust_cards::create_trust_introduction,
-                crate::trust_cards::witness_trust_creation,
+                crate::account_profile::get_account_profile,
+                crate::account_profile::save_account_bio,
                 crate::favorites::get_favorites,
                 crate::favorites::set_favorite,
                 crate::favorites::set_favorite_records,

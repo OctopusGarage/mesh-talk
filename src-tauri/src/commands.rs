@@ -557,6 +557,7 @@ pub async fn logout<R: tauri::Runtime>(
             .matching(&lease, |_| ())
             .map_err(CommandError::Authentication)?;
         let result = logout_impl(app_state.inner())?;
+        *app_state.drafts.lock().unwrap() = None;
         settings_state.deactivate();
         app_state.app_lock().clear();
         crate::chat_commands::clear_badge_after_logout(&app_handle, app_state.session().clone());
@@ -736,16 +737,18 @@ pub async fn rename_account(
             .session()
             .matching(&lease, |info| {
                 if node_state.check_installation(&lease).is_err() {
-                    return;
+                    return Ok::<_, CommandError>(());
                 }
                 if let Some(rt) = guard
                     .as_ref()
                     .filter(|rt| rt.host_account_id() == Some(lease.owner()))
                 {
-                    rt.set_display_name(&info.user.display_name);
+                    rt.try_set_display_name(&info.user.display_name)
+                        .map_err(CommandError::from)?;
                 }
+                Ok(())
             })
-            .map_err(CommandError::Authentication)?;
+            .map_err(CommandError::Authentication)??;
     }
 
     Ok(UserInfo::from(updated))
@@ -1939,6 +1942,57 @@ mod tests {
         }
     }
 
+    async fn startup_endpoint_identity_reachable(
+        port: u16,
+        expected: &mesh_talk_core::identity::device::PublicIdentity,
+    ) -> bool {
+        use mesh_talk_core::transport::{SecureChannel, TransportError};
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let stream = match tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+                .await
+            {
+                Ok(stream) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    return false;
+                }
+                Err(error) => panic!("endpoint probe failed before identity verification: {error}"),
+            };
+            let caller = mesh_talk_core::identity::device::DeviceIdentity::generate();
+            match SecureChannel::connect(stream, &caller, Some(expected)).await {
+                Ok(_) => true,
+                Err(TransportError::UnexpectedPeer) => false,
+                Err(error) => panic!("endpoint probe failed without proving retirement: {error}"),
+            }
+        })
+        .await
+        .expect("endpoint identity probe timed out; runtime retirement is unproven")
+    }
+
+    #[tokio::test]
+    async fn startup_endpoint_probe_distinguishes_a_reused_port_from_the_retired_identity() {
+        use mesh_talk_core::identity::device::DeviceIdentity;
+        use mesh_talk_core::transport::{SecureChannel, net::bind_dual_stack_listener};
+        let retired = DeviceIdentity::generate().public();
+        let original = bind_dual_stack_listener(0).await.unwrap();
+        let port = original.local_addr().unwrap().port();
+        drop(original);
+        let replacement = bind_dual_stack_listener(port).await.unwrap();
+        let replacement_identity = DeviceIdentity::generate();
+        let responder = tokio::spawn(async move {
+            // A raw TCP probe succeeds even though this is a different endpoint owner.
+            let (raw, _) = replacement.accept().await.unwrap();
+            drop(raw);
+            let (stream, _) = replacement.accept().await.unwrap();
+            let _ = SecureChannel::accept(stream, &replacement_identity).await;
+        });
+        let raw = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        drop(raw);
+        assert!(!startup_endpoint_identity_reachable(port, &retired).await);
+        responder.await.unwrap();
+    }
+
     #[tokio::test]
     async fn actual_preinstall_rejection_stops_runtime_before_releasing_startup_serialization() {
         let root = tempfile::tempdir().unwrap();
@@ -1971,6 +2025,8 @@ mod tests {
         .await
         .unwrap();
         let port = runtime.listen_tcp_port();
+        let expected = runtime.handle().signed_announce("fixture", port).public();
+        assert!(startup_endpoint_identity_reachable(port, &expected).await);
         let guard = node.0.write().await;
         let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
         let install = tokio::spawn(async move {
@@ -1985,11 +2041,7 @@ mod tests {
         assert!(!install.await.unwrap());
         assert!(node.test_startup_gate().try_lock().is_ok());
         assert!(node.0.write().await.is_none());
-        assert!(
-            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
-                .await
-                .is_err()
-        );
+        assert!(!startup_endpoint_identity_reachable(port, &expected).await);
     }
 
     #[tokio::test]

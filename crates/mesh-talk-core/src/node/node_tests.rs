@@ -728,7 +728,10 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     })
     .unwrap();
     assert_eq!(header.account_id, account_id);
-    assert_eq!(records.len(), 10);
+    assert_eq!(records.len(), 11);
+    assert!(records.iter().any(|record| matches!(record,
+        SnapshotRecordV1::AccountCreation { created_at_ms } if *created_at_ms == node.account.created_at_ms()
+    )));
     assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::SentDm { plaintext, .. } if plaintext == b"sent")));
     assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::ReceivedDm { plaintext, .. } if plaintext == b"received")));
     assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::MediaDescriptor { file_conv, size, .. } if *file_conv == [9; 32] && *size == media_bytes.len() as u64)));
@@ -772,6 +775,10 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     )
     .unwrap();
     assert_eq!(restored.account_id(), account_id);
+    assert_eq!(
+        restored.account.created_at_ms(),
+        node.account.created_at_ms()
+    );
     assert_ne!(restored.user_id(), old_device_id);
     assert_eq!(restored.history(conversation, 10).len(), 3);
     assert!(
@@ -8567,9 +8574,7 @@ async fn signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp()
         bob_account,
         &alice_proof,
     );
-    sender
-        .initialize_new_trust_card("Alice".into(), crate::node::node::now_millis())
-        .unwrap();
+    sender.set_profile_display_name("Alice").unwrap();
     let avatar = format!("data:image/jpeg;base64,{}", "A".repeat(32 * 1024)).into_bytes();
     // No relay is known yet: prepare the signed events without uploading them.
     sender.set_avatar(Some(avatar.clone())).await.unwrap();
@@ -8686,7 +8691,7 @@ async fn signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp()
     .await
     .expect("the recipient receipt must return through the relay without direct TCP");
     assert_eq!(
-        receiver.trust_card(&alice_account_id).unwrap().avatar,
+        receiver.account_profile(&alice_account_id).unwrap().avatar,
         Some(avatar)
     );
     relay_task.abort();
@@ -10034,7 +10039,7 @@ fn archived_metadata_rejects_transfer_to_unaccepted_invitee() {
 }
 
 #[tokio::test]
-async fn trust_card_propagates_signed_claims_over_loopback() {
+async fn account_profile_propagates_signed_claims_over_loopback() {
     use crate::identity::account::Account;
     let alice = DeviceIdentity::generate();
     let alice_acct = Account::generate();
@@ -10068,7 +10073,11 @@ async fn trust_card_propagates_signed_claims_over_loopback() {
 
     let alice_node = Node::open_with_account(
         alice,
-        Account::from_secret_bytes(alice_acct.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(
+            alice_acct.secret_bytes(),
+            alice_acct.created_at_ms(),
+        )
+        .unwrap(),
         alice_roster,
         a_dm,
         a_ch,
@@ -10080,7 +10089,11 @@ async fn trust_card_propagates_signed_claims_over_loopback() {
     .unwrap();
     let bob_node = Node::open_with_account(
         bob,
-        Account::from_secret_bytes(bob_acct.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(
+            bob_acct.secret_bytes(),
+            bob_acct.created_at_ms(),
+        )
+        .unwrap(),
         bob_roster,
         b_dm,
         b_ch,
@@ -10094,17 +10107,14 @@ async fn trust_card_propagates_signed_claims_over_loopback() {
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
 
     alice_node
-        .publish_trust_card_if(
-            "Alice".into(),
-            "Self-declared bio".into(),
-            Some(42),
-            |commit| commit(),
-        )
+        .save_account_profile_if("Alice".into(), "Self-declared bio".into(), |commit| {
+            commit()
+        })
         .await
         .unwrap();
     let mut got = None;
     for _ in 0..50 {
-        got = bob_node.trust_card(&alice_acct.account_id());
+        got = bob_node.account_profile(&alice_acct.account_id());
         if got.is_some() {
             break;
         }
@@ -10113,31 +10123,25 @@ async fn trust_card_propagates_signed_claims_over_loopback() {
     let card = got.expect("bob received signed trust card");
     assert!(card.verify());
     assert_eq!(card.bio, "Self-declared bio");
-    assert_eq!(card.created_at_ms, Some(42));
-    assert!(bob_node.trust_card(&bob_acct.account_id()).is_none());
-    let witness = bob_node.witness_creation(&alice_acct.account_id()).unwrap();
+    assert_eq!(card.created_at_ms, alice_acct.created_at_ms());
+    assert!(bob_node.account_profile(&bob_acct.account_id()).is_none());
     alice_node
-        .attach_timestamp_witness_if(witness, |commit| commit())
+        .save_account_profile_if("Alice updated".into(), "Updated bio".into(), |commit| {
+            commit()
+        })
         .await
         .unwrap();
     assert_eq!(
         alice_node
-            .trust_card(&alice_acct.account_id())
+            .account_profile(&alice_acct.account_id())
             .unwrap()
-            .witnesses
-            .len(),
-        1
-    );
-    assert!(
-        alice_node
-            .publish_trust_card_if("Alice".into(), "edit".into(), Some(43), |commit| commit())
-            .await
-            .is_err()
+            .created_at_ms,
+        alice_acct.created_at_ms()
     );
 }
 
 #[tokio::test]
-async fn trust_card_projection_retry_and_restart_preserve_avatar_and_identity_lifetime() {
+async fn account_profile_projection_retry_and_restart_preserve_avatar_and_identity_lifetime() {
     use crate::identity::account::Account;
     let dir = tempfile::tempdir().unwrap();
     let identity = DeviceIdentity::generate();
@@ -10146,46 +10150,46 @@ async fn trust_card_projection_retry_and_restart_preserve_avatar_and_identity_li
         personal_message_node(
             dir.path(),
             DeviceIdentity::from_secret_bytes(identity.secret_bytes().0, identity.secret_bytes().1),
-            Account::from_secret_bytes(account.secret_bytes()),
+            Account::from_secret_bytes_with_created_at(
+                account.secret_bytes(),
+                account.created_at_ms(),
+            )
+            .unwrap(),
         )
     };
     let node = open();
-    assert!(node.trust_card(&account.account_id()).is_none());
-    let card = crate::node::TrustCard::new(
+    assert!(node.account_profile(&account.account_id()).is_none());
+    let card = crate::node::AccountProfile::new(
         &account,
         1,
         "Alice".into(),
         "bio".into(),
-        Some(42),
         Some(b"avatar".to_vec()),
     );
     node.account_profiles.fail_appends_for_test(true);
-    assert!(
-        node.import_trust_card_if(card.clone(), |commit| commit())
-            .await
-            .is_err()
+    assert!(node.receive_account_profile(&card).is_err());
+    assert_eq!(
+        node.account_profile(&account.account_id()),
+        Some(card.clone())
     );
-    assert_eq!(node.trust_card(&account.account_id()), Some(card.clone()));
     node.account_profiles.fail_appends_for_test(false);
-    node.import_trust_card_if(card, |commit| commit())
-        .await
-        .unwrap();
+    node.receive_account_profile(&card).unwrap();
     assert_eq!(
         node.peer_avatar(&account.account_id()),
         Some(b"avatar".to_vec())
     );
     node.set_avatar(Some(b"edited".to_vec())).await.unwrap();
     assert_eq!(
-        node.trust_card(&account.account_id()).unwrap().avatar,
+        node.account_profile(&account.account_id()).unwrap().avatar,
         Some(b"edited".to_vec())
     );
     drop(node);
     let node = open();
     assert_eq!(
-        node.trust_card(&account.account_id())
+        node.account_profile(&account.account_id())
             .unwrap()
             .created_at_ms,
-        Some(42)
+        account.created_at_ms()
     );
     assert_eq!(
         node.peer_avatar(&account.account_id()),
@@ -10198,87 +10202,85 @@ async fn trust_card_projection_retry_and_restart_preserve_avatar_and_identity_li
     let replacement_dir = dir.path().join("replacement");
     std::fs::create_dir_all(&replacement_dir).unwrap();
     std::fs::copy(
-        dir.path().join("trust-cards.log"),
-        replacement_dir.join("trust-cards.log"),
+        dir.path().join("account-profiles.log"),
+        replacement_dir.join("account-profiles.log"),
     )
     .unwrap();
     let node = personal_message_node(
         &replacement_dir,
         DeviceIdentity::generate(),
-        Account::from_secret_bytes(other.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(other.secret_bytes(), other.created_at_ms())
+            .unwrap(),
     );
-    assert!(node.trust_card(&other.account_id()).is_none());
+    assert!(node.account_profile(&other.account_id()).is_none());
     assert!(node.account_profiles.current().is_none());
 }
 
 #[tokio::test]
-async fn trust_card_reconciles_newer_sibling_legacy_avatar() {
+async fn account_profile_reconciles_newer_sibling_legacy_avatar() {
     use crate::identity::account::Account;
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let node = personal_message_node(
         dir.path(),
         DeviceIdentity::generate(),
-        Account::from_secret_bytes(account.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(account.secret_bytes(), account.created_at_ms())
+            .unwrap(),
     );
-    node.publish_trust_card_if("Alice".into(), "keep bio".into(), Some(42), |commit| {
-        commit()
-    })
-    .await
-    .unwrap();
-    let old = node.trust_card(&account.account_id()).unwrap();
+    node.save_account_profile_if("Alice".into(), "keep bio".into(), |commit| commit())
+        .await
+        .unwrap();
+    let old = node.account_profile(&account.account_id()).unwrap();
     let legacy = crate::node::ProfilePayload::new(
         &account,
         Some(b"sibling avatar".to_vec()),
         old.revision + 1,
     );
     assert!(node.receive_legacy_profile(&legacy).unwrap());
-    let card = node.trust_card(&account.account_id()).unwrap();
+    let card = node.account_profile(&account.account_id()).unwrap();
     assert_eq!(card.avatar, legacy.avatar);
     assert_eq!(card.bio, "keep bio");
-    assert_eq!(card.created_at_ms, Some(42));
+    assert_eq!(card.created_at_ms, account.created_at_ms());
     assert!(card.revision > legacy.updated_at);
     assert!(card.verify());
 }
 
 #[tokio::test]
-async fn trust_card_exhausted_avatar_revision_rejects_before_either_store_mutates() {
+async fn account_profile_exhausted_avatar_revision_rejects_before_either_store_mutates() {
     use crate::identity::account::Account;
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let node = personal_message_node(
         dir.path(),
         DeviceIdentity::generate(),
-        Account::from_secret_bytes(account.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(account.secret_bytes(), account.created_at_ms())
+            .unwrap(),
     );
-    let card = crate::node::TrustCard::new(
+    let card = crate::node::AccountProfile::new(
         &account,
-        u64::MAX - 1,
+        u64::MAX,
         "Alice".into(),
         "bio".into(),
-        None,
         Some(b"original".to_vec()),
     );
-    node.import_trust_card_if(card.clone(), |commit| commit())
-        .await
-        .unwrap();
+    node.receive_account_profile(&card).unwrap();
     let avatars_before = std::fs::read(dir.path().join("profiles.log")).unwrap();
-    let cards_before = std::fs::read(dir.path().join("trust-cards.log")).unwrap();
+    let cards_before = std::fs::read(dir.path().join("account-profiles.log")).unwrap();
     assert!(node.set_avatar(Some(b"edit".to_vec())).await.is_err());
     assert_eq!(node.peer_avatar(&account.account_id()), card.avatar);
-    assert_eq!(node.trust_card(&account.account_id()), Some(card));
+    assert_eq!(node.account_profile(&account.account_id()), Some(card));
     assert_eq!(
         std::fs::read(dir.path().join("profiles.log")).unwrap(),
         avatars_before
     );
     assert_eq!(
-        std::fs::read(dir.path().join("trust-cards.log")).unwrap(),
+        std::fs::read(dir.path().join("account-profiles.log")).unwrap(),
         cards_before
     );
 }
 
 #[tokio::test]
-async fn trust_card_terminal_legacy_avatar_reconciles_on_restart() {
+async fn account_profile_terminal_legacy_avatar_reconciles_on_restart() {
     use crate::identity::account::Account;
     let dir = tempfile::tempdir().unwrap();
     let identity = DeviceIdentity::generate();
@@ -10287,40 +10289,45 @@ async fn trust_card_terminal_legacy_avatar_reconciles_on_restart() {
         personal_message_node(
             dir.path(),
             DeviceIdentity::from_secret_bytes(identity.secret_bytes().0, identity.secret_bytes().1),
-            Account::from_secret_bytes(account.secret_bytes()),
+            Account::from_secret_bytes_with_created_at(
+                account.secret_bytes(),
+                account.created_at_ms(),
+            )
+            .unwrap(),
         )
     };
     let node = open();
-    let card = crate::node::TrustCard::new(
+    let card = crate::node::AccountProfile::new(
         &account,
         u64::MAX - 2,
         "Alice".into(),
         "bio".into(),
-        Some(42),
         Some(b"original".to_vec()),
     );
-    node.import_trust_card_if(card, |commit| commit())
-        .await
-        .unwrap();
+    node.receive_account_profile(&card).unwrap();
     let legacy =
         crate::node::ProfilePayload::new(&account, Some(b"terminal sibling".to_vec()), u64::MAX);
     assert!(node.account_profiles.receive(&legacy).unwrap());
     drop(node);
     let node = open();
-    let card = node.trust_card(&account.account_id()).unwrap();
+    let card = node.account_profile(&account.account_id()).unwrap();
     assert_eq!(card.revision, u64::MAX);
     assert_eq!(card.avatar, legacy.avatar);
-    assert_eq!(card.created_at_ms, Some(42));
+    assert_eq!(card.created_at_ms, account.created_at_ms());
     assert!(card.verify());
 }
 
 #[tokio::test]
-async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_parent() {
+async fn account_profile_linked_device_pair_preserves_metadata_and_requires_card_parent() {
     use crate::identity::account::Account;
     let alice = DeviceIdentity::generate();
     let alice_acct = Account::generate();
     let bob = DeviceIdentity::generate();
-    let bob_acct = Account::from_secret_bytes(alice_acct.secret_bytes());
+    let bob_acct = Account::from_secret_bytes_with_created_at(
+        alice_acct.secret_bytes(),
+        alice_acct.created_at_ms(),
+    )
+    .unwrap();
     let alice_uid = alice.public().user_id();
     let bob_uid = bob.public().user_id();
     let dir = tempfile::tempdir().unwrap();
@@ -10349,7 +10356,11 @@ async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_pare
 
     let alice_node = Node::open_with_account(
         alice,
-        Account::from_secret_bytes(alice_acct.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(
+            alice_acct.secret_bytes(),
+            alice_acct.created_at_ms(),
+        )
+        .unwrap(),
         alice_roster,
         a_dm,
         a_ch,
@@ -10361,7 +10372,11 @@ async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_pare
     .unwrap();
     let bob_node = Node::open_with_account(
         bob,
-        Account::from_secret_bytes(bob_acct.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(
+            bob_acct.secret_bytes(),
+            bob_acct.created_at_ms(),
+        )
+        .unwrap(),
         bob_roster,
         b_dm,
         b_ch,
@@ -10384,51 +10399,34 @@ async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_pare
             })
             .unwrap();
     }
-    let old = crate::node::TrustCard::new(
+    let old = crate::node::AccountProfile::new(
         &alice_acct,
         10,
         "Alice".into(),
         "old bio".into(),
-        Some(42),
         Some(b"old avatar".to_vec()),
     );
-    bob_node
-        .import_trust_card_if(old, |commit| commit())
-        .await
-        .unwrap();
-    let mut latest = crate::node::TrustCard::new(
+    bob_node.receive_account_profile(&old).unwrap();
+    let latest = crate::node::AccountProfile::new(
         &alice_acct,
         13,
         "Alice".into(),
         "new bio".into(),
-        Some(42),
         Some(b"new avatar".to_vec()),
     );
-    let issuer = Account::generate();
-    latest.introductions.push(crate::node::Introduction::new(
-        &issuer,
-        alice_acct.account_id(),
-        "known account".into(),
-        100,
-    ));
-    latest.resign(&alice_acct);
+    alice_node.receive_account_profile(&latest).unwrap();
     alice_node
-        .import_trust_card_if(latest, |commit| commit())
+        .save_account_profile_if("Alice".into(), "new bio".into(), |commit| commit())
         .await
         .unwrap();
-    alice_node
-        .publish_trust_card_if("Alice".into(), "new bio".into(), Some(42), |commit| {
-            commit()
-        })
-        .await
-        .unwrap();
-    let received = bob_node.trust_card(&alice_acct.account_id()).unwrap();
+    let received = bob_node.account_profile(&alice_acct.account_id()).unwrap();
     assert_eq!(received.bio, "new bio");
     assert_eq!(received.avatar, Some(b"new avatar".to_vec()));
-    assert_eq!(received.introductions.len(), 1);
     assert_eq!(
         received,
-        alice_node.trust_card(&alice_acct.account_id()).unwrap()
+        alice_node
+            .account_profile(&alice_acct.account_id())
+            .unwrap()
     );
 
     let conv = dm_conversation_id(&alice_node.identity.public(), &bob_node.identity.public());
@@ -10447,7 +10445,11 @@ async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_pare
     let delayed = personal_message_node(
         &dir.path().join("delayed"),
         DeviceIdentity::generate(),
-        Account::from_secret_bytes(alice_acct.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(
+            alice_acct.secret_bytes(),
+            alice_acct.created_at_ms(),
+        )
+        .unwrap(),
     );
     add_account_peer(
         &delayed.roster,

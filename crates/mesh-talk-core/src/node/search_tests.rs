@@ -5,6 +5,7 @@ use super::*;
 use crate::discovery::announce::Announce;
 use crate::discovery::roster::Roster;
 use crate::identity::device::DeviceIdentity;
+use crate::node::MessageProtection;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1097,4 +1098,444 @@ fn canonical_dedup_keeps_earliest_clock_copy_despite_reverse_insertion() {
     let history = node.account_history(&contact, 1);
     assert_eq!(history[0].wall_clock, 1);
     assert_eq!(history[0].text, b"first canonical copy");
+}
+
+#[test]
+fn malformed_nested_protection_is_absent_from_history_search_and_context() {
+    use crate::node::DmEnvelope;
+
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let own = node.account_id();
+    let contact = "a".repeat(32);
+    let id = EventId::new([7; 32]);
+    let protected =
+        MessageBody::protected(b"secret".to_vec(), None, MessageProtection::Click).encode();
+    let mut malformed = b"MTEX1".to_vec();
+    malformed.extend_from_slice(&u64::MAX.to_le_bytes());
+    malformed.extend_from_slice(&protected);
+    let envelope = DmEnvelope::new(contact.clone(), own.clone(), [7; 32], malformed);
+    node.received
+        .lock()
+        .unwrap()
+        .record(
+            account_conversation_id(&own, &contact),
+            contact.clone(),
+            1,
+            &envelope.encode(),
+            id,
+        )
+        .unwrap();
+
+    let history = node.account_history(&contact, 10);
+    assert_eq!(history.len(), 1);
+    assert!(history[0].text.is_empty());
+    for query in ["MTPR1", "MTEX1", "c2VjcmV0", "secret"] {
+        assert!(node.search(query).is_empty());
+        assert!(node.search_recent(query).hits.is_empty());
+    }
+    let reference = SearchReference::Account {
+        account_id: contact,
+        message_id: Some(id),
+    };
+    let context = node.search_context(&reference).unwrap();
+    assert_eq!(context.messages.len(), 1);
+    assert!(context.messages[0].text.is_empty());
+    assert!(node.protected_message_content(&reference).is_none());
+}
+
+#[tokio::test]
+async fn protected_channel_exact_reveal_excludes_search_context_recall_and_wrong_namespace() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let channel = node.create_channel("protected", vec![]).await.unwrap();
+    let other = node.create_channel("other", vec![]).await.unwrap();
+    let id = node
+        .enqueue_protected_channel_message_reply_expiring_if(
+            channel,
+            b"private token",
+            None,
+            None,
+            MessageProtection::Click,
+            |accept| accept(),
+        )
+        .unwrap();
+    let reference = SearchReference::Channel {
+        channel_id: channel,
+        message_id: Some(id),
+    };
+    let history = node.channel_history(channel, 10);
+    assert_eq!(history[0].protection, Some(MessageProtection::Click));
+    assert!(history[0].text.is_empty());
+    assert!(node.search("private").is_empty());
+    assert!(node.search_recent("private").hits.is_empty());
+    assert!(
+        node.search_context(&reference).unwrap().messages[0]
+            .text
+            .is_empty()
+    );
+    assert_eq!(
+        node.protected_message_content(&reference),
+        Some((MessageProtection::Click, b"private token".to_vec()))
+    );
+    assert!(
+        node.protected_message_content(&SearchReference::Channel {
+            channel_id: other,
+            message_id: Some(id)
+        })
+        .is_none()
+    );
+    assert!(
+        node.protected_message_content(&SearchReference::Channel {
+            channel_id: channel,
+            message_id: None
+        })
+        .is_none()
+    );
+    node.recall_channel(channel, id).await.unwrap();
+    assert!(node.protected_message_content(&reference).is_none());
+    assert!(node.channel_history(channel, 10)[0].recalled_text.is_none());
+}
+
+#[tokio::test]
+async fn protected_channel_retains_redaction_and_exact_content_after_restart_and_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let secret = node.identity.secret_bytes();
+    let channel = node
+        .create_channel("persistent protected", vec![])
+        .await
+        .unwrap();
+    let id = node
+        .enqueue_protected_channel_message_reply_expiring_if(
+            channel,
+            b"retained secret",
+            None,
+            None,
+            MessageProtection::Authenticate,
+            |accept| accept(),
+        )
+        .unwrap();
+    let reference = SearchReference::Channel {
+        channel_id: channel,
+        message_id: Some(id),
+    };
+    let mut snapshot = Vec::new();
+    node.write_recovery_snapshot(&mut snapshot, 100).unwrap();
+    let mut retained = None;
+    crate::recovery::snapshot::read_snapshot(std::io::Cursor::new(snapshot), |record| {
+        if let crate::recovery::snapshot::SnapshotRecordV1::SentDm {
+            message_id,
+            plaintext,
+            ..
+        } = record
+            && message_id == *id.as_bytes()
+        {
+            assert!(MessageBody::decode(&plaintext).text.is_empty());
+            assert_eq!(
+                MessageBody::decode_revealed(&plaintext).text,
+                b"retained secret"
+            );
+            retained = Some(plaintext);
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(retained.is_some());
+    drop(node);
+    let (dm, _) = mpsc::unbounded_channel();
+    let (ch, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let reopened = Node::open(
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        ch,
+        file,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let history = reopened.channel_history(channel, 10);
+    assert_eq!(history[0].id, id);
+    assert_eq!(history[0].protection, Some(MessageProtection::Authenticate));
+    assert!(history[0].text.is_empty());
+    assert_eq!(
+        reopened.protected_message_content(&reference),
+        Some((MessageProtection::Authenticate, b"retained secret".to_vec()))
+    );
+}
+
+#[tokio::test]
+async fn protected_images_require_exact_reveal_and_block_ordinary_bytes_and_exports() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let image = dir.path().join("sensitive-name.png");
+    let bytes = b"\x89PNG\r\n\x1a\nprotected image pixels";
+    std::fs::write(&image, bytes).unwrap();
+    let channel = node
+        .create_channel("protected image", vec![])
+        .await
+        .unwrap();
+    let (id, file) = node
+        .enqueue_protected_file_channel_progress_expiring_if(
+            channel,
+            &image,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            MessageProtection::Authenticate,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let reference = SearchReference::Channel {
+        channel_id: channel,
+        message_id: Some(id),
+    };
+    let entry = &node.channel_history(channel, 10)[0];
+    assert_eq!(entry.protection, Some(MessageProtection::Authenticate));
+    assert!(!entry.file.as_ref().unwrap().name.contains("sensitive"));
+    {
+        let book = node.files.lock().unwrap();
+        let manifest = book.manifest(&file).unwrap();
+        assert!(!book.accepts(manifest.unprotected()));
+        let downgraded = crate::file::AnyManifest::Protected {
+            protection: MessageProtection::Click,
+            inner: Box::new(manifest.unprotected().clone()),
+        };
+        assert!(!book.accepts(&downgraded));
+        assert!(!crate::node::files::same_file_transfer(
+            manifest,
+            manifest.unprotected()
+        ));
+    }
+    {
+        let rows = node.received_files.lock().unwrap();
+        let wire = &rows.entries_ref(&channel)[0].plaintext;
+        assert!(crate::file::FileManifestV3::decode(wire).is_none());
+        assert!(crate::file::FileManifest::decode(wire).is_none());
+        for length in 0..wire.len() {
+            assert!(crate::node::files::validated_manifest(&wire[..length]).is_none());
+        }
+        let mut invalid = wire.clone();
+        invalid[3] = b'9';
+        assert!(crate::node::files::validated_manifest(&invalid).is_none());
+        let mut invalid = wire.clone();
+        invalid[4] = 255;
+        assert!(crate::node::files::validated_manifest(&invalid).is_none());
+    }
+    assert!(node.read_media(file).is_none());
+    assert!(node.read_file(file).is_err());
+    assert!(!node.file_ready_to_save(file));
+    let output = dir.path().join("export.png");
+    assert!(node.save_file(file, &output).is_err());
+    assert!(!output.exists());
+    assert!(node.save_file_into_dir(file, dir.path()).is_err());
+    assert_eq!(
+        node.protected_image_protection(&reference),
+        Some(MessageProtection::Authenticate)
+    );
+    assert_eq!(
+        node.protected_image_content(&reference),
+        Some((MessageProtection::Authenticate, bytes.to_vec()))
+    );
+    assert!(node.protected_message_content(&reference).is_none());
+    let wrong = node.create_channel("wrong", vec![]).await.unwrap();
+    assert!(
+        node.protected_image_content(&SearchReference::Channel {
+            channel_id: wrong,
+            message_id: Some(id)
+        })
+        .is_none()
+    );
+    assert!(node.recall_account(&"a".repeat(32), id).await.is_err());
+    let (ordinary_id, _) = node
+        .enqueue_file_channel_progress_expiring_if(
+            channel,
+            &image,
+            crate::file::FileKind::File,
+            |_| {},
+            None,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    assert!(node.recall_channel(channel, ordinary_id).await.is_err());
+    let foreign_author = DeviceIdentity::generate();
+    let foreign = crate::eventlog::Event::new(
+        &foreign_author,
+        channel,
+        1,
+        vec![],
+        1,
+        crate::node::node::now_millis(),
+        crate::eventlog::EventKind::FileManifest,
+        vec![],
+    );
+    node.log.lock().unwrap().append(foreign.clone()).unwrap();
+    assert!(node.recall_channel(channel, foreign.id).await.is_err());
+    node.recall_channel(channel, id).await.unwrap();
+    assert!(node.protected_image_content(&reference).is_none());
+    let (account_id, account_file) = node
+        .enqueue_protected_file_to_account_progress_expiring_if(
+            &node.account_id(),
+            &image,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            MessageProtection::Click,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let account_reference = SearchReference::Account {
+        account_id: node.account_id(),
+        message_id: Some(account_id),
+    };
+    assert!(node.read_media(account_file).is_none());
+    assert_eq!(
+        node.protected_image_content(&account_reference),
+        Some((MessageProtection::Click, bytes.to_vec()))
+    );
+    let video = dir.path().join("video.mp4");
+    std::fs::write(&video, b"video").unwrap();
+    assert!(
+        node.enqueue_protected_file_channel_progress_expiring_if(
+            channel,
+            &video,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            MessageProtection::Click,
+            |accept| accept()
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        node.enqueue_protected_file_to_account_progress_expiring_if(
+            &node.account_id(),
+            &image,
+            crate::file::FileKind::File,
+            |_| {},
+            None,
+            MessageProtection::Click,
+            |accept| accept()
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn protected_image_without_manifest_never_uses_ordinary_media_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let path = dir.path().join("private.png");
+    let bytes = b"\x89PNG\r\n\x1a\nprivate image";
+    std::fs::write(&path, bytes).unwrap();
+    let (_, file) = node
+        .enqueue_protected_file_to_account_progress_expiring_if(
+            &node.account_id(),
+            &path,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            MessageProtection::Authenticate,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    // Lifecycle cleanup retires the manifest before deleting the encrypted blob.
+    // Model that intermediate state without relying on scheduler timing.
+    *node.files.lock().unwrap() = crate::node::filebook::FileBook::new();
+    assert_eq!(node.media.read(file), Some(bytes.to_vec()));
+    assert!(node.read_media(file).is_none());
+}
+
+#[tokio::test]
+async fn protected_image_retains_policy_and_exact_bytes_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = recent_search_node(dir.path());
+    let secret = node.identity.secret_bytes();
+    let image = dir.path().join("original.png");
+    let bytes = b"\x89PNG\r\n\x1a\npersistent pixels";
+    std::fs::write(&image, bytes).unwrap();
+    let account = node.account_id();
+    let (id, file) = node
+        .enqueue_protected_file_to_account_progress_expiring_if(
+            &account,
+            &image,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            MessageProtection::Click,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let reference = SearchReference::Account {
+        account_id: account.clone(),
+        message_id: Some(id),
+    };
+    drop(node);
+    let (dm, _) = mpsc::unbounded_channel();
+    let (ch, _) = mpsc::unbounded_channel();
+    let (files, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        ch,
+        files,
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    assert_eq!(
+        node.account_history(&account, 10)[0].protection,
+        Some(MessageProtection::Click)
+    );
+    assert!(node.read_media(file).is_none());
+    assert!(node.read_file(file).is_err());
+    assert_eq!(
+        node.protected_image_content(&reference),
+        Some((MessageProtection::Click, bytes.to_vec()))
+    );
+    node.recall_account(&account, id).await.unwrap();
+    assert!(node.protected_image_content(&reference).is_none());
+}
+
+#[tokio::test]
+async fn protected_image_expiry_hides_explicit_and_ordinary_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut node = recent_search_node(dir.path());
+    let image = dir.path().join("image.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\nimage").unwrap();
+    let deadline = crate::node::node::now_millis() + 300_000;
+    let (id, file) = node
+        .enqueue_protected_file_to_account_progress_expiring_if(
+            &node.account_id(),
+            &image,
+            crate::file::FileKind::Media,
+            |_| {},
+            Some(deadline),
+            MessageProtection::Authenticate,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let reference = SearchReference::Account {
+        account_id: node.account_id(),
+        message_id: Some(id),
+    };
+    assert!(node.protected_image_content(&reference).is_some());
+    Arc::get_mut(&mut node).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
+    assert!(node.protected_image_content(&reference).is_none());
+    assert!(node.protected_image_protection(&reference).is_none());
+    assert!(node.read_media(file).is_none());
+    assert!(node.read_file(file).is_err());
 }

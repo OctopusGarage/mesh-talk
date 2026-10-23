@@ -254,31 +254,21 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 {
                     log::warn!("Startup relay settings were not applied: {error}");
                 }
-                if std::env::var_os("MESH_TALK_INTEGRATIONS").as_deref()
-                    == Some(std::ffi::OsStr::new("1"))
+                if let Err(error) = crate::integrations::local_access::restore(
+                    &integration_state,
+                    &node_handle,
+                    &integration_lease,
+                    &base_dir,
+                    std::sync::Arc::new({
+                        let handle = app_handle.clone();
+                        move |event| {
+                            let _ = handle.emit("integration-message-accepted", event);
+                        }
+                    }),
+                )
+                .await
                 {
-                    let mut guard = node_handle.0.write().await;
-                    if let Some(runtime) = guard
-                        .as_mut()
-                        .filter(|runtime| runtime.host_account_id() == Some(&account_id))
-                        && let Err(error) = crate::integrations::start(
-                            &integration_state,
-                            &node_handle,
-                            &integration_lease,
-                            runtime,
-                            &base_dir,
-                            &password,
-                            std::sync::Arc::new({
-                                let handle = app_handle.clone();
-                                move |event| {
-                                    let _ = handle.emit("integration-message-accepted", event);
-                                }
-                            }),
-                        )
-                        .await
-                    {
-                        log::warn!("Desktop integrations failed to start: {}", error.code);
-                    }
+                    log::warn!("Desktop integration settings were not applied: {error}");
                 }
                 // Keep lifecycle diagnostics without persisting an account identifier.
                 log::info!("Node started");
