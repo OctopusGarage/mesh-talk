@@ -87,7 +87,7 @@ pub(super) fn conversation(s: &str) -> Option<ConversationId> {
         return None;
     }
     let mut bytes = [0; 32];
-    for (i, pair) in s.as_bytes().chunks_exact(2).enumerate() {
+    for (i, pair) in s.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         bytes[i] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
     }
     Some(ConversationId::new(bytes))

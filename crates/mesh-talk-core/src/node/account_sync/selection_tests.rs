@@ -82,8 +82,8 @@ fn reusable_sibling_peer(
     receiver.routing_peer(&source.user_id()).unwrap()
 }
 
-// Old implementations close on the optional tag before accepting the original
-// one-shot request. Keep downgrade fixtures explicit about this extra probe.
+// Old implementations close on optional session/Favorites tags before accepting
+// the original one-shot request. Keep downgrade fixtures explicit about probes.
 pub(super) async fn accept_legacy_account_request(
     listener: &tokio::net::TcpListener,
     node: &Arc<Node>,
@@ -94,7 +94,11 @@ pub(super) async fn accept_legacy_account_request(
         let bytes = channel.recv().await.unwrap();
         if matches!(
             AccountHistoryFrame::decode_versioned(&bytes),
-            Some((_, AccountHistoryFrame::SessionRequest { .. }))
+            Some((
+                _,
+                AccountHistoryFrame::SessionRequest { .. }
+                    | AccountHistoryFrame::FavoritesRequest { .. }
+            ))
         ) {
             continue;
         }
