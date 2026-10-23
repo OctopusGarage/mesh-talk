@@ -25,6 +25,7 @@
       "paths": [
         ".github/workflows/release.yml",
         ".github/workflows/release-maintenance.yml",
+        ".github/workflows/prepare-stable.yml",
         "release-please-config.json",
         ".release-please-manifest.json",
         "CHANGELOG.md",
@@ -65,10 +66,10 @@
         "scripts/diagnostics/version-automation.test.mjs"
       ],
       "escalation": [
-        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Every desktop and relay platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Release-maintenance changes require hosted evidence for bot-PR permissions/checks, unpublished draft-only creation, explicit release build dispatch and reviewed next-target PR creation; local mocks do not prove those settings. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate."
+        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Every desktop and relay platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Manual draft/maintenance changes require hosted evidence for explicit main-only preparation, unpublished draft-only creation, exact tagged build dispatch and reviewed next-target PR creation; local mocks do not prove those settings and actual preparation/publication requires explicit release intent. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate."
       ],
       "capability": {
-        "summary": "Maintain one Cargo product target and reviewed release/next-target PRs, publishing complete exact-source verified Stable releases and immutable automatic main-branch Nightlies.",
+        "summary": "Maintain one Cargo product target, curated version notes and reviewed version/next-target PRs, publishing complete exact-source verified Stable releases and immutable automatic main-branch Nightlies.",
         "guide": "docs/updates.md",
         "invariants": [
           {
@@ -80,12 +81,12 @@
             "reference": "docs/updates.md#version-ownership-and-lifecycle"
           },
           {
-            "name": "Release preparation creates reviewed PRs and unpublished drafts only; explicit build dispatch and next-target PRs preserve the existing final Stable publication gate without direct main pushes.",
-            "reference": "docs/updates.md#automated-release-preparation"
+            "name": "Ordinary main pushes create no release proposals. Explicit main-only Stable preparation validates canonical version, curated notes, historical provenance, exact-source CI and immutable tag/draft state before mutation; next-target PRs retain the existing final publication gate without direct main pushes.",
+            "reference": "docs/updates.md#manual-release-preparation"
           },
           {
-            "name": "Absent release-please PR output is valid on idle and release-created runs. Drafts receive templated download, installation and source-verification notes before the exact tagged build dispatch; release-state reads revalidate cached responses.",
-            "reference": "docs/updates.md#automated-release-preparation"
+            "name": "Stable notes require one nonempty exact-version CHANGELOG section; Nightly never borrows another version. Templates retain download/installation/source verification, GitHub automatic product notes are disabled, and release-state reads revalidate cached responses.",
+            "reference": "docs/updates.md#manual-release-preparation"
           }
         ]
       }

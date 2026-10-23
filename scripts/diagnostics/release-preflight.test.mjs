@@ -3,7 +3,8 @@ import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { rustPackages } from "../pr-platform/rust-packages.mjs";
 import { readVersion } from "../release/version.mjs";
 import { releaseInputs } from "../release/preflight.mjs";
 import { requireSourceChecks } from "../release/check-source-checks.mjs";
@@ -105,3 +106,70 @@ test("Nightly targets must sort after the latest published stable", () => {
   assert.equal(releaseInputs({ ...nightly, latestStableTag: "v0.1.5" }).tag, "v0.1.6-nightly.123.1");
   assert.equal(releaseInputs({ ...nightly, latestStableTag: null }).version, "0.1.6", "first release may have no published stable yet");
 });
+
+test(
+  "Stable preflight refuses missing curated notes before querying remote state or emitting build outputs",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const root = mkdtempSync(join(tmpdir(), "mesh-curated-preflight-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    for (const file of [
+      "Cargo.toml",
+      "Cargo.lock",
+      "package.json",
+      "package-lock.json",
+      "frontend/package.json",
+      "frontend/package-lock.json",
+      "src-tauri/tauri.conf.json",
+      ...rustPackages.map((p) => `${p.directory}/Cargo.toml`),
+    ]) {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), readFileSync(resolve(file)));
+    }
+    writeFileSync(
+      join(root, "CHANGELOG.md"),
+      "# Changelog\n\n## 0.0.1\n\n- Old version.\n",
+    );
+    mkdirSync(join(root, "bin"));
+    const trace = join(root, "remote-called");
+    writeFileSync(
+      join(root, "bin", "gh"),
+      `#!${process.execPath}\nconst fs=require('node:fs');fs.appendFileSync(process.env.TRACE,'called\\n');if(process.argv.some(a=>a.includes('/compare/')))process.stdout.write(JSON.stringify({status:'identical'}));\n`,
+      { mode: 0o755 },
+    );
+    const output = join(root, "output.txt");
+    const result = spawnSync(
+      process.execPath,
+      [resolve("scripts/release/preflight.mjs")],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${join(root, "bin")}${delimiter}${process.env.PATH}`,
+          TRACE: trace,
+          GITHUB_REF: `refs/tags/v${readVersion()}`,
+          GITHUB_RUN_ID: "123",
+          GITHUB_RUN_ATTEMPT: "1",
+          GITHUB_REPOSITORY: "owner/repo",
+          GITHUB_SHA: "a".repeat(40),
+          GITHUB_OUTPUT: output,
+          RELEASE_NIGHTLY: "false",
+          RELEASE_PUBLICATION: "false",
+        },
+      },
+    );
+    assert.notEqual(result.status, 0, result.stdout);
+    assert.match(result.stderr, /missing changelog section/);
+    assert.equal(
+      existsSync(trace),
+      false,
+      "invalid notes must stop before remote lookups",
+    );
+    assert.equal(
+      existsSync(output),
+      false,
+      "invalid notes must stop before matrix outputs",
+    );
+  },
+);

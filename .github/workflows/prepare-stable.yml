@@ -1,0 +1,40 @@
+name: Prepare Stable Draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable tag matching the reviewed Cargo version and curated changelog (for example v0.4.5)
+        type: string
+        required: true
+
+concurrency:
+  group: release-maintenance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-draft:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: write
+      checks: read
+      security-events: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      STABLE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22
+      - name: Prepare the reviewed exact-source draft and start its build
+        run: node scripts/release/maintenance.mjs prepare-draft "$STABLE_TAG"

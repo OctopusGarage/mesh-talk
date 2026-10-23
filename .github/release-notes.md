@@ -5,22 +5,7 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### Release highlights
-
-- Open the exact message selected in search, including older context and messages
-  with identical text; recover cleanly when a result is no longer available.
-- Inspect delivery details while messages await confirmation, with automatic retry
-  and authenticated recipient confirmation kept distinct.
-- Keep chat responsive during sends and profile updates, and improve account
-  creation, saved login, profile locking and device linking.
-- Improve profile synchronization, offline delivery recovery and retained-history
-  costs across peer-operated relays.
-- Choose Stable or Nightly updates with verified downloads that preserve your
-  platform and CPU architecture.
-- Provide signed native relay packages.
-<!-- STABLE_ONLY_START -->
-- Provide a verified Linux container image.
-<!-- STABLE_ONLY_END -->
+__RELEASE_HIGHLIGHTS__
 
 ### Downloads
 

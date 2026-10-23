@@ -266,8 +266,10 @@ Root Cargo `workspace.package.version` owns the next numeric product target;
 `scripts/release/version.mjs` owns version preparation, checked projections and drift detection.
 Tauri inherits Cargo, root private npm metadata is a generated release-tooling projection,
 and the private frontend metadata is versionless. `scripts/release/maintenance.mjs` and
-`release-maintenance.yml` coordinate reviewed release and next-target PRs, draft creation and
-explicit build dispatch; they cannot replace the final verified Stable publication gate.
+`prepare-stable.yml` own explicit, main-only draft/tag preparation and build dispatch;
+`release-maintenance.yml` owns only reviewed post-Stable next-target PRs. `CHANGELOG.md` owns
+curated product notes and the release renderer combines the exact version section with shared
+installation/verification instructions. These owners preserve the final verified Stable publication gate.
 Source/Nightly/Stable logical identities follow SemVer independently of numeric native package
 metadata. New consumers extend these owners rather than creating manual version copies. See
 [updates and publication](updates.md) for invariants, triggers and native acceptance requirements.

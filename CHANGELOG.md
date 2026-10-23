@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.5
+
+### Added
+
+- Keep unfinished text drafts encrypted on this device and restore them after
+  restarting, including protected-message drafts and their protection mode.
+- Send protected text and images with concealed previews and controlled viewing;
+  protected content stays out of Favorites.
+- Catch up on group @mentions and choose how much recent text history to share with
+  newly invited members.
+- Edit and view account biographies and creation information, with private
+  contact verification kept separate from public profile details.
+- Collect messages and personal notes in Favorites, add descriptions, and keep
+  eligible attachments independently of ordinary chat history.
+- Back up and restore encrypted account data through local files, including
+  Favorites and profile information. Google Drive backup is available in builds
+  configured for it. Keep the recovery key separately; Google sign-in does not
+  replace it.
+- Let approved local agents read permitted conversation context and send messages
+  through scoped access configured in Settings.
+- Capture screenshots on supported Linux X11 desktops when the screenshot portal
+  is unavailable, using the optional `xfce4-screenshooter` tool.
+
+### Fixed
+
+- Recover from transient node identity failures without requiring an app restart.
+- Improve delayed-message recovery and unread navigation, account restoration,
+  and chat responsiveness during profile changes and interrupted sends.
+
 ## [0.4.4](https://github.com/OctopusGarage/mesh-talk/compare/v0.4.3...v0.4.4) (2026-10-22)
 
 
