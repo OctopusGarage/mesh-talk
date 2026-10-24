@@ -14,7 +14,9 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_documents::",
-            "node::account_sync::"
+            "node::account_sync::",
+            "node::account_profile_io::tests::group_inventory_releases_channels_before_profile_lookup",
+            "node::account_profile_io::tests::profile_publication_releases_store_before_channel_delivery"
           ]
         }
       ],
@@ -25,6 +27,10 @@
           {
             "name": "Legacy groups currently held by an authorized device remain visible to its certified siblings with the owner offline; descriptive references never grant membership, keys, sending or management.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Inventory snapshots release channel state before profile lookup, and profile publication releases its store before delivery preparation",
+            "reference": "docs/module-boundaries.md#account-profiles-and-private-trust"
           },
           {
             "name": "Mandatory account-directory metadata remains independent of optional personal-data switches; unsupported v4 preserves existing v1/v2/v3 domains and does not create a retry spin.",
@@ -319,6 +325,10 @@
           },
           {
             "name": "Account revocations merge without resurrection, reinvitation requires fresh consent, and independent sender chains exclude consumed historical keys",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Capability maintenance probes only sibling or existing group relationships and never competes with an unrelated discovered DM route",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {

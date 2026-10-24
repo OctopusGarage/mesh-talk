@@ -291,7 +291,7 @@ export async function revealHistoricalNativeMessage({ execute, until, command, k
 
 export function nativeMinimumWindowRequest(defaultRect, defaultViewport) {
   const width = defaultRect.width - defaultViewport.width, height = defaultRect.height - defaultViewport.height;
-  assert.ok(Number.isFinite(width) && Number.isFinite(height) && width >= 0 && height >= 0, "native window chrome must be measured from valid outer/client dimensions");
+  assert.ok(Number.isFinite(width) && Number.isFinite(height) && width >= 0 && height >= 0, `native window chrome must be measured from valid outer/client dimensions: ${JSON.stringify({ outer: defaultRect, client: defaultViewport })}`);
   return { width: 760 + width, height: 520 + height };
 }
 

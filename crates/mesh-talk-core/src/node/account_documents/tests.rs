@@ -2428,13 +2428,9 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     let _ = server.await;
     assert!(
         result.is_ok(),
-        "same-account descriptive inventory must include both distinct legacy groups with their owner offline: source={:?}; rows={:?}; target status={:?}",
-        source.list_channels(),
-        source
-            .account_documents(AccountDocumentDomain::GroupInventory, None, 64)
-            .unwrap()
-            .items,
-        target.device_sync_status()
+        "same-account descriptive inventory must include both distinct legacy groups with their owner offline: expected channels={}; actual channels={}",
+        ids.len(),
+        target.list_channels().len()
     );
     if optional_off {
         assert!(

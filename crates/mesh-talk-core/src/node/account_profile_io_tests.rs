@@ -222,3 +222,120 @@ async fn rejected_first_bio_edits_do_not_initialize_or_publish_a_profile() {
     );
     assert!(node.account_profile(&account.account_id()).is_none());
 }
+
+#[tokio::test]
+async fn profile_publication_releases_store_before_channel_delivery() {
+    for operation in ["background", "biography", "avatar", "legacy-avatar"] {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let node = open(dir.path(), &account);
+        if operation != "legacy-avatar" {
+            node.set_profile_display_name("Alice").unwrap();
+        }
+        let channel = node
+            .create_channel("Concurrent publication", vec![])
+            .await
+            .unwrap();
+        let peer_identity = crate::identity::device::DeviceIdentity::generate();
+        let peer_account = Account::generate();
+        // A closed loopback listener makes any post-acceptance delivery fail promptly.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let announce = crate::discovery::Announce::new_with_account(
+            &peer_identity,
+            &peer_account,
+            "Bob",
+            port,
+        );
+        node.roster.lock().unwrap().update(
+            &announce,
+            "127.0.0.1".parse().unwrap(),
+            &node.user_id(),
+        );
+        let peer = node.profile_fanout_targets().pop().unwrap();
+        let weak = Arc::downgrade(&node);
+        let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let checked_hook = checked.clone();
+        *node.profile_prepare_hook.lock().unwrap() = Some(Box::new(move || {
+            let node = weak.upgrade().unwrap();
+            assert!(
+                node.profiles.try_lock().is_ok(),
+                "profile delivery must release the store before waiting for channel state"
+            );
+            // Pause publication at its real channel-acquisition boundary while
+            // another thread publishes inventory and accepts an ordinary send.
+            let (finished, completion) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                node.publish_group_inventory(&mut None);
+                assert!(!node.list_channels().is_empty());
+                node.enqueue_channel_message_reply_expiring_if(
+                    channel,
+                    b"Concurrent channel message",
+                    None,
+                    None,
+                    |commit| commit(),
+                )
+                .unwrap();
+                finished.send(()).unwrap();
+            });
+            completion
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("inventory and channel send blocked behind profile publication");
+            worker.join().unwrap();
+            checked_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        match operation {
+            "background" => {
+                assert!(node.prepare_current_profile_delivery(&peer).is_some());
+            }
+            "biography" => {
+                node.save_account_bio_if("Updated bio".into(), |commit| commit())
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                node.set_avatar(Some(b"Updated avatar".to_vec()))
+                    .await
+                    .unwrap();
+            }
+        }
+        assert!(
+            checked.load(std::sync::atomic::Ordering::SeqCst),
+            "{operation} did not prepare a profile"
+        );
+    }
+}
+
+#[tokio::test]
+async fn group_inventory_releases_channels_before_profile_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(dir.path(), &account);
+    node.set_profile_display_name("Alice").unwrap();
+    let channel = node
+        .create_channel("Inventory lock order", vec![])
+        .await
+        .unwrap();
+    let weak = Arc::downgrade(&node);
+    let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let checked_hook = checked.clone();
+    *node.profile_read_hook.lock().unwrap() = Some(Box::new(move || {
+        let node = weak.upgrade().unwrap();
+        assert!(
+            node.channels.try_lock().is_ok(),
+            "inventory must release channels before waiting for a signed profile"
+        );
+        checked_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+    }));
+    node.publish_group_inventory(&mut None);
+    assert!(checked.load(std::sync::atomic::Ordering::SeqCst));
+    let references = node.group_inventory_references();
+    let reference = references.get(&hex::encode(channel.as_bytes())).unwrap();
+    assert!(
+        reference
+            .members
+            .iter()
+            .any(|member| member.name.as_deref() == Some("Alice"))
+    );
+}

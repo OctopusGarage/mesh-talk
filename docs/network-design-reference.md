@@ -634,6 +634,12 @@ When local storage cannot persist a received file-consent control, the current m
 
 ### D. Group creation, distribution and member recovery
 
+Account-group capability maintenance probes certified account routes and existing
+group relationships only. An unrelated discovery entry must not create a background
+group connection or consume the connection budget reserved for ordinary delivery.
+Private route rounds launch at most two probes concurrently and advance their
+cursor only for launched work; canceled queued routes retain their next turn.
+
 Membership and key controls are signed authority. Invitations require normal acceptance; owners, transfers, removals and departures affect the projected authorized membership. A directory or relay cannot grant access. Historical recovery obeys invitation/key/visibility constraints and must not expose uninvited ancestry to a new participant.
 
 Account-authorized groups grant membership and owner roles to accounts, not

@@ -567,3 +567,56 @@ test("a new pairing code waits for the previous session to stop", async ({
     ),
   ).toBe(2);
 });
+
+test("pairing preference seeds preserve existing values and reject retired accounts", async ({
+  page,
+}) => {
+  await enterChat(page);
+  const result = await page.evaluate(async () => {
+    const invoke = (
+      window as typeof window & {
+        __TAURI_INTERNALS__: {
+          invoke: (
+            command: string,
+            args: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__.invoke;
+    const scope = {
+      owner: "u_self",
+      expectedAccount: "acc_self_aaaa1111",
+      category: "appearance",
+      key: "theme",
+    };
+    const first = await invoke("seed_account_preference", {
+      ...scope,
+      value: "oled",
+    });
+    const second = await invoke("seed_account_preference", {
+      ...scope,
+      value: "light",
+    });
+    let rejected = false;
+    try {
+      await invoke("seed_account_preference", {
+        ...scope,
+        expectedAccount: "retired-account",
+        key: "accent",
+        value: "blue",
+      });
+    } catch {
+      rejected = true;
+    }
+    return {
+      first,
+      second,
+      rejected,
+      rows: await invoke("get_account_preferences", scope),
+    };
+  });
+  expect(result.first).toMatchObject({ key: "theme", value: "oled" });
+  expect(result.second).toEqual(result.first);
+  expect(result.rejected).toBe(true);
+  expect(result.rows).toEqual([result.first]);
+});

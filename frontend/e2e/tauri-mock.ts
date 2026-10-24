@@ -1593,6 +1593,16 @@ export const test = base.extend({
                 `mock-account-preferences-${SELF.device}-${String(a.category)}`,
               ) ?? "[]",
             ),
+          seed_account_preference: (a) => {
+            documentScope(a);
+            const rows = responses.get_account_preferences(a) as Array<
+              Record<string, unknown>
+            >;
+            return (
+              rows.find((row) => row.key === a.key) ??
+              responses.set_account_preference(a)
+            );
+          },
           set_account_preference: (a) => {
             const key = `mock-account-preferences-${SELF.device}-${String(a.category)}`;
             const rows = JSON.parse(localStorage.getItem(key) ?? "[]") as Array<

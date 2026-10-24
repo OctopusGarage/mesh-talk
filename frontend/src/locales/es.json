@@ -952,7 +952,18 @@
       "nightlyWarning": "Las compilaciones experimentales pueden contener errores. Elige Nightly para probar las próximas funciones.",
       "stableHelp": "El canal estable recibe versiones oficiales. Cambiar de canal nunca instala automáticamente una versión anterior.",
       "installed": "Instalada: {{version}}",
-      "stableDownload": "Descargar la versión estable manualmente"
+      "stableDownload": "Descargar la versión estable manualmente",
+      "updateAndRestart": "Actualizar y reiniciar",
+      "restartToUpdate": "Reiniciar para actualizar",
+      "installing": "Instalando actualización…",
+      "restarting": "Reiniciando Mesh-Talk…",
+      "automaticHelp": "Mesh-Talk instalará la actualización y se reiniciará. El sistema puede solicitar permiso.",
+      "readyToRestart": "Actualización verificada. Reinicia cuando quieras.",
+      "downloadManually": "Descargar manualmente",
+      "finishCall": "Finaliza la llamada antes de actualizar.",
+      "finishTransfers": "Espera a que terminen las transferencias de archivos antes de actualizar.",
+      "saveDraftsFailed": "No se pudieron guardar los borradores. Inténtalo de nuevo antes de reiniciar.",
+      "automaticWindowsHelp": "El instalador de Windows cerrará Mesh-Talk y lo reiniciará después de actualizar. Si cancelas la instalación, vuelve a abrir Mesh-Talk para intentarlo de nuevo."
     }
   },
   "offlineConnect": {

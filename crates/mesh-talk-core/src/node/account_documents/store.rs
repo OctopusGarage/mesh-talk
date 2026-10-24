@@ -564,21 +564,56 @@ mod budget_tests {
         let mut store =
             AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
         let mut payload = vec![3; 12 * 1024 * 1024];
-        for i in 0..10 {
-            payload[0] = i;
-            store
-                .put(
-                    &account,
-                    "a".repeat(32),
-                    AccountDocumentKey::CustomizationPack {
-                        pack_id: format!("pack-{i}"),
-                    },
-                    &payload,
-                    None,
-                    false,
-                )
-                .unwrap();
+        let first = store
+            .put(
+                &account,
+                "a".repeat(32),
+                AccountDocumentKey::CustomizationPack {
+                    pack_id: "pack-0".into(),
+                },
+                &payload,
+                None,
+                false,
+            )
+            .unwrap();
+        // The budget counts logical bytes per live key, including shared blobs.
+        // Seed valid signed rows referencing the real maximum-size blob instead
+        // of encrypting another 108 MiB just to establish the admission boundary.
+        for i in 1..10 {
+            let mut meta = first.clone();
+            meta.key = AccountDocumentKey::CustomizationPack {
+                pack_id: format!("pack-{i}"),
+            };
+            meta.signature = account.sign(&meta.message()).to_vec();
+            store.validate(&meta).unwrap();
+            store.install(meta);
         }
+        assert_eq!(store.live_bytes, 120 * 1024 * 1024);
+        let tail = AccountDocumentMeta::new(
+            &account,
+            "a".repeat(32),
+            AccountDocumentKey::CustomizationPack {
+                pack_id: "pack-tail".into(),
+            },
+            1,
+            &vec![4; 8 * 1024 * 1024],
+            false,
+        );
+        store.validate(&tail).unwrap();
+        store.install(tail);
+        assert_eq!(store.live_bytes, MAX_LIVE);
+        let one_byte_over = AccountDocumentMeta::new(
+            &account,
+            "a".repeat(32),
+            AccountDocumentKey::CustomizationPack {
+                pack_id: "one-byte-over".into(),
+            },
+            1,
+            b"x",
+            false,
+        );
+        assert!(store.validate(&one_byte_over).is_err());
+        let before_rows = store.current.clone();
         let before = store.digest(AccountDocumentDomain::CustomizationPack);
         let key = AccountDocumentKey::CustomizationPack {
             pack_id: "overflow".into(),
@@ -589,6 +624,8 @@ mod budget_tests {
                 .is_err()
         );
         assert!(store.meta(&key).is_none());
+        assert_eq!(store.current, before_rows);
+        assert_eq!(store.live_bytes, MAX_LIVE);
         assert_eq!(
             store.digest(AccountDocumentDomain::CustomizationPack),
             before
@@ -612,6 +649,17 @@ mod budget_tests {
                     false
                 )
                 .is_err()
+        );
+        assert_eq!(store.current, before_rows);
+        assert_eq!(store.live_bytes, MAX_LIVE);
+        assert_eq!(
+            store.digest(AccountDocumentDomain::CustomizationPack),
+            before
+        );
+        let retained = store.get(&first.key).unwrap().unwrap();
+        assert!(
+            retained.payload.as_slice() == &payload[..payload.len() - 1],
+            "failed admissions must preserve the persisted maximum-size payload"
         );
     }
     #[test]
