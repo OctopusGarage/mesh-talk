@@ -10,7 +10,7 @@ const api = vi.hoisted(() => ({
   install: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({ updates: api }));
-const restart = vi.hoisted(() => ({ prepare: vi.fn(async () => {}) }));
+const restart = vi.hoisted(() => ({ prepare: vi.fn(async () => () => {}) }));
 vi.mock("./updateRestart", () => ({ prepareUpdateRestart: restart.prepare }));
 const key = "mesh-talk-update-channel";
 const candidate = {
@@ -248,4 +248,22 @@ it("honors cancellation intent even when notifying the native downloader fails",
   });
   await preparing;
   expect(api.install).not.toHaveBeenCalled();
+});
+
+it("keeps prepared bytes retryable if drafts change before installer handoff", async () => {
+  const { useUpdates } = await import("./updates");
+  useUpdates.setState({
+    phase: "downloaded",
+    release: { ...candidate, automatic_install: true },
+    download: { path: "/prepared", file_name: "payload", installable: true },
+  });
+  restart.prepare.mockResolvedValueOnce(() => {
+    throw new Error("Draft changed");
+  });
+  await useUpdates.getState().install();
+  expect(api.install).not.toHaveBeenCalled();
+  expect(useUpdates.getState()).toMatchObject({
+    phase: "downloaded",
+    error: "Draft changed",
+  });
 });

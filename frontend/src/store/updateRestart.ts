@@ -15,11 +15,26 @@ function assertNoActiveWork() {
     throw new Error(i18n.t("about.updates.finishTransfers"));
 }
 
-/** Persist pending text before the host hands control to the native installer. */
-export async function prepareUpdateRestart(): Promise<void> {
+/** Persist a stable draft snapshot, then guard the synchronous installer handoff. */
+export async function prepareUpdateRestart(): Promise<() => void> {
   assertNoActiveWork();
-  await useDrafts.getState().flush();
-  if (useDrafts.getState().error)
-    throw new Error(i18n.t("about.updates.saveDraftsFailed"));
-  assertNoActiveWork();
+  const snapshot = useDrafts.getState();
+  const assertReady = () => {
+    const current = useDrafts.getState();
+    if (
+      current.error ||
+      current.owner !== snapshot.owner ||
+      current.generation !== snapshot.generation ||
+      current.loaded !== snapshot.loaded ||
+      current.texts !== snapshot.texts ||
+      current.protections !== snapshot.protections
+    )
+      throw new Error(i18n.t("about.updates.saveDraftsFailed"));
+    assertNoActiveWork();
+  };
+  await snapshot.flush();
+  // A concurrent edit stays in the draft store and defers restart. The next
+  // attempt saves that revision; never install from a stale durable snapshot.
+  assertReady();
+  return assertReady;
 }

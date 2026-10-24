@@ -122,7 +122,8 @@ export const useUpdates = create<UpdateState>((set, get) => ({
     if (phase !== "downloaded" || !release || !download?.installable) return;
     set({ phase: "installing", error: null });
     try {
-      await prepareUpdateRestart();
+      const assertReady = await prepareUpdateRestart();
+      assertReady();
       await updates.install(
         release.latest_version,
         (next) => set({ phase: next }),

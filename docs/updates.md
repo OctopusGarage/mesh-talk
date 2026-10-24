@@ -54,6 +54,9 @@ matching, version-bound signed payload in the selected release. macOS supports i
 bundles outside mounted `/Volumes` images and App Translocation; Windows supports NSIS installations; Linux supports
 AppImage installations. Source/debug builds, MSI, DEB/RPM and releases without updater artifacts
 retain the manual path. Install the first updater-enabled release manually before using this feature.
+The SDK enables TLS and system proxy support explicitly, with optional ZIP extraction disabled:
+Windows receives the raw NSIS executable, Linux the raw AppImage, and macOS its `.app.tar.gz`
+payload through the SDK's unconditional macOS tar support. Release verification enforces these formats.
 
 **Update and restart** downloads into a private temporary folder, validates the exact release,
 channel, OS and architecture, checks size/SHA-256 and verifies the updater signature against the
@@ -63,7 +66,7 @@ signatures or replacement bytes. Downloads are cancellable; a canceled download 
 installation. Signature errors leave the running application untouched.
 
 Before installation the UI flushes conversation drafts. An unfinished call, file transfer or draft
-save failure keeps the verified update ready for **Restart to update** after the work finishes.
+save failure or an edit made during persistence keeps the verified update ready for **Restart to update** after the work finishes.
 Installation and restart disable competing update actions. The native installer handles application
 replacement and any system authorization. Immediate installer-launch or authorization failures
 keep the prepared update retryable and offer **Download manually**. On Windows, once the NSIS

@@ -32,7 +32,8 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-opener = "2"
 # Version-bound signatures and native bundle replacement without paid OS certificates.
-tauri-plugin-updater = "=2.14.0"
+# Native NSIS/AppImage payloads need no ZIP extraction; macOS tar support is unconditional.
+tauri-plugin-updater = { version = "=2.14.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
 # Shared (versions from the workspace)
 tokio = { workspace = true }
 serde = { workspace = true }
