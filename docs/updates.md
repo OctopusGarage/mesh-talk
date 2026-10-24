@@ -74,6 +74,41 @@ An exhausted discovery bound is reported explicitly. Public download links are a
 [project download page](https://octopusgarage.github.io/mesh-talk/#download), without Actions
 artifact access or a GitHub login.
 
+## Public website downloads
+
+The project site requests GitHub's latest Stable release metadata and presents
+its desktop ZIP packages directly. It accepts only published full releases,
+exact unsuffixed desktop archive names and matching GitHub asset URLs. Relays,
+legacy Lite packages, signature bundles and prereleases are not desktop download
+choices. There is no separately maintained website version number or binary URL.
+
+The visitor's operating system selects the initial platform tab. Browser client
+hints can also identify a supported 64-bit CPU. When hints are unavailable,
+denied or ambiguous, the page offers explicit architecture choices; in
+particular, Safari's `MacIntel` platform string does not distinguish Intel from
+Apple silicon. Explicit platform choices update the primary download button; architecture choices
+are remembered for the browser session when session storage is available. Visitors
+can always change platform and architecture. Mobile
+visitors choose a desktop package explicitly. A missing package is reported,
+never silently replaced with another architecture or an older release.
+
+A download click uses GitHub's ordinary asset link and shows platform-specific
+unzip, install and first-run guidance. The Mac guide includes the release-owned
+app-specific quarantine command with copy feedback; it does not run commands or
+request system privileges. Opening the guide separately does not start a download. The guide offers the
+exact selected asset as **Download again**, and keeps focus on a visible control
+after the architecture chooser closes.
+The page cannot observe completion of the browser's download and does not claim
+the archive has been checked. Follow the release notes for signature and
+provenance verification. This differs from the desktop updater's verified
+transfer described above.
+
+Release lookup has a bounded timeout and a retry action. If GitHub is unavailable
+or rate-limited, or JavaScript is disabled, ordinary release-page links remain
+available. Downloading and installing remain explicit visitor actions. Browser
+coverage is owned by `frontend/e2e/site-downloads.spec.ts`; these fixtures prove
+page selection and interaction, not native installation or release provenance.
+
 ## Publish Nightly builds
 
 The authoritative implementation is [the release workflow](../.github/workflows/release.yml),
@@ -87,8 +122,12 @@ verifiers. Stable and Nightly reuse the same platform matrix and verification ow
   artifacts only. Nightly publication rejects tag refs, other branches and simultaneous Stable
   publication requests. Only trusted main-branch code may use publication credentials.
 - Preflight requires the existing exact-source CI/health/E2E/security checks before expensive
-  Nightly builds. A failed or pending required check blocks publication; wait for those checks
-  and retry. Required checks are owned by `scripts/release/check-source-checks.mjs`.
+  Nightly builds. Missing or pending required checks are polled once per minute for up to four
+  hours on the selected source SHA, so CI finishing after the scheduled start can proceed
+  automatically. Completed unsuccessful checks, open scanning alerts and API errors fail
+  immediately; a timeout reports the checks still pending. Retry after resolving those failures.
+  Final publication rechecks immediately and never accepts pending checks. Required checks and
+  bounded waiting are owned by `scripts/release/check-source-checks.mjs`.
 - CI generates `v<workspace-version>-nightly.<run-id>.<attempt>` and binds that technical tag to
   the exact source SHA. There is no manual version bump or official Stable tag. Never reuse or
   move a published Nightly tag, and never replace its uploaded assets.

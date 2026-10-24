@@ -8,628 +8,41 @@
       name="description"
       content="Encrypted peer-to-peer messaging for LANs and connected sites. No central server required. Synchronize retained messages and files across authorized peers, with optional offline delivery."
     />
-    <meta name="theme-color" content="#0b191d" />
+    <meta name="theme-color" content="#090f12" />
     <meta property="og:title" content="Mesh-Talk" />
     <meta
       property="og:description"
       content="Private conversations across local networks and sites. Encrypted messaging, multi-node synchronization, member-assisted recovery and optional offline delivery."
     />
     <meta property="og:type" content="website" />
+    <meta
+      property="og:url"
+      content="https://octopusgarage.github.io/mesh-talk/"
+    />
+    <meta
+      property="og:image"
+      content="https://octopusgarage.github.io/mesh-talk/screenshots/app-conversations.webp"
+    />
+    <meta
+      property="og:image:alt"
+      content="Mesh-Talk desktop app showing a demo team conversation"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href="https://octopusgarage.github.io/mesh-talk/" />
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b191d'/%3E%3Cg stroke='%2394dac8' stroke-width='1.4' fill='%2394dac8'%3E%3Cline x1='9' y1='10' x2='23' y2='9' stroke-opacity='.5'/%3E%3Cline x1='9' y1='10' x2='15' y2='23' stroke-opacity='.5'/%3E%3Cline x1='23' y1='9' x2='15' y2='23' stroke-opacity='.5'/%3E%3Cline x1='23' y1='9' x2='24' y2='22' stroke-opacity='.5'/%3E%3Ccircle cx='9' cy='10' r='2.6'/%3E%3Ccircle cx='23' cy='9' r='2.6'/%3E%3Ccircle cx='15' cy='23' r='2.6'/%3E%3Ccircle cx='24' cy='22' r='2.2' fill='%2394dac8'/%3E%3C/g%3E%3C/svg%3E"
     />
     <link rel="stylesheet" href="theme.css" />
-    <style>
-      * {
-        box-sizing: border-box;
-      }
-      html {
-        scroll-behavior: smooth;
-      }
-      @media (prefers-reduced-motion: reduce) {
-        html {
-          scroll-behavior: auto;
-        }
-      }
-      body {
-        margin: 0;
-        background: var(--ink);
-        color: var(--paper);
-        font-family: var(--body);
-        font-size: 16px;
-        line-height: 1.6;
-        -webkit-font-smoothing: antialiased;
-        text-rendering: optimizeLegibility;
-      }
-      a {
-        color: inherit;
-        text-decoration: none;
-      }
-      :focus-visible {
-        outline: 2px solid var(--signal);
-        outline-offset: 3px;
-        border-radius: 3px;
-      }
-      img {
-        max-width: 100%;
-        display: block;
-      }
-
-      .wrap {
-        width: 100%;
-        max-width: var(--maxw);
-        margin: 0 auto;
-        padding-inline: var(--pad);
-      }
-
-      /* ---------- nav ---------- */
-      .nav {
-        position: sticky;
-        top: 0;
-        z-index: 50;
-        background: var(--ink);
-        border-bottom: 1px solid
-          color-mix(in srgb, var(--line) 60%, transparent);
-      }
-      .nav__in {
-        display: flex;
-        align-items: center;
-        gap: 1.5rem;
-        height: 64px;
-      }
-      .brand {
-        display: flex;
-        align-items: center;
-        gap: 0.6rem;
-        font-family: var(--display);
-        font-weight: 600;
-        letter-spacing: -0.01em;
-        font-size: 1.05rem;
-      }
-      .brand svg {
-        width: 26px;
-        height: 26px;
-      }
-      .nav__links {
-        margin-left: auto;
-        display: flex;
-        align-items: center;
-        gap: 1.6rem;
-        font-size: 0.92rem;
-        color: var(--muted);
-      }
-      .nav__links a:hover {
-        color: var(--paper);
-      }
-      .nav__links .ghost {
-        color: var(--paper);
-      }
-      .ver {
-        font-family: var(--mono);
-        font-size: 0.74rem;
-        color: var(--signal);
-        border: 1px solid var(--line-2);
-        border-radius: 999px;
-        padding: 0.2rem 0.6rem;
-      }
-      @media (max-width: 780px) {
-        .nav__links .hide-sm {
-          display: none;
-        }
-      }
-
-      /* ---------- buttons ---------- */
-      .btn {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        font-family: var(--display);
-        font-weight: 500;
-        font-size: 0.95rem;
-        padding: 0.7rem 1.15rem;
-        border-radius: 10px;
-        border: 1px solid transparent;
-        cursor: pointer;
-        transition:
-          transform 0.15s ease,
-          background 0.15s ease,
-          border-color 0.15s ease;
-      }
-      .btn--primary {
-        background: var(--signal);
-        color: #042c28;
-      }
-      .btn--primary:hover {
-        background: var(--signal-2);
-      }
-      .btn--ghost {
-        border-color: var(--line-2);
-        color: var(--paper);
-      }
-      .btn--ghost:hover {
-        border-color: var(--signal);
-      }
-
-      /* ---------- hero ---------- */
-      .hero {
-        position: relative;
-        padding-top: clamp(3.5rem, 9vw, 7rem);
-        padding-bottom: clamp(3.5rem, 8vw, 6.5rem);
-        overflow: hidden;
-      }
-      .hero__in {
-        display: grid;
-        grid-template-columns: 1.1fr 1fr;
-        align-items: center;
-        gap: clamp(2rem, 5vw, 5rem);
-      }
-      .hero__copy {
-        min-width: 0;
-      }
-      .network-proof {
-        margin: 0;
-        min-width: 0;
-      }
-      .network-proof svg {
-        display: block;
-        width: 100%;
-        height: auto;
-        color: var(--paper);
-      }
-      .network-proof figcaption {
-        color: var(--muted);
-        font-size: 0.8rem;
-        line-height: 1.6;
-        margin: 0.5rem 0 0;
-      }
-      .network-proof .network-region {
-        fill: var(--ink-2);
-        stroke: var(--line);
-      }
-      .network-proof .network-edge {
-        fill: none;
-        stroke: var(--line-2);
-        stroke-width: 1.5;
-      }
-      .network-proof .network-relay {
-        fill: var(--ink);
-        stroke: var(--signal);
-        stroke-width: 1.5;
-      }
-      .network-proof .network-peer {
-        fill: var(--signal);
-      }
-      .network-proof text {
-        fill: var(--paper);
-        font-family: var(--body);
-        font-size: 15px;
-      }
-      .network-proof .network-label {
-        fill: var(--muted);
-        font-size: 13px;
-      }
-      @media (max-width: 900px) {
-        .hero__in {
-          grid-template-columns: 1fr;
-        }
-        .network-proof {
-          max-width: 32rem;
-        }
-        .hero__copy {
-          max-width: 42rem;
-        }
-      }
-      .hero h1 {
-        font-family: var(--display);
-        font-weight: 700;
-        font-size: clamp(2.8rem, 5.2vw, 4.2rem);
-        line-height: 1.06;
-        letter-spacing: -0.03em;
-        margin: 0;
-      }
-      .hero__sub {
-        font-size: clamp(1.05rem, 2vw, 1.22rem);
-        color: var(--muted);
-        margin: 1.4rem 0 0;
-        max-width: 33rem;
-      }
-      .hero__sub b {
-        color: var(--paper);
-        font-weight: 500;
-      }
-      .hero__cta {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.8rem;
-        margin-top: 2.1rem;
-      }
-      .ticker {
-        margin-top: 2.4rem;
-        font-size: 0.84rem;
-        color: var(--faint);
-        display: flex;
-        align-items: center;
-        flex-wrap: wrap;
-        gap: 0.4rem 0.6rem;
-      }
-
-      /* ---------- shared section ---------- */
-      .section {
-        padding-block: clamp(3.5rem, 8vw, 6rem);
-        border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
-      }
-      .section__head {
-        max-width: 38rem;
-        margin-bottom: 2.6rem;
-      }
-      .section__head h2 {
-        font-family: var(--display);
-        font-weight: 600;
-        font-size: clamp(1.7rem, 4vw, 2.5rem);
-        line-height: 1.05;
-        letter-spacing: -0.02em;
-        margin: 0;
-      }
-      .section__head p {
-        color: var(--muted);
-        margin: 0.9rem 0 0;
-        font-size: 1.05rem;
-      }
-
-      /* ---------- communication paths ---------- */
-      .steps {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 2rem 4rem;
-      }
-      .step {
-        padding: 1.25rem 0;
-        border-top: 1px solid var(--line);
-      }
-      .step h3 {
-        font-family: var(--display);
-        font-weight: 600;
-        font-size: 1.18rem;
-        margin: 0 0 0.75rem;
-        letter-spacing: -0.01em;
-      }
-      .step p {
-        color: var(--muted);
-        font-size: 0.94rem;
-        margin: 0;
-      }
-      @media (max-width: 800px) {
-        .steps {
-          grid-template-columns: 1fr;
-        }
-      }
-
-      /* ---------- opt-in routed network ---------- */
-      .bridge {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 1rem;
-      }
-      .bridge__site,
-      .bridge__link {
-        min-width: 0;
-        padding: 1.5rem;
-        border: 1px solid var(--line-2);
-        border-radius: 14px;
-        background: var(--ink-2);
-      }
-      .bridge__link {
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        text-align: center;
-        background: var(--ink-3);
-      }
-      .bridge__label {
-        display: block;
-        color: var(--signal);
-        font: 0.72rem var(--mono);
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-      }
-      .bridge strong {
-        display: block;
-        margin-top: 0.55rem;
-        font-size: 1.1rem;
-        line-height: 1.3;
-      }
-      .bridge p {
-        margin: 0.5rem 0 0;
-        color: var(--muted);
-        font-size: 0.9rem;
-      }
-      .bridge__line {
-        height: 1px;
-        margin-block: 0.9rem;
-        background: var(--signal);
-      }
-      .bridge__note {
-        max-width: 48rem;
-        margin-top: 1.3rem;
-        color: var(--faint);
-        font-size: 0.9rem;
-      }
-      .bridge__note a {
-        color: var(--paper);
-        text-decoration: underline;
-        text-underline-offset: 3px;
-      }
-      .network-heading {
-        margin-top: clamp(3rem, 6vw, 5rem);
-      }
-      @media (max-width: 720px) {
-        .bridge {
-          grid-template-columns: 1fr;
-        }
-      }
-
-      /* ---------- security: actual verification screen ---------- */
-      .secure {
-        display: grid;
-        grid-template-columns: 1.05fr 0.95fr;
-        gap: clamp(1.5rem, 4vw, 3rem);
-        align-items: center;
-      }
-      @media (max-width: 860px) {
-        .secure {
-          grid-template-columns: 1fr;
-        }
-      }
-      .security-shot {
-        border: 1px solid var(--line-2);
-        border-radius: 16px;
-        background: var(--ink-2);
-        overflow: hidden;
-      }
-      .security-shot img {
-        width: 100%;
-        height: auto;
-      }
-      .security-shot figcaption {
-        padding: 0.65rem 0.9rem;
-        font-family: var(--mono);
-        font-size: 0.74rem;
-        color: var(--faint);
-      }
-      .secure a {
-        color: var(--signal);
-        text-decoration: underline;
-        text-underline-offset: 3px;
-      }
-
-      /* ---------- capabilities grid ---------- */
-      .caps {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 1px;
-        background: color-mix(in srgb, var(--line) 55%, transparent);
-        border: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
-        border-radius: 14px;
-        overflow: hidden;
-      }
-      .cap {
-        background: var(--ink);
-        padding: 1.4rem;
-        transition: background 0.15s ease;
-      }
-      .cap:hover {
-        background: var(--ink-2);
-      }
-      .cap b {
-        font-family: var(--display);
-        font-weight: 600;
-        font-size: 1.05rem;
-        display: block;
-        margin: 0.7rem 0 0.35rem;
-        letter-spacing: -0.01em;
-      }
-      .cap p {
-        color: var(--muted);
-        font-size: 0.88rem;
-        margin: 0;
-      }
-      @media (max-width: 900px) {
-        .caps {
-          grid-template-columns: repeat(2, 1fr);
-        }
-      }
-      @media (max-width: 520px) {
-        .caps {
-          grid-template-columns: 1fr;
-        }
-      }
-
-      /* ---------- showcase ---------- */
-      .shots {
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        gap: 1.1rem;
-      }
-      .shot {
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        overflow: hidden;
-        background: var(--ink-2);
-        position: relative;
-      }
-      .shot img {
-        width: 100%;
-        height: auto;
-        display: block;
-      }
-      .shot figcaption {
-        position: absolute;
-        left: 0;
-        bottom: 0;
-        right: 0;
-        padding: 1.4rem 1rem 0.8rem;
-        font-family: var(--mono);
-        font-size: 0.74rem;
-        letter-spacing: 0.01em;
-        color: var(--paper);
-        background: linear-gradient(
-          180deg,
-          transparent,
-          color-mix(in srgb, var(--ink) 92%, transparent)
-        );
-      }
-      .shot--wide {
-        grid-column: 1 / -1;
-      }
-      .shot-note {
-        margin: 1rem 0 0;
-        color: var(--faint);
-        font-size: 0.84rem;
-      }
-      @media (max-width: 720px) {
-        .shots {
-          grid-template-columns: 1fr;
-        }
-      }
-
-      /* ---------- download ---------- */
-      .download {
-        text-align: center;
-      }
-      .platforms {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 1.1rem;
-        margin: 2.2rem 0 1.4rem;
-      }
-      .platform {
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        background: var(--ink-2);
-        padding: 1.6rem 1rem;
-        transition:
-          border-color 0.15s ease,
-          transform 0.15s ease;
-      }
-      .platform:hover {
-        border-color: var(--signal);
-        transform: translateY(-3px);
-      }
-      .platform svg {
-        width: 30px;
-        height: 30px;
-        margin-bottom: 0.7rem;
-        color: var(--signal);
-      }
-      .platform b {
-        font-family: var(--display);
-        font-weight: 600;
-        display: block;
-      }
-      .platform span {
-        color: var(--faint);
-        font-family: var(--mono);
-        font-size: 0.74rem;
-      }
-      .note {
-        color: var(--faint);
-        font-size: 0.84rem;
-        max-width: 36rem;
-        margin: 0 auto;
-      }
-      .note a {
-        color: var(--paper);
-        text-decoration: underline;
-        text-underline-offset: 3px;
-      }
-      @media (max-width: 640px) {
-        .platforms {
-          grid-template-columns: 1fr;
-        }
-      }
-
-      /* ---------- footer ---------- */
-      .foot {
-        border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
-        padding-block: 2.6rem;
-        color: var(--faint);
-        font-size: 0.86rem;
-      }
-      .foot__in {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 1rem 2rem;
-        align-items: center;
-        justify-content: space-between;
-      }
-      .foot a:hover {
-        color: var(--paper);
-      }
-      .foot__links {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 1.4rem;
-      }
-
-      .recovery-layout {
-        display: grid;
-        grid-template-columns: 1fr 1.1fr;
-        gap: 2rem 5rem;
-      }
-      .recovery-flow {
-        padding: 0;
-        margin: 0;
-        list-style-position: inside;
-      }
-      .recovery-flow li {
-        padding: 0 0 1.6rem;
-        border-bottom: 1px solid var(--line);
-        margin: 0 0 1.6rem;
-        color: var(--signal);
-      }
-      .recovery-flow h3 {
-        display: inline;
-        font-family: var(--display);
-        font-size: 1.1rem;
-        font-weight: 600;
-        color: var(--paper);
-      }
-      .recovery-flow p {
-        margin: 0.7rem 0 0;
-        color: var(--muted);
-        font-size: 0.96rem;
-      }
-      .recovery-note {
-        font-size: 0.88rem;
-        color: var(--muted);
-      }
-      .recovery-layout a {
-        color: var(--signal);
-        text-decoration: underline;
-      }
-      .cap {
-        padding-top: 1.4rem;
-      }
-      @media (max-width: 900px) {
-        .recovery-layout {
-          grid-template-columns: 1fr;
-        }
-      }
-      @media (max-width: 1080px) {
-        .nav__links {
-          gap: 1rem;
-        }
-        .nav__in {
-          gap: 1rem;
-        }
-      }
-      @media (max-width: 1000px) {
-        .nav__links .hide-sm {
-          display: none;
-        }
-      }
-    </style>
+    <link rel="stylesheet" href="landing.css" />
+    <link rel="stylesheet" href="motion.css" />
+    <link rel="stylesheet" href="faq-motion.css" />
+    <script src="i18n.js" defer></script>
+    <script src="site.js" defer></script>
+    <script src="faq-motion.js" defer></script>
+    <script src="downloads.js" defer></script>
+    <script src="motion.js" defer></script>
+    <script src="network-flow.js" defer></script>
   </head>
   <body>
     <a class="skip" href="#top">Skip to content</a>
@@ -651,55 +64,138 @@
           </svg>
           Mesh-Talk
         </a>
-        <nav class="nav__links">
-          <a class="hide-sm" href="#how">How it works</a>
-          <a class="hide-sm" href="#networks">Networks</a>
-          <a class="hide-sm" href="#recovery">Recovery</a>
-          <a class="hide-sm" href="#security">Security</a>
-          <a class="hide-sm" href="#features">Features</a>
-          <a class="hide-sm" href="help/index.html">Help</a>
-          <a class="hide-sm" href="https://octopusgarage.github.io/marketplace/"
-            >Marketplace</a
+        <button
+          class="menu-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-label="Menu"
+          aria-controls="main-navigation"
+          hidden
+        >
+          <span class="menu-label">Menu</span
+          ><svg
+            class="menu-symbol"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
           >
-          <a class="ghost" href="https://github.com/OctopusGarage/mesh-talk"
-            >GitHub</a
-          >
+            <path d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        </button>
+        <nav
+          class="nav__links"
+          id="main-navigation"
+          aria-label="Main navigation"
+        >
+          <a href="#tour">Tour</a>
+          <a href="#features">Features</a>
+          <a href="#download">Download</a>
+          <a href="#marketplace">Marketplace</a>
+          <a href="#faq">FAQ</a>
+          <a href="help/index.html">User guide</a>
           <a
-            class="ver"
-            href="https://github.com/OctopusGarage/mesh-talk/releases/latest"
-            >Releases</a
+            class="nav__github"
+            href="https://github.com/OctopusGarage/mesh-talk"
+            >GitHub <span aria-hidden="true">↗</span></a
           >
         </nav>
+        <label class="language-control" hidden
+          ><span class="sr-only">Language</span
+          ><select id="site-language" aria-label="Language">
+            <option value="en" lang="en">English</option>
+            <option value="es" lang="es">Español</option>
+            <option value="pt-BR" lang="pt-BR">Português</option>
+            <option value="ja" lang="ja">日本語</option>
+            <option value="ko" lang="ko">한국어</option>
+            <option value="zh-Hans" lang="zh-Hans">简体中文</option>
+            <option value="zh-Hant" lang="zh-Hant">繁體中文</option>
+            <option value="yue" lang="yue">粵語</option>
+          </select></label
+        >
       </div>
     </header>
 
     <!-- ===== hero ===== -->
     <main id="top" tabindex="-1">
-      <section class="hero">
+      <section class="hero" aria-label="Mesh-Talk">
         <div class="wrap hero__in">
           <div class="hero__copy">
-            <h1>Encrypted conversations.<br />Across your networks.</h1>
+            <h1>Your conversations.<br /><span>On your terms.</span></h1>
             <p class="hero__sub">
-              Talk directly on a LAN, without a central server. Connect sites
-              through routes you manage. When devices reconnect, authorized
-              peers help recover retained messages and files.
+              Encrypted messaging across your networks. Start on a LAN, connect
+              your sites, and keep your conversations close.
             </p>
             <div class="hero__cta">
-              <a
-                class="btn btn--primary"
-                href="https://github.com/OctopusGarage/mesh-talk/releases/latest"
-                >Download for desktop</a
+              <a class="btn btn--primary" data-download-primary href="#download"
+                >Get Mesh-Talk <span aria-hidden="true">↗</span></a
               >
-              <a class="btn btn--ghost" href="help/index.html"
-                >Read the user guide</a
+              <a class="btn btn--ghost" href="#tour"
+                >Explore the app <span aria-hidden="true">↓</span></a
               >
             </div>
-            <p class="ticker">
-              macOS · Windows · Linux<span aria-hidden="true"> / </span>No cloud
-              account required
-            </p>
+            <a class="other-platforms" href="#download"
+              >Other platforms and architectures</a
+            >
           </div>
-          <figure class="network-proof">
+        </div>
+      </section>
+      <section class="product-tour wrap" id="tour" aria-labelledby="tour-title">
+        <h2 class="sr-only" id="tour-title">A closer look at Mesh-Talk</h2>
+        <figure class="product-preview">
+          <div id="preview-panel">
+            <a
+              href="screenshots/app-conversations@2x.webp"
+              class="preview-link"
+              aria-label="Enlarge app preview"
+              data-zoom
+            >
+              <img
+                id="preview-image"
+                src="screenshots/app-conversations.webp"
+                srcset="
+                  screenshots/app-conversations.webp    1280w,
+                  screenshots/app-conversations@2x.webp 2560w
+                "
+                sizes="(max-width: 400px) calc(100vw - 40px), (max-width: 960px) 90vw, (max-width: 1200px) calc(100vw - 96px), 1104px"
+                width="1280"
+                height="800"
+                fetchpriority="high"
+                alt="Mesh-Talk desktop app with encrypted group conversations and a device roster. Demo data."
+              />
+              <span class="preview-enlarge" aria-hidden="true"
+                >View full size ↗</span
+              >
+            </a>
+          </div>
+          <figcaption>
+            <p id="preview-caption">
+              One place for your conversations.
+              <span>Actual app · demo conversations</span>
+            </p>
+          </figcaption>
+        </figure>
+        <p class="product-principles">
+          No central server required
+          <span aria-hidden="true">/</span> End-to-end encrypted
+          <span aria-hidden="true">/</span> Open source
+        </p>
+      </section>
+      <section class="section introduction" aria-labelledby="intro-title">
+        <div class="wrap intro-layout">
+          <div class="section__head">
+            <h2 id="intro-title">A little closer.<br />A lot more yours.</h2>
+            <p>
+              Talk directly on a LAN, without a central messaging service.
+              Connect sites through routes you manage. Your peers hold the
+              conversation.
+            </p>
+            <a class="text-link" href="#how"
+              >See how it connects <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <figure class="network-proof" id="network-demo">
             <svg
               viewBox="0 0 480 340"
               role="img"
@@ -736,12 +232,73 @@
                 d="M60 112H155 M60 112L108 194L155 112 M320 112H415 M320 112L368 194L415 112"
               />
               <path
+                class="network-bridge"
                 d="M108 194H368"
                 fill="none"
                 stroke="var(--signal)"
                 stroke-width="1.5"
                 stroke-dasharray="4 6"
               />
+              <g class="network-traffic" aria-hidden="true">
+                <path id="flow-local" class="flow-guide" d="M60 112H155" />
+                <path id="flow-send" class="flow-guide" d="M60 112L108 194" />
+                <path id="flow-bridge" class="flow-guide" d="M108 194H368" />
+                <path
+                  id="flow-receive"
+                  class="flow-guide"
+                  d="M368 194L415 112"
+                />
+                <circle class="flow-packet" data-flow-packet="local" r="3.5" />
+                <circle class="flow-packet" data-flow-packet="send" r="3.5" />
+                <circle
+                  class="flow-packet flow-packet--tail"
+                  data-flow-packet="bridge-tail-2"
+                  r="2"
+                />
+                <circle
+                  class="flow-packet flow-packet--tail"
+                  data-flow-packet="bridge-tail-1"
+                  r="2.7"
+                />
+                <circle class="flow-packet" data-flow-packet="bridge" r="3.8" />
+                <circle
+                  class="flow-packet"
+                  data-flow-packet="receive"
+                  r="3.5"
+                />
+                <circle
+                  class="flow-arrival"
+                  data-flow-arrival="local"
+                  cx="155"
+                  cy="112"
+                  r="11"
+                />
+                <circle
+                  class="flow-arrival"
+                  data-flow-arrival="destination"
+                  cx="415"
+                  cy="112"
+                  r="11"
+                />
+                <rect
+                  class="flow-custody"
+                  data-flow-arrival="custody"
+                  x="90"
+                  y="176"
+                  width="36"
+                  height="36"
+                  rx="9"
+                />
+                <rect
+                  class="flow-custody"
+                  data-flow-arrival="forward"
+                  x="350"
+                  y="176"
+                  width="36"
+                  height="36"
+                  rx="9"
+                />
+              </g>
               <circle class="network-peer" cx="60" cy="112" r="7" />
               <circle class="network-peer" cx="155" cy="112" r="7" />
               <circle class="network-peer" cx="320" cy="112" r="7" />
@@ -775,6 +332,27 @@
                 Direct locally. Encrypted between sites.
               </text>
             </svg>
+            <div class="flow-controls" hidden>
+              <span class="flow-explanation">Illustrative data flow</span>
+              <div>
+                <button type="button" data-flow-toggle>Pause data flow</button
+                ><button
+                  type="button"
+                  data-flow-replay
+                  aria-label="Replay data flow"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                  >
+                    <path d="M3 10a9 9 0 1 1 2 8M3 4v6h6" /></svg
+                  ><span>Replay data flow</span>
+                </button>
+              </div>
+            </div>
             <figcaption>
               Illustrative topology. Post offices are optional; cross-site
               communication requires reachable routes and explicit trust.
@@ -801,6 +379,9 @@
                 Signed discovery finds devices on the same LAN, even without
                 internet. Peers connect directly and sync encrypted events.
               </p>
+              <a class="cap-guide" href="help/find-people.html"
+                >Find nearby people <span aria-hidden="true">↗</span></a
+              >
             </div>
             <div class="step">
               <h3>Reach another LAN</h3>
@@ -808,6 +389,9 @@
                 Use an existing route, such as your Tailscale network, to find
                 reachable peers. Mesh-Talk verifies their identity separately.
               </p>
+              <a class="cap-guide" href="help/routed-networks.html"
+                >Connect your sites <span aria-hidden="true">↗</span></a
+              >
             </div>
             <div class="step">
               <h3>Deliver while away</h3>
@@ -815,6 +399,9 @@
                 A peer-operated post office holds recipient-encrypted events
                 temporarily, subject to capacity and a 30-day maximum age.
               </p>
+              <a class="cap-guide" href="help/post-offices.html"
+                >Set up offline delivery <span aria-hidden="true">↗</span></a
+              >
             </div>
             <div class="step">
               <h3>Recover together</h3>
@@ -823,13 +410,16 @@
                 peers. Group members can share a copy even when the original
                 sender is unavailable.
               </p>
+              <a class="cap-guide" href="help/channels.html"
+                >Understand group recovery <span aria-hidden="true">↗</span></a
+              >
             </div>
           </div>
         </div>
       </section>
 
       <!-- ===== optional cross-network introductions ===== -->
-      <section class="section" id="networks">
+      <section class="section networks-section" id="networks">
         <div class="wrap">
           <div class="section__head">
             <h2>Across LANs, when you choose.</h2>
@@ -949,11 +539,17 @@
           </div>
           <figure class="security-shot">
             <a
-              href="screenshots/verify.webp"
+              href="screenshots/app-verification@2x.webp"
+              data-zoom
               aria-label="View the contact verification screen at full size"
             >
               <img
-                src="screenshots/verify.webp"
+                src="screenshots/app-verification.webp"
+                srcset="
+                  screenshots/app-verification.webp    1280w,
+                  screenshots/app-verification@2x.webp 2560w
+                "
+                sizes="(max-width: 720px) calc(100vw - 40px), (max-width: 1200px) 48vw, 600px"
                 width="1280"
                 height="800"
                 loading="lazy"
@@ -968,7 +564,7 @@
       </section>
 
       <!-- ===== capabilities ===== -->
-      <section class="section" id="features">
+      <section class="section features-section" id="features">
         <div class="wrap">
           <div class="section__head">
             <h2>Everyday messaging, with local control.</h2>
@@ -980,6 +576,9 @@
                 One-to-one and group conversations with replies, reactions,
                 mentions, and search.
               </p>
+              <a class="cap-guide" href="help/channels.html"
+                >Explore conversations <span aria-hidden="true">↗</span></a
+              >
             </div>
             <div class="cap">
               <b>Encrypted files</b>
@@ -988,6 +587,9 @@
                 can resume when an authorized source retains the content and
                 receiving is approved.
               </p>
+              <a class="cap-guide" href="help/send-files.html"
+                >Understand file sharing <span aria-hidden="true">↗</span></a
+              >
             </div>
             <div class="cap">
               <b>Linked devices</b>
@@ -996,6 +598,9 @@
                 file cards and attachment contents synchronize over reachable
                 device-to-device paths.
               </p>
+              <a class="cap-guide" href="help/link-devices.html"
+                >Link your devices <span aria-hidden="true">↗</span></a
+              >
             </div>
             <div class="cap">
               <b>Manual backup</b>
@@ -1003,6 +608,9 @@
                 Export an encrypted backup with a separate recovery key for
                 restoring an account.
               </p>
+              <a class="cap-guide" href="help/backup.html"
+                >Back up your account <span aria-hidden="true">↗</span></a
+              >
             </div>
             <div class="cap">
               <b>Privacy choices</b>
@@ -1010,6 +618,9 @@
                 Choose notification, app lock, visibility, and local retention
                 settings.
               </p>
+              <a class="cap-guide" href="help/privacy.html"
+                >Review privacy choices <span aria-hidden="true">↗</span></a
+              >
             </div>
             <div class="cap">
               <b>Themes and packs</b>
@@ -1017,73 +628,166 @@
                 Choose an interface theme and add optional avatar, theme, or
                 sticker packs.
               </p>
+              <a class="cap-guide" href="help/customization-packs.html"
+                >Explore customization <span aria-hidden="true">↗</span></a
+              >
             </div>
           </div>
         </div>
       </section>
 
       <!-- ===== showcase ===== -->
-      <section class="section" aria-label="Screenshots">
+      <section
+        class="section marketplace-section"
+        id="marketplace"
+        aria-labelledby="marketplace-title"
+      >
         <div class="wrap">
           <div class="section__head">
-            <h2>See the desktop app.</h2>
+            <h2 id="marketplace-title">Your space.<br />A little more you.</h2>
+            <p>
+              Discover optional themes, avatar collections and sticker packs in
+              the community Marketplace. Choose what to install, and make
+              Mesh-Talk feel like your own.
+            </p>
+            <div class="marketplace-actions">
+              <a
+                class="btn btn--primary"
+                href="https://octopusgarage.github.io/marketplace/"
+                >Explore Marketplace <span aria-hidden="true">↗</span></a
+              ><a class="text-link" href="help/customization-packs.html"
+                >How packs work <span aria-hidden="true">↗</span></a
+              >
+            </div>
           </div>
-          <div class="shots">
-            <figure class="shot shot--wide">
-              <img
-                src="screenshots/hero-barcelona.webp"
-                width="1280"
-                height="800"
-                loading="lazy"
-                alt="Barcelona-themed Mesh-Talk channel with Lionel Messi, Neymar Jr., player avatars, and a football team conversation"
-              />
-              <figcaption>Barcelona × Argentina · team conversation</figcaption>
+          <div class="marketplace-grid">
+            <figure class="marketplace-themes">
+              <h3>Themes</h3>
+              <p>Give your conversations a different setting.</p>
+              <div
+                id="customization-panel"
+                role="tabpanel"
+                aria-labelledby="theme-messi"
+              >
+                <a
+                  href="screenshots/hero-messi@2x.webp"
+                  class="customization-link"
+                  data-zoom
+                  aria-label="Enlarge Marketplace theme preview"
+                  ><img
+                    id="customization-image"
+                    src="screenshots/hero-messi.webp"
+                    srcset="
+                      screenshots/hero-messi.webp    1280w,
+                      screenshots/hero-messi@2x.webp 2560w
+                    "
+                    sizes="(max-width: 720px) calc(100vw - 84px), (max-width: 1200px) 48vw, 610px"
+                    width="1280"
+                    height="800"
+                    loading="lazy"
+                    alt="An optional Messi theme installed in Mesh-Talk. Demo data."
+                /></a>
+              </div>
+              <p class="preview-status" role="status"></p>
+              <div
+                class="preview-tabs"
+                role="tablist"
+                aria-label="Marketplace theme examples"
+                hidden
+              >
+                <button
+                  id="theme-messi"
+                  type="button"
+                  role="tab"
+                  aria-selected="true"
+                  aria-controls="customization-panel"
+                  data-theme="messi"
+                >
+                  Messi
+                </button>
+                <button
+                  id="theme-barcelona"
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="customization-panel"
+                  tabindex="-1"
+                  data-theme="barcelona"
+                >
+                  Barcelona
+                </button>
+                <button
+                  id="theme-argentina"
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="customization-panel"
+                  tabindex="-1"
+                  data-theme="argentina"
+                >
+                  Argentina
+                </button>
+              </div>
             </figure>
-            <figure class="shot">
-              <img
-                src="screenshots/hero-argentina.webp"
-                width="1280"
-                height="800"
-                loading="lazy"
-                alt="Argentina theme showing the same football team conversation"
-              />
-              <figcaption>Argentina theme</figcaption>
+            <figure class="marketplace-avatars">
+              <h3>Avatars</h3>
+              <p>Find a face for your profile or group.</p>
+              <a
+                href="screenshots/avatars-players@2x.webp"
+                data-zoom
+                aria-label="Enlarge avatar collection preview"
+                ><img
+                  src="screenshots/avatars-players.webp"
+                  srcset="
+                    screenshots/avatars-players.webp    1280w,
+                    screenshots/avatars-players@2x.webp 2560w
+                  "
+                  sizes="(max-width: 720px) calc(100vw - 84px), (max-width: 1200px) 42vw, 485px"
+                  width="1280"
+                  height="800"
+                  loading="lazy"
+                  alt="An optional avatar collection in Mesh-Talk. Demo data."
+              /></a>
             </figure>
-            <figure class="shot">
-              <img
-                src="screenshots/hero-messi.webp"
-                width="1280"
-                height="800"
-                loading="lazy"
-                alt="Messi theme showing the same football team conversation"
-              />
-              <figcaption>Messi theme</figcaption>
-            </figure>
-            <figure class="shot">
-              <img
-                src="screenshots/verify.webp"
-                width="1280"
-                height="800"
-                loading="lazy"
-                alt="The contact verification screen showing a safety number"
-              />
-              <figcaption>Verify a contact's safety number</figcaption>
-            </figure>
-            <figure class="shot">
-              <img
-                src="screenshots/themes.webp"
-                width="1280"
-                height="800"
-                loading="lazy"
-                alt="Selectable themes in Mesh-Talk"
-              />
-              <figcaption>Make it yours — selectable themes</figcaption>
+            <figure class="marketplace-stickers">
+              <h3>Stickers</h3>
+              <p>Say a little more with a sticker.</p>
+              <a
+                href="screenshots/stickers@2x.webp"
+                data-zoom
+                aria-label="Enlarge sticker pack preview"
+                ><img
+                  src="screenshots/stickers.webp"
+                  srcset="
+                    screenshots/stickers.webp    1280w,
+                    screenshots/stickers@2x.webp 2560w
+                  "
+                  sizes="(max-width: 720px) calc(100vw - 84px), (max-width: 1200px) 42vw, 485px"
+                  width="1280"
+                  height="800"
+                  loading="lazy"
+                  alt="An optional sticker pack in Mesh-Talk. Demo data."
+              /></a>
             </figure>
           </div>
-          <p class="shot-note">
-            Interface examples with deterministic football-themed demo
-            identities and messages. These are UI captures, not network tests.
-          </p>
+          <div class="marketplace-install">
+            <h3>Pick a pack. Make it part of your app.</h3>
+            <p>
+              Open its library in Mesh-Talk: Appearance for themes, your profile
+              gallery for avatars, or Manage sticker packs for stickers. Install
+              from the marketplace or import a local ZIP.
+            </p>
+            <p class="shot-note">
+              Packs are optional and installed separately. Recipients need a
+              matching sticker pack to see its artwork; otherwise a fallback
+              appears. Interface examples use demo data.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/CUSTOMIZATION_PACKS.md"
+              >Create your own pack <span aria-hidden="true">↗</span></a
+            >
+          </div>
         </div>
       </section>
 
@@ -1093,74 +797,499 @@
           <div class="section__head" style="margin: 0 auto 0">
             <h2>Get Mesh-Talk.</h2>
           </div>
+          <p class="download-intro">
+            A place on your desktop. A network you control.
+          </p>
+          <div
+            class="platform-tabs"
+            role="tablist"
+            aria-label="Choose your platform"
+            hidden
+          >
+            <button
+              id="tab-macos"
+              role="tab"
+              type="button"
+              aria-selected="true"
+              aria-controls="platform-macos"
+              data-platform="macos"
+            >
+              macOS
+            </button>
+            <button
+              id="tab-windows"
+              role="tab"
+              type="button"
+              aria-selected="false"
+              aria-controls="platform-windows"
+              tabindex="-1"
+              data-platform="windows"
+            >
+              Windows
+            </button>
+            <button
+              id="tab-linux"
+              role="tab"
+              type="button"
+              aria-selected="false"
+              aria-controls="platform-linux"
+              tabindex="-1"
+              data-platform="linux"
+            >
+              Linux
+            </button>
+          </div>
+          <div class="release-summary">
+            <p id="release-status" role="status">
+              Find the latest Stable packages on GitHub Releases.
+            </p>
+            <button id="release-retry" type="button" hidden>Try again</button>
+            <a
+              id="release-notes"
+              href="https://github.com/OctopusGarage/mesh-talk/releases/latest"
+              >Browse Stable release</a
+            >
+          </div>
           <div class="platforms">
-            <a
+            <section
               class="platform"
-              href="https://github.com/OctopusGarage/mesh-talk/releases/latest"
+              id="platform-macos"
+              aria-labelledby="tab-macos"
             >
-              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path
-                  d="M16.4 1.6c.1 1-.3 2-1 2.8-.7.8-1.8 1.4-2.8 1.3-.1-1 .4-2 1-2.7.7-.8 1.9-1.4 2.8-1.4ZM19 17.2c-.5 1.2-.8 1.7-1.5 2.8-1 1.5-2.3 3.3-4 3.3-1.5 0-1.9-1-3.9-1-2 0-2.4 1-3.9 1-1.7 0-3-1.7-3.9-3.1C-.7 16.6-1 11.5 1.2 8.8 2.5 7 4.4 6 6.2 6c1.6 0 2.6 1 3.9 1 1.3 0 2-1 3.9-1 1.5 0 3.1.8 4.2 2.3-3.7 2-3.1 7.3.8 8.9Z"
-                />
-              </svg>
-              <b>macOS</b>
-              <span>Apple silicon · Intel</span>
-            </a>
-            <a
+              <h3>Mesh-Talk for macOS</h3>
+              <p>
+                Apple silicon or Intel. Open About This Mac to check your chip.
+                Each ZIP includes the DMG installer and checksums.
+              </p>
+              <div class="package-options" data-packages="macos">
+                <a
+                  class="btn btn--primary"
+                  href="https://github.com/OctopusGarage/mesh-talk/releases/latest"
+                  >Get macOS installers <span aria-hidden="true">↗</span></a
+                >
+              </div>
+              <button
+                class="install-help"
+                type="button"
+                data-install="macos"
+                hidden
+              >
+                How to install
+              </button>
+              <p class="platform-hint">
+                Open the release notes for first-run and archive verification
+                steps.
+              </p>
+            </section>
+            <section
               class="platform"
-              href="https://github.com/OctopusGarage/mesh-talk/releases/latest"
+              id="platform-windows"
+              aria-labelledby="tab-windows"
             >
-              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path
-                  d="M3 4.6 11 3.5v8.1H3V4.6Zm0 14.8 8 1.1v-8H3v6.9ZM12 3.3 21 2v9.6h-9V3.3Zm0 9.3h9V22l-9-1.3v-8.1Z"
-                />
-              </svg>
-              <b>Windows</b>
-              <span>x64 · ARM64 installers</span>
-            </a>
-            <a
+              <h3>Mesh-Talk for Windows</h3>
+              <p>
+                x64 or ARM64. Check System → About → System type. Each ZIP
+                includes the Windows installers and checksums.
+              </p>
+              <div class="package-options" data-packages="windows">
+                <a
+                  class="btn btn--primary"
+                  href="https://github.com/OctopusGarage/mesh-talk/releases/latest"
+                  >Get Windows installers <span aria-hidden="true">↗</span></a
+                >
+              </div>
+              <button
+                class="install-help"
+                type="button"
+                data-install="windows"
+                hidden
+              >
+                How to install
+              </button>
+              <p class="platform-hint">
+                Open the release notes for first-run and archive verification
+                steps.
+              </p>
+            </section>
+            <section
               class="platform"
-              href="https://github.com/OctopusGarage/mesh-talk/releases/latest"
+              id="platform-linux"
+              aria-labelledby="tab-linux"
             >
-              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path
-                  d="M12 2c-2 0-3 1.7-3 3.6 0 1.3.1 2.3-.6 3.4-.8 1.2-2.6 2.9-2.6 5.6 0 .9.3 1.6.3 2.3-.3.5-1.2 1-1.2 1.8 0 1 1.2 1.1 2.3 1.4 1 .3 1.7.9 2.6.9.6 0 1-.4 1.2-.9.4 0 .8-.1 1.2 0 .2.5.6.9 1.2.9.9 0 1.6-.6 2.6-.9 1.1-.3 2.3-.4 2.3-1.4 0-.8-.9-1.3-1.2-1.8 0-.7.3-1.4.3-2.3 0-2.7-1.8-4.4-2.6-5.6-.7-1.1-.6-2.1-.6-3.4C15 3.7 14 2 12 2Z"
-                />
-              </svg>
-              <b>Linux</b>
-              <span>AppImage · deb · rpm</span>
-            </a>
+              <h3>Mesh-Talk for Linux</h3>
+              <p>
+                AppImage, deb, or rpm, packaged in one ZIP for each
+                architecture. Choose x64 or ARM64 for your Linux machine.
+              </p>
+              <div class="package-options" data-packages="linux">
+                <a
+                  class="btn btn--primary"
+                  href="https://github.com/OctopusGarage/mesh-talk/releases/latest"
+                  >Get Linux packages <span aria-hidden="true">↗</span></a
+                >
+              </div>
+              <button
+                class="install-help"
+                type="button"
+                data-install="linux"
+                hidden
+              >
+                How to install
+              </button>
+              <p class="platform-hint">
+                Open the release notes for package details and archive
+                verification steps.
+              </p>
+            </section>
           </div>
           <p class="note">
             Stable is recommended for everyday use. Want to try recent changes?
-            <a href="https://github.com/OctopusGarage/mesh-talk/releases">Browse Nightly prereleases.</a>
+            <a href="https://github.com/OctopusGarage/mesh-talk/releases"
+              >Browse Nightly prereleases.</a
+            >
             Nightly builds may contain bugs. You can also choose Nightly under
             More → About → Update channel in the app. Back up your local data
             before trying Nightly or returning to an older Stable installation.
           </p>
           <p class="note">
             Releases start without optional packs or animated sticker assets.
-            Install packs later from the marketplace or a local ZIP. Desktop installers are not signed with Apple
-            Developer ID or a commercial Windows certificate. Release notes
-            explain first-run steps and signed archive verification. Prefer to
-            build it yourself?
+            Install packs later from the marketplace or a local ZIP. Desktop
+            installers are not signed with Apple Developer ID or a commercial
+            Windows certificate. Release notes explain first-run steps and
+            signed archive verification. Prefer to build it yourself?
             <a
               href="https://github.com/OctopusGarage/mesh-talk#build-from-source"
               >Build from source.</a
             >
           </p>
+          <details class="source-install">
+            <summary>Build and run from source</summary>
+            <p>
+              Install stable Rust, Node.js 22+, and the
+              <a
+                href="https://github.com/OctopusGarage/mesh-talk/blob/main/specifications/deployment_guide.md"
+                >Tauri prerequisites for your platform</a
+              >, then run:
+            </p>
+            <div class="command-block">
+              <div class="command-toolbar">
+                <span>Terminal</span
+                ><button
+                  type="button"
+                  data-copy-target="source-command"
+                  data-copy-status="source-copy-status"
+                >
+                  Copy source commands
+                </button>
+              </div>
+              <pre><code id="source-command">git clone https://github.com/OctopusGarage/mesh-talk.git
+cd mesh-talk
+make dev
+make tauri-dev</code></pre>
+            </div>
+            <p id="source-copy-status" class="copy-feedback" role="status"></p>
+            <p>
+              This starts a development build.
+              <a
+                href="https://github.com/OctopusGarage/mesh-talk#build-from-source"
+                >Read the build guide</a
+              >
+              for packaging and setup.
+            </p>
+          </details>
+        </div>
+      </section>
+      <section class="section faq-section" id="faq" aria-labelledby="faq-title">
+        <div class="wrap faq-layout">
+          <div class="section__head">
+            <h2 id="faq-title">A few things<br />you might ask.</h2>
+            <p>Start here, or go a little deeper.</p>
+            <a class="text-link" href="help/index.html"
+              >Open the user guide <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <div class="faq-list">
+            <details id="faq-offline">
+              <summary>Does it work without the internet?</summary>
+              <p>
+                Yes. Reachable peers on the same LAN can discover each other and
+                exchange encrypted messages without internet access or a central
+                server. Your network must allow local discovery and peer
+                connections.
+                <a href="help/find-people.html">Read the connection guide.</a>
+              </p>
+              <a class="faq-permalink" href="#faq-offline"
+                >Link to this answer</a
+              >
+            </details>
+            <details id="faq-networks">
+              <summary>Can I talk to people on another network?</summary>
+              <p>
+                Yes, when an existing routed path connects you, or through
+                opted-in, trusted post-office bridges. Mesh-Talk does not
+                provide a VPN or join IP subnets.
+                <a href="#networks">Explore cross-site connections.</a>
+              </p>
+              <a class="faq-permalink" href="#faq-networks"
+                >Link to this answer</a
+              >
+            </details>
+            <details id="faq-delivery">
+              <summary>What happens when someone is offline?</summary>
+              <p>
+                An optional peer-operated post office can temporarily hold
+                recipient-encrypted events, subject to capacity and a 30-day
+                maximum age. Authorized peers can also help recover retained
+                group history after reconnection. Delivery depends on available
+                paths and retained data.
+                <a href="help/delivery.html">Understand delivery states.</a>
+              </p>
+              <a class="faq-permalink" href="#faq-delivery"
+                >Link to this answer</a
+              >
+            </details>
+            <details id="faq-privacy">
+              <summary>Who can read my messages?</summary>
+              <p>
+                Message content is end-to-end encrypted. Compare a contact’s
+                safety number through a trusted channel to verify their
+                identity. Peers and relays still observe some connection and
+                routing metadata.
+                <a href="help/verify-contact.html"
+                  >Learn about contact verification.</a
+                >
+              </p>
+              <a class="faq-permalink" href="#faq-privacy"
+                >Link to this answer</a
+              >
+            </details>
+            <details id="faq-devices">
+              <summary>Can I use more than one device?</summary>
+              <p>
+                Link certified devices to one account, then choose which
+                history, file cards, and attachment contents synchronize over
+                eligible direct device paths. Keep an encrypted backup and its
+                separate recovery key.
+                <a href="help/index.html">Find device and backup guides.</a>
+              </p>
+              <a class="faq-permalink" href="#faq-devices"
+                >Link to this answer</a
+              >
+            </details>
+            <details id="faq-open-source">
+              <summary>Is Mesh-Talk free and open source?</summary>
+              <p>
+                Yes. Mesh-Talk is MIT licensed. You can inspect the code, build
+                it yourself, and run your own optional post office.
+                <a href="https://github.com/OctopusGarage/mesh-talk"
+                  >Explore the source on GitHub.</a
+                >
+              </p>
+              <a class="faq-permalink" href="#faq-open-source"
+                >Link to this answer</a
+              >
+            </details>
+            <details id="faq-mac-open">
+              <summary>Why does macOS say the app is damaged?</summary>
+              <p>
+                Current installers are not signed with Apple Developer ID.
+                Follow the first-run steps after verifying the archive.
+              </p>
+              <button
+                class="install-help"
+                type="button"
+                data-install="macos"
+                hidden
+              >
+                Show Mac installation steps
+              </button>
+              <p>
+                <a
+                  href="https://github.com/OctopusGarage/mesh-talk/releases/latest"
+                  >Read first-run instructions in the release notes</a
+                >
+              </p>
+              <a class="faq-permalink" href="#faq-mac-open"
+                >Link to this answer</a
+              >
+            </details>
+          </div>
         </div>
       </section>
     </main>
 
+    <dialog class="install-dialog" aria-labelledby="install-title">
+      <form method="dialog" class="install-close">
+        <button aria-label="Close installation guide" title="Close">×</button>
+      </form>
+      <h2 id="install-title">Install Mesh-Talk</h2>
+      <p
+        id="install-download-status"
+        class="install-download-status"
+        role="status"
+      ></p>
+      <p class="install-package-info" data-download-info hidden></p>
+      <div class="install-package-picker" hidden>
+        <p>
+          Your browser cannot reliably identify your chip. Choose the matching
+          package:
+        </p>
+        <div class="package-options"></div>
+      </div>
+      <div data-install-guide="macos">
+        <ol class="install-steps">
+          <li>
+            <p>
+              Unzip the download. Open the DMG and drag
+              <strong>mesh-talk.app</strong> into <strong>Applications</strong>.
+              Quit the existing app before replacing it.
+            </p>
+          </li>
+          <li>
+            <p>
+              Open Mesh-Talk from Applications. If macOS blocks it, review
+              <strong
+                >System Settings → Privacy &amp; Security → Open Anyway</strong
+              >.
+            </p>
+          </li>
+          <li>
+            <p>
+              If macOS reports the app as “damaged”, verify the archive using
+              the release notes, then paste this app-specific command into
+              Terminal:
+            </p>
+            <div class="command-block">
+              <div class="command-toolbar">
+                <span>Terminal</span
+                ><button
+                  type="button"
+                  data-copy-command
+                  data-copy-target="mac-install-command"
+                  data-copy-status="mac-copy-status"
+                >
+                  Copy command
+                </button>
+              </div>
+              <pre><code id="mac-install-command">/usr/bin/xattr -dr com.apple.quarantine "/Applications/mesh-talk.app"</code></pre>
+            </div>
+            <p id="mac-copy-status" class="copy-feedback" role="status"></p>
+            <p class="install-small">
+              This removes the quarantine attribute from Mesh-Talk only. It does
+              not verify the archive. Open the app again after running it.
+            </p>
+          </li>
+        </ol>
+        <p class="install-small">
+          Current installers are not signed with Apple Developer ID.
+          <a
+            href="https://support.apple.com/en-us/102445"
+            target="_blank"
+            rel="noopener"
+            >Apple’s guidance for opening downloaded apps ↗</a
+          >
+        </p>
+      </div>
+      <div data-install-guide="windows" hidden>
+        <ol class="install-steps">
+          <li>
+            <p>Unzip the download. Quit Mesh-Talk if it is already running.</p>
+          </li>
+          <li>
+            <p>
+              Run the <strong>EXE installer</strong>. Use the MSI for a managed
+              installation.
+            </p>
+          </li>
+          <li>
+            <p>
+              If Windows SmartScreen blocks the unsigned installer, verify your
+              download using the release notes before choosing
+              <strong>More info → Run anyway</strong>. Open Mesh-Talk from the
+              Start menu.
+            </p>
+          </li>
+        </ol>
+        <p class="install-small">
+          Current installers do not have a commercial Windows code-signing
+          certificate.
+        </p>
+      </div>
+      <div data-install-guide="linux" hidden>
+        <ol class="install-steps">
+          <li>
+            <p>
+              Unzip the download. Choose the <strong>DEB</strong> or
+              <strong>RPM</strong> for your distribution, or use the
+              <strong>AppImage</strong>.
+            </p>
+          </li>
+          <li>
+            <p>
+              For AppImage, mark the extracted file as executable in your file
+              manager’s permissions, then open it. Install DEB or RPM files with
+              your distribution’s package manager.
+            </p>
+          </li>
+          <li>
+            <p>
+              Quit Mesh-Talk before replacing an existing installation. Launch
+              the installed app and connect to your local network.
+            </p>
+          </li>
+        </ol>
+      </div>
+      <a class="download-again" data-download-again hidden>Download again</a>
+      <div class="install-footer">
+        <a
+          href="https://github.com/OctopusGarage/mesh-talk/releases/latest"
+          data-verification-link
+          target="_blank"
+          rel="noopener"
+          >Release notes &amp; download verification ↗</a
+        >
+        <form method="dialog">
+          <button class="btn btn--primary">Got it</button>
+        </form>
+      </div>
+    </dialog>
+    <dialog class="image-viewer" aria-label="Screenshot viewer">
+      <form method="dialog">
+        <button class="viewer-close" aria-label="Close screenshot viewer">
+          Close <span aria-hidden="true">×</span>
+        </button>
+      </form>
+      <div class="viewer-media">
+        <img alt="" width="1280" height="800" />
+        <p class="viewer-loading" role="status" hidden></p>
+      </div>
+      <p class="viewer-caption"></p>
+      <div class="viewer-controls" hidden>
+        <button type="button" data-viewer-prev aria-label="Previous screenshot">
+          ← Previous</button
+        ><span class="viewer-position" role="status"></span
+        ><button type="button" data-viewer-next aria-label="Next screenshot">
+          Next →</button
+        ><a data-viewer-original target="_blank" rel="noopener"
+          >Open original image</a
+        >
+      </div>
+    </dialog>
     <!-- ===== footer ===== -->
     <footer class="foot">
       <div class="wrap foot__in">
-        <div>Mesh-Talk · MIT licensed · © 2026 Kingson Wu</div>
+        <div class="foot__brand">
+          <a class="brand" href="#top">Mesh-Talk</a>
+          <p>Your conversations. On your terms.</p>
+          <small>MIT licensed · © 2026 OctopusGarage</small>
+        </div>
         <nav class="foot__links">
           <a href="help/index.html">User guide</a>
           <a href="https://octopusgarage.github.io/marketplace/">Marketplace</a>
           <a href="https://github.com/OctopusGarage/mesh-talk">GitHub</a>
+          <a href="https://github.com/OctopusGarage/mesh-talk/issues"
+            >Report an issue</a
+          >
           <a
             href="https://github.com/OctopusGarage/mesh-talk/blob/main/docs/README.md"
             >Docs</a
@@ -1171,5 +1300,6 @@
         </nav>
       </div>
     </footer>
+    <p id="language-status" class="language-status" role="status"></p>
   </body>
 </html>

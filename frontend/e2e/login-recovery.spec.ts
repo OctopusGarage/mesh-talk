@@ -222,7 +222,16 @@ for (const theme of ["light", "dark"]) {
   });
 }
 
-for (const language of ["en", "es", "ja", "zh-Hans", "zh-Hant", "yue"]) {
+for (const language of [
+  "en",
+  "es",
+  "ja",
+  "zh-Hans",
+  "zh-Hant",
+  "yue",
+  "pt-BR",
+  "ko",
+]) {
   test(`creation action remains visible in a short ${language} window`, async ({
     page,
   }) => {

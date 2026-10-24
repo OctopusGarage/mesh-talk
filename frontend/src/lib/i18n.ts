@@ -6,16 +6,31 @@ import ja from "@/locales/ja.json";
 import zhHans from "@/locales/zh-Hans.json";
 import zhHant from "@/locales/zh-Hant.json";
 import yue from "@/locales/yue.json";
+import ptBR from "@/locales/pt-BR.json";
+import ko from "@/locales/ko.json";
 
 export const SUPPORTED_LANGUAGES = [
   "en",
   "es",
+  "pt-BR",
   "ja",
+  "ko",
   "zh-Hans",
   "zh-Hant",
   "yue",
 ] as const;
 export type Language = (typeof SUPPORTED_LANGUAGES)[number];
+
+export const LANGUAGE_LABELS: Record<Language, string> = {
+  en: "English",
+  es: "Español",
+  "pt-BR": "Português",
+  ja: "日本語",
+  ko: "한국어",
+  "zh-Hans": "简体中文",
+  "zh-Hant": "繁體中文",
+  yue: "粵語",
+};
 
 const KEY = "mesh-talk-lang";
 const localLanguageListeners = new Set<(language: Language) => void>();
@@ -24,28 +39,30 @@ function isLanguage(value: string): value is Language {
   return (SUPPORTED_LANGUAGES as readonly string[]).includes(value);
 }
 
-/** Map a stored or browser language tag to a supported code (or null). */
+/** Resolve saved/browser tags without accepting unrelated language prefixes. */
 export function resolveLanguage(raw: string): Language | null {
-  if (isLanguage(raw)) return raw;
-  const lower = raw.toLowerCase();
-  // Legacy persisted "zh" (was Simplified) → zh-Hans, so existing users don't break.
-  if (lower === "zh" || lower === "zh-cn" || lower === "zh-hans")
-    return "zh-Hans";
-  if (lower === "zh-tw" || lower === "zh-hk" || lower === "zh-hant")
-    return "zh-Hant";
-  if (lower.startsWith("yue")) return "yue";
-  if (lower.startsWith("zh")) return "zh-Hans";
-  if (lower.startsWith("es")) return "es";
-  if (lower.startsWith("ja")) return "ja";
-  if (lower.startsWith("en")) return "en";
-  return null;
+  const lower = raw.trim().toLowerCase();
+  const exact = SUPPORTED_LANGUAGES.find(
+    (code) => code.toLowerCase() === lower,
+  );
+  if (exact) return exact;
+  if (/^zh-(?:tw|hk|mo|hant)(?:-|$)/.test(lower)) return "zh-Hant";
+  // Preserve the legacy saved "zh" choice as Simplified Chinese.
+  if (/^zh(?:-|$)/.test(lower)) return "zh-Hans";
+  const base = lower.split("-")[0];
+  if (base === "pt") return "pt-BR";
+  return SUPPORTED_LANGUAGES.find((code) => code === base) ?? null;
 }
 
 /** Explicit persisted choice only; browser defaults are not account preferences. */
 export function savedLanguage(): Language | null {
-  if (typeof localStorage !== "undefined") {
-    const stored = localStorage.getItem(KEY);
-    if (stored) return resolveLanguage(stored);
+  try {
+    if (typeof localStorage !== "undefined") {
+      const stored = localStorage.getItem(KEY);
+      if (stored) return resolveLanguage(stored);
+    }
+  } catch {
+    // Embedded browsers can deny storage; account preferences still work in session.
   }
   return null;
 }
@@ -54,9 +71,19 @@ export function savedLanguage(): Language | null {
 function initialLanguage(): Language {
   const saved = savedLanguage();
   if (saved) return saved;
-  const nav = typeof navigator !== "undefined" ? navigator.language : "";
-  return resolveLanguage(nav) ?? "en";
+  if (typeof navigator !== "undefined") {
+    for (const tag of navigator.languages ?? [navigator.language]) {
+      const resolved = resolveLanguage(tag);
+      if (resolved) return resolved;
+    }
+  }
+  return "en";
 }
+
+i18n.on("languageChanged", (language) => {
+  if (typeof document !== "undefined")
+    document.documentElement.lang = resolveLanguage(language) ?? "en";
+});
 
 void i18n.use(initReactI18next).init({
   resources: {
@@ -66,6 +93,8 @@ void i18n.use(initReactI18next).init({
     "zh-Hans": { translation: zhHans },
     "zh-Hant": { translation: zhHant },
     yue: { translation: yue },
+    "pt-BR": { translation: ptBR },
+    ko: { translation: ko },
   },
   lng: initialLanguage(),
   fallbackLng: "en",
@@ -83,7 +112,11 @@ export function setLanguage(lng: Language) {
 export function applyAccountLanguage(value: string | null): boolean {
   if (value !== null && !isLanguage(value)) return false;
   const lng = value ?? "en";
-  if (typeof localStorage !== "undefined") localStorage.setItem(KEY, lng);
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(KEY, lng);
+  } catch {
+    // A denied preference write must not prevent an in-session switch.
+  }
   void i18n.changeLanguage(lng);
   return true;
 }
