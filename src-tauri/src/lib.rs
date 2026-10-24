@@ -185,6 +185,7 @@ pub fn run_tauri_configured(
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Launch-at-login. `--hidden` is passed on autostart so a login-time launch
         // comes up straight to the tray (see the WindowEvent handler / frontend boot).
         .plugin(tauri_plugin_autostart::init(
@@ -461,6 +462,8 @@ pub fn run_tauri_configured(
                 crate::diagnostics::env_info,
                 crate::updates::check_for_update,
                 crate::updates::download_update,
+                crate::updates::native::prepare_update,
+                crate::updates::native::install_update,
                 crate::updates::cancel_update_download,
                 crate::integrations::local_access::get_local_agent_access,
                 crate::integrations::local_access::set_local_agent_access,

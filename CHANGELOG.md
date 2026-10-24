@@ -4,6 +4,10 @@
 
 ### Added
 
+- Install verified updates and restart directly on supported macOS, Windows NSIS
+  and Linux AppImage installations, with manual installation retained for other
+  packages. The first updater-enabled version still requires a manual install.
+
 - Keep unfinished text drafts encrypted on this device and restore them after
   restarting, including protected-message drafts and their protection mode.
 - Send protected text and images with concealed previews and controlled viewing;
