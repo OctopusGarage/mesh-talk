@@ -36,6 +36,8 @@ it.each([
   ["zh-Hans", "用户名或密码错误"],
   ["zh-Hant", "使用者名稱或密碼錯誤"],
   ["yue", "用戶名或密碼錯誤"],
+  ["pt-BR", "Nome de usuário ou senha inválidos"],
+  ["ko", "사용자 이름 또는 비밀번호가 올바르지 않습니다"],
 ])("renders the generic credential error in %s", async (language, expected) => {
   authState.error = "Invalid username or password";
   await i18n.changeLanguage(language);

@@ -33,9 +33,10 @@ extend-exclude = [
   "package-lock.json",
   "src-tauri/icons/**",
   "specifications/**/*.md",
-  # UI translation catalogs: intentionally non-English (es/ja/zh-Hans/zh-Hant/yue),
+  # UI translation catalogs contain deliberately non-English text.
   # so the English spell-checker would flag every localized word (foto, contactos, tema…).
   "frontend/src/locales/**",
+  "site/locales/**",
   # Generated coverage artifacts (function-name fragments trip the checker).
   "**/lcov.info",
   "**/*.info",

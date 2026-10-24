@@ -74,6 +74,41 @@ An exhausted discovery bound is reported explicitly. Public download links are a
 [project download page](https://octopusgarage.github.io/mesh-talk/#download), without Actions
 artifact access or a GitHub login.
 
+## Public website downloads
+
+The project site requests GitHub's latest Stable release metadata and presents
+its desktop ZIP packages directly. It accepts only published full releases,
+exact unsuffixed desktop archive names and matching GitHub asset URLs. Relays,
+legacy Lite packages, signature bundles and prereleases are not desktop download
+choices. There is no separately maintained website version number or binary URL.
+
+The visitor's operating system selects the initial platform tab. Browser client
+hints can also identify a supported 64-bit CPU. When hints are unavailable,
+denied or ambiguous, the page offers explicit architecture choices; in
+particular, Safari's `MacIntel` platform string does not distinguish Intel from
+Apple silicon. Explicit platform choices update the primary download button; architecture choices
+are remembered for the browser session when session storage is available. Visitors
+can always change platform and architecture. Mobile
+visitors choose a desktop package explicitly. A missing package is reported,
+never silently replaced with another architecture or an older release.
+
+A download click uses GitHub's ordinary asset link and shows platform-specific
+unzip, install and first-run guidance. The Mac guide includes the release-owned
+app-specific quarantine command with copy feedback; it does not run commands or
+request system privileges. Opening the guide separately does not start a download. The guide offers the
+exact selected asset as **Download again**, and keeps focus on a visible control
+after the architecture chooser closes.
+The page cannot observe completion of the browser's download and does not claim
+the archive has been checked. Follow the release notes for signature and
+provenance verification. This differs from the desktop updater's verified
+transfer described above.
+
+Release lookup has a bounded timeout and a retry action. If GitHub is unavailable
+or rate-limited, or JavaScript is disabled, ordinary release-page links remain
+available. Downloading and installing remain explicit visitor actions. Browser
+coverage is owned by `frontend/e2e/site-downloads.spec.ts`; these fixtures prove
+page selection and interaction, not native installation or release provenance.
+
 ## Publish Nightly builds
 
 The authoritative implementation is [the release workflow](../.github/workflows/release.yml),

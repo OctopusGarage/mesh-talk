@@ -36,6 +36,11 @@ export default defineConfig(() => {
           codeSplitting: {
             groups: [
               {
+                // Keep the growing offline language catalog separate from UI code.
+                name: "locales",
+                test: /[\\/]src[\\/]locales[\\/]/,
+              },
+              {
                 name: "react-vendor",
                 // Keep React, its renderer and scheduler together so the shared
                 // startup chunk stays small as application features grow.

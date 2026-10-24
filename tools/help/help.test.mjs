@@ -184,3 +184,28 @@ test("public readers share the landing page theme and self-hosted font at every 
     assert.match(html, /Connection/);
   }
 });
+
+test("reader gives article sections stable anchors and a table of contents", async (t) => {
+  const { buildHelp } = await import("./build.mjs");
+  const root = await fixture(t),
+    out = join(root, "out");
+  await writeFile(
+    join(root, "docs/help/topics/connect.md"),
+    "# Connect devices\n\n## First connection\n\nConnect directly.\n\n### Advanced options\n\nRead the details.\n\n## First connection\n\nTry again.\n",
+  );
+  await buildHelp({ root, out });
+  for (const prefix of ["", "v/0.4.0/"]) {
+    const html = await readFile(join(out, prefix, "connect.html"), "utf8");
+    assert.match(html, /aria-label="On this page"/);
+    assert.match(html, /href="#first-connection"/);
+    assert.match(html, /id="first-connection"/);
+    assert.match(html, /href="#first-connection-2"/);
+    assert.match(html, /id="first-connection-2"/);
+    assert.match(html, /<h3 id="advanced-options">/);
+    assert.ok(
+      html.indexOf('id="article-title"') <
+        html.indexOf('class="article-contents"'),
+    );
+    assert.match(html, /aria-label="More help topics"/);
+  }
+});
