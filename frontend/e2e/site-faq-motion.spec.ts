@@ -53,20 +53,31 @@ test("rapid reversals continue from the currently displayed height", async ({
   const answer = page.locator("#faq-offline");
   const reversal = await answer.evaluate(async (element) => {
     const summary = element.querySelector("summary")!;
+    const sampleAnimation = async (time: number) => {
+      const animation = element.getAnimations()[0];
+      if (!animation)
+        throw new Error("Expected an active FAQ height animation");
+      // Seek the actual animation so delayed first frames on busy CI runners
+      // cannot turn a wall-clock delay into a sample of the closed state.
+      animation.pause();
+      await animation.ready;
+      animation.currentTime = time;
+      return element.getBoundingClientRect().height;
+    };
     const closed = element.getBoundingClientRect().height;
     summary.click();
     // Sample partway through the authored 270 ms expansion.
-    await new Promise((resolve) => setTimeout(resolve, 70));
-    const beforeClose = element.getBoundingClientRect().height;
+    const beforeClose = await sampleAnimation(70);
     summary.click();
     const afterClose = element.getBoundingClientRect().height;
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    const beforeReopen = element.getBoundingClientRect().height;
+    const beforeReopen = await sampleAnimation(40);
     summary.click();
     const afterReopen = element.getBoundingClientRect().height;
     return { closed, beforeClose, afterClose, beforeReopen, afterReopen };
   });
   expect(reversal.beforeClose).toBeGreaterThan(reversal.closed + 1);
+  expect(reversal.beforeReopen).toBeLessThan(reversal.beforeClose - 1);
+  expect(reversal.beforeReopen).toBeGreaterThan(reversal.closed + 1);
   expect(Math.abs(reversal.beforeClose - reversal.afterClose)).toBeLessThan(2);
   expect(Math.abs(reversal.beforeReopen - reversal.afterReopen)).toBeLessThan(
     2,
