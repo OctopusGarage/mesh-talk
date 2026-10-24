@@ -3,7 +3,7 @@ use crate::{
     chat_commands::NodeState, commands::CommandError, runtime_admission::RuntimeAdmission,
     state::AppState,
 };
-use mesh_talk_core::node::PrivacySnapshot;
+use mesh_talk_core::node::{AccountBindingChange, PrivacySnapshot};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -122,6 +122,64 @@ pub async fn initiate_privacy_contact(
     dispatch(&app, &node, owner, Change::Initiate(account)).await
 }
 
+#[derive(Serialize)]
+pub struct AccountBindingChangesResponse {
+    owner: String,
+    changes: Vec<AccountBindingChange>,
+}
+
+#[tauri::command]
+pub async fn get_account_binding_changes(
+    owner: String,
+    account: String,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<AccountBindingChangesResponse, CommandError> {
+    RuntimeAdmission::capture(&app, &node, &owner)?
+        .with_runtime(|runtime| {
+            Ok(AccountBindingChangesResponse {
+                owner,
+                changes: runtime.handle().account_binding_changes(&account),
+            })
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn accept_account_binding_change(
+    owner: String,
+    change: AccountBindingChange,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<PrivacyResponse, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                runtime
+                    .handle()
+                    .accept_account_binding_change_guarded(&change, |commit| {
+                        admission.authorize_io(runtime, commit)
+                    })
+                    .await
+                    .map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::InvalidInput {
+                            CommandError::Validation(error.to_string())
+                        } else {
+                            CommandError::Io(error.to_string())
+                        }
+                    })?;
+                admission.checked(runtime, || {
+                    Ok(PrivacyResponse {
+                        owner,
+                        policy: runtime.privacy_snapshot(),
+                    })
+                })
+            })
+        })
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +197,7 @@ mod tests {
             "token".into(),
             User {
                 user_id: "alice".into(),
+                account_login_name: None,
                 name: "alice".into(),
                 display_name: "Alice".into(),
                 address: "fixture".into(),
@@ -277,6 +336,7 @@ mod tests {
             "test-token".into(),
             User {
                 user_id: "alice".into(),
+                account_login_name: None,
                 name: "alice".into(),
                 display_name: "Alice".into(),
                 address: "fixture".into(),

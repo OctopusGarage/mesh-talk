@@ -181,7 +181,7 @@ pub fn set_call_active(
 pub fn allowed_while_locked(command: &str) -> bool {
     matches!(
         command,
-        "lock_status" | "unlock_app" | "logout" | "delete_temp_file"
+        "lock_status" | "unlock_app" | "logout" | "delete_temp_file" | "initial_presentation_ready"
     )
 }
 
@@ -244,7 +244,7 @@ pub(crate) async fn verify_session_identity(
     // Resolve identity under the captured lease before starting an OS/password prompt.
     let username = app
         .session()
-        .matching(lease, |info| info.user.name.clone())
+        .matching(lease, |info| info.user.login_name().to_owned())
         .map_err(CommandError::Authorization)?;
     #[cfg(target_os = "macos")]
     {
@@ -339,6 +339,7 @@ mod tests {
         let user = crate::services::user::User {
             user_id: "owner".into(),
             name: "owner".into(),
+            account_login_name: None,
             display_name: "Owner".into(),
             address: "fixture".into(),
             created_at: 0,
@@ -359,6 +360,7 @@ mod tests {
     #[test]
     fn locked_commands_allow_only_unlock_and_preferences() {
         assert!(allowed_while_locked("unlock_app"));
+        assert!(allowed_while_locked("initial_presentation_ready"));
         assert!(!allowed_while_locked("account_history"));
         assert!(!allowed_while_locked("read_media"));
         assert!(!allowed_while_locked("owner_enqueue_text"));
@@ -390,6 +392,7 @@ mod tests {
         let user = crate::services::user::User {
             user_id: "owner".into(),
             name: "owner".into(),
+            account_login_name: None,
             display_name: "Owner".into(),
             address: "fixture".into(),
             created_at: 0,

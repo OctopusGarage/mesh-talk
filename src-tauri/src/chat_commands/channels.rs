@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use serde::Serialize;
+use tauri::Manager;
 
 /// A channel as shown in the chat UI.
 #[derive(Serialize)]
@@ -11,9 +12,17 @@ pub struct ChannelInfo {
     pub channel_id: String, // hex
     pub name: String,
     pub member_count: usize,
-    /// The owner's device `user_id` — only the owner may rename the channel. The UI gates
-    /// the synced-rename action on this (non-owners fall back to a local alias).
+    /// Legacy owner device identifier, retained for provenance and compatibility.
+    /// Management controls use the verified `can_manage` result below.
     pub owner: String,
+    /// Account authority when upgraded; the legacy device owner remains above.
+    pub owner_account_id: Option<String>,
+    /// Verified for this running device, rather than inferred from UI presence.
+    pub can_manage: bool,
+    /// Account-private display reference without a local membership/key grant.
+    pub shared_reference: bool,
+    pub legacy_membership: bool,
+    pub reference_members_complete: bool,
     pub archived: bool,
     pub dissolved: bool,
     pub left: bool,
@@ -23,78 +32,175 @@ pub struct ChannelInfo {
 
 #[tauri::command]
 pub async fn list_channels(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
 ) -> Result<Vec<ChannelInfo>, CommandError> {
-    let guard = state.0.read().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(rt
-        .list_channels()
-        .into_iter()
-        .map(|c| ChannelInfo {
-            channel_id: hex::encode(c.id.as_bytes()),
-            name: c.name,
-            member_count: c.member_count,
-            owner: c.owner,
-            archived: c.archived,
-            dissolved: c.dissolved,
-            left: c.left,
-            pending_invite: c.pending_invite,
-            recovery: rt.channel_recovery(c.id),
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .with_runtime(move |rt| {
+            let node = rt.handle();
+            Ok(rt
+                .list_channels()
+                .into_iter()
+                .map(|c| {
+                    let reference = node.channel_shared_reference(c.id);
+                    ChannelInfo {
+                        channel_id: hex::encode(c.id.as_bytes()),
+                        name: c.name,
+                        member_count: c.member_count,
+                        owner: c.owner,
+                        owner_account_id: reference
+                            .as_ref()
+                            .and_then(|r| r.owner_account_id.clone())
+                            .or_else(|| node.channel_owner_account_id(c.id)),
+                        can_manage: reference.is_none() && node.channel_can_manage(c.id),
+                        shared_reference: reference.is_some(),
+                        reference_members_complete: reference
+                            .as_ref()
+                            .is_none_or(|reference| reference.members_complete),
+                        legacy_membership: reference.as_ref().map_or_else(
+                            || node.channel_legacy_membership(c.id),
+                            |reference| reference.legacy_membership,
+                        ),
+                        archived: c.archived,
+                        dissolved: c.dissolved,
+                        left: c.left,
+                        pending_invite: c.pending_invite,
+                        recovery: rt.channel_recovery(c.id),
+                    }
+                })
+                .collect())
         })
-        .collect())
+        .await
+}
+
+struct ChannelMemberFact {
+    public: mesh_talk_core::identity::device::PublicIdentity,
+    account_id: Option<String>,
+    pending: bool,
+    replica_enabled: bool,
+    reference_name: Option<String>,
+    post_office: bool,
+}
+
+/// Both actual and borrowed legacy rosters use the same display population as
+/// the core summary count. Infrastructure facts remain outside authorization.
+fn display_member_facts(
+    legacy_membership: bool,
+    mut facts: Vec<ChannelMemberFact>,
+) -> Vec<ChannelMemberFact> {
+    if legacy_membership {
+        facts.retain(|member| !member.post_office);
+    }
+    facts
 }
 
 #[tauri::command]
 pub async fn channel_members(
+    app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     channel_id: String,
 ) -> Result<ChannelMembersInfo, CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let guard = state.0.read().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    // Resolve each member's display name via the runtime, which checks the LIVE roster
-    // first and then the DURABLE name directory — so a member that's gone offline (and so
-    // been evicted from the roster) still shows the last name we saw, not a raw hex id.
-    // Ourselves: we're never in our own roster, so use our own advertised name.
-    let self_uid = rt.user_id();
-    let known_names = rt.known_account_names();
-    let pending: std::collections::HashSet<_> =
-        rt.channel_pending_members(channel).into_iter().collect();
-    let members = rt
-        .channel_members(channel)
-        .into_iter()
-        .map(|p| {
-            let user_id = p.user_id();
-            let account_id = if user_id == self_uid {
-                Some(rt.account_id().to_string())
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .with_runtime(move |rt| {
+            let channel = parse_channel_id(&channel_id)?;
+            let node = rt.handle();
+            let reference = node.channel_shared_reference(channel);
+            let own_account = rt.account_id();
+            let known_names = rt.known_account_names();
+            let pending: std::collections::HashSet<_> =
+                rt.channel_pending_members(channel).into_iter().collect();
+            // Borrowed facts are projected here only. Core member queries and every
+            // admission/sender-key path continue to use the actual local group book.
+            let facts: Vec<_> = if let Some(reference) = &reference {
+                reference
+                    .members
+                    .iter()
+                    .map(|member| ChannelMemberFact {
+                        public: member.public.clone(),
+                        account_id: member.account_id.clone(),
+                        pending: member.pending,
+                        replica_enabled: false,
+                        reference_name: member.name.clone(),
+                        post_office: member.post_office,
+                    })
+                    .collect()
             } else {
-                rt.account_id_for_device(&p)
+                rt.channel_members(channel)
+                    .into_iter()
+                    .map(|public| {
+                        let account = rt.channel_member_account_binding(channel, &public);
+                        let user = public.user_id();
+                        ChannelMemberFact {
+                            post_office: node.device_is_post_office(&public),
+                            public,
+                            account_id: account,
+                            pending: pending.contains(&user),
+                            replica_enabled: rt.channel_replica_enabled(channel, &user),
+                            reference_name: None,
+                        }
+                    })
+                    .collect()
             };
-            let name = if user_id == self_uid {
-                rt.display_name().to_string()
-            } else {
-                account_id
+            let legacy_membership = reference.as_ref().map_or_else(
+                || node.channel_legacy_membership(channel),
+                |reference| reference.legacy_membership,
+            );
+            let members = display_member_facts(legacy_membership, facts)
+                .into_iter()
+                .map(
+                    |ChannelMemberFact {
+                         public,
+                         account_id,
+                         pending,
+                         replica_enabled,
+                         reference_name,
+                         ..
+                     }| {
+                        let user_id = public.user_id();
+                        let name = if account_id.as_deref() == Some(own_account) {
+                            rt.display_name().to_string()
+                        } else {
+                            account_id
+                                .as_ref()
+                                .and_then(|id| known_names.get(id))
+                                .and_then(|names| names.first())
+                                .cloned()
+                                .or_else(|| {
+                                    (account_id.is_none()
+                                        || rt.account_id_for_device(&public) == account_id)
+                                        .then(|| rt.display_name_for(&user_id))
+                                        .flatten()
+                                })
+                                .or(reference_name)
+                                .unwrap_or_else(|| user_id.clone())
+                        };
+                        ChannelMemberInfo {
+                            user_id,
+                            name,
+                            account_id,
+                            pending,
+                            replica_enabled,
+                        }
+                    },
+                )
+                .collect();
+            Ok(ChannelMembersInfo {
+                history_policy: node.channel_history_policy(channel),
+                owner: reference
                     .as_ref()
-                    .and_then(|id| known_names.get(id))
-                    .and_then(|names| names.first())
-                    .cloned()
-                    .or_else(|| rt.display_name_for(&user_id))
-                    .unwrap_or_else(|| user_id.clone())
-            };
-            ChannelMemberInfo {
-                pending: pending.contains(&user_id),
-                replica_enabled: rt.channel_replica_enabled(channel, &user_id),
-                user_id,
-                name,
-                account_id,
-            }
+                    .map(|r| r.owner.clone())
+                    .unwrap_or_else(|| rt.channel_owner(channel)),
+                owner_account_id: reference
+                    .as_ref()
+                    .and_then(|r| r.owner_account_id.clone())
+                    .or_else(|| node.channel_owner_account_id(channel)),
+                can_manage: reference.is_none() && node.channel_can_manage(channel),
+                members,
+            })
         })
-        .collect();
-    Ok(ChannelMembersInfo {
-        history_policy: rt.handle().channel_history_policy(channel),
-        owner: rt.channel_owner(channel),
-        members,
-    })
+        .await
 }
 
 #[tauri::command]
@@ -150,7 +256,7 @@ pub struct ChannelCustodyInfo {
     post_offices: usize,
 }
 
-/// Historical, authenticated durable-copy confirmations for this device's own
+/// Historical, authenticated durable-copy confirmations for this account's own
 /// channel messages. These counts do not imply recipient delivery or reading.
 #[tauri::command]
 pub async fn channel_custody_statuses<R: tauri::Runtime>(
@@ -169,22 +275,24 @@ pub async fn channel_custody_statuses<R: tauri::Runtime>(
         .iter()
         .map(|id| parse_event_id(id))
         .collect::<Result<Vec<_>, _>>()?;
-    let node = state.node_handle().await?;
-    let statuses = ids
-        .into_iter()
-        .filter_map(|id| {
-            node.channel_custody_count(channel, id)
-                .map(|replicas| ChannelCustodyInfo {
-                    id: id.to_hex(),
-                    replicas,
-                    post_offices: node
-                        .channel_post_office_custody_count(channel, id)
-                        .unwrap_or(0),
+    let admission = RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state)?;
+    admission
+        .with_runtime(move |runtime| {
+            let node = runtime.handle();
+            Ok(ids
+                .into_iter()
+                .filter_map(|id| {
+                    let replicas = node.channel_custody_count(channel, id)?;
+                    let post_offices = node.channel_post_office_custody_count(channel, id)?;
+                    Some(ChannelCustodyInfo {
+                        id: id.to_hex(),
+                        replicas,
+                        post_offices,
+                    })
                 })
+                .collect())
         })
-        .collect();
-    crate::app_lock::reject_if_locked(&app)?;
-    Ok(statuses)
+        .await
 }
 
 #[derive(Serialize)]
@@ -292,6 +400,30 @@ pub async fn remove_channel_member(
                 let channel = parse_channel_id(&channel_id)?;
                 let node = runtime.handle();
                 node.remove_channel_member_if(channel, &member_id, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
+        .await
+}
+
+/// Remove every certified device of one account in a single signed membership change.
+#[tauri::command]
+pub async fn remove_channel_account_members(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+    account_id: String,
+) -> Result<(), CommandError> {
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let node = runtime.handle();
+                node.remove_channel_account_members_if(channel, &account_id, |commit| {
                     admission.authorize_accept(runtime, commit)
                 })
                 .await
@@ -503,4 +635,50 @@ pub async fn channel_reactions(
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(to_reaction_infos(rt.channel_reactions(channel)))
+}
+
+#[cfg(test)]
+mod inventory_display_tests {
+    use super::*;
+    use mesh_talk_core::identity::device::DeviceIdentity;
+
+    #[test]
+    fn group_inventory_display_roster_matches_legacy_people_and_preserves_modern_members() {
+        let owner = DeviceIdentity::generate().public();
+        let member = DeviceIdentity::generate().public();
+        let relay = DeviceIdentity::generate().public();
+        let facts = || {
+            [
+                (owner.clone(), false),
+                (member.clone(), false),
+                (relay.clone(), true),
+            ]
+            .into_iter()
+            .map(|(public, post_office)| ChannelMemberFact {
+                account_id: Some(public.user_id()),
+                public,
+                pending: false,
+                replica_enabled: false,
+                reference_name: None,
+                post_office,
+            })
+            .collect()
+        };
+        let legacy = display_member_facts(true, facts());
+        assert_eq!(
+            legacy
+                .iter()
+                .map(|member| &member.public)
+                .collect::<Vec<_>>(),
+            vec![&owner, &member]
+        );
+        let modern = display_member_facts(false, facts());
+        assert_eq!(
+            modern
+                .iter()
+                .map(|member| &member.public)
+                .collect::<Vec<_>>(),
+            vec![&owner, &member, &relay]
+        );
+    }
 }

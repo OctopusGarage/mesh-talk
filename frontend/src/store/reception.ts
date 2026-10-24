@@ -17,6 +17,8 @@ export interface ConversationReception {
   processing?: boolean;
 }
 export interface ReceptionState {
+  /** Account documents outlive the viewed-entry LRU and may precede history. */
+  accountSeen?: Record<string, string[]>;
   ledger: ReceptionLedger;
   overflowUnread: Record<string, number>;
   unreadIds: Record<string, string[]>;
@@ -75,6 +77,7 @@ export function boundLedger(ledger: ReceptionLedger): ReceptionLedger {
 export function emptyReception(
   ledger: ReceptionLedger = {},
   overflowUnread: Record<string, number> = {},
+  accountSeen?: Record<string, string[]>,
 ): ReceptionState {
   const bounded = boundLedger(ledger);
   const overflow = { ...overflowUnread };
@@ -88,6 +91,7 @@ export function emptyReception(
       overflow[key] = Math.min(1_000_000, (overflow[key] ?? 0) + dropped);
   }
   return {
+    ...(accountSeen ? { accountSeen } : {}),
     ledger: bounded,
     overflowUnread: Object.fromEntries(
       Object.entries(overflow)
@@ -171,7 +175,28 @@ export function mergeReception(
       ),
     ]),
   );
-  const merged = emptyReception(ledger, overflow);
+  const merged = emptyReception(
+    ledger,
+    overflow,
+    persisted.accountSeen || pending.accountSeen
+      ? Object.fromEntries(
+          [
+            ...new Set([
+              ...Object.keys(persisted.accountSeen ?? {}),
+              ...Object.keys(pending.accountSeen ?? {}),
+            ]),
+          ].map((key) => [
+            key,
+            [
+              ...new Set([
+                ...(persisted.accountSeen?.[key] ?? []),
+                ...(pending.accountSeen?.[key] ?? []),
+              ]),
+            ],
+          ]),
+        )
+      : undefined,
+  );
   const unread = Object.fromEntries(
     [
       ...new Set([
@@ -266,7 +291,9 @@ export function receiveIdentity(
     ...(state.ledger[key] ?? {}),
     [id]: {
       ...(mentioned && !event.own_device ? { mentioned: true } : {}),
-      seen: event.own_device === true,
+      seen:
+        event.own_device === true ||
+        state.accountSeen?.[key]?.includes(id) === true,
       late: kind !== "live",
       receivedAt: event.received_at,
       arrivalKind: kind,
@@ -275,6 +302,7 @@ export function receiveIdentity(
   const next = emptyReception(
     { ...state.ledger, [key]: entries },
     state.overflowUnread,
+    state.accountSeen,
   );
   const previous = state.reception[key];
   const batch = event.batch_id ?? undefined;
@@ -327,6 +355,7 @@ export function viewIdentities(
     ...emptyReception(
       { ...state.ledger, [key]: entries },
       state.overflowUnread,
+      state.accountSeen,
     ),
     reception: state.reception,
   };
@@ -355,7 +384,10 @@ export function reconcileHistory(
     Object.defineProperty(entries, row.id, {
       value: {
         ...(row.mentioned && !row.fromMe ? { mentioned: true } : {}),
-        seen: row.fromMe || !discover,
+        seen:
+          row.fromMe ||
+          !discover ||
+          state.accountSeen?.[key]?.includes(row.id) === true,
         late: true,
         arrivalKind: "history_sync",
       },
@@ -368,8 +400,45 @@ export function reconcileHistory(
     ...emptyReception(
       { ...state.ledger, [key]: entries },
       state.overflowUnread,
+      state.accountSeen,
     ),
     reception: state.reception,
+  };
+}
+
+/** Exact monotone sibling reads never advance a timestamp or another conversation. */
+export function validAccountSeenIdentity(id: string): boolean {
+  return (
+    id.length > 0 &&
+    id.length <= 200 &&
+    !Array.from(id).some((character) => {
+      const code = character.codePointAt(0)!;
+      return code < 32 || (code >= 127 && code <= 159);
+    })
+  );
+}
+
+export function applyAccountSeen(
+  state: ReceptionState,
+  key: string,
+  ids: string[],
+): ReceptionState {
+  const existing = state.accountSeen?.[key] ?? [];
+  const valid = ids.filter(validAccountSeenIdentity);
+  const count = Object.values(state.accountSeen ?? {}).reduce(
+    (total, entries) => total + entries.length,
+    0,
+  );
+  const additions = [...new Set(valid)]
+    .filter((id) => !existing.includes(id))
+    .slice(0, Math.max(0, 65536 - count));
+  const accountSeen = {
+    ...state.accountSeen,
+    [key]: [...existing, ...additions],
+  };
+  return {
+    ...viewIdentities({ ...state, accountSeen }, key, valid),
+    accountSeen,
   };
 }
 

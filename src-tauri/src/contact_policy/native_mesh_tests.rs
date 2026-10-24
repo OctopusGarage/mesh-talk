@@ -111,6 +111,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     let session = state.session();
     let alice_user = crate::services::user::User {
         user_id: "alice".into(),
+        account_login_name: None,
         name: "alice".into(),
         display_name: "Alice".into(),
         address: String::new(),

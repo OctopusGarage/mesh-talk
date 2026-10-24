@@ -1,6 +1,19 @@
 import { useAuth } from "./auth";
 
-let runtimeSnapshot = () => ({ runEpoch: 0, identityEpoch: 0 });
+type RegisteredRuntimeSnapshot = {
+  runEpoch: number;
+  identityEpoch: number;
+  accountId?: string | null;
+};
+let runtimeSnapshot: () => RegisteredRuntimeSnapshot = () => ({
+  runEpoch: 0,
+  identityEpoch: 0,
+});
+
+/** Current cryptographic account, supplied by chat without importing its store. */
+export function currentRuntimeAccountId(): string | null {
+  return runtimeSnapshot().accountId ?? null;
+}
 
 type RuntimeSnapshot = ReturnType<typeof runtimeSnapshot>;
 

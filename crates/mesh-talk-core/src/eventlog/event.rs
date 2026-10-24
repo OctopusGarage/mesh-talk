@@ -103,6 +103,10 @@ pub enum EventKind {
     ChannelHistoryPolicy = 15,
     /// Versioned encrypted history offer or post-acceptance key release.
     ChannelJoinHistory = 16,
+    /// Owner-authorized versioned account-principal channel grants.
+    ChannelAccountAuthority = 17,
+    /// Versioned certified-device inheritance and encrypted receive-only bootstrap.
+    ChannelDeviceInheritance = 18,
 }
 
 /// A single, content-addressed, signed log event.
@@ -405,6 +409,8 @@ mod tests {
             (EventKind::ChannelReplica, 14),
             (EventKind::ChannelHistoryPolicy, 15),
             (EventKind::ChannelJoinHistory, 16),
+            (EventKind::ChannelAccountAuthority, 17),
+            (EventKind::ChannelDeviceInheritance, 18),
         ];
         for (kind, index) in cases {
             assert_eq!(bincode::serialize(&kind).unwrap(), index.to_le_bytes());

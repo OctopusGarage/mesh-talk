@@ -47,6 +47,7 @@ serde_json = "1" # persist app settings as JSON in the app config dir
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "system-proxy", "query", "form"] }
 semver = "1"
 sha2 = { workspace = true }
+zeroize = { workspace = true }
 tempfile = { workspace = true } # atomic replacement of per-account contact policy
 # "Stay signed in": store the login password in the OS keychain (macOS Keychain,
 # Windows Credential Manager, Linux Secret Service) — never on plaintext disk.

@@ -6,6 +6,10 @@ use crate::node::profile::ProfilePayload;
 
 impl Node {
     pub fn account_profile(&self, account_id: &str) -> Option<AccountProfile> {
+        #[cfg(test)]
+        if let Some(hook) = self.profile_read_hook.lock().unwrap().take() {
+            hook();
+        }
         self.profiles
             .lock()
             .expect("profiles mutex not poisoned")
@@ -42,8 +46,9 @@ impl Node {
         &self,
         peer: &PeerRecord,
     ) -> Option<crate::eventlog::event::ConversationId> {
-        let store = self.profiles.lock().expect("profiles mutex not poisoned");
-        if let Some(profile) = store.get(&self.account_id()) {
+        // Delivery acquires channel state; retain only an owned profile snapshot.
+        let profile = self.account_profile(&self.account_id());
+        if let Some(profile) = profile {
             return self.prepare_account_profile_delivery(peer, &profile);
         }
         self.prepare_profile_delivery(peer, &self.account_profiles.current()?.encode())
@@ -121,6 +126,17 @@ impl Node {
         Ok(())
     }
 
+    /// Compatibility entry point for authorized desktop nickname edits. The
+    /// ordinary account-profile owner retains biography, avatar and metadata.
+    pub fn set_account_display_name(&self, display_name: &str) -> Result<(), NodeError> {
+        if crate::identity::user::User::validate_display_name(display_name).as_deref()
+            != Some(display_name)
+        {
+            return Err(NodeError::InvalidInput("invalid display name".into()));
+        }
+        self.set_profile_display_name(display_name)
+    }
+
     /// Biography edits derive the latest nickname inside the publication mutex;
     /// a concurrent ordinary rename cannot be overwritten by a stale UI read.
     pub async fn save_account_bio_if(
@@ -129,7 +145,21 @@ impl Node {
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
-        self.edit_account_profile_if(None, bio, authorize).await
+        self.edit_account_profile_if(None, None, bio, authorize)
+            .await
+    }
+
+    /// An explicit profile edit may initialize a missing legacy profile using the
+    /// host's current account nickname. Existing signed names always win at commit.
+    pub async fn save_account_bio_with_initial_name_if(
+        &self,
+        initial_display_name: String,
+        bio: String,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<(), NodeError> {
+        self.edit_account_profile_if(None, Some(initial_display_name), bio, authorize)
+            .await
     }
 
     /// Timestamps and proof lists are intentionally absent from the edit API.
@@ -140,13 +170,14 @@ impl Node {
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
-        self.edit_account_profile_if(Some(display_name), bio, authorize)
+        self.edit_account_profile_if(Some(display_name), None, bio, authorize)
             .await
     }
 
     async fn edit_account_profile_if(
         &self,
         display_name: Option<String>,
+        initial_display_name: Option<String>,
         bio: String,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
@@ -161,10 +192,12 @@ impl Node {
                         .get(&self.account_id())
                         .map(|profile| profile.display_name)
                 })
+                .or_else(|| initial_display_name.clone())
                 .ok_or_else(|| {
                     NodeError::InvalidInput("account profile is not initialized".into())
                 })?;
             let profile = self.save_profile_local(&mut store, name, bio.clone())?;
+            drop(store);
             for peer in self.profile_fanout_targets() {
                 if let Some(conversation) = self.prepare_account_profile_delivery(&peer, &profile) {
                     deliveries.push((peer, conversation));

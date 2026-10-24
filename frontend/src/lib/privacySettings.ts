@@ -1,6 +1,6 @@
 import type { AppSettings } from "./types";
 
-/** Device-local presentation privacy; network admission has its own protocol owner. */
+/** Account-scoped presentation privacy; network admission has its own protocol owner. */
 export type PrivacySettings = Pick<
   AppSettings,
   | "privacy_level"

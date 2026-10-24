@@ -6,20 +6,40 @@
 //! `pub(crate)` (rather than `pub`) means an external consumer's semver contract is the
 //! re-exports, not every internal type.
 
+mod enrollment;
+pub use enrollment::{DeviceEnrollment, EnrolledDevice, EnrollmentSource};
+mod account_access;
+pub use account_access::{
+    AccountAccessSnapshot, AccountAccessSyncFailure, AccountAccessSyncPhase,
+    AccountAccessSyncStatus,
+};
 pub(crate) mod account_devices;
+mod account_documents;
 pub(crate) mod account_file_proofs;
 pub(crate) mod account_preferences;
 mod account_profile;
 mod account_session;
+pub use account_documents::{
+    AccountDocument, AccountDocumentDomain, AccountDocumentKey, AccountDocumentMeta,
+    AccountDocumentPage, DocumentConversation, DocumentVersion, GroupInventoryMember,
+    GroupInventoryReference,
+};
 pub(crate) mod account_suppression;
 pub(crate) mod account_sync;
 pub(crate) mod account_sync_policy;
 pub(crate) mod account_sync_wire;
+mod account_transition_adoption;
+mod account_transition_runtime;
+mod account_transition_store;
 pub(crate) mod attachment_consent;
 mod bridge_client;
 pub(crate) mod bridge_directory;
 pub(crate) mod call;
 pub(crate) mod channel;
+pub(crate) mod channel_account_authority;
+mod channel_account_bootstrap;
+mod channel_account_controls;
+mod channel_account_maintenance;
 pub(crate) mod channel_custody;
 mod channel_projection_cache;
 pub(crate) mod channel_senders;
@@ -114,6 +134,7 @@ pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;
 pub use filebook::{FileBook, ReceivedFile};
 pub use files::{FileProgress, OutgoingFileProgress};
+pub use linking::LinkingError;
 pub use message::{MessageBody, MessageProtection};
 pub use node::{
     ChannelSummary, FileHistoryInfo, HistoryEntry, LinkedAccount, Node, NodeError, ReceivedDm,
@@ -129,11 +150,14 @@ pub use postbox::{
     run_relay_accept_loop,
 };
 pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapshot};
+pub use privacy_runtime::AccountBindingChange;
 pub use profile::{MAX_AVATAR_BYTES, ProfilePayload};
 pub use ratchet_sessions::RatchetSessions;
 pub use reaction::{ReactionPayload, ReactionView, aggregate};
 pub use received_log::{ReceivedEntry, ReceivedLog};
-pub use runtime::{NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents, RuntimeNetworkOptions};
+pub use runtime::{
+    NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents, RuntimeIdentity, RuntimeNetworkOptions,
+};
 pub use search::{RecentSearchResults, ReferencedSearchHit, SearchContext, SearchReference};
 
 mod outgoing_message;

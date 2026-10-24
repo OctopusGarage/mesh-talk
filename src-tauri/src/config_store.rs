@@ -307,6 +307,7 @@ mod account_tests {
         ))));
         let user = |owner: &str| User {
             user_id: owner.into(),
+            account_login_name: None,
             name: owner.into(),
             display_name: owner.into(),
             address: String::new(),

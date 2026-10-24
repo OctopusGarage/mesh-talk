@@ -2555,7 +2555,8 @@ impl DeliveryStore {
                 senders,
             } => {
                 if events.is_empty()
-                    || events.len() > 2
+                    || (events.len() > 2
+                        && !super::join_history::valid_invitation_transaction(events))
                     || (senders.is_empty()
                         && !super::join_history::valid_invitation_transaction(events))
                     || events.last().is_none_or(|e| {

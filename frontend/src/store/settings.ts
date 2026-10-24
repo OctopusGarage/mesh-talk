@@ -10,7 +10,7 @@ import {
   privacyFromSettings,
   type PrivacySettings,
 } from "@/lib/privacySettings";
-import { captureOwner } from "./ownership";
+import { captureRuntimeOwner } from "./ownership";
 
 /** App-setting flags the UI needs reactively (most settings are read in Rust, but a few —
  * like the experimental calls toggle and the ringtone — drive UI affordances / playback and
@@ -54,7 +54,7 @@ export const useSettings = create<SettingsStore>((set, get) => ({
   ringtone: DEFAULT_RINGTONE,
   privacy: balancedPrivacy,
   load: async () => {
-    const lease = captureOwner();
+    const lease = captureRuntimeOwner();
     if (!lease.owner || !lease.current() || get().owner !== lease.owner) return;
     try {
       const s = await settingsApi.get();

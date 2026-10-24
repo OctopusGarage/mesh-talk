@@ -20,12 +20,49 @@ export interface AccountPreference {
   device_id: string;
 }
 
+export interface AccountLoginSyncStatus {
+  account_id: string;
+  available_revision: number | null;
+  applied_revision: number | null;
+  devices: Array<{
+    device_id: string;
+    phase:
+      | "synchronizing"
+      | "up_to_date"
+      | "waiting_for_source"
+      | "retry_scheduled"
+      | "unsupported"
+      | "permission_denied";
+    revision: number;
+    failure:
+      | "connection"
+      | "response_closed"
+      | "unsupported_protocol"
+      | "invalid_record"
+      | "permission_denied"
+      | "storage"
+      | "timeout"
+      | null;
+    attempts: number;
+    retry_delay_ms: number;
+  }>;
+}
+
 export interface DeviceSyncStatus {
   device_id: string;
-  phase: "offline" | "catching_up" | "up_to_date" | "error" | "disabled";
+  phase:
+    | "offline"
+    | "catching_up"
+    | "up_to_date"
+    | "waiting_for_files"
+    | "error"
+    | "disabled";
   pending_attachments: number;
   /** Older cores omit this; V1 peers cannot separate file cards from file bytes. */
   legacy_file_metadata?: boolean;
+  document_phase?: DeviceSyncStatus["phase"];
+  document_error?: string | null;
+  document_requires_upgrade?: boolean;
   error: string | null;
 }
 import type {
@@ -114,6 +151,8 @@ export const chat = {
       reference,
       password: password ?? null,
     }).then(mediaBytes),
+  getAccountLoginSyncStatus: (owner: string) =>
+    invoke<AccountLoginSyncStatus>("get_account_login_sync_status", { owner }),
   getDeviceSyncPolicy: (owner: string) =>
     invoke<DeviceSyncPolicy>("get_device_sync_policy", { owner }),
   getDeviceSyncStatus: (owner: string) =>
@@ -130,23 +169,48 @@ export const chat = {
     }),
   getAccountPreferences: (category: "appearance" | "contacts", owner: string) =>
     invoke<AccountPreference[]>("get_account_preferences", { category, owner }),
+  seedAccountPreference: (
+    category: "appearance" | "contacts",
+    key: string,
+    value: string | null,
+    owner: string,
+    expectedAccount: string,
+  ) =>
+    invoke<AccountPreference>("seed_account_preference", {
+      category,
+      key,
+      value,
+      owner,
+      expectedAccount,
+    }),
   setAccountPreference: (
     category: "appearance" | "contacts",
     key: string,
     value: string | null,
     owner: string,
+    expectedAccount: string,
   ) =>
     invoke<AccountPreference>("set_account_preference", {
       category,
       key,
       value,
       owner,
+      expectedAccount,
     }),
+  ownerStartupIdentity: (owner: string) =>
+    invoke<{
+      owner: string;
+      startup_id: string;
+      phase: "pending" | "identity" | "ready" | "failed";
+      account_id?: string;
+      device_id?: string;
+    } | null>("owner_startup_identity", { owner }),
   ownerIdentity: (owner: string) =>
     invoke<{
       owner: string;
       device_id: string;
       account_id: string;
+      display_name?: string;
       history_revision?: number;
       supports_push_state?: boolean;
     }>("owner_node_identity", { owner }),
@@ -362,6 +426,8 @@ export const chat = {
     invoke<void>("add_channel_member", { channelId, memberId }),
   removeChannelMember: (channelId: string, memberId: string) =>
     invoke<void>("remove_channel_member", { channelId, memberId }),
+  removeChannelAccountMembers: (channelId: string, accountId: string) =>
+    invoke<void>("remove_channel_account_members", { channelId, accountId }),
   transferChannelOwner: (channelId: string, memberId: string) =>
     invoke<void>("transfer_channel_owner", { channelId, memberId }),
   leaveChannel: (channelId: string) =>

@@ -61,7 +61,10 @@ test("idle saves the active conversation without switching away", async ({
   await page.getByTestId("composer-input").fill("Save after I pause typing");
   await expect
     .poll(
-      () => page.evaluate(() => localStorage.getItem("mock-drafts-u_self")),
+      () =>
+        page.evaluate(() =>
+          localStorage.getItem("mock-drafts-u_self:acc_self_aaaa1111"),
+        ),
       { timeout: 15000 },
     )
     .toContain("Save after I pause typing");

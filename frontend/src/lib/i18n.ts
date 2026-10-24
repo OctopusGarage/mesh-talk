@@ -33,6 +33,11 @@ export const LANGUAGE_LABELS: Record<Language, string> = {
 };
 
 const KEY = "mesh-talk-lang";
+const localLanguageListeners = new Set<(language: Language) => void>();
+
+function isLanguage(value: string): value is Language {
+  return (SUPPORTED_LANGUAGES as readonly string[]).includes(value);
+}
 
 /** Resolve saved/browser tags without accepting unrelated language prefixes. */
 export function resolveLanguage(raw: string): Language | null {
@@ -49,19 +54,23 @@ export function resolveLanguage(raw: string): Language | null {
   return SUPPORTED_LANGUAGES.find((code) => code === base) ?? null;
 }
 
-/** Persisted choice, else the browser's preferred language, else English. */
-function initialLanguage(): Language {
+/** Explicit persisted choice only; browser defaults are not account preferences. */
+export function savedLanguage(): Language | null {
   try {
     if (typeof localStorage !== "undefined") {
       const stored = localStorage.getItem(KEY);
-      if (stored) {
-        const resolved = resolveLanguage(stored);
-        if (resolved) return resolved;
-      }
+      if (stored) return resolveLanguage(stored);
     }
   } catch {
-    // Embedded browsers can deny storage; language detection still works.
+    // Embedded browsers can deny storage; account preferences still work in session.
   }
+  return null;
+}
+
+/** Persisted choice, else the browser's preferred language, else English. */
+function initialLanguage(): Language {
+  const saved = savedLanguage();
+  if (saved) return saved;
   if (typeof navigator !== "undefined") {
     for (const tag of navigator.languages ?? [navigator.language]) {
       const resolved = resolveLanguage(tag);
@@ -94,12 +103,32 @@ void i18n.use(initReactI18next).init({
 
 /** Switch and persist the active language. */
 export function setLanguage(lng: Language) {
+  if (!isLanguage(lng)) return;
+  applyAccountLanguage(lng);
+  for (const listener of localLanguageListeners) listener(lng);
+}
+
+/** Account imports never emit local edits, including asynchronous i18next events. */
+export function applyAccountLanguage(value: string | null): boolean {
+  if (value !== null && !isLanguage(value)) return false;
+  const lng = value ?? "en";
   try {
     if (typeof localStorage !== "undefined") localStorage.setItem(KEY, lng);
   } catch {
     // A denied preference write must not prevent an in-session switch.
   }
   void i18n.changeLanguage(lng);
+  return true;
+}
+
+/** Subscribe only to explicit changes made through the local language control. */
+export function subscribeLanguageChanges(
+  listener: (language: Language) => void,
+): () => void {
+  localLanguageListeners.add(listener);
+  return () => {
+    localLanguageListeners.delete(listener);
+  };
 }
 
 export default i18n;

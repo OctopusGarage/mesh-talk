@@ -487,6 +487,81 @@ it("projects member and post-office custody separately for exact channel IDs", a
   });
 });
 
+it("retires stale copy counts only for requested own channel messages omitted by status", async () => {
+  const store = session();
+  const channel: Conversation = { kind: "channel", id: "group", name: "Group" };
+  const incoming = { ...row("incoming"), fromMe: false, replicas: 2 };
+  const other = { ...row("other"), replicas: 1, postOfficeCopies: 1 };
+  store.setState({
+    active: channel,
+    messages: {
+      "channel:group": [
+        { ...row("event"), replicas: 2, postOfficeCopies: 1 },
+        incoming,
+      ],
+      "channel:other": [other],
+    },
+  });
+  invoke.mockResolvedValue([]);
+  await refreshDeliveryStatuses(store.setState, store.getState);
+  expect(store.getState().messages["channel:group"][0]).toMatchObject({
+    id: "event",
+    replicas: undefined,
+    postOfficeCopies: undefined,
+  });
+  expect(store.getState().messages["channel:group"][1]).toEqual(incoming);
+  expect(store.getState().messages["channel:other"]).toEqual([other]);
+});
+
+it("does not retire counts for channel messages added after a status request", async () => {
+  const store = session();
+  const channel: Conversation = { kind: "channel", id: "group", name: "Group" };
+  const requested = { ...row("requested"), replicas: 1 };
+  const addedLater = {
+    ...row("added-later"),
+    replicas: 2,
+    postOfficeCopies: 1,
+  };
+  store.setState({
+    active: channel,
+    messages: { "channel:group": [requested] },
+  });
+  let release!: (rows: unknown[]) => void;
+  invoke.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  const refresh = refreshDeliveryStatuses(store.setState, store.getState);
+  store.setState({ messages: { "channel:group": [requested, addedLater] } });
+  release([]);
+  await refresh;
+  expect(
+    store.getState().messages["channel:group"][0].replicas,
+  ).toBeUndefined();
+  expect(store.getState().messages["channel:group"][1]).toEqual(addedLater);
+});
+
+it("does not clear channel confirmation after its owner runtime retires", async () => {
+  const store = session();
+  const channel: Conversation = { kind: "channel", id: "group", name: "Group" };
+  const message = { ...row("event"), replicas: 1, postOfficeCopies: 1 };
+  store.setState({ active: channel, messages: { "channel:group": [message] } });
+  let release!: (rows: unknown[]) => void;
+  invoke.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  const refresh = refreshDeliveryStatuses(store.setState, store.getState);
+  store.setState({ runEpoch: 1, statusBusy: false });
+  release([]);
+  await refresh;
+  expect(store.getState().messages["channel:group"]).toEqual([message]);
+});
+
 it("samples local delivery facts monotonically and clears absent or confirmed observations", async () => {
   const store = session();
   store.setState({ messages: { [key]: [row("event-a")] } });

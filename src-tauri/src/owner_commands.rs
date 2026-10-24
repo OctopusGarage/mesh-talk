@@ -30,6 +30,7 @@ fn validate_account(account: &str) -> Result<(), CommandError> {
 #[derive(Serialize)]
 pub struct NodeIdentity {
     owner: String,
+    display_name: String,
     device_id: String,
     account_id: String,
     history_revision: u64,
@@ -50,11 +51,23 @@ pub async fn owner_node_identity(
                 owner,
                 device_id: runtime.user_id().into(),
                 account_id: runtime.account_id().into(),
+                display_name: runtime.display_name(),
                 history_revision: runtime.account_history_revision(),
                 supports_push_state: true,
             })
         })
         .await
+}
+
+/// Observe authenticated startup identity without admitting node operations.
+#[tauri::command]
+pub fn owner_startup_identity(
+    owner: String,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<Option<crate::chat_commands::StartupIdentity>, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    node.startup_identity(app.session(), admission.lease(), app.app_lock())
 }
 
 #[tauri::command]
@@ -506,6 +519,7 @@ mod tests {
     fn user(owner: &str) -> User {
         User {
             user_id: owner.into(),
+            account_login_name: None,
             name: owner.into(),
             display_name: owner.into(),
             address: "fixture".into(),
@@ -575,6 +589,13 @@ mod tests {
         }
 
         fn create(authenticated: bool) -> Self {
+            Self::create_prepared(authenticated, |_, _| {})
+        }
+
+        fn create_prepared(
+            authenticated: bool,
+            prepare: impl FnOnce(&std::path::Path, &str),
+        ) -> Self {
             // Isolate background producers from deliberately stalled legacy
             // privacy callbacks, including regressions that retain a state writer,
             // so low-core runners can still execute registered logout.
@@ -610,12 +631,16 @@ mod tests {
                     .set("a".into(), user("alice"), "pw".into());
                 "alice".into()
             };
+            prepare(root.path(), &owner);
             let node = NodeState::empty();
             let app = tauri::test::mock_builder()
                 .manage(app_state.clone())
                 .manage(app_state.app_lock().clone())
                 .manage(node.clone())
                 .manage(crate::trust::TrustState::default())
+                .manage(crate::avatars::AvatarsState::isolated(
+                    root.path().to_owned(),
+                ))
                 .manage(crate::settings::SettingsState::isolated(
                     root.path().join("settings.json"),
                 ))
@@ -626,6 +651,19 @@ mod tests {
                     crate::chat_commands::read_media,
                     crate::trust::mark_verified,
                     crate::trust::get_trust,
+                    crate::avatars::get_avatars,
+                    crate::avatars::set_avatar,
+                    crate::avatars::publish_legacy_avatar_overrides,
+                    crate::drafts::load_conversation_drafts,
+                    crate::drafts::save_conversation_drafts,
+                    crate::drafts::publish_legacy_conversation_drafts,
+                    crate::account_documents::get_account_documents,
+                    crate::account_documents::get_account_document_meta,
+                    crate::account_documents::read_account_document,
+                    crate::account_documents::put_account_document,
+                    crate::account_documents::remove_account_document,
+                    crate::account_documents::mark_account_message_seen,
+                    crate::account_documents::publish_legacy_account_controls,
                     crate::account_profile::get_account_profile,
                     crate::account_profile::save_account_bio,
                     crate::chat_commands::send_file_to_account,
@@ -638,9 +676,12 @@ mod tests {
                     crate::chat_commands::rename_channel,
                     crate::chat_commands::set_channel_replica_enabled,
                     crate::chat_commands::set_channel_history_policy,
+                    crate::chat_commands::list_channels,
                     crate::chat_commands::channel_members,
+                    crate::chat_commands::channel_custody_statuses,
                     crate::chat_commands::add_channel_member,
                     crate::chat_commands::remove_channel_member,
+                    crate::chat_commands::remove_channel_account_members,
                     crate::chat_commands::transfer_channel_owner,
                     crate::chat_commands::leave_channel,
                     crate::chat_commands::accept_channel_invite,
@@ -680,6 +721,7 @@ mod tests {
                     crate::message_favorites::owner_read_favorite_file,
                     crate::message_favorites::owner_save_favorite_file,
                     super::owner_node_identity,
+                    super::owner_startup_identity,
                     super::owner_enqueue_text,
                     super::owner_enqueue_channel_text,
                     super::owner_enqueue_channel_sticker,
@@ -695,6 +737,8 @@ mod tests {
                     crate::chat_commands::set_account_preference,
                     crate::commands::logout,
                     crate::privacy_commands::get_privacy,
+                    crate::privacy_commands::get_account_binding_changes,
+                    crate::privacy_commands::accept_account_binding_change,
                     crate::privacy_commands::set_invisible,
                     crate::privacy_commands::set_privacy_allowed,
                     crate::privacy_commands::initiate_privacy_contact
@@ -769,7 +813,7 @@ mod tests {
                 .join(runtime.host_account_id().unwrap());
             [
                 format!("account-sync-policy-{}.log", runtime.account_id()),
-                "account-preferences.log".into(),
+                format!("account-preferences-{}.log", runtime.account_id()),
             ]
             .map(|name| std::fs::read(directory.join(name)).unwrap())
         }
@@ -920,6 +964,632 @@ mod tests {
                 serde_json::json!({"owner":owner,"id":"01".repeat(32),"expectedRevision":1,"expectedDeviceId":"01".repeat(16)}),
             ),
         ]
+    }
+
+    #[test]
+    fn registered_account_documents_preserve_account_scope_cas_and_queued_owner() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let key = serde_json::json!({"kind":"draft","conversation":{"kind":"account","id":"11".repeat(16)}});
+        let body = serde_json::json!({"owner":"alice","expectedAccount":account,"key":key,"payloadBase64":"aGVsbG8=","expected":null});
+        let first = fixture
+            .invoke("put_account_document", body.clone())
+            .unwrap();
+        assert_eq!(first["content_len"], 5);
+        assert!(
+            fixture
+                .invoke("put_account_document", body.clone())
+                .is_err(),
+            "create-only must preserve an existing version"
+        );
+        let mut other = body.clone();
+        other["expectedAccount"] = serde_json::json!("22".repeat(16));
+        assert_eq!(
+            fixture.invoke("put_account_document", other).unwrap_err()["kind"],
+            "authorization"
+        );
+        let meta = fixture
+            .invoke(
+                "get_account_document_meta",
+                serde_json::json!({"owner":"alice","expectedAccount":account,"key":key}),
+            )
+            .unwrap();
+        assert_eq!(meta, first);
+        let (entered, captured) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+        let lifecycle = fixture.node.0.blocking_write();
+        let webview = fixture.webview.clone();
+        let pending = std::thread::spawn(move || invoke(&webview, "put_account_document", body));
+        captured
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        fixture
+            .app_state
+            .session()
+            .set("replacement".into(), user("alice"), "pw".into());
+        drop(lifecycle);
+        assert_eq!(
+            pending.join().unwrap().unwrap_err()["kind"],
+            "authorization"
+        );
+        *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn registered_group_inventory_projects_reference_and_rejects_queued_retirement() {
+        use mesh_talk_core::{
+            channel::{ChannelMeta, new_channel_id},
+            eventlog::{Event, EventKind, PersistentEventLog},
+            identity::{account::Account, account_keystore, device::DeviceIdentity, keystore},
+            node::{AccountDocumentDomain, AccountDocumentKey, DocumentConversation, NodeRuntime},
+        };
+        use tauri::Manager;
+        let id = new_channel_id();
+        let legacy_owner = DeviceIdentity::generate();
+        let source_device = DeviceIdentity::generate();
+        let account = Account::generate();
+        let relay = DeviceIdentity::generate();
+        let fixture = Fixture::create_prepared(false, |root, owner| {
+            let source_root = tempfile::tempdir().unwrap();
+            let source_dir = source_root.path().join("accounts/source");
+            let target_dir = root.join("accounts").join(owner);
+            std::fs::create_dir_all(&source_dir).unwrap();
+            std::fs::create_dir_all(&target_dir).unwrap();
+            keystore::save(&source_dir.join("identity.keystore"), "pw", &source_device).unwrap();
+            account_keystore::save(&source_dir.join("account.keystore"), "pw", &account).unwrap();
+            account_keystore::save(&target_dir.join("account.keystore"), "pw", &account).unwrap();
+            let mut log = PersistentEventLog::open(&source_dir.join("messages.log"), "pw").unwrap();
+            log.append_durable(Event::new(
+                &legacy_owner,
+                id,
+                1,
+                vec![],
+                1,
+                1,
+                EventKind::MembershipChange,
+                ChannelMeta {
+                    name: "Account inventory fixture".into(),
+                    members: vec![
+                        legacy_owner.public(),
+                        source_device.public(),
+                        relay.public(),
+                    ],
+                    epoch: 0,
+                    owner: legacy_owner.public().user_id(),
+                }
+                .encode(),
+            ))
+            .unwrap();
+            drop(log);
+            let reservation = reserve_discovery_port();
+            let source = tauri::async_runtime::block_on(NodeRuntime::start(
+                source_root.path(),
+                "source",
+                "Source",
+                "pw",
+                reservation.local_addr().unwrap().port(),
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+            ))
+            .unwrap();
+            drop(reservation);
+            // Reuse the fixture's real signed discovery seam for a legacy
+            // infrastructure member; no proof or inventory record is fabricated.
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket
+                .send_to(
+                    &mesh_talk_core::discovery::announce::encode(
+                        &mesh_talk_core::discovery::Announce::new_post_office(
+                            &relay, "Relay", 4242,
+                        ),
+                    ),
+                    (std::net::Ipv4Addr::LOCALHOST, source.discovery_port()),
+                )
+                .unwrap();
+            tauri::async_runtime::block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !source.handle().device_is_post_office(&relay.public()) {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                source
+                    .handle()
+                    .put_account_document_if(
+                        AccountDocumentKey::Draft {
+                            conversation: DocumentConversation::Account(account.account_id()),
+                        },
+                        b"synthetic inventory wake".to_vec(),
+                        None,
+                        |commit| commit(),
+                    )
+                    .unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while source
+                        .handle()
+                        .account_documents(AccountDocumentDomain::GroupInventory, None, 64)
+                        .unwrap()
+                        .items
+                        .first()
+                        .and_then(|meta| source.handle().account_document(&meta.key).unwrap())
+                        .is_none_or(|document| {
+                            serde_json::from_slice::<serde_json::Value>(document.payload()).unwrap()
+                                ["member_count"]
+                                != 2
+                        })
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                source.stop().await;
+            });
+            // Reopen a real account-private metadata artifact produced by the
+            // source worker. No membership/key event is installed on the target.
+            fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+                if from.is_dir() {
+                    std::fs::create_dir_all(to).unwrap();
+                    for entry in std::fs::read_dir(from).unwrap() {
+                        let entry = entry.unwrap();
+                        copy_tree(&entry.path(), &to.join(entry.file_name()));
+                    }
+                } else {
+                    std::fs::copy(from, to).unwrap();
+                }
+            }
+            for entry in std::fs::read_dir(&source_dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry
+                    .file_name()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("account-document")
+                {
+                    copy_tree(&entry.path(), &target_dir.join(entry.file_name()));
+                }
+            }
+        });
+        let rows = fixture
+            .invoke("list_channels", serde_json::json!({}))
+            .unwrap();
+        let reference = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["channel_id"] == hex::encode(id.as_bytes()))
+            .unwrap();
+        assert_eq!(reference["name"], "Account inventory fixture");
+        assert_eq!(reference["shared_reference"], true);
+        assert_eq!(reference["legacy_membership"], true);
+        assert_eq!(reference["archived"], true);
+        assert_eq!(reference["can_manage"], false);
+        assert_eq!(reference["member_count"], 2);
+        let body = serde_json::json!({"channelId":hex::encode(id.as_bytes())});
+        let members = fixture.invoke("channel_members", body.clone()).unwrap();
+        assert_eq!(members["owner"], legacy_owner.public().user_id());
+        assert_eq!(members["members"].as_array().unwrap().len(), 2);
+        assert_eq!(members["can_manage"], false);
+        for (command, extra) in [
+            (
+                "set_channel_history_policy",
+                serde_json::json!({"policy":"off"}),
+            ),
+            (
+                "set_channel_replica_enabled",
+                serde_json::json!({"enabled":true}),
+            ),
+            ("leave_channel", serde_json::json!({})),
+        ] {
+            let mut input = extra;
+            input["channelId"] = serde_json::json!(hex::encode(id.as_bytes()));
+            assert!(
+                fixture.invoke(command, input).is_err(),
+                "descriptive references cannot authorize {command}"
+            );
+        }
+        assert!(
+            fixture
+                .node
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .channel_members(id)
+                .is_empty()
+        );
+        for (command, input) in [
+            ("list_channels", serde_json::json!({})),
+            ("channel_members", body),
+        ] {
+            for lock in [true, false] {
+                fixture.app_state.app_lock().clear();
+                let (entered, captured) = std::sync::mpsc::channel();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+                let lifecycle = fixture.node.0.blocking_write();
+                let webview = fixture.webview.clone();
+                let input = input.clone();
+                let pending = std::thread::spawn(move || invoke(&webview, command, input));
+                captured
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+                if lock {
+                    crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap();
+                } else {
+                    fixture.app_state.session().set(
+                        "replacement".into(),
+                        user("alice"),
+                        "pw".into(),
+                    );
+                }
+                drop(lifecycle);
+                assert_eq!(
+                    pending.join().unwrap().unwrap_err()["kind"],
+                    "authorization"
+                );
+                *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+            }
+        }
+    }
+
+    #[test]
+    fn registered_channel_custody_rejects_lock_and_queued_session_replacement() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let body = serde_json::json!({"channelId":"11".repeat(32),"ids":["22".repeat(32)]});
+        assert_eq!(
+            fixture
+                .invoke("channel_custody_statuses", body.clone())
+                .unwrap(),
+            serde_json::json!([])
+        );
+        for lock in [true, false] {
+            fixture.app_state.app_lock().clear();
+            let (entered, captured) = std::sync::mpsc::channel();
+            *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+            let lifecycle = fixture.node.0.blocking_write();
+            let webview = fixture.webview.clone();
+            let input = body.clone();
+            let pending =
+                std::thread::spawn(move || invoke(&webview, "channel_custody_statuses", input));
+            captured
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            if lock {
+                crate::app_lock::lock_app(
+                    fixture.webview.state::<AppState>(),
+                    fixture.webview.state::<crate::app_lock::AppLock>(),
+                )
+                .unwrap();
+            } else {
+                fixture
+                    .app_state
+                    .session()
+                    .set("replacement".into(), user("alice"), "pw".into());
+            }
+            drop(lifecycle);
+            assert_eq!(
+                pending.join().unwrap().unwrap_err()["kind"],
+                "authorization"
+            );
+            *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+        }
+        fixture.app_state.app_lock().clear();
+        fixture
+            .app_state
+            .session()
+            .set("foreign".into(), user("bob"), "pw".into());
+        assert_eq!(
+            fixture
+                .invoke("channel_custody_statuses", body)
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+    }
+
+    #[test]
+    fn registered_account_controls_reject_generic_writes_and_removals() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        for kind in [
+            "dm_reaction",
+            "dm_recall",
+            "channel_custody",
+            "group_inventory",
+        ] {
+            let mut key = serde_json::json!({"kind":kind,"peer_account":"11".repeat(16),"target":"22".repeat(32),"actor_account":account});
+            if kind == "dm_reaction" {
+                key["emoji"] = serde_json::json!("👍");
+            }
+            if kind == "channel_custody" {
+                key = serde_json::json!({"kind": kind, "channel": "22".repeat(32), "event": "33".repeat(32), "holder": "44".repeat(16)});
+            }
+            if kind == "group_inventory" {
+                key = serde_json::json!({"kind":kind,"channel":"22".repeat(32),"source_device":"44".repeat(16)});
+            }
+            for command in ["put_account_document", "remove_account_document"] {
+                let result = fixture.invoke(command,serde_json::json!({"owner":"alice","expectedAccount":account,"key":key,"payloadBase64":"e30=","expected":null}));
+                assert_eq!(
+                    result.unwrap_err()["kind"],
+                    "authorization",
+                    "generic IPC must not forge a control: {command} {kind}"
+                );
+            }
+            assert!(
+                fixture
+                    .invoke(
+                        "get_account_document_meta",
+                        serde_json::json!({"owner":"alice","expectedAccount":account,"key":key})
+                    )
+                    .unwrap()
+                    .is_null()
+            );
+        }
+    }
+
+    #[test]
+    fn registered_account_control_source_import_checks_account_and_queued_session() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        assert_eq!(
+            fixture
+                .invoke(
+                    "publish_legacy_account_controls",
+                    serde_json::json!({"owner":"alice","expectedAccount":"11".repeat(16)})
+                )
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+        let body = serde_json::json!({"owner":"alice","expectedAccount":account});
+        fixture
+            .invoke("publish_legacy_account_controls", body.clone())
+            .unwrap();
+        let (entered, captured) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+        let lifecycle = fixture.node.0.blocking_write();
+        let webview = fixture.webview.clone();
+        let pending =
+            std::thread::spawn(move || invoke(&webview, "publish_legacy_account_controls", body));
+        captured
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        fixture
+            .app_state
+            .session()
+            .set("replacement".into(), user("alice"), "pw".into());
+        drop(lifecycle);
+        assert_eq!(
+            pending.join().unwrap().unwrap_err()["kind"],
+            "authorization"
+        );
+        *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn registered_public_avatar_rejects_originating_wrong_account() {
+        let fixture = Fixture::new();
+        let result = fixture.invoke(
+            "publish_avatar",
+            serde_json::json!({"owner":"alice","expectedAccount":"22".repeat(16),"avatar":null}),
+        );
+        assert!(
+            result.is_err(),
+            "a former account image must never be published under the replacement root"
+        );
+    }
+
+    #[test]
+    fn registered_public_avatar_rejects_queued_same_owner_account_replacement() {
+        let fixture = Fixture::new();
+        let replacement = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let replacement_account = replacement
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        assert_ne!(account, replacement_account);
+        let (entered, captured) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+        let mut lifecycle = fixture.node.0.blocking_write();
+        let webview = fixture.webview.clone();
+        let pending = std::thread::spawn(move || {
+            invoke(
+                &webview,
+                "publish_avatar",
+                serde_json::json!({"owner":"alice","expectedAccount":account,"avatar":null}),
+            )
+        });
+        captured
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let old = std::mem::replace(&mut *lifecycle, replacement.node.0.blocking_write().take());
+        drop(lifecycle);
+        assert!(
+            pending.join().unwrap().is_err(),
+            "queued old-root image cannot publish into replacement account with the same local owner"
+        );
+        *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+        tauri::async_runtime::block_on(async {
+            old.unwrap().stop().await;
+        });
+    }
+
+    #[test]
+    fn registered_shared_drafts_reject_wrong_account_writer_and_queued_session() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let load = serde_json::json!({"owner":"alice","expectedAccount":account});
+        let snapshot = fixture
+            .invoke("load_conversation_drafts", load.clone())
+            .unwrap();
+        let conversation = format!("account:{}", "11".repeat(16));
+        let mut changes = serde_json::Map::new();
+        changes.insert(
+            conversation.clone(),
+            serde_json::json!({"text":"unfinished shared draft","protection":null,"expected":null}),
+        );
+        let body = serde_json::json!({"owner":"alice","expectedAccount":account,"session":snapshot["session"],"drafts":{},"protections":{},"changes":changes});
+        let saved = fixture
+            .invoke("save_conversation_drafts", body.clone())
+            .unwrap();
+        assert_eq!(saved["drafts"][&conversation], "unfinished shared draft");
+        let mut wrong = load;
+        wrong["expectedAccount"] = serde_json::json!("22".repeat(16));
+        assert_eq!(
+            fixture
+                .invoke("load_conversation_drafts", wrong)
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+        let mut stale = body.clone();
+        stale["session"] = serde_json::json!("retired-writer");
+        assert!(fixture.invoke("save_conversation_drafts", stale).is_err());
+        let (entered, captured) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+        let lifecycle = fixture.node.0.blocking_write();
+        let webview = fixture.webview.clone();
+        let pending =
+            std::thread::spawn(move || invoke(&webview, "save_conversation_drafts", body));
+        captured
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        fixture
+            .app_state
+            .session()
+            .set("replacement".into(), user("alice"), "pw".into());
+        drop(lifecycle);
+        assert_eq!(
+            pending.join().unwrap().unwrap_err()["kind"],
+            "authorization"
+        );
+        *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn registered_avatar_overrides_keep_tombstones_and_refuse_other_account_writes() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let target = "11".repeat(16);
+        let image = "data:image/png;base64,iVBORw0KGgo=";
+        let legacy = fixture.root.path().join("accounts/alice/avatars.json");
+        std::fs::write(
+            &legacy,
+            serde_json::to_vec(&serde_json::json!({"avatars":{target.clone():image}})).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            fixture
+                .invoke(
+                    "get_avatars",
+                    serde_json::json!({"owner":"alice","expectedAccount":account})
+                )
+                .unwrap()
+                .get(&target)
+                .is_none(),
+            "unbound legacy photos cannot be attributed by a one-device registry"
+        );
+        assert!(
+            fixture
+                .invoke("get_avatars", serde_json::json!({"owner":"alice"}))
+                .unwrap()
+                .get(&target)
+                .is_none(),
+            "bootstrap cannot expose another account's legacy photos"
+        );
+        let set = serde_json::json!({"owner":"alice","expectedAccount":account,"id":target,"dataUrl":image});
+        fixture.invoke("set_avatar", set.clone()).unwrap();
+        let get = serde_json::json!({"owner":"alice","expectedAccount":account});
+        assert_eq!(
+            fixture.invoke("get_avatars", get.clone()).unwrap()[&target],
+            image
+        );
+        let mut wrong = set.clone();
+        wrong["expectedAccount"] = serde_json::json!("22".repeat(16));
+        assert_eq!(
+            fixture.invoke("set_avatar", wrong).unwrap_err()["kind"],
+            "authorization"
+        );
+        let mut clear = set;
+        clear["dataUrl"] = serde_json::Value::Null;
+        fixture.invoke("set_avatar", clear).unwrap();
+        assert!(
+            fixture
+                .invoke("get_avatars", get.clone())
+                .unwrap()
+                .get(&target)
+                .is_none()
+        );
+        let legacy = fixture.root.path().join("accounts/alice/avatars.json");
+        std::fs::write(
+            &legacy,
+            serde_json::to_vec(&serde_json::json!({"avatars":{target.clone():image}})).unwrap(),
+        )
+        .unwrap();
+        fixture
+            .invoke("publish_legacy_avatar_overrides", get.clone())
+            .unwrap();
+        assert!(
+            fixture
+                .invoke("get_avatars", get)
+                .unwrap()
+                .get(&target)
+                .is_none(),
+            "source seeding must not resurrect a deleted picture"
+        );
     }
 
     #[test]
@@ -2149,7 +2819,7 @@ mod tests {
             ),
             (
                 "set_account_preference",
-                serde_json::json!({"owner":"alice","category":"appearance", "key":"theme", "value":"dark"}),
+                serde_json::json!({"owner":"alice","expectedAccount":fixture.node.0.blocking_read().as_ref().unwrap().account_id(),"category":"appearance", "key":"theme", "value":"dark"}),
             ),
         ] {
             let result = fixture.invoke(command, body);
@@ -2391,6 +3061,10 @@ mod tests {
                 serde_json::json!({"channelId":channel,"memberId":"peer"}),
             ),
             (
+                "remove_channel_account_members",
+                serde_json::json!({"channelId":channel,"accountId":"peer-account"}),
+            ),
+            (
                 "transfer_channel_owner",
                 serde_json::json!({"channelId":channel,"memberId":"peer"}),
             ),
@@ -2443,7 +3117,10 @@ mod tests {
                 serde_json::json!({"peer":"peer","code":"unused"}),
             ),
             ("rekey_account", serde_json::json!({})),
-            ("publish_avatar", serde_json::json!({"avatar":"queued"})),
+            (
+                "publish_avatar",
+                serde_json::json!({"owner":"alice","expectedAccount":fixture.node.0.blocking_read().as_ref().unwrap().account_id(),"avatar":"queued"}),
+            ),
             (
                 "set_attachment_global_auto",
                 serde_json::json!({"auto":false}),
@@ -2831,7 +3508,7 @@ mod tests {
             ),
             (
                 "set_account_preference",
-                serde_json::json!({"owner":"alice","category":"appearance", "key":"theme", "value":"dark"}),
+                serde_json::json!({"owner":"alice","expectedAccount":fixture.node.0.blocking_read().as_ref().unwrap().account_id(),"category":"appearance", "key":"theme", "value":"dark"}),
             ),
             (
                 "send_file_to_account",
@@ -2909,7 +3586,7 @@ mod tests {
             ),
             (
                 "set_account_preference",
-                serde_json::json!({"owner":"alice","category":"appearance", "key":"theme", "value":"dark"}),
+                serde_json::json!({"owner":"alice","expectedAccount":fixture.node.0.blocking_read().as_ref().unwrap().account_id(),"category":"appearance", "key":"theme", "value":"dark"}),
             ),
         ];
         for lock in [false, true] {
@@ -2958,9 +3635,19 @@ mod tests {
         assert_eq!(fixture.sync_documents(), before);
     }
 
-    fn privacy_requests(account: &str) -> [(&'static str, serde_json::Value); 4] {
+    fn privacy_requests(account: &str) -> [(&'static str, serde_json::Value); 6] {
         [
             ("get_privacy", serde_json::json!({"owner":"alice"})),
+            (
+                "get_account_binding_changes",
+                serde_json::json!({"owner":"alice","account":account}),
+            ),
+            (
+                "accept_account_binding_change",
+                serde_json::json!({"owner":"alice","change":{
+                    "device_id":"a".repeat(32), "previous_account_id":"b".repeat(32), "current_account_id":account
+                }}),
+            ),
             (
                 "set_invisible",
                 serde_json::json!({"owner":"alice","invisible":true}),
@@ -3399,6 +4086,90 @@ mod tests {
             .invoke("owner_node_identity", serde_json::json!({"owner":"bob"}))
             .unwrap();
         assert_eq!(identity["owner"], "bob");
+    }
+
+    #[test]
+    fn registered_startup_identity_is_ids_only_and_denies_locked_or_replaced_sessions() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let lease = fixture.app_state.session().capture().unwrap();
+        let authority = crate::chat_commands::RuntimeAuthority::request(
+            fixture.app_state.session().clone(),
+            lease,
+            fixture.node.clone(),
+        )
+        .unwrap();
+        let lifetime = authority.observation_lifetime();
+        let pending = fixture
+            .invoke(
+                "owner_startup_identity",
+                serde_json::json!({"owner":"alice"}),
+            )
+            .unwrap();
+        assert_eq!(pending["phase"], "pending");
+        assert!(pending.get("account_id").is_none());
+        authority
+            .observe_identity(mesh_talk_core::node::RuntimeIdentity {
+                account_id: "observed-account".into(),
+                device_id: "observed-device".into(),
+            })
+            .unwrap();
+        let identity = fixture
+            .invoke(
+                "owner_startup_identity",
+                serde_json::json!({"owner":"alice"}),
+            )
+            .unwrap();
+        assert_eq!(
+            identity,
+            serde_json::json!({
+                "owner":"alice", "startup_id":pending["startup_id"], "phase":"identity",
+                "account_id":"observed-account", "device_id":"observed-device",
+            })
+        );
+        assert!(
+            fixture
+                .invoke("owner_startup_identity", serde_json::json!({"owner":"bob"}))
+                .is_err()
+        );
+        assert!(
+            fixture
+                .invoke("owner_node_identity", serde_json::json!({"owner":"alice"}))
+                .is_err()
+        );
+        let handle = fixture.webview.app_handle();
+        crate::app_lock::lock_app(handle.state(), handle.state()).unwrap();
+        assert!(
+            fixture
+                .invoke(
+                    "owner_startup_identity",
+                    serde_json::json!({"owner":"alice"})
+                )
+                .is_err()
+        );
+        fixture.app_state.app_lock().clear();
+        drop(lifetime);
+        let failed = fixture
+            .invoke(
+                "owner_startup_identity",
+                serde_json::json!({"owner":"alice"}),
+            )
+            .unwrap();
+        assert_eq!(
+            failed,
+            serde_json::json!({
+                "owner":"alice", "startup_id":pending["startup_id"], "phase":"failed",
+            })
+        );
+        fixture.app_state.session().clear();
+        assert!(
+            fixture
+                .invoke(
+                    "owner_startup_identity",
+                    serde_json::json!({"owner":"alice"})
+                )
+                .is_err()
+        );
     }
 
     #[test]

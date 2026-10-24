@@ -123,13 +123,15 @@ pub struct ChannelMemberInfo {
     pub replica_enabled: bool,
 }
 
-/// A channel's membership plus its owner. The owner is the only principal allowed to
-/// change membership (enforced in core); the UI uses it to show the owner badge and to
-/// reveal the add/remove controls only to the owner.
+/// Membership and management rights projected by the core authority owner.
+/// Device provenance and account ownership remain distinct; UI presence cannot
+/// establish a management permission.
 #[derive(Serialize)]
 pub struct ChannelMembersInfo {
     pub history_policy: mesh_talk_core::channel::HistoryPolicy,
     pub owner: String,
+    pub owner_account_id: Option<String>,
+    pub can_manage: bool,
     pub members: Vec<ChannelMemberInfo>,
 }
 
@@ -179,6 +181,8 @@ mod tests {
         ] {
             let value = serde_json::to_value(ChannelMembersInfo {
                 owner: "owner".into(),
+                owner_account_id: None,
+                can_manage: false,
                 members: vec![],
                 history_policy: policy,
             })

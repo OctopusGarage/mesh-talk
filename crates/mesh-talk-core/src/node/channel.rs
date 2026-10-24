@@ -304,6 +304,15 @@ pub(in crate::node) struct ChannelInfoProjection {
     history_policy: crate::channel::HistoryPolicy,
 }
 
+pub(super) struct ChannelMembershipProjection {
+    pub state: Option<ChannelState>,
+    pub departures: Vec<(String, EventId)>,
+    pub authority: super::channel_account_authority::AccountAuthority,
+    pub accepted: Vec<super::channel_account_authority::LegacyAccountMember>,
+    pub authorized: HashSet<EventId>,
+    pub invited: Vec<super::channel_account_authority::LegacyAccountMember>,
+}
+
 impl ChannelBook {
     pub(in crate::node) fn info_projection(
         &self,
@@ -349,6 +358,25 @@ impl ChannelBook {
         before: Option<EventId>,
         by_id: &HashMap<EventId, &Event>,
     ) -> (Option<ChannelState>, Vec<(String, EventId)>) {
+        let projection = Self::membership_projection(channel_id, events, before, by_id);
+        (projection.state, projection.departures)
+    }
+
+    pub(super) fn membership_projection(
+        channel_id: ConversationId,
+        events: &[&Event],
+        before: Option<EventId>,
+        by_id: &HashMap<EventId, &Event>,
+    ) -> ChannelMembershipProjection {
+        use super::channel_account_authority::{
+            AccountAuthority, LegacyAccountMember, LegacyAuthorityContext,
+        };
+        use super::channel_account_bootstrap::DeviceControl;
+        let mut authority = AccountAuthority::default();
+        let mut authorized = HashSet::new();
+        let mut bindings: HashMap<String, crate::discovery::Announce> = HashMap::new();
+        let mut roots: HashMap<String, (PublicIdentity, EventId, Option<EventId>, bool)> =
+            HashMap::new();
         let mut prior: Option<ChannelState> = None;
         let mut departures: Vec<(String, EventId)> = Vec::new();
         for event in events {
@@ -359,6 +387,31 @@ impl ChannelBook {
                 break;
             }
             let author = event.author.user_id();
+            let old_members: HashSet<_> = prior
+                .as_ref()
+                .map(|state| {
+                    state
+                        .members()
+                        .iter()
+                        .map(PublicIdentity::user_id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let was_accepted = prior
+                .as_ref()
+                .is_some_and(|state| state.is_accepted_member(&author));
+            let mut valid = was_accepted
+                && !matches!(
+                    event.kind,
+                    EventKind::MembershipChange
+                        | EventKind::ChannelRename
+                        | EventKind::ChannelDissolve
+                        | EventKind::ChannelAccept
+                        | EventKind::ChannelLeave
+                        | EventKind::ChannelOwnerTransfer
+                        | EventKind::ChannelAccountAuthority
+                        | EventKind::ChannelDeviceInheritance
+                );
             match event.kind {
                 EventKind::MembershipChange => {
                     let Some(mut meta) = ChannelMeta::decode(&event.ciphertext) else {
@@ -371,9 +424,10 @@ impl ChannelBook {
                         })
                     });
                     if let Some(state) = prior.as_mut() {
-                        if author != state.owner() {
+                        if !state.can_admin(&author) {
                             continue;
                         }
+                        valid = true;
                         let old: HashSet<_> = state
                             .members()
                             .iter()
@@ -402,6 +456,7 @@ impl ChannelBook {
                         && author == meta.owner
                         && meta.is_member(&author)
                     {
+                        valid = true;
                         let invited = ChannelMeta::is_invitation(&event.ciphertext);
                         let mut state = ChannelState::from_meta(channel_id, meta);
                         if invited {
@@ -420,47 +475,253 @@ impl ChannelBook {
                 }
                 EventKind::ChannelRename => {
                     if let Some(state) = prior.as_mut()
-                        && author == state.owner()
+                        && state.can_admin(&author)
                         && let Ok(name) = std::str::from_utf8(&event.ciphertext)
                     {
+                        valid = true;
                         state.apply_rename(name, event.lamport, event.id);
                     }
                 }
                 EventKind::ChannelDissolve => {
                     if event.ciphertext.is_empty()
                         && let Some(state) = prior.as_mut()
-                        && author == state.owner()
+                        && state.can_admin(&author)
                     {
+                        valid = true;
                         state.dissolve();
                     }
                 }
                 EventKind::ChannelAccept => {
-                    if event.ciphertext.is_empty()
+                    if authority.current_event().is_some() {
+                        let proof = bindings.get(&author).cloned().or_else(|| {
+                            authority
+                                .original_device_proofs()
+                                .into_iter()
+                                .chain(authority.invited_device_proofs())
+                                .find(|proof| proof.user_id == author)
+                        });
+                        if let Some(proof) = proof
+                            && (authority.is_member(&proof.public(), &proof)
+                                || authority
+                                    .invitation_for_device(&proof.public(), &proof)
+                                    .is_some())
+                        {
+                            valid = authority.accept_account(event, &proof, by_id).is_ok();
+                        }
+                    } else if event.ciphertext.is_empty()
                         && let Some(state) = prior.as_mut()
                     {
+                        valid = state.is_member(&author);
                         state.accept_invite(&author, event.id);
                     }
                 }
                 EventKind::ChannelOwnerTransfer => {
+                    if authority.current_event().is_some() {
+                        continue;
+                    }
                     if let Some(state) = prior.as_mut()
-                        && author == state.owner()
+                        && state.can_admin(&author)
                         && let Ok(next) = std::str::from_utf8(&event.ciphertext)
                     {
-                        state.transfer_owner(next);
+                        valid = state.transfer_owner(next);
                     }
                 }
                 EventKind::ChannelLeave => {
-                    if event.ciphertext.is_empty()
+                    if authority.current_event().is_some() {
+                        let proof = bindings.get(&author).cloned().or_else(|| {
+                            authority
+                                .original_device_proofs()
+                                .into_iter()
+                                .find(|proof| proof.user_id == author)
+                        });
+                        if let Some(proof) = proof
+                            && authority.is_member(&proof.public(), &proof)
+                        {
+                            valid = authority.leave_account(event, &proof, by_id).is_ok();
+                        }
+                    } else if event.ciphertext.is_empty()
                         && let Some(state) = prior.as_mut()
                         && state.leave_member(&author)
                     {
-                        departures.push((author, event.id));
+                        valid = true;
+                        departures.push((author.clone(), event.id));
+                    }
+                }
+                EventKind::ChannelAccountAuthority => {
+                    valid = false;
+                    if let Some(state) = prior.as_ref() {
+                        let issuer =
+                            super::channel_account_authority::AccountAuthorityControl::decode(
+                                &event.ciphertext,
+                            )
+                            .map(|control| control.issuer.public());
+                        if let Some(owner) = state
+                            .members()
+                            .iter()
+                            .find(|member| member.user_id() == state.owner())
+                            .cloned()
+                            .or(issuer)
+                        {
+                            let accepted = roots
+                                .values()
+                                .filter(|(_, _, _, accepted)| *accepted)
+                                .map(|(public, membership_event, acceptance_event, _)| {
+                                    LegacyAccountMember {
+                                        public: public.clone(),
+                                        membership_event: *membership_event,
+                                        acceptance_event: *acceptance_event,
+                                    }
+                                })
+                                .collect();
+                            let context = LegacyAuthorityContext {
+                                channel: channel_id,
+                                owner,
+                                accepted,
+                                invited: roots
+                                    .values()
+                                    .filter(|(_, _, _, accepted)| !*accepted)
+                                    .map(|(public, membership_event, acceptance_event, _)| {
+                                        LegacyAccountMember {
+                                            public: public.clone(),
+                                            membership_event: *membership_event,
+                                            acceptance_event: *acceptance_event,
+                                        }
+                                    })
+                                    .collect(),
+                                epoch: state.epoch(),
+                            };
+                            valid = authority.apply(event, &context, by_id).is_ok();
+                        }
+                    }
+                }
+                EventKind::ChannelDeviceInheritance => {
+                    valid = false;
+                    if let Some((_, _, proof)) = DeviceControl::signed_inheritance(event)
+                        && authority.inherit_device(event, by_id).is_ok()
+                    {
+                        valid = true;
+                        bindings.insert(proof.user_id.clone(), proof);
+                    } else if let Some(state) = prior.as_ref() {
+                        valid = super::channel_account_bootstrap::receive_keys_admitted(
+                            state, event, &authority, by_id,
+                        ) || super::join_history::account_release_admitted(
+                            state, event, &authority, by_id,
+                        );
                     }
                 }
                 _ => {}
             }
+            if valid
+                && event
+                    .parents
+                    .iter()
+                    .all(|parent| authorized.contains(parent))
+            {
+                authorized.insert(event.id);
+            }
+            if let Some(state) = prior.as_ref() {
+                if event.kind == EventKind::MembershipChange {
+                    roots.retain(|uid, _| state.is_member(uid));
+                    for member in state.members() {
+                        if !old_members.contains(&member.user_id()) {
+                            roots.insert(
+                                member.user_id(),
+                                (
+                                    member.clone(),
+                                    event.id,
+                                    None,
+                                    state.is_accepted_member(&member.user_id()),
+                                ),
+                            );
+                        }
+                    }
+                }
+                if event.kind == EventKind::ChannelAccept
+                    && !was_accepted
+                    && state.is_accepted_member(&author)
+                    && let Some(root) = roots.get_mut(&author)
+                {
+                    root.2 = Some(event.id);
+                    root.3 = true;
+                }
+            }
+            if let Some(state) = prior.as_mut()
+                && let Some(owner) = authority.owner_account_id()
+                && let Some(epoch) = authority.key_epoch()
+            {
+                let mut proofs = authority.original_device_proofs();
+                proofs.extend(authority.grants().into_iter().map(|grant| grant.original));
+                proofs.extend(bindings.values().cloned());
+                let participants = proofs
+                    .into_iter()
+                    .filter(|proof| authority.is_member(&proof.public(), proof))
+                    .filter_map(|proof| proof.account_id().map(|account| (proof.public(), account)))
+                    .collect();
+                state.install_account_projection(owner, participants, epoch);
+                let mut invites = authority.invited_device_proofs();
+                invites.extend(
+                    bindings
+                        .values()
+                        .filter(|proof| {
+                            authority
+                                .invitation_for_device(&proof.public(), proof)
+                                .is_some()
+                        })
+                        .cloned(),
+                );
+                state.install_account_invites(
+                    invites
+                        .into_iter()
+                        .filter_map(|proof| {
+                            proof.account_id().map(|account| (proof.public(), account))
+                        })
+                        .collect(),
+                );
+            }
         }
-        (prior, departures)
+        let invited = roots
+            .values()
+            .filter(|(_, _, _, accepted)| !*accepted)
+            .map(
+                |(public, membership_event, acceptance_event, _)| LegacyAccountMember {
+                    public: public.clone(),
+                    membership_event: *membership_event,
+                    acceptance_event: *acceptance_event,
+                },
+            )
+            .collect();
+        let accepted = roots
+            .into_values()
+            .filter(|(_, _, _, accepted)| *accepted)
+            .map(
+                |(public, membership_event, acceptance_event, _)| LegacyAccountMember {
+                    public,
+                    membership_event,
+                    acceptance_event,
+                },
+            )
+            .collect();
+        ChannelMembershipProjection {
+            state: prior,
+            departures,
+            authority,
+            accepted,
+            authorized,
+            invited,
+        }
+    }
+
+    pub(super) fn project_membership(
+        channel_id: ConversationId,
+        events: &[&Event],
+    ) -> ChannelMembershipProjection {
+        let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
+        let order = super::timeline::ordered_ids(events, &[], true);
+        let ordered: Vec<_> = order
+            .iter()
+            .filter_map(|id| by_id.get(id).copied())
+            .collect();
+        Self::membership_projection(channel_id, &ordered, None, &by_id)
     }
 
     /// Channel metadata from the validated event DAG. This intentionally creates
@@ -470,13 +731,7 @@ impl ChannelBook {
         channel_id: ConversationId,
         events: &[&Event],
     ) -> Option<ChannelState> {
-        let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
-        let order = super::timeline::ordered_ids(events, &[], true);
-        let ordered: Vec<_> = order
-            .iter()
-            .filter_map(|id| by_id.get(id).copied())
-            .collect();
-        Self::membership_view(channel_id, &ordered, None, &by_id).0
+        Self::project_membership(channel_id, events).state
     }
 
     /// Current members from the validated event DAG, without decrypting or
@@ -672,6 +927,51 @@ impl ChannelBook {
                         .any(|parent| after_accept.contains(parent)))
             {
                 after_accept.insert(event.id);
+            }
+            let upgraded_control = matches!(
+                event.kind,
+                EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
+            ) || (self
+                .states
+                .get(&channel_id)
+                .is_some_and(|state| state.owner_account_id().is_some())
+                && matches!(
+                    event.kind,
+                    EventKind::MembershipChange
+                        | EventKind::ChannelAccept
+                        | EventKind::ChannelLeave
+                        | EventKind::ChannelOwnerTransfer
+                        | EventKind::ChannelRename
+                        | EventKind::ChannelDissolve
+                ));
+            if upgraded_control {
+                let projection = Self::membership_projection(
+                    channel_id,
+                    events,
+                    events.get(*cursor).map(|event| event.id),
+                    by_id,
+                );
+                if let Some(mut projected) = projection.state
+                    && (projected.is_member(&me.public().user_id())
+                        || self.states.contains_key(&channel_id))
+                {
+                    if let Some(state) = self.states.get_mut(&channel_id) {
+                        state.install_membership_projection(projected);
+                    } else {
+                        projected.set_identity(me.public().user_id());
+                        self.states.insert(channel_id, projected);
+                    }
+                    if let Some(state) = self.states.get_mut(&channel_id) {
+                        super::channel_account_bootstrap::apply_receive_keys(
+                            me,
+                            state,
+                            event,
+                            &projection.authority,
+                            by_id,
+                        );
+                    }
+                }
+                continue;
             }
             let mut activity: Option<(&'static str, Option<String>)> = None;
             match event.kind {

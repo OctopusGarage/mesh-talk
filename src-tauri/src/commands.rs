@@ -26,10 +26,23 @@ use crate::state::AppState;
 /// - `io`               — file / disk / log I/O failure
 /// - `not-started`      — the node runtime isn't running yet
 /// - `invalid-input`    — caller-supplied input was rejected
+/// - `link-*`           — the core's explicit device-pairing stage/recovery cause
 /// - `internal`         — anything not distinguishable as one of the above
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind", content = "message")]
 pub enum CommandError {
+    #[serde(rename = "link-no-direct-route")]
+    LinkNoDirectRoute(String),
+    #[serde(rename = "link-connection")]
+    LinkConnection(String),
+    #[serde(rename = "link-timeout")]
+    LinkTimeout(String),
+    #[serde(rename = "link-rejected")]
+    LinkRejected(String),
+    #[serde(rename = "link-upgrade-required")]
+    LinkUpgradeRequired(String),
+    #[serde(rename = "link-protocol")]
+    LinkProtocol(String),
     #[serde(rename = "peer-unknown")]
     PeerUnknown(String),
     #[serde(rename = "relay-unreachable")]
@@ -80,6 +93,12 @@ impl std::fmt::Display for CommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CommandError::PeerUnknown(msg)
+            | CommandError::LinkNoDirectRoute(msg)
+            | CommandError::LinkConnection(msg)
+            | CommandError::LinkTimeout(msg)
+            | CommandError::LinkRejected(msg)
+            | CommandError::LinkUpgradeRequired(msg)
+            | CommandError::LinkProtocol(msg)
             | CommandError::RelayUnreachable(msg)
             | CommandError::Crypto(msg)
             | CommandError::Auth(msg)
@@ -112,6 +131,19 @@ impl From<mesh_talk_core::node::NodeError> for CommandError {
 
         let msg = e.to_string();
         match e {
+            NodeError::Linking(error) => {
+                use mesh_talk_core::node::LinkingError;
+                match error {
+                    LinkingError::NoDirectRoute => CommandError::LinkNoDirectRoute(msg),
+                    LinkingError::Connection(_) => CommandError::LinkConnection(msg),
+                    LinkingError::ResponseTimeout => CommandError::LinkTimeout(msg),
+                    LinkingError::Closed => CommandError::LinkRejected(msg),
+                    LinkingError::UpgradeRequired => CommandError::LinkUpgradeRequired(msg),
+                    LinkingError::InvalidResponse | LinkingError::Protocol(_) => {
+                        CommandError::LinkProtocol(msg)
+                    }
+                }
+            }
             NodeError::InvalidInput(_) | NodeError::RequestConflict => {
                 CommandError::InvalidInput(msg)
             }
@@ -149,10 +181,10 @@ impl From<mesh_talk_core::node::NodeError> for CommandError {
 
 pub type CommandResult<T> = Result<T, CommandError>;
 
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 pub struct UserInfo {
     pub id: String,
-    /// The immutable login handle.
+    /// The shared account login name, or the legacy local login name.
     pub username: String,
     /// The editable, peer-facing display name (nickname). Equals `username` until changed.
     pub display_name: String,
@@ -160,9 +192,10 @@ pub struct UserInfo {
 
 impl From<User> for UserInfo {
     fn from(user: User) -> Self {
+        let username = user.login_name().to_owned();
         Self {
             id: user.user_id,
-            username: user.name,
+            username,
             display_name: user.display_name,
         }
     }
@@ -222,28 +255,28 @@ pub async fn login<R: tauri::Runtime>(
                 settings_state.activate(outcome.lease.owner())
             })
             .map_err(CommandError::Authorization)?;
-        // Start the node: per-account stores under ~/.mesh-talk/accounts/<user_id>/.
-        // NOTE: the node keystore intentionally uses the RAW `password` here, while the auth
-        // keystore uses the trimmed form (auth_service::login trims). They are independent
-        // stores; the node's was first created with the raw value, so it must keep using the
-        // raw value. Do NOT "unify" these to the trimmed form without a keystore migration —
-        // that would break decryption for any user whose password has leading/trailing space.
+        let (node_password, login_password) = app_state
+            .session()
+            .matching(&outcome.lease, |info| {
+                (
+                    info.node_storage_password.clone(),
+                    info.account_login_password.clone(),
+                )
+            })
+            .map_err(CommandError::Authorization)?;
         {
-            // "Stay signed in": persist the RAW password (the one the node keystore needs)
-            // to the OS keychain so the next launch can auto-unlock; otherwise forget any
-            // previously-saved secret. Keyed by the trimmed username the user typed.
             result.saved_session = Some(remember_login(
                 &app_handle,
                 app_state.inner(),
                 settings_state.inner(),
                 &outcome.user,
                 &outcome.lease,
-                &password,
+                &login_password,
             )?);
             spawn_node_runtime(
                 app_handle.clone(),
                 outcome.lease,
-                password,
+                node_password,
                 node_state.inner().clone(),
                 app_state.session().clone(),
             );
@@ -314,11 +347,15 @@ pub async fn auto_login<R: tauri::Runtime>(
                     settings_state.activate(outcome.lease.owner())
                 })
                 .map_err(CommandError::Authorization)?;
+            let node_password = app_state
+                .session()
+                .matching(&outcome.lease, |info| info.node_storage_password.clone())
+                .map_err(CommandError::Authorization)?;
             let user_info = UserInfo::from(outcome.user);
             spawn_node_runtime(
                 app_handle.clone(),
                 outcome.lease,
-                password,
+                node_password,
                 node_state.inner().clone(),
                 app_state.session().clone(),
             );
@@ -374,32 +411,36 @@ fn remember_login<R: tauri::Runtime>(
         .map_err(CommandError::Authentication)
 }
 
-fn persist_saved_login<R: tauri::Runtime>(
+pub(crate) fn persist_saved_login<R: tauri::Runtime>(
     handle: &tauri::AppHandle<R>,
     settings: &crate::settings::SettingsState,
     user: &User,
     raw_password: &str,
 ) -> SavedSessionStatus {
     if settings.get().stay_signed_in {
-        if crate::session_store::save(&user.name, raw_password)
-            && crate::settings::record_last_user(handle, settings, Some(user.name.clone()))
+        if crate::session_store::save(user.login_name(), raw_password)
+            && crate::settings::record_last_user(
+                handle,
+                settings,
+                Some(user.login_name().to_owned()),
+            )
         {
             SavedSessionStatus::Saved
         } else {
             // Never advertise an older or absent credential as a saved login.
-            crate::session_store::clear(&user.name);
+            crate::session_store::clear(user.login_name());
             crate::settings::record_last_user(handle, settings, None);
             SavedSessionStatus::Failed
         }
     } else {
-        crate::session_store::clear(&user.name);
+        crate::session_store::clear(user.login_name());
         crate::settings::record_last_user(handle, settings, None);
         SavedSessionStatus::Disabled
     }
 }
 
 /// Retry only from the unlocked, exact current session. The native runtime owns
-/// the raw keystore password; no secret is returned to or retained by the UI.
+/// the account login password; no secret is returned to or retained by the UI.
 #[tauri::command]
 pub async fn retry_saved_session<R: tauri::Runtime>(
     owner: String,
@@ -428,12 +469,12 @@ pub async fn retry_saved_session<R: tauri::Runtime>(
                 return Err(CommandError::Authorization("app is locked".into()));
             }
             node_state.check_installation(&lease)?;
-            let runtime = runtime.as_ref().ok_or_else(CommandError::not_started)?;
+            runtime.as_ref().ok_or_else(CommandError::not_started)?;
             Ok(persist_saved_login(
                 &app_handle,
                 &settings_state,
                 &info.user,
-                runtime.restart_password(),
+                &info.account_login_password,
             ))
         })
         .map_err(CommandError::Authorization)?
@@ -481,7 +522,7 @@ async fn login_impl_guarded(
     }
 
     let normalized_username = username.trim().to_string();
-    let normalized_password = password.trim().to_string();
+    let raw_password = password;
 
     // The Argon2 password KDF inside auth_service.login is CPU-bound and would pin a tokio
     // worker for its full duration. Run credential verification and its atomic session
@@ -489,13 +530,13 @@ async fn login_impl_guarded(
     let auth_service = app_state.auth_service().clone();
     let auth_result = {
         let normalized_username = normalized_username.clone();
-        let normalized_password = normalized_password.clone();
+        let raw_password = raw_password.clone();
         tokio::task::spawn_blocking(move || {
             // The blocking operation owns auth serialization even if its IPC
             // future is cancelled. Publication belongs to this actual result.
             let _auth = auth_operation;
             let (user, token, lease) =
-                auth_service.login_session(normalized_username, normalized_password)?;
+                auth_service.login_session(normalized_username, raw_password)?;
             Ok::<_, AuthError>(AuthOutcome {
                 user: user.clone(),
                 lease,
@@ -542,7 +583,7 @@ pub async fn logout<R: tauri::Runtime>(
         .map_err(CommandError::Authentication)?;
     let username = app_state
         .session()
-        .matching(&lease, |info| info.user.name.clone())
+        .matching(&lease, |info| info.user.login_name().to_owned())
         .map_err(CommandError::Authentication)?;
     #[cfg(test)]
     if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
@@ -1846,6 +1887,7 @@ mod tests {
         User {
             user_id: owner.into(),
             name: owner.into(),
+            account_login_name: None,
             display_name: owner.into(),
             address: "fixture".into(),
             created_at: 0,
@@ -2188,6 +2230,36 @@ mod tests {
             let v = serde_json::to_value(&err).unwrap();
             assert_eq!(v["kind"], kind, "kind tag for {err:?}");
             assert!(v["message"].is_string(), "message is a string for {err:?}");
+        }
+    }
+
+    #[test]
+    fn device_link_errors_preserve_the_stage_and_diagnostic_in_ipc() {
+        use mesh_talk_core::node::{LinkingError, NodeError};
+        use mesh_talk_core::transport::TransportError;
+        let cases = [
+            (LinkingError::NoDirectRoute, "link-no-direct-route"),
+            (
+                LinkingError::Connection(TransportError::Io(
+                    std::io::ErrorKind::ConnectionRefused.into(),
+                )),
+                "link-connection",
+            ),
+            (LinkingError::ResponseTimeout, "link-timeout"),
+            (LinkingError::Closed, "link-rejected"),
+            (LinkingError::UpgradeRequired, "link-upgrade-required"),
+            (LinkingError::InvalidResponse, "link-protocol"),
+            (
+                LinkingError::Protocol(TransportError::FrameTooLarge(100_000)),
+                "link-protocol",
+            ),
+        ];
+        for (error, kind) in cases {
+            let expected = NodeError::Linking(error);
+            let message = expected.to_string();
+            let value = serde_json::to_value(CommandError::from(expected)).unwrap();
+            assert_eq!(value["kind"], kind);
+            assert_eq!(value["message"], message);
         }
     }
 

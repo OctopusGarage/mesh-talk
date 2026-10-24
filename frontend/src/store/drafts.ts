@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { draftsApi } from "@/lib/api/drafts";
+import type { DraftChange, DraftVersion } from "@/lib/api/drafts";
 import type { MessageProtection } from "@/lib/types";
+import { captureRuntimeOwner, currentRuntimeAccountId } from "./ownership";
 
 type Scope = [owner: string, generation: number, key: string];
 interface DraftAdmissionResult {
@@ -15,7 +17,12 @@ interface DraftState {
   pending: Record<string, boolean>;
   loaded: boolean;
   error: "load" | "save" | null;
-  start: (owner: string, generation: number) => Promise<void>;
+  start: (
+    owner: string,
+    generation: number,
+    accountId?: string,
+  ) => Promise<void>;
+  refresh: () => Promise<void>;
   reset: () => void;
   edit: (...args: [...Scope, text: string]) => void;
   setProtection: (
@@ -33,11 +40,15 @@ interface DraftState {
 }
 
 /** Owns durable text/policy and transient admission; none of its callbacks cross sessions. */
-export function createDraftStore(api: typeof draftsApi) {
+export function createDraftStore(api: Pick<typeof draftsApi, "load" | "save">) {
   let epoch = 0;
   let session = "";
   let dirty = false;
   let revisions: Record<string, number> = {};
+  let versions: Record<string, DraftVersion> = {};
+  let dirtyKeys = new Set<string>();
+  let accountId: string | undefined;
+  let refreshRequest = 0;
   let idle: ReturnType<typeof setTimeout> | undefined;
   let writes = Promise.resolve();
   const cancelTimers = () => {
@@ -53,6 +64,10 @@ export function createDraftStore(api: typeof draftsApi) {
     };
     const touch = (key: string) => {
       revisions[key] = (revisions[key] ?? 0) + 1;
+    };
+    const locallyChanged = (key: string) => {
+      touch(key);
+      dirtyKeys.add(key);
     };
     const changed = (immediate = false) => {
       dirty = true;
@@ -73,6 +88,9 @@ export function createDraftStore(api: typeof draftsApi) {
         cancelTimers();
         dirty = false;
         revisions = {};
+        versions = {};
+        dirtyKeys = new Set();
+        accountId = undefined;
         session = "";
         writes = Promise.resolve();
         set({
@@ -84,14 +102,18 @@ export function createDraftStore(api: typeof draftsApi) {
           error: null,
         });
       },
-      start: async (owner, generation) => {
+      start: async (owner, generation, currentAccount) => {
         get().reset();
+        accountId = currentAccount;
         const run = epoch;
         set({ owner, generation });
         try {
-          const snapshot = await api.load(owner);
+          const snapshot = await api.load(owner, currentAccount);
           if (epoch !== run) return;
+          if (snapshot.account_id && snapshot.account_id !== currentAccount)
+            throw new Error("Draft account changed");
           session = snapshot.session;
+          versions = snapshot.versions ?? {};
           set({
             texts: snapshot.drafts,
             protections: snapshot.protections ?? {},
@@ -101,13 +123,60 @@ export function createDraftStore(api: typeof draftsApi) {
           if (epoch === run) set({ error: "load" });
         }
       },
+      refresh: async () => {
+        const run = epoch;
+        const request = ++refreshRequest;
+        const owner = get().owner;
+        if (!owner || !get().loaded) return;
+        try {
+          const snapshot = await api.load(owner, accountId);
+          if (
+            epoch !== run ||
+            request !== refreshRequest ||
+            snapshot.session !== session ||
+            (snapshot.account_id && snapshot.account_id !== accountId)
+          )
+            return;
+          const texts = { ...snapshot.drafts };
+          const protections = { ...(snapshot.protections ?? {}) };
+          const nextVersions = { ...(snapshot.versions ?? {}) };
+          for (const key of new Set([
+            ...dirtyKeys,
+            ...Object.keys(get().pending),
+          ])) {
+            if (get().texts[key]) texts[key] = get().texts[key];
+            else delete texts[key];
+            if (get().protections[key])
+              protections[key] = get().protections[key];
+            else delete protections[key];
+            if (versions[key]) nextVersions[key] = versions[key];
+            else delete nextVersions[key];
+          }
+          for (const key of new Set([
+            ...Object.keys(get().texts),
+            ...Object.keys(texts),
+            ...Object.keys(get().protections),
+            ...Object.keys(protections),
+          ])) {
+            if (
+              get().texts[key] !== texts[key] ||
+              get().protections[key] !== protections[key]
+            )
+              touch(key);
+          }
+          versions = nextVersions;
+          set({ texts, protections });
+        } catch {
+          /* Retain the last readable snapshot and all local edits. */
+        }
+      },
       edit: (owner, generation, key, text) => {
         if (!current(owner, generation) || (get().texts[key] ?? "") === text)
           return;
         const texts = { ...get().texts };
         if (text) texts[key] = text;
         else delete texts[key];
-        touch(key);
+        locallyChanged(key);
         set({ texts });
         changed(!text);
       },
@@ -120,7 +189,7 @@ export function createDraftStore(api: typeof draftsApi) {
         const protections = { ...get().protections };
         if (protection) protections[key] = protection;
         else delete protections[key];
-        touch(key);
+        locallyChanged(key);
         set({ protections });
         changed(!protection);
       },
@@ -169,7 +238,7 @@ export function createDraftStore(api: typeof draftsApi) {
             const protections = { ...get().protections };
             delete texts[key];
             delete protections[key];
-            touch(key);
+            locallyChanged(key);
             set({ texts, protections, pending });
             changed(true);
           } else set({ pending });
@@ -188,11 +257,51 @@ export function createDraftStore(api: typeof draftsApi) {
         dirty = false;
         const run = epoch;
         const savedSession = session;
+        const savedAccount = accountId;
+        const keys = [...dirtyKeys];
+        const savedRevisions = { ...revisions };
         writes = writes.then(async () => {
           if (epoch !== run) return;
           try {
-            await api.save(owner, savedSession, texts, protections);
+            const changes: Record<string, DraftChange> = Object.fromEntries(
+              keys.map((key) => [
+                key,
+                {
+                  text: texts[key] ?? "",
+                  ...(protections[key] ? { protection: protections[key] } : {}),
+                  expected: versions[key] ?? null,
+                },
+              ]),
+            );
+            const snapshot = savedAccount
+              ? await api.save(
+                  owner,
+                  savedSession,
+                  texts,
+                  protections,
+                  savedAccount,
+                  changes,
+                )
+              : await api.save(owner, savedSession, texts, protections);
             if (epoch === run) {
+              if (snapshot?.versions)
+                for (const key of keys) {
+                  if (snapshot.versions[key])
+                    versions[key] = snapshot.versions[key];
+                  else delete versions[key];
+                }
+              const conflicts = new Set(snapshot?.conflicts ?? []);
+              for (const key of keys)
+                if (
+                  !conflicts.has(key) &&
+                  revisions[key] === savedRevisions[key]
+                )
+                  dirtyKeys.delete(key);
+              if (conflicts.size) {
+                dirty = true;
+                set({ error: "save" });
+                return;
+              }
               if (get().texts === texts && get().protections === protections)
                 dirty = false;
               set({ error: null });
@@ -211,3 +320,22 @@ export function createDraftStore(api: typeof draftsApi) {
 }
 
 export const useDrafts = createDraftStore(draftsApi);
+
+/** Explicit kept-source action; ordinary account startup never imports local legacy drafts. */
+export async function publishDraftsBeforeLink(owner: string) {
+  const lease = captureRuntimeOwner();
+  const account = currentRuntimeAccountId();
+  const current = () =>
+    lease.owner === owner &&
+    lease.current() &&
+    currentRuntimeAccountId() === account;
+  if (!account || !current()) throw new Error("Draft account is not ready");
+  await useDrafts.getState().flush();
+  if (!current()) throw new Error("Draft account changed");
+  if (useDrafts.getState().error)
+    throw new Error("Unfinished drafts could not be saved");
+  const result = await draftsApi.publishLegacy(owner, account);
+  if (!current()) throw new Error("Draft account changed");
+  await useDrafts.getState().refresh();
+  return result;
+}

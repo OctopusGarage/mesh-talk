@@ -11,9 +11,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct User {
     /// Unique identifier for the user.
     pub user_id: String,
-    /// The login username — the immutable handle the on-disk store is namespaced by and
-    /// the key the keychain / auto-login use. Not shown to peers; see `display_name`.
+    /// Immutable local storage namespace. User-facing sign-in uses `login_name()`.
     pub name: String,
+    /// Shared account login name, distinct from this installation's storage namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_login_name: Option<String>,
     /// The editable, peer-facing display name (nickname). Defaults to `name` until the
     /// user changes it. This is what the node advertises in its announce.
     pub display_name: String,
@@ -28,6 +30,10 @@ pub struct User {
 }
 
 impl User {
+    pub fn login_name(&self) -> &str {
+        self.account_login_name.as_deref().unwrap_or(&self.name)
+    }
+
     /// Update the last-seen timestamp to now and mark the user online.
     pub fn update_last_seen(&mut self) {
         self.last_seen = SystemTime::now()

@@ -28,6 +28,7 @@ import {
 } from "@/lib/unreadStorage";
 import {
   emptyReception,
+  applyAccountSeen,
   mergeReception,
   receiveIdentity,
   viewIdentities,
@@ -125,6 +126,72 @@ const BOOT_TIMEOUT_MS = 30_000;
 const BOOT_POLL_MS = 500;
 const BOOT_RECOVERY_INTERVAL_MS = 10_000;
 
+/** Both startup and full runtime identities bind persisted reception exactly once. */
+function applyVerifiedIdentity(
+  set: Set,
+  identity: {
+    owner: string;
+    account_id: string;
+    device_id: string;
+    history_revision?: number;
+  },
+  ready: boolean,
+) {
+  const owner = identity.owner;
+  const acct = identity.account_id;
+  const persistedUnread = loadUnread(owner, acct);
+  const persistedPendingUnread = loadPendingUnread(owner, acct);
+  const persistedReception = emptyReception(
+    loadReceptionLedger(owner, acct),
+    loadUnreadOverflow(owner, acct),
+  );
+  set((state) => {
+    const sameScope = state.unreadOwner === owner && state.myAccountId === acct;
+    const invalidateScope = state.unreadOwner !== "" && !sameScope;
+    const replacedScope =
+      invalidateScope ||
+      (state.myAccountId !== "" && state.myAccountId !== acct);
+    const reception = sameScope
+      ? state
+      : mergeReception(
+          { ...persistedReception, unread: persistedUnread },
+          replacedScope ? { ...emptyReception(), unread: {} } : state,
+        );
+    const unread = reception.unread;
+    const pendingUnknownUnread = sameScope
+      ? state.pendingUnknownUnread
+      : { ...persistedPendingUnread };
+    if (!sameScope && !replacedScope)
+      for (const [sender, count] of Object.entries(state.pendingUnknownUnread))
+        pendingUnknownUnread[sender] = Math.min(
+          1_000_000,
+          (pendingUnknownUnread[sender] ?? 0) + count,
+        );
+    return {
+      ...(invalidateScope ? invalidateConversationIdentity(state) : {}),
+      ...(!sameScope
+        ? {
+            ...reception,
+            accountSeen: reception.accountSeen,
+            historyBaselines: Object.keys(persistedReception.ledger),
+            historyFullBaselines: loadFullHistoryBaselines(owner, acct),
+          }
+        : {}),
+      identityEpoch: invalidateScope
+        ? state.identityEpoch + 1
+        : state.identityEpoch,
+      historyRevision: identity.history_revision ?? null,
+      myId: identity.device_id,
+      myAccountId: acct,
+      unread,
+      pendingUnknownUnread,
+      unreadOwner: owner,
+      ready,
+      bootFailed: false,
+    };
+  });
+}
+
 /**
  * Poll my_id/account_id until the node finishes opening (post-login KDF unlock takes a
  * moment), then mark ready and refresh the roster. Returns true once ready, false if the
@@ -139,75 +206,108 @@ async function pollUntilReady(
 ): Promise<boolean> {
   const deadline = performance.now() + BOOT_TIMEOUT_MS;
   while (performance.now() < deadline && !isCancelled()) {
+    const owner = captureOwner().owner;
+    if (!owner) return false;
+    const identityEpoch = get().identityEpoch;
+    const superseded = () =>
+      isCancelled() || get().identityEpoch !== identityEpoch;
+    let observedStartup:
+      Awaited<ReturnType<typeof chat.ownerStartupIdentity>> | undefined;
     try {
-      const owner = captureOwner().owner;
-      if (!owner) return false;
       const identity = await readWithDeadline(
         () => chat.ownerIdentity(owner),
         Math.min(10_000, deadline - performance.now()),
       );
-      if (isCancelled() || performance.now() >= deadline) return false;
+      if (superseded() || performance.now() >= deadline) return false;
       if (identity.owner !== owner)
         throw new Error("Node identity is not ready for this owner");
+      // Remember the native ticket even when the node was already ready at the
+      // first poll, so a later transient outage cannot look like a new startup.
+      const startup = await readWithDeadline(
+        () => chat.ownerStartupIdentity(owner),
+        Math.max(1, Math.min(2_000, deadline - performance.now())),
+      ).catch(() => undefined);
+      if (superseded() || performance.now() >= deadline) return false;
+      if (startup === null && get().startupId !== null) {
+        observedStartup = null;
+        throw new Error("Runtime startup retired during identity observation");
+      }
+      if (startup?.owner === owner && startup.startup_id) {
+        if (
+          startup.phase !== "ready" ||
+          startup.account_id !== identity.account_id ||
+          startup.device_id !== identity.device_id
+        ) {
+          observedStartup = startup;
+          throw new Error(
+            "Runtime startup changed during identity observation",
+          );
+        }
+        set({ startupId: startup.startup_id });
+      }
+      if (identity.display_name && useAuth.getState().user?.id === owner)
+        useAuth.setState((state) => ({
+          user: state.user
+            ? { ...state.user, display_name: identity.display_name! }
+            : null,
+        }));
+      applyVerifiedIdentity(set, identity, true);
       const acct = identity.account_id;
-      const persistedUnread = loadUnread(owner, acct);
-      const persistedPendingUnread = loadPendingUnread(owner, acct);
-      const persistedReception = emptyReception(
-        loadReceptionLedger(owner, acct),
-        loadUnreadOverflow(owner, acct),
-      );
-      set((state) => {
-        const sameScope =
-          state.unreadOwner === owner && state.myAccountId === acct;
-        const invalidateScope = state.unreadOwner !== "" && !sameScope;
-        const replacedScope =
-          invalidateScope ||
-          (state.myAccountId !== "" && state.myAccountId !== acct);
-        const reception = sameScope
-          ? state
-          : mergeReception(
-              { ...persistedReception, unread: persistedUnread },
-              replacedScope ? { ...emptyReception(), unread: {} } : state,
-            );
-        const unread = reception.unread;
-        const pendingUnknownUnread = sameScope
-          ? state.pendingUnknownUnread
-          : { ...persistedPendingUnread };
-        if (!sameScope && !replacedScope)
-          for (const [sender, count] of Object.entries(
-            state.pendingUnknownUnread,
-          ))
-            pendingUnknownUnread[sender] = Math.min(
-              1_000_000,
-              (pendingUnknownUnread[sender] ?? 0) + count,
-            );
-        return {
-          ...(invalidateScope ? invalidateConversationIdentity(state) : {}),
-          ...(!sameScope
-            ? {
-                ...reception,
-                historyBaselines: Object.keys(persistedReception.ledger),
-                historyFullBaselines: loadFullHistoryBaselines(owner, acct),
-              }
-            : {}),
-          identityEpoch: invalidateScope
-            ? state.identityEpoch + 1
-            : state.identityEpoch,
-          historyRevision: identity.history_revision ?? null,
-          myId: identity.device_id,
-          myAccountId: acct,
-          unread,
-          pendingUnknownUnread,
-          unreadOwner: owner,
-          ready: true,
-          bootFailed: false,
-        };
-      });
       setPushStateSupport(identity.supports_push_state ? owner : null);
       syncChatAvatarIdentity(acct, () => !isCancelled());
       await get().refreshRoster();
       return true;
     } catch {
+      if (superseded()) return false;
+      try {
+        const startup =
+          observedStartup !== undefined
+            ? observedStartup
+            : await readWithDeadline(
+                () => chat.ownerStartupIdentity(owner),
+                Math.max(1, Math.min(2_000, deadline - performance.now())),
+              );
+        if (superseded() || performance.now() >= deadline) return false;
+        if (startup === null && get().startupId !== null) {
+          resetChatFileAvailability();
+          set((state) => ({
+            ...invalidateConversationIdentity(state),
+            identityEpoch: state.identityEpoch + 1,
+            myId: "",
+            myAccountId: "",
+            startupId: null,
+          }));
+        }
+        if (startup?.owner === owner && startup.startup_id) {
+          const hasIdentity =
+            (startup.phase === "identity" || startup.phase === "ready") &&
+            Boolean(startup.account_id && startup.device_id);
+          const changed = get().startupId !== startup.startup_id;
+          if ((changed || !hasIdentity) && get().myAccountId) {
+            resetChatFileAvailability();
+            set((state) => ({
+              ...invalidateConversationIdentity(state),
+              identityEpoch: state.identityEpoch + 1,
+              myId: "",
+              myAccountId: "",
+            }));
+          }
+          set({ startupId: startup.startup_id });
+          if (hasIdentity)
+            applyVerifiedIdentity(
+              set,
+              {
+                owner,
+                device_id: startup.device_id!,
+                account_id: startup.account_id!,
+              },
+              false,
+            );
+        }
+      } catch {
+        // Older native hosts and transient observation failures retain the
+        // existing full-runtime retry path; they never grant startup identity.
+      }
       if (isCancelled() || singleAttempt) return false;
       const remaining = deadline - performance.now();
       if (remaining <= 0) return false;
@@ -239,6 +339,8 @@ export interface ChatState
   extends ConversationHistoryState, OutgoingIntentContext, ChannelActions {
   bootBusy: boolean;
   bootRequest: number;
+  /** Native startup ticket; distinct from the frontend run and account identity. */
+  startupId: string | null;
   rosterRequest: number;
   favoritesRequest: number;
   ready: boolean;
@@ -276,6 +378,12 @@ export interface ChatState
   deleteContact: (account: string) => Promise<boolean>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
   markActiveRead: () => void;
+  applyAccountReadReceipts: (
+    owner: string,
+    accountId: string,
+    key: string,
+    ids: string[],
+  ) => void;
   markLegacyActiveRead: () => void;
   markMessagesViewed: (key: string, ids: string[]) => void;
   revealUnread: (key: string, id: string) => Promise<boolean>;
@@ -322,6 +430,7 @@ export interface ChatState
 
 function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
   return {
+    accountSeen: undefined,
     ...emptyConversationHistory(),
     historyRevision: state.historyRevision,
     activeRequest: state.activeRequest,
@@ -339,11 +448,13 @@ function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
 /** One empty session snapshot for initial state, login, and app lock. */
 function emptySessionData() {
   return {
+    accountSeen: undefined,
     ...emptyConversationHistory(),
     expiryNow: Date.now(),
     identityEpoch: 0,
     bootBusy: false,
     bootRequest: 0,
+    startupId: null,
     statusBusy: false,
     rosterRequest: 0,
     favoritesRequest: 0,
@@ -423,6 +534,12 @@ async function refreshRosterSnapshot(
       get().retryBoot();
       return;
     }
+    if (identity.display_name && useAuth.getState().user?.id === lease.owner)
+      useAuth.setState((state) => ({
+        user: state.user
+          ? { ...state.user, display_name: identity.display_name! }
+          : null,
+      }));
     const [peers, accounts] = await Promise.all([
       readWithDeadline(() => chat.listPeers()),
       readWithDeadline(() => chat.listAccounts()),
@@ -461,9 +578,16 @@ async function refreshRosterSnapshot(
         rawSet,
         get,
         [
-          ...accounts.map((account): Conversation => ({
+          // Saved Messages belongs to the runtime even when the contact
+          // directory has no row for our own account.
+          ...Array.from(
+            new Set([
+              ...accounts.map((account) => account.account_id),
+              identity.account_id,
+            ]),
+          ).map((accountId): Conversation => ({
             kind: "account",
-            id: account.account_id,
+            id: accountId,
             name: "",
           })),
           ...channels.map((channel): Conversation => ({
@@ -612,7 +736,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   // Re-attempt the node-id poll after a boot failure (events + roster interval from the
   // original start() are still live, so we only need to re-resolve my_id/account_id).
   retryBoot: (background = false) => {
-    const lease = captureChat(get);
+    const lease = captureChat(get, false);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     if (get().bootBusy) return;
@@ -827,6 +951,21 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       onFileProgress: (e) => {
         if (lease.current()) applyChatFileProgress(e);
       },
+      onAccountProfile: (event) => {
+        const state = get();
+        if (
+          lease.current() &&
+          useAuth.getState().user?.id === event.user.id &&
+          state.myAccountId === event.account_id &&
+          state.myId === event.device_id
+        )
+          useAuth.setState({
+            user: event.user,
+            ...(event.saved_session != null
+              ? { savedSession: event.saved_session }
+              : {}),
+          });
+      },
       onProfile: (e) => {
         if (lease.current()) applyChatProfile(e);
       },
@@ -947,6 +1086,17 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       (state.unreadIds[key]?.length ?? 0) + (state.overflowUnread[key] ?? 0);
     if (state.unread[key] !== tracked)
       rawSet({ unread: { ...state.unread, [key]: tracked } });
+  },
+
+  applyAccountReadReceipts: (owner, accountId, key, ids) => {
+    const state = get();
+    if (
+      !state.ready ||
+      state.unreadOwner !== owner ||
+      state.myAccountId !== accountId
+    )
+      return;
+    rawSet(receptionPatch(state, applyAccountSeen(state, key, ids)));
   },
 
   markActiveRead: () => {
@@ -1274,6 +1424,7 @@ function captureChat(get: Get, identitySensitive = true) {
 registerRuntimeSnapshot(() => ({
   runEpoch: useChat.getState().runEpoch,
   identityEpoch: useChat.getState().identityEpoch,
+  accountId: useChat.getState().myAccountId,
 }));
 
 export function captureChatOwnership() {
@@ -1390,12 +1541,13 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
           state,
           key,
           { ...e, own_device: own },
-          mentionsName(
-            e.text,
-            useAuth.getState().user?.display_name ||
-              useAuth.getState().user?.username ||
-              "",
-          ),
+          !e.protection &&
+            mentionsName(
+              e.text,
+              useAuth.getState().user?.display_name ||
+                useAuth.getState().user?.username ||
+                "",
+            ),
         ),
       ),
     );
