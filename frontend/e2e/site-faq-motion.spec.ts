@@ -45,42 +45,87 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
   });
 }
 
-test("rapid reversals continue from the currently displayed height", async ({
-  page,
-}) => {
-  await page.emulateMedia({ reducedMotion: "no-preference" });
-  await page.goto(`${hosted.url}?lang=en`);
-  const answer = page.locator("#faq-offline");
-  const reversal = await answer.evaluate(async (element) => {
-    const summary = element.querySelector("summary")!;
-    const closed = element.getBoundingClientRect().height;
-    summary.click();
-    // Sample partway through the authored 270 ms expansion.
-    await new Promise((resolve) => setTimeout(resolve, 70));
-    const beforeClose = element.getBoundingClientRect().height;
-    summary.click();
-    const afterClose = element.getBoundingClientRect().height;
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    const beforeReopen = element.getBoundingClientRect().height;
-    summary.click();
-    const afterReopen = element.getBoundingClientRect().height;
-    return { closed, beforeClose, afterClose, beforeReopen, afterReopen };
-  });
-  expect(reversal.beforeClose).toBeGreaterThan(reversal.closed + 1);
-  expect(Math.abs(reversal.beforeClose - reversal.afterClose)).toBeLessThan(2);
-  expect(Math.abs(reversal.beforeReopen - reversal.afterReopen)).toBeLessThan(
-    2,
+for (const deferredStart of [false, true]) {
+  test(
+    deferredStart
+      ? "rapid reversals sample a deferred native animation in flight"
+      : "rapid reversals continue from the currently displayed height",
+    async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+      await page.goto(`${hosted.url}?lang=en`);
+      const answer = page.locator("#faq-offline");
+      await answer.scrollIntoViewIfNeeded();
+      const reversal = await answer.evaluate(async (element, deferred) => {
+        // Delay only native expansion startup; geometry and effects stay real.
+        if (deferred) {
+          const animate = element.animate.bind(element);
+          let first = true;
+          element.animate = (...args: Parameters<Element["animate"]>) => {
+            const animation = animate(...args);
+            if (first) {
+              first = false;
+              animation.startTime =
+                Number(document.timeline.currentTime) + 1000;
+            }
+            return animation;
+          };
+        }
+        const sampleAt = async (animation: Animation, milliseconds: number) => {
+          await animation.ready;
+          animation.pause();
+          await animation.ready;
+          animation.currentTime = milliseconds;
+        };
+        const summary = element.querySelector("summary")!;
+        const closed = element.getBoundingClientRect().height;
+        summary.click();
+        const expansion = element.getAnimations()[0];
+        const keyframes = (expansion.effect as KeyframeEffect).getKeyframes();
+        const expanded = Number.parseFloat(
+          String(keyframes[keyframes.length - 1].height),
+        );
+        await sampleAt(expansion, 70);
+        const beforeClose = element.getBoundingClientRect().height;
+        summary.click();
+        const afterClose = element.getBoundingClientRect().height;
+        const closing = element.getAnimations()[0];
+        await sampleAt(closing, 40);
+        const beforeReopen = element.getBoundingClientRect().height;
+        summary.click();
+        const afterReopen = element.getBoundingClientRect().height;
+        return {
+          closed,
+          beforeClose,
+          afterClose,
+          beforeReopen,
+          afterReopen,
+          expanded,
+        };
+      }, deferredStart);
+      expect(reversal.beforeClose).toBeGreaterThan(reversal.closed + 1);
+      expect(reversal.beforeClose).toBeLessThan(reversal.expanded - 1);
+      expect(reversal.beforeReopen).toBeGreaterThan(reversal.closed + 1);
+      expect(reversal.beforeReopen).toBeLessThan(reversal.beforeClose - 1);
+      expect(Math.abs(reversal.beforeClose - reversal.afterClose)).toBeLessThan(
+        2,
+      );
+      expect(
+        Math.abs(reversal.beforeReopen - reversal.afterReopen),
+      ).toBeLessThan(2);
+      await expect
+        .poll(() =>
+          answer.evaluate((element) => element.getAnimations().length),
+        )
+        .toBe(0);
+      await expect(answer).toHaveAttribute("open", "");
+      expect(
+        await answer.evaluate(
+          (element) => element.scrollHeight <= element.clientHeight + 1,
+        ),
+      ).toBe(true);
+    },
   );
-  await expect
-    .poll(() => answer.evaluate((element) => element.getAnimations().length))
-    .toBe(0);
-  await expect(answer).toHaveAttribute("open", "");
-  expect(
-    await answer.evaluate(
-      (element) => element.scrollHeight <= element.clientHeight + 1,
-    ),
-  ).toBe(true);
-});
+}
 
 test("closing answers immediately remove their links from keyboard focus", async ({
   page,
