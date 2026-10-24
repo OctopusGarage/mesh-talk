@@ -360,6 +360,8 @@ pub struct Node {
     pub(in crate::node) channel_recovery:
         Mutex<HashMap<ConversationId, super::channels::ChannelRecovery>>,
     pub(in crate::node) delivery_notify: tokio::sync::Notify,
+    /// Single receive producer owns this retained mailbox-policy wake.
+    pub(in crate::node) post_office_receive_notify: tokio::sync::Notify,
     /// Local interface changes invalidate in-flight work without retiring identity or queues.
     pub(in crate::node) network_changes: tokio::sync::watch::Sender<u64>,
     pub(in crate::node) delivery_status_notify: tokio::sync::Notify,
@@ -883,6 +885,7 @@ impl Node {
             channel_recovery_notify: tokio::sync::Notify::new(),
             channel_recovery: Mutex::new(HashMap::new()),
             delivery_notify: tokio::sync::Notify::new(),
+            post_office_receive_notify: tokio::sync::Notify::new(),
             network_changes: tokio::sync::watch::channel(0).0,
             delivery_status_notify: tokio::sync::Notify::new(),
             verified_dm_pull_peers: Mutex::new(HashSet::new()),

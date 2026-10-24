@@ -1014,7 +1014,7 @@
             "reference": "docs/network-design-reference.md#session-reuse-contract"
           },
           {
-            "name": "Healthy relay receiving keeps its own cadence while a valid slow alternative retains bounded progress; unrelated roster churn cannot cancel eligible work and current policy/network changes retire owned requests",
+            "name": "Healthy relay receiving keeps its own cadence while a valid slow alternative retains bounded progress; unrelated roster churn cannot cancel eligible work, current policy/network changes retire owned requests, and mailbox switches retain a dedicated receive-worker wake for prompt cancellation and resumption",
             "reference": "docs/network-design-reference.md#session-reuse-contract"
           }
         ],

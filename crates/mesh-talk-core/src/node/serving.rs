@@ -1388,6 +1388,9 @@ impl Node {
                         }
                     }
                     _ = tokio::time::sleep_until(wake) => {},
+                    // Mailbox switches own a retained wake rather than competing
+                    // with delivery's Notify or waiting for the idle cadence.
+                    _ = self.post_office_receive_notify.notified() => break,
                     _ = network.changed() => break,
                     _ = roster.changed() => {},
                 }
