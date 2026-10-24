@@ -889,7 +889,18 @@
       "nightlyWarning": "Versões experimentais podem conter erros. Escolha Nightly para testar os próximos recursos.",
       "stableHelp": "O canal Estável recebe versões oficiais. Mudar de canal nunca instala automaticamente uma versão anterior do aplicativo.",
       "installed": "Instalada: {{version}}",
-      "stableDownload": "Baixar versão estável manualmente"
+      "stableDownload": "Baixar versão estável manualmente",
+      "updateAndRestart": "Atualizar e reiniciar",
+      "restartToUpdate": "Reiniciar para atualizar",
+      "installing": "Instalando atualização…",
+      "restarting": "Reiniciando o Mesh-Talk…",
+      "automaticHelp": "O Mesh-Talk instalará a atualização e reiniciará. O sistema pode solicitar permissão.",
+      "readyToRestart": "A atualização foi verificada. Reinicie quando estiver pronto.",
+      "downloadManually": "Baixar manualmente",
+      "finishCall": "Encerre a chamada atual antes de atualizar.",
+      "finishTransfers": "Conclua as transferências de arquivos atuais antes de atualizar.",
+      "saveDraftsFailed": "Não foi possível salvar seus rascunhos. Tente novamente antes de reiniciar.",
+      "automaticWindowsHelp": "O instalador do Windows fechará o Mesh-Talk e o reiniciará após a atualização. Se cancelar a instalação, abra o Mesh-Talk novamente para tentar de novo."
     }
   },
   "offlineConnect": {
