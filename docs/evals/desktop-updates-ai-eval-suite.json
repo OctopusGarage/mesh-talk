@@ -28,7 +28,9 @@
         "src-tauri/Cargo.toml",
         "frontend/src/lib/api/drafts.ts",
         "src-tauri/src/drafts.rs",
-        "frontend/src/store/updateRestart.test.ts"
+        "frontend/src/store/updateRestart.test.ts",
+        "crates/mesh-talk-core/src/storage/record_log.rs",
+        "scripts/release/release-api.mjs"
       ],
       "min_score": 0.9,
       "scenario": "Review the application-owned signed full-package updater without paid OS publisher certificates. The official Tauri 2.14 SDK verify/restore_update/install APIs verify version-bound signatures and perform native replacement. Inspect caller policy and tests, distinguish delegated SDK guarantees from absent physical/hosted evidence. Windows invokes on_before_exit before ShellExecute, which can fail/cancel: resources must stay usable until successful handoff. After successful Windows handoff the old process exits, so do not claim canceled installers can always show retry in the old UI. Source and SDK fixture evidence cannot certify real production discovery, session restoration, OS authorization or publication. Report only confirmed material bugs, with concrete file/symbol evidence; distinguish missing context/runtime evidence.",
