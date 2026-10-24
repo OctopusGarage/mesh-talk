@@ -259,6 +259,9 @@ for preview/run commands, unknown-path handling and the unchanged mandatory gate
 
 `src-tauri/src/updates/channel.rs` owns channel eligibility and immutable build ordering;
 `updates.rs` owns bounded GitHub discovery, exact-release revalidation and verified manual downloads.
+`updates/native.rs` owns signed native payload selection, private staging, version-bound verification
+and platform installer/restart handoff. The host never accepts installer paths or trust keys from IPC.
+`ui/store/updateRestart.ts` coordinates draft persistence and active-work deferral before installation.
 The frontend update store owns the device-local channel preference and invalidation of checked
 candidates; its IPC adapter forwards the choice without choosing packages. The existing release
 workflow and `scripts/release/` own build identity, publication and provenance.

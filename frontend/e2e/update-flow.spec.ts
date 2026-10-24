@@ -275,3 +275,91 @@ test("Nightly choice persists, discards candidates and downloads the same deskto
     channel: "nightly",
   });
 });
+
+test("a signed update offers one-click installation and retries authorization without downloading again", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const window_ = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      __updatePreparations: number;
+      __updateInstallations: number;
+      __installedUpdate?: unknown;
+    };
+    const original = window_.__TAURI_INTERNALS__.invoke;
+    window_.__updatePreparations = 0;
+    window_.__updateInstallations = 0;
+    window_.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "check_for_update")
+        return {
+          channel: "stable",
+          automatic_install: true,
+          current_version: "0.4.4",
+          latest_version: "0.4.5",
+          is_newer: true,
+          release_url:
+            "https://github.com/OctopusGarage/mesh-talk/releases/tag/v0.4.5",
+          notes: "Smoother desktop updates",
+          package_name: "mesh-talk-update_v0.4.5_macos_arm64.app.tar.gz",
+          package_size: 42,
+          edition: "default",
+        };
+      if (command === "prepare_update") {
+        window_.__updatePreparations++;
+        return {
+          path: "/private/verified-update/payload",
+          file_name: "app.tar.gz",
+          installable: true,
+        };
+      }
+      if (command === "install_update") {
+        window_.__installedUpdate = {
+          version: args.version,
+          channel: args.updateChannel,
+        };
+        if (++window_.__updateInstallations === 1)
+          throw new Error("Authorization canceled");
+        return null;
+      }
+      return original(command, args);
+    };
+  });
+  await openAbout(page);
+  await page.getByTestId("check-for-updates").click();
+  await page
+    .getByRole("button", { name: "Update and restart", exact: true })
+    .click();
+  await expect(page.getByTestId("update-error")).toContainText(
+    "Authorization canceled",
+  );
+  await expect(
+    page.getByRole("button", { name: "Download manually", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Restart to update", exact: true })
+    .click();
+  await expect(page.getByTestId("update-install-status")).toContainText(
+    "Restarting Mesh-Talk",
+  );
+  await expect(page.getByTestId("check-for-updates")).toBeDisabled();
+  expect(
+    await page.evaluate(() => {
+      const result = window as unknown as {
+        __updatePreparations: number;
+        __updateInstallations: number;
+        __installedUpdate: unknown;
+      };
+      return [
+        result.__updatePreparations,
+        result.__updateInstallations,
+        result.__installedUpdate,
+      ];
+    }),
+  ).toEqual([1, 2, { version: "0.4.5", channel: "stable" }]);
+});

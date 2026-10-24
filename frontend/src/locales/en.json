@@ -889,7 +889,18 @@
       "nightlyWarning": "Experimental builds may contain bugs. Choose Nightly to try upcoming features.",
       "stableHelp": "Stable receives official releases. Switching channels never automatically downgrades the app.",
       "installed": "Installed: {{version}}",
-      "stableDownload": "Download Stable manually"
+      "stableDownload": "Download Stable manually",
+      "updateAndRestart": "Update and restart",
+      "restartToUpdate": "Restart to update",
+      "installing": "Installing update…",
+      "restarting": "Restarting Mesh-Talk…",
+      "automaticHelp": "Mesh-Talk will install the update and restart. Your system may ask for permission.",
+      "readyToRestart": "The update is verified. Restart when you are ready.",
+      "downloadManually": "Download manually",
+      "finishCall": "Finish the current call before updating.",
+      "finishTransfers": "Finish the current file transfers before updating.",
+      "saveDraftsFailed": "Your drafts could not be saved. Try again before restarting.",
+      "automaticWindowsHelp": "The Windows installer will close Mesh-Talk and restart it after updating. If you cancel installation, reopen Mesh-Talk to try again."
     }
   },
   "offlineConnect": {

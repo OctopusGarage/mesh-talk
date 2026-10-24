@@ -50,7 +50,8 @@
         "scripts/diagnostics/version-contract.test.mjs",
         "scripts/diagnostics/version-automation.test.mjs",
         "site/index.html",
-        "docs/updates.md"
+        "docs/updates.md",
+        "scripts/diagnostics/release-updater.test.mjs"
       ],
       "node": [
         "scripts/diagnostics/release-assets.test.mjs",
@@ -63,7 +64,8 @@
         "scripts/diagnostics/release-verifier.test.mjs",
         "scripts/diagnostics/release-workflow.test.mjs",
         "scripts/diagnostics/version-contract.test.mjs",
-        "scripts/diagnostics/version-automation.test.mjs"
+        "scripts/diagnostics/version-automation.test.mjs",
+        "scripts/diagnostics/release-updater.test.mjs"
       ],
       "escalation": [
         "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Every desktop and relay platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Manual draft/maintenance changes require hosted evidence for explicit main-only preparation, unpublished draft-only creation, exact tagged build dispatch and reviewed next-target PR creation; local mocks do not prove those settings and actual preparation/publication requires explicit release intent. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate."
@@ -91,6 +93,10 @@
           {
             "name": "Stable notes require one nonempty exact-version CHANGELOG section; Nightly never borrows another version. Templates retain download/installation/source verification, GitHub automatic product notes are disabled, and release-state reads revalidate cached responses.",
             "reference": "docs/updates.md#manual-release-preparation"
+          },
+          {
+            "name": "Optional free updater signing binds the full logical build version; standalone native payloads and signatures must match the verified ZIP and form a complete platform matrix. Missing keys keep the manual path; partial signing configuration fails closed.",
+            "reference": "docs/updates.md#free-updater-signing-setup"
           }
         ]
       }
@@ -289,7 +295,8 @@
         "docs/evals/tray-menu-ai-eval-suite.json",
         "docs/evals/validation-velocity-ai-eval-suite.json",
         "docs/evals/prompts/agent-contract-evaluator.md",
-        "scripts/test-ai-eval.mjs"
+        "scripts/test-ai-eval.mjs",
+        "docs/evals/desktop-updates-ai-eval-suite.json"
       ],
       "node": ["scripts/test-ai-eval.mjs"],
       "escalation": [

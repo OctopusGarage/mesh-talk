@@ -15,8 +15,13 @@ const mocks = vi.hoisted(() => ({
   check: vi.fn(),
   download: vi.fn(),
   cancel: vi.fn(),
+  prepare: vi.fn(),
+  install: vi.fn(),
   openUrl: vi.fn(),
   revealItemInDir: vi.fn(),
+}));
+vi.mock("@/store/updateRestart", () => ({
+  prepareUpdateRestart: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/api", () => ({ updates: mocks }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
@@ -185,4 +190,50 @@ it("reports a retryable check failure and an up-to-date installed identity", asy
   );
   expect(host.querySelector('[role="alert"]')).toBeNull();
   expect(host.querySelector('[data-testid="download-update"]')).toBeNull();
+});
+
+it("offers one-click updates only for eligible signed releases and shows native installation progress", async () => {
+  mocks.check.mockResolvedValue({ ...candidate, automatic_install: true });
+  mocks.prepare.mockResolvedValue({
+    path: "/private/payload",
+    file_name: "app.tar.gz",
+    installable: true,
+  });
+  let finish!: () => void;
+  let progress!: (value: "installing" | "restarting") => void;
+  mocks.install.mockImplementation((_version, callback) => {
+    progress = callback;
+    return new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+  });
+  await click("Check for updates");
+  expect(button("Update and restart").disabled).toBe(false);
+  await click("Update and restart");
+  expect(host.textContent).toContain("Installing update");
+  expect(select().disabled).toBe(true);
+  expect(
+    host.querySelector('button[data-testid="download-update"]'),
+  ).toBeNull();
+  await act(async () => progress("restarting"));
+  expect(host.textContent).toContain("Restarting Mesh-Talk");
+  await act(async () => finish());
+});
+
+it("keeps native install failures recoverable with retry and a manual release link", async () => {
+  mocks.check.mockResolvedValue({ ...candidate, automatic_install: true });
+  mocks.prepare.mockResolvedValue({
+    path: "/private/payload",
+    file_name: "app.tar.gz",
+    installable: true,
+  });
+  mocks.install.mockRejectedValue(new Error("Authorization canceled"));
+  await click("Check for updates");
+  await click("Update and restart");
+  expect(button("Restart to update").disabled).toBe(false);
+  expect(host.textContent).toContain("Authorization canceled");
+  expect(host.textContent).not.toContain("DEB or RPM");
+  expect(host.textContent).not.toContain("Show in Downloads");
+  await click("Download manually");
+  expect(mocks.openUrl).toHaveBeenLastCalledWith(candidate.release_url);
 });
