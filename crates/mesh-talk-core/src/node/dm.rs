@@ -12,10 +12,18 @@ impl Node {
         &self,
         target_account_id: &str,
     ) -> Vec<PeerRecord> {
+        self.select_account_fanout_targets(target_account_id, self.routing_peers())
+    }
+
+    fn select_account_fanout_targets(
+        &self,
+        target_account_id: &str,
+        peers: Vec<PeerRecord>,
+    ) -> Vec<PeerRecord> {
         let my_account = self.account_id();
         let me = self.user_id();
         let mut seen = std::collections::HashSet::new();
-        self.routing_peers()
+        peers
             .into_iter()
             .filter(|p| {
                 (p.account_id.as_deref() == Some(target_account_id)
@@ -221,12 +229,6 @@ impl Node {
     ) -> Result<EventId, NodeError> {
         authorize(&mut || Ok(()))?;
         let self_target = target == self.account_id();
-        // Capture every fanout device's verified binding before building the
-        // durable intent. An external contact grant persists only that account;
-        // newly discovered own siblings also need their certified account here.
-        self.cached_peer_snapshot_async()
-            .await
-            .map_err(|error| NodeError::Log(crate::eventlog::LogError::Io(error)))?;
         let dests = self.account_fanout_targets(target);
         if !self_target
             && !dests
@@ -289,6 +291,32 @@ impl Node {
         logical: Option<EventId>,
         request: Option<super::delivery_store::RequestRecord>,
     ) -> Result<EventId, NodeError> {
+        let dests = if let Some(target_account) = target.as_deref() {
+            // Account fanout needs durable bindings for own siblings as well as
+            // the external recipient. Select from this exact persisted snapshot
+            // inside final host authorization, after the awaited privacy grant.
+            let mut peers = self
+                .cached_peer_snapshot()
+                .map_err(|error| NodeError::Log(crate::eventlog::LogError::Io(error)))?;
+            let mut seen: std::collections::HashSet<_> =
+                peers.iter().map(|peer| peer.public.user_id()).collect();
+            peers.extend(
+                self.cached_routing_peers()
+                    .into_iter()
+                    .filter(|peer| seen.insert(peer.public.user_id())),
+            );
+            let dests = self.select_account_fanout_targets(target_account, peers);
+            if target_account != self.account_id()
+                && !dests
+                    .iter()
+                    .any(|peer| peer.account_id.as_deref() == Some(target_account))
+            {
+                return Err(NodeError::UnknownPeer(target_account.to_owned()));
+            }
+            dests
+        } else {
+            dests
+        };
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut store).map_err(NodeError::Log)?;
         store
@@ -301,9 +329,14 @@ impl Node {
                     .historical_author(&peer.public.ed25519_pub)
                     .filter(|p| p.public() == peer.public)
                     .and_then(|p| p.account_id());
-                (peer, proof_account)
+                if target.is_some() && proof_account != peer.account_id {
+                    return Err(NodeError::Authorization(
+                        "account fanout binding changed before acceptance".into(),
+                    ));
+                }
+                Ok((peer, proof_account))
             })
-            .collect();
+            .collect::<Result<_, NodeError>>()?;
         let ratchet = self.dm_ratchet.lock().expect("ratchet lock not poisoned");
         let log = self.log.lock().expect("log lock not poisoned");
         let own = self.identity.public();

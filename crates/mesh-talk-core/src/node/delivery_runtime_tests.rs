@@ -384,6 +384,81 @@ async fn owner_invalidated_at_privacy_gate_cannot_grant_or_stage_file() {
 }
 
 #[tokio::test]
+async fn account_acceptance_does_not_keep_an_unbound_sibling_forgotten_at_privacy_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let remote = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&bob, &remote, "Bob", 1);
+    let (node, _) = node(dir.path(), DeviceIdentity::generate(), account, &proof);
+    let sibling = DeviceIdentity::generate();
+    let sibling_proof = Announce::new_with_account(&sibling, &node.account, "Sibling", 2);
+    node.roster.lock().unwrap().update(
+        &sibling_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &node.user_id(),
+    );
+    node.configure_privacy(
+        dir.path(),
+        "pw",
+        &node.signed_announce("Alice", 3),
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    assert!(
+        node.historical_author(&sibling.public().ed25519_pub)
+            .is_none()
+    );
+    let gate = node.privacy.gate.clone().write_owned().await;
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let worker = node.clone();
+    let target = remote.account_id();
+    let pending = tokio::spawn(async move {
+        let mut entered = Some(entered);
+        worker
+            .enqueue_to_account_if(
+                &target,
+                b"current bound destinations only",
+                None,
+                |commit| {
+                    let result = commit();
+                    if result.is_ok()
+                        && let Some(entered) = entered.take()
+                    {
+                        let _ = entered.send(());
+                    }
+                    result
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    node.roster.lock().unwrap().forget(&sibling.public());
+    drop(gate);
+    let id = pending.await.unwrap().unwrap();
+    let delivery = node.delivery.lock().unwrap();
+    let destinations = &delivery.message(id).unwrap().destinations;
+    assert_eq!(
+        destinations.len(),
+        1,
+        "forgotten uncached siblings must not become unbound accepted destinations"
+    );
+    assert_eq!(destinations[0].device, bob.public());
+    assert_eq!(
+        destinations[0].account.as_deref(),
+        Some(remote.account_id().as_str())
+    );
+    assert!(
+        node.historical_author(&sibling.public().ed25519_pub)
+            .is_none(),
+        "acceptance must not resurrect the forgotten discovery proof"
+    );
+}
+
+#[tokio::test]
 async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance() {
     let dir = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
