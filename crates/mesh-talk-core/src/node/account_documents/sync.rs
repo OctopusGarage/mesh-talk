@@ -314,9 +314,16 @@ impl Node {
             cursor.pending = false;
             return Ok(());
         }
+        let attempted_domain = DOMAINS[cursor.domain];
         let result = self.pull_document_exchange(peer, cursor).await;
         if result.is_err()
-            && (cursor.control_retry_at.is_some() || cursor.custody_retry_at.is_some())
+            && match attempted_domain {
+                AccountDocumentDomain::ChannelCustody => cursor.custody_retry_at.is_some(),
+                AccountDocumentDomain::DmReaction | AccountDocumentDomain::DmRecall => {
+                    cursor.control_retry_at.is_some()
+                }
+                _ => false,
+            }
         {
             return result;
         }

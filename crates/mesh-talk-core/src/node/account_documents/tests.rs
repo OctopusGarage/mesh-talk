@@ -1857,6 +1857,85 @@ async fn unsupported_control_domains_do_not_pause_legacy_draft_updates() {
 }
 
 #[tokio::test]
+async fn unsupported_channel_custody_cooldown_does_not_hide_legacy_document_failure() {
+    use crate::{discovery::roster::PeerRecord, node::account_devices::AccountDevice};
+    use std::time::Instant;
+    use tokio::net::TcpListener;
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&directory.path().join("legacy"), &account);
+    let target = node(&directory.path().join("target"), &account);
+    for (owner, sibling) in [(&source, &target), (&target, &source)] {
+        owner
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: sibling.identity.public(),
+                certificate: account.certify(&sibling.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = source.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let owner = serving.clone();
+            tokio::spawn(async move {
+                let mut connection = owner.privacy_accept(stream).await.unwrap();
+                // A history-only legacy client closes every document request,
+                // including capability negotiation and the legacy fallback.
+                let _ = connection.recv().await;
+            });
+        }
+    });
+    let peer = PeerRecord {
+        public: source.identity.public(),
+        addr: address,
+        name: "history-only legacy sibling".into(),
+        account_id: Some(account.account_id()),
+        last_seen: Instant::now(),
+        post_office: false,
+        routes: vec![],
+    };
+    let mut cursor = sync::DocumentSyncCursor::default();
+    assert!(
+        target
+            .pull_account_documents_page(&peer, &mut cursor)
+            .await
+            .is_err()
+    );
+    assert!(
+        cursor.pending,
+        "optional rejection must still try older domains"
+    );
+    assert_eq!(cursor.domain, AccountDocumentDomain::Draft as usize);
+    assert!(
+        target
+            .pull_account_documents_page(&peer, &mut cursor)
+            .await
+            .is_err()
+    );
+    assert!(
+        !cursor.pending,
+        "an unrelated optional cooldown must not keep failed legacy work pending"
+    );
+    assert!(cursor.status(target.device_sync_policy()).2);
+    target
+        .pull_account_documents_page(&peer, &mut cursor)
+        .await
+        .unwrap();
+    assert!(
+        !cursor.pending,
+        "the retry cooldown must allow history to settle"
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn unsupported_channel_custody_does_not_pause_v2_controls_or_legacy_drafts() {
     use crate::{
         discovery::roster::PeerRecord,
