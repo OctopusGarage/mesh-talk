@@ -73,6 +73,10 @@
         "guide": "docs/updates.md",
         "invariants": [
           {
+            "name": "Nightly preflight waits at most four hours for missing or pending exact-source checks; completed unsuccessful checks, scanning alerts and API errors fail immediately. Final publication remains an immediate strict source recheck.",
+            "reference": "docs/updates.md#publish-nightly-builds"
+          },
+          {
             "name": "Stable publication remains explicit; Nightly is opt-in, main-only and never latest, with all platform assets verified before visibility; desktop packages omit optional packs and edition suffixes.",
             "reference": "docs/updates.md"
           },

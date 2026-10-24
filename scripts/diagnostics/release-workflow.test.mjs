@@ -90,3 +90,12 @@ test("Nightly runs gate main before the shared matrix and publish verified prere
   assert.match(verify, /make_latest: false/);
   assert.ok(verify.indexOf("release-state.mjs record") < verify.indexOf("release-state.mjs publish"));
 });
+
+
+test("Nightly preflight waits within a bounded job while publication retains immediate checks", () => {
+  const preflight = workflow.split("  preflight:\n")[1].split("  build-release:\n")[0];
+  assert.match(preflight, /timeout-minutes: 250/);
+  assert.match(preflight, /check-source-checks\.mjs "\$GITHUB_REPOSITORY" "\$GITHUB_SHA" --wait/);
+  const publication = workflow.split("  preflight:\n")[1].split("  build-release:\n")[1];
+  assert.doesNotMatch(publication, /check-source-checks\.mjs[^\n]*--wait/);
+});

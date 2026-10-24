@@ -87,8 +87,12 @@ verifiers. Stable and Nightly reuse the same platform matrix and verification ow
   artifacts only. Nightly publication rejects tag refs, other branches and simultaneous Stable
   publication requests. Only trusted main-branch code may use publication credentials.
 - Preflight requires the existing exact-source CI/health/E2E/security checks before expensive
-  Nightly builds. A failed or pending required check blocks publication; wait for those checks
-  and retry. Required checks are owned by `scripts/release/check-source-checks.mjs`.
+  Nightly builds. Missing or pending required checks are polled once per minute for up to four
+  hours on the selected source SHA, so CI finishing after the scheduled start can proceed
+  automatically. Completed unsuccessful checks, open scanning alerts and API errors fail
+  immediately; a timeout reports the checks still pending. Retry after resolving those failures.
+  Final publication rechecks immediately and never accepts pending checks. Required checks and
+  bounded waiting are owned by `scripts/release/check-source-checks.mjs`.
 - CI generates `v<workspace-version>-nightly.<run-id>.<attempt>` and binds that technical tag to
   the exact source SHA. There is no manual version bump or official Stable tag. Never reuse or
   move a published Nightly tag, and never replace its uploaded assets.
