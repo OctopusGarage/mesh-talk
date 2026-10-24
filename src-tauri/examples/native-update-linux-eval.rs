@@ -10,6 +10,28 @@ mod linux {
     const OLD: &str = concat!(env!("CARGO_PKG_VERSION"), "-nightly.900001.1");
     const NEW: &str = concat!(env!("CARGO_PKG_VERSION"), "-nightly.900001.2");
 
+    struct FixtureAssets(Vec<u8>);
+
+    impl tauri::Assets<tauri::Wry> for FixtureAssets {
+        fn get(&self, key: &tauri::utils::assets::AssetKey) -> Option<std::borrow::Cow<'_, [u8]>> {
+            (key.as_ref() == "/index.html").then_some(std::borrow::Cow::Borrowed(self.0.as_slice()))
+        }
+
+        fn iter(&self) -> Box<tauri::utils::assets::AssetsIter<'_>> {
+            Box::new(std::iter::once((
+                std::borrow::Cow::Borrowed("/index.html"),
+                std::borrow::Cow::Borrowed(self.0.as_slice()),
+            )))
+        }
+
+        fn csp_hashes(
+            &self,
+            _: &tauri::utils::assets::AssetKey,
+        ) -> Box<dyn Iterator<Item = tauri::utils::assets::CspHash<'_>> + '_> {
+            Box::new(std::iter::empty())
+        }
+    }
+
     fn record(root: &Path, event: &str) {
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -48,25 +70,37 @@ mod linux {
         context.config_mut().identifier = "com.mesh-talk.updater-linux-acceptance".into();
         context.config_mut().product_name = Some("UpdaterAcceptance".into());
         context.config_mut().app.windows.clear();
+        context.config_mut().build.dev_url = None;
+        context.set_assets(Box::new(FixtureAssets(format!("<!doctype html><html><body style='background:#fff;color:#111;padding:32px;font:20px sans-serif'><h1>Mesh Talk updater acceptance</h1><p>{identity}</p></body></html>").into_bytes())));
         let setup_root = root.clone();
         let app = tauri::Builder::default()
             .plugin(tauri_plugin_updater::Builder::new().build())
             .setup(move |app| {
-                let window = tauri::WebviewWindowBuilder::new(app, "acceptance",
-                    tauri::WebviewUrl::External("about:blank".parse().unwrap()))
-                    .title(format!("UpdaterAcceptance {identity}"))
-                    .inner_size(640.0, 320.0).build()?;
-                window.eval(&format!("document.body.innerHTML = '<h1>Mesh Talk updater acceptance</h1><p>{identity}</p>'; document.body.style = 'background:#fff;color:#111;padding:32px;font:20px sans-serif'"))?;
+                tauri::WebviewWindowBuilder::new(
+                    app,
+                    "acceptance",
+                    tauri::WebviewUrl::App("index.html".into()),
+                )
+                .title(format!("UpdaterAcceptance {identity}"))
+                .inner_size(640.0, 320.0)
+                .build()?;
                 let root = setup_root.clone();
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
-                    assert_eq!(tauri::process::current_binary(&handle.env()).unwrap(), appimage);
+                    assert_eq!(
+                        tauri::process::current_binary(&handle.env()).unwrap(),
+                        appimage
+                    );
                     let marker = root.join("home/.mesh-talk/acceptance-marker");
                     assert_eq!(fs::read_to_string(marker).unwrap(), "preserve fixture data");
                     if identity == NEW {
                         assert!(root.join("installed").is_file());
                         record(&root, "relaunched-new-identity-data-preserved");
-                        fs::write(root.join("passed"), "signed AppImage replaced and relaunched").unwrap();
+                        fs::write(
+                            root.join("passed"),
+                            "signed AppImage replaced and relaunched",
+                        )
+                        .unwrap();
                         wait(&root, "exit-approved");
                         handle.exit(0);
                         return;
@@ -81,15 +115,27 @@ mod linux {
                     let original = fs::read(&appimage).unwrap();
                     let mode = fs::metadata(&appimage).unwrap().permissions().mode() & 0o777;
                     let prepare = |version: &str, key: &str| {
-                        handle.updater_builder().pubkey(key)
-                            .endpoints(vec!["https://api.github.com/repos/OctopusGarage/mesh-talk/releases".parse().unwrap()]).unwrap()
-                            .version_comparator(|_, remote| remote.version > semver::Version::parse(OLD).unwrap())
-                            .build().unwrap()
+                        handle
+                            .updater_builder()
+                            .pubkey(key)
+                            .endpoints(vec![
+                                "https://api.github.com/repos/OctopusGarage/mesh-talk/releases"
+                                    .parse()
+                                    .unwrap(),
+                            ])
+                            .unwrap()
+                            .version_comparator(|_, remote| {
+                                remote.version > semver::Version::parse(OLD).unwrap()
+                            })
+                            .build()
+                            .unwrap()
                             .restore_update(serde_json::json!({
                                 "version": version,
                                 "url": "https://example.invalid/host-owned-fixture.AppImage",
                                 "signature": signature.trim()
-                            })).unwrap().unwrap()
+                            }))
+                            .unwrap()
+                            .unwrap()
                     };
                     let update = prepare(NEW, key.trim());
                     let mut tampered = bytes.clone();
@@ -101,20 +147,37 @@ mod linux {
                     assert!(prepare(NEW, "invalid-public-key").install(&bytes).is_err());
                     assert_eq!(fs::read(&appimage).unwrap(), original);
                     record(&root, "wrong-key-rejected-old-AppImage-preserved");
-                    assert!(prepare(concat!(env!("CARGO_PKG_VERSION"), "-nightly.900001.3"), key.trim()).install(&bytes).is_err());
+                    assert!(
+                        prepare(
+                            concat!(env!("CARGO_PKG_VERSION"), "-nightly.900001.3"),
+                            key.trim()
+                        )
+                        .install(&bytes)
+                        .is_err()
+                    );
                     assert_eq!(fs::read(&appimage).unwrap(), original);
                     record(&root, "relabelled-version-rejected-old-AppImage-preserved");
                     update.verify(&bytes).unwrap();
                     update.install(&bytes).unwrap();
                     assert_eq!(fs::read(&appimage).unwrap(), bytes);
-                    assert_eq!(fs::metadata(&appimage).unwrap().permissions().mode() & 0o777, mode);
-                    record(&root, &format!("signed-full-AppImage-installed sha256={:x} mode={mode:o}", Sha256::digest(&bytes)));
+                    assert_eq!(
+                        fs::metadata(&appimage).unwrap().permissions().mode() & 0o777,
+                        mode
+                    );
+                    record(
+                        &root,
+                        &format!(
+                            "signed-full-AppImage-installed sha256={:x} mode={mode:o}",
+                            Sha256::digest(&bytes)
+                        ),
+                    );
                     fs::write(root.join("installed"), NEW).unwrap();
                     handle.request_restart();
                 });
                 Ok(())
             })
-            .build(context).expect("fixture app");
+            .build(context)
+            .expect("fixture app");
         app.run(move |_, event| match event {
             tauri::RunEvent::ExitRequested { .. } => record(&root, "exit-requested"),
             tauri::RunEvent::Exit => record(&root, "exit"),
