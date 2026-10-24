@@ -5,7 +5,7 @@ export type MessageProtection = "click" | "authenticate";
 
 export interface UserInfo {
   id: string;
-  /** The immutable login handle. */
+  /** The canonical account login name. */
   username: string;
   /** The editable, peer-facing display name (nickname). Equals `username` until changed. */
   display_name: string;
@@ -100,13 +100,15 @@ export interface ChannelActivityInfo {
   wall_clock: number;
 }
 
-// A channel's membership plus its owner. The owner is the only principal allowed to
-// change membership (enforced in core) — the UI shows the owner badge and reveals the
-// add/remove controls only to the owner.
+// Channel membership and native owner-account authority. Legacy owner device IDs
+// remain available for compatibility; roster identity never grants management rights.
 export type ChannelHistoryPolicy =
   "off" | "last_ten" | "last_three_days" | "last_ten_within_three_days";
 
 export interface ChannelMembersInfo {
+  /** Native authorization for the current certified device/account. */
+  can_manage?: boolean;
+  owner_account_id?: string | null;
   history_policy: ChannelHistoryPolicy;
   owner: string;
   members: ChannelMemberInfo[];
@@ -135,12 +137,14 @@ export interface ChannelRecovery {
   checked_at?: number | null;
 }
 export interface ChannelInfo {
+  /** Native authorization; false overrides legacy device ownership. */
+  can_manage?: boolean;
+  owner_account_id?: string | null;
   recovery?: ChannelRecovery | null;
   channel_id: string;
   name: string;
   member_count: number;
-  // The owner's device user_id. Only the owner may rename the channel (synced to all
-  // members); non-owners fall back to a local-only alias.
+  // Legacy signed owner device user_id. Use can_manage for current account rights.
   owner: string;
   archived?: boolean;
   dissolved?: boolean;

@@ -141,3 +141,84 @@ fn legacy_bio_only_updates_invalidate_visible_profiles_without_an_avatar_change(
         );
     }
 }
+
+#[tokio::test]
+async fn first_bio_edit_initializes_a_missing_profile_without_losing_account_metadata() {
+    for account in [Account::generate(), Account::from_secret_bytes([41; 32])] {
+        let dir = tempfile::tempdir().unwrap();
+        let node = open(dir.path(), &account);
+        node.set_avatar(Some(b"existing avatar".to_vec()))
+            .await
+            .unwrap();
+        assert!(node.account_profile(&account.account_id()).is_none());
+        node.save_account_bio_with_initial_name_if(
+            "Current account nickname".into(),
+            "New bio".into(),
+            |commit| commit(),
+        )
+        .await
+        .unwrap();
+        let profile = node.account_profile(&account.account_id()).unwrap();
+        assert_eq!(profile.display_name, "Current account nickname");
+        assert_eq!(profile.bio, "New bio");
+        assert_eq!(profile.avatar, Some(b"existing avatar".to_vec()));
+        assert_eq!(profile.created_at_ms, account.created_at_ms());
+        assert!(profile.verify());
+        let sibling_dir = tempfile::tempdir().unwrap();
+        let sibling = open(sibling_dir.path(), &account);
+        assert_ne!(node.user_id(), sibling.user_id());
+        assert!(sibling.receive_account_profile(&profile).unwrap());
+        assert_eq!(
+            sibling.account_profile(&account.account_id()),
+            Some(profile.clone())
+        );
+        drop(node);
+        assert_eq!(
+            open(dir.path(), &account).account_profile(&account.account_id()),
+            Some(profile)
+        );
+    }
+}
+
+#[tokio::test]
+async fn initial_bio_name_never_overwrites_a_profile_received_before_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(dir.path(), &account);
+    node.save_account_bio_with_initial_name_if(
+        "Stale local name".into(),
+        "Edited bio".into(),
+        |commit| {
+            node.set_profile_display_name("Latest account nickname")?;
+            commit()
+        },
+    )
+    .await
+    .unwrap();
+    let profile = node.account_profile(&account.account_id()).unwrap();
+    assert_eq!(profile.display_name, "Latest account nickname");
+    assert_eq!(profile.bio, "Edited bio");
+}
+
+#[tokio::test]
+async fn rejected_first_bio_edits_do_not_initialize_or_publish_a_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(dir.path(), &account);
+    for (name, bio) in [("Name", "界".repeat(683)), ("", "Bio".into())] {
+        assert!(
+            node.save_account_bio_with_initial_name_if(name.into(), bio, |commit| commit(),)
+                .await
+                .is_err()
+        );
+        assert!(node.account_profile(&account.account_id()).is_none());
+    }
+    assert!(
+        node.save_account_bio_with_initial_name_if("Name".into(), "Retired".into(), |_| Err(
+            NodeError::Authorization("retired".into())
+        ),)
+            .await
+            .is_err()
+    );
+    assert!(node.account_profile(&account.account_id()).is_none());
+}

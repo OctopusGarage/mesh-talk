@@ -14,6 +14,7 @@
 
 // Protocol/core modules live in the `mesh_talk_core` crate; this crate is the
 // Tauri desktop shell over it.
+pub mod account_documents;
 pub mod account_profile;
 pub mod app_lock;
 pub mod avatars;
@@ -24,6 +25,7 @@ pub mod commands;
 pub mod config_store;
 pub mod contact_policy;
 mod desktop_session;
+mod device_enrollment;
 pub mod diagnostics;
 mod drafts;
 mod easytier_discovery;
@@ -45,6 +47,7 @@ mod runtime_bootstrap;
 pub mod services;
 pub mod session_store;
 pub mod settings;
+mod shared_account_login;
 pub mod state;
 mod tailscale_discovery;
 pub mod tray;
@@ -332,11 +335,17 @@ pub fn run_tauri_configured(
                 owner_commands::owner_account_history,
                 owner_commands::owner_delivery_statuses,
                 commands::login,
+                device_enrollment::begin_device_enrollment,
+                device_enrollment::probe_device_enrollment,
+                device_enrollment::complete_device_enrollment,
+                device_enrollment::cancel_device_enrollment,
                 crate::contact_policy::get_hidden_contacts,
                 crate::contact_policy::set_contact_hidden,
                 crate::contact_policy::set_contact_hidden_batch,
                 crate::contact_policy::delete_contact,
                 crate::privacy_commands::get_privacy,
+                crate::privacy_commands::get_account_binding_changes,
+                crate::privacy_commands::accept_account_binding_change,
                 crate::privacy_commands::set_invisible,
                 crate::privacy_commands::set_privacy_allowed,
                 crate::privacy_commands::initiate_privacy_contact,
@@ -381,9 +390,11 @@ pub fn run_tauri_configured(
                 crate::chat_commands::link_device,
                 crate::chat_commands::get_device_sync_policy,
                 crate::chat_commands::get_device_sync_status,
+                crate::chat_commands::get_account_login_sync_status,
                 crate::chat_commands::set_device_sync_category,
                 crate::chat_commands::get_account_preferences,
                 crate::chat_commands::set_account_preference,
+                crate::chat_commands::seed_account_preference,
                 crate::chat_commands::rekey_account,
                 crate::chat_commands::list_accounts,
                 crate::chat_commands::send_file_to_account,
@@ -393,6 +404,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::create_channel,
                 crate::chat_commands::add_channel_member,
                 crate::chat_commands::remove_channel_member,
+                crate::chat_commands::remove_channel_account_members,
                 crate::chat_commands::transfer_channel_owner,
                 crate::chat_commands::leave_channel,
                 crate::chat_commands::accept_channel_invite,
@@ -465,11 +477,20 @@ pub fn run_tauri_configured(
                 crate::integrations::local_access::get_local_agent_access,
                 crate::integrations::local_access::set_local_agent_access,
                 crate::settings::get_app_settings,
+                crate::settings::reconcile_account_settings,
                 crate::drafts::load_conversation_drafts,
                 crate::drafts::save_conversation_drafts,
+                crate::drafts::publish_legacy_conversation_drafts,
                 crate::settings::set_app_settings,
                 crate::trust::get_trust,
                 crate::trust::mark_verified,
+                crate::account_documents::get_account_documents,
+                crate::account_documents::get_account_document_meta,
+                crate::account_documents::read_account_document,
+                crate::account_documents::put_account_document,
+                crate::account_documents::remove_account_document,
+                crate::account_documents::mark_account_message_seen,
+                crate::account_documents::publish_legacy_account_controls,
                 crate::account_profile::get_account_profile,
                 crate::account_profile::save_account_bio,
                 crate::favorites::get_favorites,
@@ -478,6 +499,7 @@ pub fn run_tauri_configured(
                 crate::favorites::set_alias,
                 crate::favorites::set_channel_hidden,
                 crate::avatars::get_avatars,
+                crate::avatars::publish_legacy_avatar_overrides,
                 crate::avatars::set_avatar
             ];
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {

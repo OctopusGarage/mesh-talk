@@ -15,6 +15,14 @@ use std::{
 };
 use tokio::net::TcpStream;
 
+/// A valid signed account change for an otherwise unchanged, previously pinned device.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AccountBindingChange {
+    pub device_id: String,
+    pub previous_account_id: String,
+    pub current_account_id: String,
+}
+
 pub(in crate::node) struct PrivacyState {
     pub policy: PrivacyPolicy,
     pub proofs: PeerDirectory,
@@ -352,6 +360,50 @@ impl Node {
         }
         Ok(())
     }
+    /// Inspect current signed claims without persisting discovery or granting trust.
+    pub fn account_binding_changes(&self, account: &str) -> Vec<AccountBindingChange> {
+        let guard = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy state lock not poisoned");
+        let Some(state) = guard.as_ref() else {
+            return Vec::new();
+        };
+        let roster = self.roster.lock().expect("roster lock not poisoned");
+        let mut changes: Vec<_> = roster
+            .announcements()
+            .iter()
+            .filter_map(|proof| state.proofs.account_binding_change(proof))
+            .filter(|change| {
+                change.previous_account_id == account || change.current_account_id == account
+            })
+            .collect();
+        changes.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+        changes
+    }
+
+    /// Explicitly accept only the reviewed device and account pair. The existing
+    /// manual permission owner performs the grant; verification/history stay separate.
+    pub async fn accept_account_binding_change_guarded(
+        &self,
+        expected: &AccountBindingChange,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + Send,
+    ) -> io::Result<()> {
+        {
+            let _operation = self.privacy.gate.write().await;
+            self.change_allowed_locked_guarded_selected(
+                &expected.current_account_id,
+                true,
+                PermissionSource::Manual,
+                authorize,
+                Some(expected),
+            )?;
+        }
+        self.publish_presence(&expected.current_account_id).await;
+        Ok(())
+    }
+
     /// Explicitly grant reply permission durably before publishing private presence.
     /// Background operations must not call this user-intent boundary.
     pub async fn initiate_contact(&self, account: &str) -> io::Result<()> {
@@ -482,6 +534,17 @@ impl Node {
         source: PermissionSource,
         authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.change_allowed_locked_guarded_selected(account, allowed, source, authorize, None)
+    }
+
+    fn change_allowed_locked_guarded_selected(
+        &self,
+        account: &str,
+        allowed: bool,
+        source: PermissionSource,
+        authorize: impl FnOnce(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+        expected: Option<&AccountBindingChange>,
+    ) -> io::Result<()> {
         let announcements = self
             .roster
             .lock()
@@ -494,13 +557,28 @@ impl Node {
             .peers();
         let matches: Vec<_> = announcements
             .into_iter()
-            .filter(|a| a.account_id().as_deref() == Some(account) && a.verify())
+            .filter(|a| {
+                a.account_id().as_deref() == Some(account)
+                    && a.verify()
+                    && expected.is_none_or(|change| change.device_id == a.user_id)
+            })
             .collect();
         let prepared = {
             let guard = self.privacy.state.read().map_err(|_| denied())?;
             guard
                 .as_ref()
                 .map(|state| {
+                    if let Some(expected) = expected {
+                        let proposal = matches
+                            .first()
+                            .and_then(|proof| state.proofs.account_binding_change(proof));
+                        if matches.len() != 1 || proposal.as_ref() != Some(expected) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "account change is no longer current",
+                            ));
+                        }
+                    }
                     let before = state.policy.snapshot();
                     let name = if allowed {
                         let cached = state
@@ -535,6 +613,24 @@ impl Node {
         authorize(&mut || {
             let mut guard = self.privacy.state.write().map_err(|_| denied())?;
             let state = guard.as_mut().ok_or_else(denied)?;
+            let reviewed_roster = expected
+                .map(|_| self.roster.lock().map_err(|_| denied()))
+                .transpose()?;
+            if let Some(expected) = expected {
+                let current = reviewed_roster
+                    .as_ref()
+                    .expect("reviewed roster")
+                    .announcements()
+                    .into_iter()
+                    .find(|proof| proof.user_id == expected.device_id)
+                    .and_then(|proof| state.proofs.account_binding_change(&proof));
+                if current.as_ref() != Some(expected) || matches.len() != 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "account change is no longer current",
+                    ));
+                }
+            }
             if let Some(name) = name.as_ref() {
                 for proof in &matches {
                     let binding_changed =
@@ -613,21 +709,22 @@ impl Node {
                  impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send
              ),
     ) -> Result<(), NodeError> {
-        let account = self
-            .roster
-            .lock()
-            .expect("roster lock")
-            .announcement(public)
-            .and_then(Announce::account_id)
-            .or_else(|| {
-                self.privacy
-                    .state
-                    .read()
-                    .ok()?
-                    .as_ref()?
-                    .proofs
-                    .account_for(public)
-            });
+        let discovered_account = {
+            self.roster
+                .lock()
+                .expect("roster lock")
+                .announcement(public)
+                .and_then(Announce::account_id)
+        };
+        let account = discovered_account.or_else(|| {
+            self.privacy
+                .state
+                .read()
+                .ok()?
+                .as_ref()?
+                .proofs
+                .account_for(public)
+        });
         if let Some(account) = account {
             self.initiate_contact_locally_if(&account, authorize)
                 .await?;
@@ -844,18 +941,19 @@ impl Node {
         })
     }
     fn admitted(&self, peer: &VerifiedPeer) -> bool {
-        {
-            let state = self
+        let binding_conflicts = {
+            let guard = self
                 .privacy
                 .state
                 .read()
                 .expect("privacy lock not poisoned");
-            if let Some(state) = state.as_ref()
-                && let Some(new) = peer.announcement()
-                && !state.proofs.accepts_binding(new)
-            {
-                return false;
-            }
+            guard.as_ref().is_some_and(|state| {
+                peer.announcement()
+                    .is_some_and(|new| !state.proofs.accepts_binding(new))
+            })
+        };
+        if binding_conflicts {
+            return self.account_transition_admitted(peer);
         }
         self.account_allowed(peer.public_identity(), peer.announcement())
             || self.group_member(peer.public_identity())
@@ -1156,9 +1254,9 @@ impl Node {
         timing.phase("dial-privacy-gate");
         let _operation = self.privacy.gate.read().await;
         let own = self.own_presence();
+        let transitions = self.own_account_transitions();
         #[cfg(test)]
         timing.phase("dial-admission");
-        let generation = self.privacy.generation.load(Ordering::SeqCst);
         let announce = self
             .roster
             .lock()
@@ -1179,6 +1277,7 @@ impl Node {
         use futures_util::{StreamExt, stream::FuturesUnordered};
         let attempt = |candidate, permits| {
             let own = own.as_ref();
+            let transitions = transitions.as_slice();
             async move {
                 let started = std::time::Instant::now();
                 let result = tokio::time::timeout(
@@ -1188,12 +1287,13 @@ impl Node {
                         stream.set_nodelay(true)?;
                         crate::transport::net::set_tcp_keepalive(&stream);
                         let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
-                        SecureChannel::connect_with_visibility(
+                        SecureChannel::connect_with_transitions(
                             stream,
                             &self.identity,
                             Some(expected),
                             own,
                             publicly_visible,
+                            transitions,
                         )
                         .await
                     },
@@ -1253,18 +1353,8 @@ impl Node {
         channel.retain_connection_permits(permits);
         #[cfg(test)]
         timing.phase("dial-proof-validation");
-        if let Some(new) = channel.peer_announcement() {
-            let state = self
-                .privacy
-                .state
-                .read()
-                .expect("privacy lock not poisoned");
-            if let Some(state) = state.as_ref()
-                && !state.proofs.accepts_binding(new)
-            {
-                return Err(TransportError::AdmissionDenied);
-            }
-        }
+        self.apply_account_transition(channel.verified_peer())?;
+        let generation = self.privacy.generation.load(Ordering::SeqCst);
         #[cfg(test)]
         timing.phase("dial-remember-peer");
         self.remember_peer_with_visibility(
@@ -1313,17 +1403,18 @@ impl Node {
         timing.phase("accept-privacy-gate");
         let _operation = self.privacy.gate.read().await;
         let own = self.own_presence();
+        let transitions = self.own_account_transitions();
         let publicly_visible = self.publicly_visible_at(endpoint);
         #[cfg(test)]
         timing.phase("accept-noise-presence");
-        let generation = self.privacy.generation.load(Ordering::SeqCst);
         let mut channel = tokio::time::timeout(
             super::route_timing::MAX_AUTHENTICATION_DEADLINE,
-            SecureChannel::accept_with_visibility(
+            SecureChannel::accept_with_transitions(
                 stream,
                 &self.identity,
                 own.as_ref(),
                 publicly_visible,
+                &transitions,
                 |peer| {
                     self.admitted(peer)
                         || self.pairing_retry_allowed(peer.public_identity(), peer.announcement())
@@ -1338,6 +1429,7 @@ impl Node {
         if self.pairing_retry_allowed(channel.peer_identity(), channel.peer_announcement()) {
             channel.restrict_to_pairing();
         } else {
+            self.apply_account_transition(channel.verified_peer())?;
             self.remember_peer_with_visibility(
                 channel.peer_identity(),
                 channel.peer_announcement(),
@@ -1345,6 +1437,7 @@ impl Node {
                 channel.peer_publicly_visible(),
             )?;
         }
+        let generation = self.privacy.generation.load(Ordering::SeqCst);
         self.guard_channel(&mut channel, generation);
         #[cfg(test)]
         timing.finish();

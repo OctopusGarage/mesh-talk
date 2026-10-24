@@ -398,6 +398,7 @@ function receptionRows(key: string, rows: HistoryItem[]) {
     mentioned:
       key.startsWith("channel:") &&
       !row.from_me &&
+      !row.protection &&
       mentionsName(row.text, name),
   }));
 }

@@ -6,6 +6,12 @@
 // legacy single-word kinds ("validation" / "authentication" / "service" / "network") are
 // kept here only so older/handwritten rejections still type-check and route sensibly.
 export type CommandErrorKind =
+  | "link-no-direct-route"
+  | "link-connection"
+  | "link-timeout"
+  | "link-rejected"
+  | "link-upgrade-required"
+  | "link-protocol"
   | "peer-unknown"
   | "relay-unreachable"
   | "crypto"

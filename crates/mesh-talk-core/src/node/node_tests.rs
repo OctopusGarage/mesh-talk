@@ -11,6 +11,223 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 
 #[tokio::test]
+async fn removing_account_removes_linked_devices_in_one_epoch_and_rechecks_stale_enrollment() {
+    use crate::identity::account::Account;
+    let directory = tempfile::tempdir().unwrap();
+    let owner_identity = DeviceIdentity::generate();
+    let owner_account = Account::generate();
+    let owner_account_id = owner_account.account_id();
+    let account = Account::generate();
+    let devices = [
+        DeviceIdentity::generate(),
+        DeviceIdentity::generate(),
+        DeviceIdentity::generate(),
+    ];
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let owner = Node::open_with_account(
+        owner_identity,
+        owner_account,
+        Arc::clone(&roster),
+        dm,
+        channel_tx,
+        file,
+        &directory.path().join("node.log"),
+        &directory.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    for (index, device) in devices.iter().enumerate() {
+        let proof = Announce::new_with_account(
+            device,
+            &account,
+            format!("device-{index}"),
+            47001 + index as u16,
+        );
+        roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &owner.user_id());
+    }
+    let channel = owner
+        .create_channel("two people", vec![devices[0].public(), devices[1].public()])
+        .await
+        .unwrap();
+    let stale = owner
+        .auto_enrollment_candidate()
+        .expect("third certified sibling is eligible");
+    let before = owner
+        .channels
+        .lock()
+        .unwrap()
+        .state(&channel)
+        .unwrap()
+        .epoch();
+    assert!(
+        owner
+            .remove_channel_account_members_if(channel, &owner_account_id, |commit| commit())
+            .await
+            .is_err()
+    );
+    assert!(
+        owner
+            .remove_channel_account_members_if(channel, &account.account_id(), |_commit| Err(
+                NodeError::Authorization("retired owner".into())
+            ))
+            .await
+            .is_err()
+    );
+    assert_eq!(owner.channel_members(channel).len(), 3);
+    owner
+        .remove_channel_account_members_if(channel, &account.account_id(), |commit| commit())
+        .await
+        .unwrap();
+    assert_eq!(
+        owner.channel_members(channel),
+        vec![owner.identity.public()]
+    );
+    assert_eq!(
+        owner
+            .channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .epoch(),
+        before + 1
+    );
+    assert!(
+        !owner
+            .add_channel_member_checked_if(stale.0, stale.1, true, |commit| commit())
+            .await
+            .unwrap()
+    );
+    assert!(owner.auto_enrollment_candidate().is_none());
+    assert_eq!(
+        owner
+            .channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .epoch(),
+        before + 1
+    );
+    owner
+        .remove_channel_account_members_if(channel, &account.account_id(), |commit| commit())
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .epoch(),
+        before + 1
+    );
+}
+
+#[tokio::test]
+async fn removing_account_uses_durable_bindings_and_controls_when_projection_is_deferred() {
+    use crate::identity::account::Account;
+    let directory = tempfile::tempdir().unwrap();
+    let owner_identity = DeviceIdentity::generate();
+    let owner_account = Account::generate();
+    let account = Account::generate();
+    let devices = [
+        DeviceIdentity::generate(),
+        DeviceIdentity::generate(),
+        DeviceIdentity::generate(),
+    ];
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let owner = Node::open_with_account(
+        owner_identity,
+        owner_account,
+        Arc::clone(&roster),
+        dm,
+        channel_tx,
+        file,
+        &directory.path().join("node.log"),
+        &directory.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    for (index, device) in devices.iter().enumerate() {
+        let proof = Announce::new_with_account(
+            device,
+            &account,
+            format!("device-{index}"),
+            47001 + index as u16,
+        );
+        roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &owner.user_id());
+    }
+    let channel = owner
+        .create_channel("two people", vec![devices[0].public(), devices[1].public()])
+        .await
+        .unwrap();
+    let stale = owner
+        .auto_enrollment_candidate()
+        .expect("third certified sibling is eligible");
+    let own = Announce::new_with_account(&owner.identity, &owner.account, "owner", 47000);
+    owner
+        .configure_privacy(
+            directory.path(),
+            "pw",
+            &own,
+            Arc::new(crate::discovery::DiscoveryVisibility::default()),
+        )
+        .unwrap();
+    owner.cached_peer_snapshot().unwrap();
+    owner.set_invisible(true).await.unwrap();
+    owner
+        .set_allowed(&account.account_id(), false)
+        .await
+        .unwrap();
+    owner.pending_channel_plaintext.lock().unwrap().retry_at =
+        Some(std::time::Instant::now() + Duration::from_secs(30));
+    owner
+        .remove_channel_account_members_if(channel, &account.account_id(), |commit| commit())
+        .await
+        .unwrap();
+    // Plaintext persistence is blocked, so the older book may still show peers.
+    assert_eq!(owner.channel_members(channel).len(), 3);
+    {
+        let log = owner.log.lock().unwrap();
+        let events = log.events(&channel);
+        let durable = ChannelBook::projected_members(channel, &events).unwrap();
+        assert_eq!(durable, vec![owner.identity.public()]);
+    }
+    assert!(
+        !owner
+            .add_channel_member_checked_if(stale.0, stale.1, true, |commit| commit())
+            .await
+            .unwrap()
+    );
+    // Repeating removal reads the durable epoch and is a true no-op.
+    owner
+        .remove_channel_account_members_if(channel, &account.account_id(), |commit| commit())
+        .await
+        .unwrap();
+    owner.pending_channel_plaintext.lock().unwrap().retry_at = None;
+    owner.process_channel(channel);
+    assert_eq!(
+        owner.channel_members(channel),
+        vec![owner.identity.public()]
+    );
+    assert!(owner.auto_enrollment_candidate().is_none());
+}
+
+#[tokio::test]
 async fn auto_enrollment_candidate_requires_accepted_certified_account_sibling() {
     use crate::identity::account::Account;
 
@@ -66,6 +283,25 @@ async fn auto_enrollment_candidate_requires_accepted_certified_account_sibling()
         Some((accepted, bob_sibling.public()))
     );
     assert_ne!(invited, accepted);
+
+    // Retaining the same physical owner key does not authorize its legacy
+    // groups for a newly adopted account. Only explicit source provenance does.
+    *owner.channel_migration.lock().unwrap() =
+        super::super::channel_account_maintenance::ChannelMigrationStore::open(
+            &dir.path().join("unknown-origin.log"),
+            "pw",
+            owner.account.public().ed25519_pub,
+            &owner.identity.public(),
+        )
+        .unwrap();
+    assert!(owner.auto_enrollment_candidate().is_none());
+    owner
+        .authorize_legacy_channel_migration_if(|commit| commit())
+        .unwrap();
+    assert_eq!(
+        owner.auto_enrollment_candidate(),
+        Some((accepted, bob_sibling.public()))
+    );
 }
 
 #[tokio::test]
@@ -4349,6 +4585,75 @@ async fn list_channels_reports_created_channels() {
     assert_eq!(channels[0].id, id);
     assert_eq!(channels[0].name, "general");
     assert_eq!(channels[0].member_count, 1); // just the creator
+}
+
+#[tokio::test]
+async fn group_summary_and_presence_count_accounts_while_unknown_devices_remain_distinct() {
+    let directory = tempfile::tempdir().unwrap();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (files, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::clone(&roster),
+        dm,
+        channel_tx,
+        files,
+        &directory.path().join("messages.log"),
+        &directory.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let other_account = crate::identity::account::Account::generate();
+    let siblings = [DeviceIdentity::generate(), DeviceIdentity::generate()];
+    for (index, sibling) in siblings.iter().enumerate() {
+        let proof = Announce::new_with_account(
+            sibling,
+            &other_account,
+            "same person",
+            47001 + index as u16,
+        );
+        roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &node.user_id());
+    }
+    let unknown = DeviceIdentity::generate();
+    let channel = node
+        .create_channel(
+            "three people",
+            vec![siblings[0].public(), siblings[1].public(), unknown.public()],
+        )
+        .await
+        .unwrap();
+    let (accounts, unbound) = node.channel_member_account_sets(channel);
+    assert_eq!(accounts.len(), 2, "local account plus the remote account");
+    assert_eq!(
+        unbound.into_iter().collect::<Vec<_>>(),
+        vec![unknown.public().user_id()]
+    );
+    assert_eq!(
+        node.list_channels()
+            .iter()
+            .find(|row| row.id == channel)
+            .unwrap()
+            .member_count,
+        3
+    );
+    let pending = node
+        .create_channel_invited("one accepted person", vec![unknown.public()])
+        .await
+        .unwrap();
+    assert_eq!(
+        node.list_channels()
+            .iter()
+            .find(|row| row.id == pending)
+            .unwrap()
+            .member_count,
+        1,
+        "pending invitees are not accepted participants"
+    );
 }
 
 #[tokio::test]

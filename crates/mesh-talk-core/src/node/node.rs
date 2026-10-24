@@ -169,6 +169,8 @@ pub struct FileHistoryInfo {
 /// Errors from node operations.
 #[derive(Debug)]
 pub enum NodeError {
+    /// A stage-specific device enrollment failure.
+    Linking(super::linking::LinkingError),
     /// Caller-supplied local data cannot be accepted.
     InvalidInput(String),
     RequestConflict,
@@ -192,6 +194,7 @@ pub enum NodeError {
 impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            NodeError::Linking(error) => write!(f, "device linking: {error}"),
             NodeError::RequestConflict => {
                 write!(f, "message request conflicts with prior acceptance")
             }
@@ -250,11 +253,19 @@ pub struct Node {
     /// device can serve a pairing request (transfer the account to a new device).
     pub(in crate::node) account: Account,
     pub(in crate::node) account_devices: Mutex<super::account_devices::AccountDevices>,
+    pub(in crate::node) account_transitions:
+        Mutex<super::account_transition_store::AccountTransitionStore>,
+    pub(in crate::node) account_documents:
+        Mutex<super::account_documents::store::AccountDocumentStore>,
+    pub(in crate::node) account_document_updates: tokio::sync::watch::Sender<u64>,
     pub(in crate::node) account_suppression: Mutex<super::account_suppression::AccountSuppression>,
     pub(in crate::node) favorites: Mutex<super::favorites::FavoriteStore>,
     pub(in crate::node) favorite_media: super::media_store::MediaStore,
     pub(in crate::node) account_sync_policy:
         Mutex<super::account_sync_policy::DeviceSyncPolicyStore>,
+    pub(super) account_access: Mutex<super::account_access::AccountAccessStore>,
+    pub(super) account_access_updates:
+        tokio::sync::watch::Sender<Option<super::AccountAccessSnapshot>>,
     pub(in crate::node) account_preferences: Mutex<super::account_preferences::AccountPreferences>,
     pub(in crate::node) account_file_proofs: Mutex<super::account_file_proofs::AccountFileProofs>,
     pub(in crate::node) account_sync_notify: tokio::sync::Notify,
@@ -275,6 +286,8 @@ pub struct Node {
     pub(in crate::node) preferred_routes: Mutex<HashMap<UserId, std::net::SocketAddr>>,
     pub(in crate::node) incoming: mpsc::UnboundedSender<ReceivedDm>,
     pub(in crate::node) channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
+    /// Serialize owner membership commits with conditional sibling enrollment.
+    pub(in crate::node) channel_membership_commit: Mutex<()>,
     pub(in crate::node) channels: Mutex<ChannelBook>,
     pub(in crate::node) pending_channel_plaintext: Mutex<super::serving::PendingChannelPlaintext>,
     pub(in crate::node) channel_projection_cache:
@@ -293,6 +306,8 @@ pub struct Node {
     /// `my_sender` is in-memory only and rebuilt empty on restart; persisting it here
     /// lets us resume our sending chains so receivers (first-wins on chains they hold)
     /// can still decrypt our post-restart messages.
+    pub(in crate::node) channel_migration:
+        Mutex<super::channel_account_maintenance::ChannelMigrationStore>,
     pub(in crate::node) channel_senders: Mutex<ChannelSenderStore>,
     /// Last confirmed durable holders of our own channel events.
     pub(in crate::node) channel_custody: Mutex<ChannelCustodyStore>,
@@ -734,14 +749,40 @@ impl Node {
             &dir.join(format!("account-sync-policy-{}.log", account.account_id())),
             password,
         )?;
-        let account_preferences = super::account_preferences::AccountPreferences::open(
-            &dir.join("account-preferences.log"),
+        let account_preferences = super::account_preferences::AccountPreferences::open_for_account(
+            dir,
+            password,
+            &account.account_id(),
+        )?;
+        let account_access = super::account_access::AccountAccessStore::open(
+            &dir.join("account-access.log"),
             password,
         )?;
+        let account_access_updates =
+            tokio::sync::watch::channel(account_access.current(&account.account_id())).0;
         let my_dm_reactions = super::reaction_store::ReactionStore::open(
             &log_path.with_extension(format!("{}-reactions.log", account.account_id())),
             password,
         )?;
+        let channel_migration = super::channel_account_maintenance::ChannelMigrationStore::open(
+            &dir.join(format!("channel-migration-{}.log", account.account_id())),
+            password,
+            account.public().ed25519_pub,
+            &identity.public(),
+        )?;
+        let mut account_transitions =
+            super::account_transition_store::AccountTransitionStore::open(
+                &dir.join("account-binding-transitions.log"),
+                password,
+            )?;
+        account_transitions.commit_own(&identity.public(), &account.public().ed25519_pub)?;
+        account_transitions.discard_pending(&identity.public(), &account.public().ed25519_pub)?;
+        let account_documents = super::account_documents::store::AccountDocumentStore::open(
+            dir,
+            password,
+            &account.public().ed25519_pub,
+        )?;
+        let account_document_updates = tokio::sync::watch::channel(0).0;
         let node = Arc::new(Self {
             expiry_clock_start: (std::time::Instant::now(), now_millis()),
             expiry_first_seen: Mutex::new(HashMap::new()),
@@ -762,11 +803,16 @@ impl Node {
             identity,
             account,
             account_devices: Mutex::new(account_devices),
+            account_transitions: Mutex::new(account_transitions),
+            account_documents: Mutex::new(account_documents),
+            account_document_updates,
             account_suppression: Mutex::new(account_suppression),
             favorites: Mutex::new(favorites),
             favorite_media,
             account_sync_policy: Mutex::new(account_sync_policy),
             account_preferences: Mutex::new(account_preferences),
+            account_access: Mutex::new(account_access),
+            account_access_updates,
             account_file_proofs: Mutex::new(account_file_proofs),
             account_sync_notify: tokio::sync::Notify::new(),
             account_history_revision: std::sync::atomic::AtomicU64::new(0),
@@ -789,6 +835,7 @@ impl Node {
             roster,
             incoming,
             channel_incoming,
+            channel_membership_commit: Mutex::new(()),
             channels: Mutex::new(channels),
             pending_channel_plaintext: Mutex::new(Default::default()),
             archived_channels,
@@ -796,6 +843,7 @@ impl Node {
             recovery_contacts,
             recovered_sent_ids: Mutex::new(recovered_sent_ids),
             outgoing_requests_gate: tokio::sync::Mutex::new(()),
+            channel_migration: Mutex::new(channel_migration),
             channel_senders: Mutex::new(channel_senders),
             channel_custody: Mutex::new(channel_custody),
             channel_projection_cache: Mutex::new(Default::default()),
@@ -948,7 +996,6 @@ impl Node {
 
     /// Summaries of all channels this node is a member of.
     pub fn list_channels(&self) -> Vec<ChannelSummary> {
-        let own_id = self.user_id();
         let book = self.channels.lock().expect("channels mutex not poisoned");
         let mut channels: Vec<_> = book
             .channel_ids()
@@ -961,7 +1008,7 @@ impl Node {
                     owner: s.owner().to_string(),
                     archived: false,
                     dissolved: s.is_dissolved(),
-                    left: !s.is_member(&own_id),
+                    left: !self.channel_identity_matches_account(s),
                     pending_invite: s.pending_invite(),
                 })
             })
@@ -972,7 +1019,60 @@ impl Node {
                 .filter(|archive| book.state(&archive.id).is_none())
                 .cloned(),
         );
+        drop(book);
+        for channel in &mut channels {
+            let (accounts, unbound) = self.channel_member_account_sets(channel.id);
+            if !channel.archived || !accounts.is_empty() || !unbound.is_empty() {
+                channel.member_count = accounts.len() + unbound.len();
+            }
+        }
         channels
+    }
+
+    /// Owner account authority from the validated group projection.
+    pub fn channel_owner_account_id(&self, channel: ConversationId) -> Option<String> {
+        self.channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .state(&channel)
+            .and_then(|state| state.owner_account_id().map(str::to_owned))
+    }
+    pub fn channel_can_manage(&self, channel: ConversationId) -> bool {
+        self.channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .state(&channel)
+            .is_some_and(|state| self.channel_identity_can_manage(state))
+    }
+
+    pub fn channel_can_send(&self, channel: ConversationId) -> bool {
+        self.channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .state(&channel)
+            .is_some_and(|state| !state.is_dissolved() && self.channel_identity_is_current(state))
+    }
+    pub fn channel_member_account_binding(
+        &self,
+        channel: ConversationId,
+        member: &PublicIdentity,
+    ) -> Option<String> {
+        let book = self.channels.lock().expect("channels mutex not poisoned");
+        if let Some(state) = book.state(&channel)
+            && state.owner_account_id().is_some()
+        {
+            return state
+                .members()
+                .contains(member)
+                .then(|| {
+                    state
+                        .member_account_id(&member.user_id())
+                        .map(str::to_owned)
+                })
+                .flatten();
+        }
+        drop(book);
+        self.account_id_for_device(member)
     }
 
     /// The current members of `channel` (empty if the channel is unknown).

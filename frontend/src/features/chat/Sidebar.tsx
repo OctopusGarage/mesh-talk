@@ -1,3 +1,4 @@
+import { canManageChannel } from "./channelPermissions";
 import { FavoritesDialog } from "./favorites/FavoritesDialog";
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, Network, Wifi, WifiOff, X } from "lucide-react";
@@ -177,7 +178,7 @@ export function Sidebar() {
   // or a channel I don't own (the core would reject the change) — gets a personal alias
   // instead. Single source of truth for that distinction, used by the rename flow + dialog.
   const ownedChannel = (id: string) =>
-    channels.find((c) => c.channel_id === id && c.owner === myId);
+    channels.find((c) => c.channel_id === id && canManageChannel(c, myId));
 
   const startRename = (id: string, current: string) => {
     setRenameId(id);

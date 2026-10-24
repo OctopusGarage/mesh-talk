@@ -31,12 +31,66 @@ pub(crate) async fn adopt_linked_account<R: tauri::Runtime>(
             })
             .map_err(CommandError::Authentication)??
     };
+    // Startup reloads the adopted key asynchronously. Do not announce success
+    // before this exact session has applied the source account's login record.
+    let root = crate::data_dir();
+    let intent_path =
+        crate::config_store::account_path(&root, lease.owner(), "account-login-adoption.json")
+            .ok_or_else(|| CommandError::Authorization("Invalid local owner".into()))?;
+    let expected = std::fs::read(&intent_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .get("next_account")
+                .and_then(|id| id.as_str())
+                .map(str::to_owned)
+        });
     spawn_node_runtime(
-        app_handle,
-        lease,
+        app_handle.clone(),
+        lease.clone(),
         password,
         node_state.clone(),
         app_state.session().clone(),
     );
+    if let Some(expected) = expected {
+        tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            loop {
+                app_state
+                    .session()
+                    .matching(&lease, |_| ())
+                    .map_err(CommandError::Authorization)?;
+                let ready = {
+                    let guard = node_state.0.read().await;
+                    guard.as_ref().is_some_and(|runtime| {
+                        runtime.account_id() == expected
+                            && runtime.handle().account_access_snapshot().is_some()
+                    })
+                };
+                if ready {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            let admission = crate::runtime_admission::RuntimeAdmission::capture_lease(
+                app_state, node_state, &lease,
+            )?;
+            crate::shared_account_login::apply_current(
+                app_handle,
+                root,
+                app_state.clone(),
+                node_state.clone(),
+                admission,
+            )
+            .await
+        })
+        .await
+        .map_err(|_| {
+            CommandError::Service(
+                "Account adopted; applying its shared login is still pending. Keep this app open"
+                    .into(),
+            )
+        })??;
+    }
     Ok(())
 }

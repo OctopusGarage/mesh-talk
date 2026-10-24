@@ -11,9 +11,13 @@ pub struct ChannelInfo {
     pub channel_id: String, // hex
     pub name: String,
     pub member_count: usize,
-    /// The owner's device `user_id` — only the owner may rename the channel. The UI gates
-    /// the synced-rename action on this (non-owners fall back to a local alias).
+    /// Legacy owner device identifier, retained for provenance and compatibility.
+    /// Management controls use the verified `can_manage` result below.
     pub owner: String,
+    /// Account authority when upgraded; the legacy device owner remains above.
+    pub owner_account_id: Option<String>,
+    /// Verified for this running device, rather than inferred from UI presence.
+    pub can_manage: bool,
     pub archived: bool,
     pub dissolved: bool,
     pub left: bool,
@@ -35,6 +39,8 @@ pub async fn list_channels(
             name: c.name,
             member_count: c.member_count,
             owner: c.owner,
+            owner_account_id: rt.handle().channel_owner_account_id(c.id),
+            can_manage: rt.handle().channel_can_manage(c.id),
             archived: c.archived,
             dissolved: c.dissolved,
             left: c.left,
@@ -56,7 +62,7 @@ pub async fn channel_members(
     // first and then the DURABLE name directory — so a member that's gone offline (and so
     // been evicted from the roster) still shows the last name we saw, not a raw hex id.
     // Ourselves: we're never in our own roster, so use our own advertised name.
-    let self_uid = rt.user_id();
+    let own_account = rt.account_id();
     let known_names = rt.known_account_names();
     let pending: std::collections::HashSet<_> =
         rt.channel_pending_members(channel).into_iter().collect();
@@ -65,12 +71,8 @@ pub async fn channel_members(
         .into_iter()
         .map(|p| {
             let user_id = p.user_id();
-            let account_id = if user_id == self_uid {
-                Some(rt.account_id().to_string())
-            } else {
-                rt.account_id_for_device(&p)
-            };
-            let name = if user_id == self_uid {
+            let account_id = rt.channel_member_account_binding(channel, &p);
+            let name = if account_id.as_deref() == Some(own_account) {
                 rt.display_name().to_string()
             } else {
                 account_id
@@ -78,7 +80,13 @@ pub async fn channel_members(
                     .and_then(|id| known_names.get(id))
                     .and_then(|names| names.first())
                     .cloned()
-                    .or_else(|| rt.display_name_for(&user_id))
+                    .or_else(|| {
+                        // An adopted device may still appear in an older pinned
+                        // grant. Its new account's nickname is not that member's name.
+                        (account_id.is_none() || rt.account_id_for_device(&p) == account_id)
+                            .then(|| rt.display_name_for(&user_id))
+                            .flatten()
+                    })
                     .unwrap_or_else(|| user_id.clone())
             };
             ChannelMemberInfo {
@@ -93,6 +101,8 @@ pub async fn channel_members(
     Ok(ChannelMembersInfo {
         history_policy: rt.handle().channel_history_policy(channel),
         owner: rt.channel_owner(channel),
+        owner_account_id: rt.handle().channel_owner_account_id(channel),
+        can_manage: rt.handle().channel_can_manage(channel),
         members,
     })
 }
@@ -292,6 +302,30 @@ pub async fn remove_channel_member(
                 let channel = parse_channel_id(&channel_id)?;
                 let node = runtime.handle();
                 node.remove_channel_member_if(channel, &member_id, |commit| {
+                    admission.authorize_accept(runtime, commit)
+                })
+                .await
+                .map_err(CommandError::from)
+            })
+        })
+        .await
+}
+
+/// Remove every certified device of one account in a single signed membership change.
+#[tauri::command]
+pub async fn remove_channel_account_members(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    channel_id: String,
+    account_id: String,
+) -> Result<(), CommandError> {
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let channel = parse_channel_id(&channel_id)?;
+                let node = runtime.handle();
+                node.remove_channel_account_members_if(channel, &account_id, |commit| {
                     admission.authorize_accept(runtime, commit)
                 })
                 .await

@@ -1,3 +1,4 @@
+import { canManageChannel } from "./channelPermissions";
 import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -17,6 +18,7 @@ export function ChannelHistorySettings(props: {
   myId: string;
   dissolved: boolean;
   channelOwner: string;
+  canManage?: boolean;
   selfAccepted: boolean;
 }) {
   const owner = useAuth((s) => s.user?.id);
@@ -24,7 +26,7 @@ export function ChannelHistorySettings(props: {
   // Retire in-flight metadata and saves when the desktop session or membership authority changes.
   return (
     <HistoryPolicyControl
-      key={`${props.channelId}:${owner}:${generation}:${props.myId}:${props.channelOwner}:${props.selfAccepted}`}
+      key={`${props.channelId}:${owner}:${generation}:${props.myId}:${props.channelOwner}:${props.canManage}:${props.selfAccepted}`}
       {...props}
     />
   );
@@ -35,12 +37,14 @@ function HistoryPolicyControl({
   myId,
   dissolved,
   channelOwner,
+  canManage,
   selfAccepted,
 }: {
   channelId: string;
   myId: string;
   dissolved: boolean;
   channelOwner: string;
+  canManage?: boolean;
   selfAccepted: boolean;
 }) {
   const { t } = useTranslation();
@@ -74,9 +78,9 @@ function HistoryPolicyControl({
   const self = info?.members.find((m) => m.user_id === myId);
   const editable =
     !dissolved &&
-    channelOwner === myId &&
+    canManageChannel({ owner: channelOwner, can_manage: canManage }, myId) &&
     selfAccepted &&
-    info?.owner === myId &&
+    canManageChannel(info, myId) &&
     !!self &&
     !self.pending;
   const save = async (policy: ChannelHistoryPolicy) => {

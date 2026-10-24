@@ -3111,3 +3111,131 @@ async fn alternate_route_reclaims_idle_sessions_before_waiting_on_stale_route() 
     );
     assert_eq!(result.unwrap().unwrap().peer_identity(), &expected);
 }
+
+#[tokio::test]
+async fn account_change_recovery_is_read_only_until_exact_device_acceptance() {
+    use crate::identity::account::Account;
+    let directory = tempfile::tempdir().unwrap();
+    let (recipient, _) = node(directory.path());
+    recipient
+        .configure_privacy(
+            directory.path(),
+            "pw",
+            &recipient.signed_announce("Recipient", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let devices = [DeviceIdentity::generate(), DeviceIdentity::generate()];
+    let previous = Account::generate();
+    let current = Account::generate();
+    for device in &devices {
+        let old = Announce::new_with_account(device, &previous, "Before", 2);
+        recipient.roster.lock().unwrap().update(
+            &old,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &recipient.user_id(),
+        );
+    }
+    recipient.cached_peer_snapshot_async().await.unwrap();
+    let claims: Vec<_> = devices
+        .iter()
+        .map(|device| Announce::new_with_account(device, &current, "After", 2))
+        .collect();
+    for proof in &claims {
+        recipient.roster.lock().unwrap().update(
+            proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &recipient.user_id(),
+        );
+    }
+    let documents = || {
+        ["privacy.policy", "peer-proofs"]
+            .map(|name| std::fs::read(directory.path().join(name)).unwrap())
+    };
+    let before = documents();
+    let changes = recipient.account_binding_changes(&current.account_id());
+    assert_eq!(changes.len(), 2);
+    assert_eq!(
+        recipient.account_binding_changes(&previous.account_id()),
+        changes
+    );
+    assert_eq!(
+        documents(),
+        before,
+        "diagnostics must not grant or persist new bindings"
+    );
+    assert!(
+        recipient
+            .accept_account_binding_change_guarded(&changes[0], |_| Err(denied()))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        documents(),
+        before,
+        "retired host authority cannot mutate a binding"
+    );
+    let selected = changes[0].clone();
+    let third = Account::generate();
+    let device = devices
+        .iter()
+        .find(|device| device.public().user_id() == selected.device_id)
+        .unwrap();
+    let newer = Announce::new_with_account(device, &third, "Changed again", 2);
+    assert!(
+        recipient
+            .accept_account_binding_change_guarded(&selected, |commit| {
+                recipient.roster.lock().unwrap().update(
+                    &newer,
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    &recipient.user_id(),
+                );
+                commit()
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        documents(),
+        before,
+        "a changed proposal must fail at commit"
+    );
+    let reviewed = claims
+        .iter()
+        .find(|proof| proof.user_id == selected.device_id)
+        .unwrap();
+    recipient.roster.lock().unwrap().update(
+        reviewed,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &recipient.user_id(),
+    );
+    recipient
+        .accept_account_binding_change_guarded(&selected, |commit| commit())
+        .await
+        .unwrap();
+    let remaining = recipient.account_binding_changes(&current.account_id());
+    assert_eq!(
+        remaining.len(),
+        1,
+        "accepting one device must not accept a second unreviewed change"
+    );
+    assert_ne!(remaining[0].device_id, selected.device_id);
+    assert!(
+        recipient
+            .privacy_snapshot()
+            .allowed_accounts
+            .iter()
+            .any(|account| account.id == current.account_id())
+    );
+    let state = recipient.privacy.state.read().unwrap();
+    let proofs = &state.as_ref().unwrap().proofs;
+    assert!(proofs.accepts_binding(reviewed));
+    assert!(
+        !proofs.accepts_binding(
+            claims
+                .iter()
+                .find(|proof| proof.user_id == remaining[0].device_id)
+                .unwrap()
+        )
+    );
+}

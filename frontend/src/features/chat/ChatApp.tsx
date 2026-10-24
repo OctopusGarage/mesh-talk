@@ -23,6 +23,8 @@ import { ease, useMotionOK } from "@/lib/motion";
 import { startLinkedAppearance } from "@/lib/linkedAppearance";
 import { startLinkedContacts } from "@/lib/linkedContacts";
 import { useDrafts } from "@/store/drafts";
+import { startLinkedReadReceipts } from "@/lib/linkedReadReceipts";
+import { subscribeSyncInvalidation } from "@/lib/syncInvalidation";
 
 import { DeliveryRecoveryProvider } from "./DeliveryRecoveryProvider";
 
@@ -34,22 +36,6 @@ export function ChatApp() {
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
   const draftError = useDrafts((s) => s.error);
-  useEffect(() => {
-    if (!owner) return;
-    void useDrafts.getState().start(owner, generation);
-    const flush = () => {
-      void useDrafts.getState().flush();
-    };
-    window.addEventListener("blur", flush);
-    document.addEventListener("visibilitychange", flush);
-    window.addEventListener("pagehide", flush);
-    return () => {
-      window.removeEventListener("blur", flush);
-      document.removeEventListener("visibilitychange", flush);
-      window.removeEventListener("pagehide", flush);
-      useDrafts.getState().reset();
-    };
-  }, [owner, generation]);
   const ready = useChat((s) => s.ready);
   const presenceRun = useChat((s) => s.runEpoch);
   const presenceIdentity = useChat((s) => s.identityEpoch);
@@ -60,6 +46,30 @@ export function ChatApp() {
   const active = useChat((s) => s.active);
   const peers = useChat((s) => s.peers);
   const accountId = useChat((s) => s.myAccountId);
+  useEffect(() => {
+    if (!owner || !ready || !accountId) return;
+    void useDrafts.getState().start(owner, generation, accountId);
+    const timer = setInterval(() => {
+      void useDrafts.getState().refresh();
+    }, 15000);
+    const unsubscribe = subscribeSyncInvalidation((change) => {
+      if (change.owner === owner) void useDrafts.getState().refresh();
+    });
+    const flush = () => {
+      void useDrafts.getState().flush();
+    };
+    window.addEventListener("blur", flush);
+    document.addEventListener("visibilitychange", flush);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      clearInterval(timer);
+      unsubscribe();
+      window.removeEventListener("blur", flush);
+      document.removeEventListener("visibilitychange", flush);
+      window.removeEventListener("pagehide", flush);
+      useDrafts.getState().reset();
+    };
+  }, [owner, generation, ready, accountId, presenceRun, presenceIdentity]);
   const unreadOwner = useChat((s) => s.unreadOwner);
   useEffect(() => {
     if (owner) void useContactPolicy.getState().load(owner);
@@ -69,11 +79,14 @@ export function ChatApp() {
     };
   }, [owner, generation]);
   useEffect(() => {
-    if (owner && ready) return startLinkedAppearance(owner);
-  }, [owner, generation, ready]);
+    if (owner && ready && accountId) return startLinkedAppearance(owner);
+  }, [owner, generation, ready, accountId, presenceRun, presenceIdentity]);
   useEffect(() => {
-    if (owner && ready) return startLinkedContacts(owner);
-  }, [owner, generation, ready]);
+    if (owner && ready && accountId) return startLinkedContacts(owner);
+  }, [owner, generation, ready, accountId, presenceRun, presenceIdentity]);
+  useEffect(() => {
+    if (owner && ready && accountId) return startLinkedReadReceipts(owner);
+  }, [owner, generation, ready, accountId, presenceRun, presenceIdentity]);
   useEffect(() => {
     if (owner && ready) void usePrivacy.getState().load(owner);
   }, [owner, generation, ready]);
@@ -217,7 +230,9 @@ export function ChatApp() {
                   className="underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() => {
                     if (draftError === "load" && owner)
-                      void useDrafts.getState().start(owner, generation);
+                      void useDrafts
+                        .getState()
+                        .start(owner, generation, accountId);
                     else void useDrafts.getState().flush();
                   }}
                 >

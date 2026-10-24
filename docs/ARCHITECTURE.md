@@ -213,6 +213,22 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   the original author encrypted that exact plaintext. Sender chains, attachment
   admission, ordinary post-acceptance content and existing plaintext archive rules
   remain owned by their existing modules.
+  Account-authorized channels append root-signed account grants in kind 17 and
+  full-device account attestations in V4-gated kind 18. Membership, owner roles,
+  consent and revocation apply to an account grant lifetime. Certified devices
+  inherit accepted roles without individual owner approval and keep independent
+  sending chains. Initial migration is a new owner-authorized commitment, using
+  local creation/kept-source provenance and authenticated full-key account proofs;
+  later device account adoption cannot relabel an established grant.
+  For an account invitation, invitation, pending grant and selected history offer
+  commit atomically through the same delivery journal. Any certified device of
+  that account can accept. A bounded `MTJHA1` release in kind 18 binds the frozen
+  offer, exact grant incarnation, causal acceptance and target device attestation,
+  so an eligible sharing holder can send only selected row keys even when the
+  invitation's original device is offline. Legacy offer/release bytes remain
+  unchanged; account releases retain the original expiry, recall, protection,
+  count and ownership lifetime checks. See the
+  [account membership contract](network-design-reference.md#d-group-creation-distribution-and-member-recovery).
   Legacy unmarked channels retain their original auto-join semantics. The current
   owner alone may add/remove members or sign `ChannelOwnerTransfer`, and only an
   accepted current member can become owner. A non-owner can append a self-signed
@@ -224,7 +240,8 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   Departure, acceptance, and ownership-transfer delivery are retried to channel
   members after an offline first push (bounded batches).
   Membership is keyed to the device identity. When a channel owner discovers a
-  certified sibling of an accepted member, it signs and distributes one invitation
+  certified sibling of an accepted member, and local group-owner provenance is
+  established, it signs and distributes one invitation
   per recovery pass; the sibling must still accept it. If the owner is offline, the
   invitation waits until its node runs and learns the sibling's verified route.
   Restored groups remain read-only archives until the new device is invited.
@@ -247,6 +264,32 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   devices when linked-message history is enabled; `account_history` merges by `msg_id`. Device **linking** (`node/pairing.rs`):
   one-time 128-bit code (SHA-256 authenticator binding both device keys, constant-time
   check) → account secret + cert + history backfill transferred over the Noise channel.
+  Desktop enrollment uses `MTPQ4` / `MTPS4` and requires the source's signed
+  private account-access snapshot before adopting account keys. Desktop linking
+  never downgrades to V1/V2/V3; immutable creation metadata remains included,
+  and historical SDK/CLI V1/V2/V3 paths remain compatible.
+  `node/account_access.rs` owns bounded opaque account-access records, encrypted
+  persistence, account signature/revision validation and authenticated certified-
+  sibling exchange, independently of optional synchronization categories. Only
+  the explicit keep-account action seeds source credentials; joining startup
+  never publishes its previous login. Public profiles, discovery, contact remarks
+  and ordinary chat events never carry passwords.
+  `identity/account_login.rs` owns canonical sign-in resolution through an atomic
+  versioned per-local-user envelope. Its encrypted payload repeats the public
+  account/local-user binding and retains separate identity-auth and raw node-
+  storage passwords. Shared sign-in changes neither the local-user UUID nor the
+  existing storage username and never re-encrypts retained history. Migrated users
+  cannot authenticate through the old login; corrupt envelopes fail closed.
+  Registration and migration share a namespace lock and reject canonical-login
+  collisions without merging users or overwriting existing accounts.
+  `src-tauri/src/shared_account_login.rs` owns private desktop payloads, source
+  initialization, pre-adoption collision checks and admitted snapshot application.
+  It checks the current session after encryption and publishes the envelope under
+  that authority. Cross-account replacement additionally requires the matching
+  persisted previous-account/next-account/device adoption intent. Session and
+  saved-login projections use the canonical account login, while retained storage
+  credentials remain device-local. The code issuer keeps its account and login;
+  the joining desktop explicitly consents to use that login name and password.
   Self-account sends also work with no known siblings: the delivery WAL accepts a
   durable local projection without reserving a remote queue slot. Message Yourself
   reuses the self-account conversation and logical message IDs. Personal file
@@ -971,7 +1014,12 @@ completion never recreates an evicted conversation cache.
 Owner-scoped channel text, sticker and file enqueue commands return exact durable
 IDs before network work; a separate admitted fanout retains runtime retirement
 protection. Nickname publication uses shared runtime admission and synchronized
-metadata, leaving lifecycle replacement exclusive. `NodeRuntime::display_name`
+metadata, leaving lifecycle replacement exclusive. The authenticated account profile owns
+nickname, bio and avatar across linked devices; desktop projection persists the
+nickname and emits an owner-scoped update, while startup/roster identity reads
+repair a missed frontend event. Legacy source migration is marked per local
+profile/account and never seeds a joining device's previous nickname.
+`NodeRuntime::display_name`
 returns an owned snapshot so concurrent rename never exposes a borrowed mutable
 name. Member and verified opaque post-office custody are separate projections,
 with post-office confirmations never retiring member-copy recovery work.
@@ -1010,8 +1058,10 @@ remain unchanged.
 Conversation headers show accepted distinct account counts and known-online
 counts, including self while an accepted local node runs. Pending/removed members
 and infrastructure are excluded. Account-unresolved device memberships appear
-separately rather than being labeled people; membership actions still address
-devices. Member profiles expose deduplicated fresh devices and overlapping source
+separately rather than being labeled people. Account-authorized channels apply
+membership and owner roles to accounts; certified devices inherit those roles
+without separate owner approval. Legacy device authority remains until a verified
+owner-signed migration. Member profiles expose deduplicated fresh devices and overlapping source
 details without inferring physical LAN location or claiming a connection. Group
 history through an intermediary does not propagate presence. See the
 [network presence contract](network-design-reference.md#person-presence-contract).
@@ -1159,7 +1209,6 @@ order differs from authored time; pending accepted rows follow durable rows.
 Signed DAG ancestry is not pruned to satisfy a local memory
 limit; authenticated checkpoint compaction remains a separate protocol decision.
 
-
 ### Manual encrypted backup and recovery
 
 `recovery/{snapshot,archive,key}.rs` defines a versioned logical snapshot inside
@@ -1186,9 +1235,11 @@ auth and node stores for verification. A publication marker makes the two direct
 renames recoverable: startup removes an incomplete pair or retains a completed pair
 before auth initializes. Startup also removes orphan staging and decrypted scratch.
 The recovered account fingerprint remains the same; the new device fingerprint
-differs. Restored channels are read-only archives because their old sender keys
-are excluded. A new device must be invited into an active channel as a new member
-to receive fresh sender keys and participate in future messages. Peer replicas
+differs. Restored channels initially expose retained archives because old sender
+keys are excluded. A certified device can inherit an existing account grant from a
+reachable accepted sibling in an account-authorized channel, including while the
+owner is offline. Legacy device-only channels first require a compatible,
+owner-signed migration; restoration does not fabricate that authorization. Peer replicas
 can restore signed ciphertext events but cannot give the new device the retired
 device's sender chains or decrypt past channel history. A certified linked device
 with retained plaintext can share its available archive after channel enrollment;
@@ -1330,7 +1381,8 @@ evicted. Details and operational limits are in
 
 Messages have no content-language restrictions. The core does not bundle language
 models, classify message text, or persist language-based visibility decisions.
-Display-language localization remains a device preference.
+The interface language is a portable account preference when appearance
+synchronization is enabled; operating-system locale remains device-local.
 
 Avatar compatibility publications use `MTPF1`; ordinary account profiles publish
 `MTP3` first, then the compatibility avatar under the same publication lock. The

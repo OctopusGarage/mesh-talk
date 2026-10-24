@@ -150,20 +150,57 @@ pub fn set_channel_hidden(
 
 /// Import complete records with one disk replacement, avoiding partial pin/alias state.
 #[tauri::command]
-pub fn set_favorite_records(
+pub async fn set_favorite_records(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, FavoritesState>,
+    node: tauri::State<'_, crate::chat_commands::NodeState>,
     owner: String,
+    expected_account: String,
     records: Vec<FavoriteInfo>,
     expected: HashMap<String, Option<FavoriteRecord>>,
 ) -> Result<(), CommandError> {
-    config_store::with_account(&app, &owner, FAVORITES_FILE, |path| {
-        let _guard = state.0.lock().unwrap();
-        let mut file: FavoritesFile = config_store::read_account(path);
-        check_expected(&file, &records, &expected)?;
-        apply_records(&mut file, records)?;
-        config_store::write_account(path, &file)
-    })
+    let admission = crate::runtime_admission::RuntimeAdmission::capture(&app, &node, &owner)?;
+    let path = config_store::account_path(&crate::data_dir(), &owner, FAVORITES_FILE)
+        .ok_or_else(|| CommandError::Authorization("invalid account owner".into()))?;
+    let state = state.inner().clone();
+    // RuntimeAdmission retains installation and exact-session authority through
+    // the blocking disk commit. Reentering config_store::with_account here would
+    // acquire the same session lock a second time.
+    admission
+        .blocking(move |runtime, _| {
+            replace_linked_records(
+                &path,
+                &state,
+                runtime.account_id(),
+                &expected_account,
+                records,
+                &expected,
+            )
+        })
+        .await
+}
+
+fn replace_linked_records(
+    path: &std::path::Path,
+    state: &FavoritesState,
+    current_account: &str,
+    expected_account: &str,
+    records: Vec<FavoriteInfo>,
+    expected: &HashMap<String, Option<FavoriteRecord>>,
+) -> Result<(), CommandError> {
+    if current_account != expected_account {
+        return Err(CommandError::Authorization(
+            "Contact preferences belong to another account".into(),
+        ));
+    }
+    let _guard = state
+        .0
+        .lock()
+        .map_err(|_| CommandError::Internal("Favorites lock unavailable".into()))?;
+    let mut file: FavoritesFile = config_store::read_account(path);
+    check_expected(&file, &records, expected)?;
+    apply_records(&mut file, records)?;
+    config_store::write_account(path, &file)
 }
 
 fn check_expected(
@@ -222,6 +259,43 @@ fn apply_records(file: &mut FavoritesFile, records: Vec<FavoriteInfo>) -> Result
 #[cfg(test)]
 mod batch_tests {
     use super::*;
+    #[test]
+    fn stale_crypto_account_cannot_replace_the_same_local_users_saved_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("favorites.json");
+        let state = FavoritesState::default();
+        let id = "b".repeat(32);
+        let original = FavoriteRecord {
+            pinned: false,
+            custom_alias: Some("Ronaldo".into()),
+            hidden: false,
+        };
+        let file = FavoritesFile {
+            contacts: HashMap::from([(id.clone(), original.clone())]),
+        };
+        config_store::write_account(&path, &file).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let records = vec![FavoriteInfo {
+            id: id.clone(),
+            pinned: false,
+            custom_alias: Some("Previous account alias".into()),
+            hidden: false,
+        }];
+        let expected = HashMap::from([(id, Some(original))]);
+        assert!(
+            replace_linked_records(
+                &path,
+                &state,
+                "new-account",
+                "old-account",
+                records,
+                &expected
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
     #[test]
     fn invalid_batch_does_not_apply_any_partial_favorite() {
         let mut file = FavoritesFile::default();

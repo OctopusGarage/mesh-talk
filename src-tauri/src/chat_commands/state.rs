@@ -226,7 +226,17 @@ impl StartupPermit {
             .authority
             .current(|info| {
                 let rt = runtime.as_mut().unwrap();
-                if rt.display_name() != info.user.display_name {
+                if info.user.display_name != self.display_name
+                    && rt.display_name() != info.user.display_name
+                {
+                    // An explicit rename committed while startup prepared must
+                    // also advance the shared account claim before installation.
+                    if let Err(error) = rt
+                        .handle()
+                        .set_account_display_name(&info.user.display_name)
+                    {
+                        log::warn!("Unable to publish startup nickname: {error}");
+                    }
                     rt.set_display_name(&info.user.display_name);
                 }
                 *guard = runtime.take();

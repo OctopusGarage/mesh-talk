@@ -8,7 +8,7 @@ import { useAuth } from "./auth";
  * replacing the deterministic IdentityGlyph wherever that identity renders.
  *
  * Two sources, by id (account_id / channel_id):
- * - `local`: photos the user set on THIS device (persisted per host account). These are
+ * - `local`: private photos the user chose, synchronized within the account. These are
  *   local overrides — a contact photo you chose for someone, or your own photo.
  * - `received`: avatars peers PROPAGATED to us via signed profiles (persisted by the node,
  *   keyed by account id). These let `useAvatar(account_id)` show a contact's chosen photo.
@@ -31,7 +31,7 @@ interface AvatarsState {
   /** Tell the store which id is "us" (set once the node resolves the account id). */
   setOwnId: (id: string) => void;
   /** Load the persisted LOCAL avatar table from the backend (called on app start). */
-  load: (current?: () => boolean) => Promise<void>;
+  load: (current?: () => boolean) => Promise<boolean>;
   /** Load received peer avatars from the node (called once the node is ready). */
   loadPeers: (current?: () => boolean) => Promise<boolean>;
   /** Merge one received peer avatar (from the live `profile-received` event). */
@@ -55,6 +55,7 @@ const EMPTY: Record<string, string> = {};
 let localRevision = 0;
 let receivedRevision = 0;
 let pendingWrite: Promise<void> = Promise.resolve();
+const latestIntents = new Map<string, number>();
 const pendingEdits = new Map<
   string,
   { revision: number; dataUrl: string | null; current: () => boolean }
@@ -74,6 +75,7 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     localRevision++;
     receivedRevision++;
     pendingEdits.clear();
+    latestIntents.clear();
     set({
       owner,
       local: EMPTY,
@@ -87,14 +89,23 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
   ownProfileSeen: false,
   ownId: "",
 
-  setOwnId: (id) => set({ ownId: id }),
+  setOwnId: (id) => {
+    if (get().ownId !== id) {
+      localRevision++;
+      receivedRevision++;
+      pendingEdits.clear();
+      latestIntents.clear();
+      set({ ownId: id, local: EMPTY, received: EMPTY, ownProfileSeen: false });
+    }
+  },
 
   load: async (current = () => true) => {
     const lease = captureRuntimeOwner();
     const revision = localRevision;
-    if (!lease.current() || !current()) return;
+    if (!lease.current() || !current()) return false;
     try {
-      const local = (await avatarsApi.get(lease.owner!)) ?? EMPTY;
+      const local =
+        (await avatarsApi.get(lease.owner!, get().ownId || undefined)) ?? EMPTY;
       if (
         lease.current() &&
         current() &&
@@ -114,10 +125,12 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
         )
           delete merged[get().ownId];
         set({ local: merged });
+        return true;
       }
     } catch {
       // avatars are local UI personalization; a load failure is non-fatal.
     }
+    return false;
   },
 
   loadPeers: async (current = () => true) => {
@@ -153,6 +166,7 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
 
   mergeReceived: (id, dataUrl) => {
     receivedRevision++;
+    const expectedAccount = get().ownId;
     const lease = captureRuntimeOwner();
     const own =
       id === get().ownId && lease.current() && get().owner === lease.owner;
@@ -172,7 +186,12 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     const task = pendingWrite.then(async () => {
       if (!lease.current()) return;
       try {
-        await avatarsApi.set(lease.owner!, id, null);
+        await avatarsApi.set(
+          lease.owner!,
+          id,
+          null,
+          expectedAccount || undefined,
+        );
       } finally {
         finishEdit(id, revision);
       }
@@ -186,6 +205,7 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     if (!lease.current() || get().owner !== lease.owner) return;
     const revision = ++localRevision;
     pendingEdits.set(id, { revision, dataUrl, current: lease.current });
+    latestIntents.set(id, revision);
     if (id === ownId) {
       receivedRevision++;
       set((s) => {
@@ -208,14 +228,18 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     const task = pendingWrite.then(async () => {
       if (!lease.current()) return;
       try {
-        await avatarsApi.set(lease.owner!, id, dataUrl);
+        await avatarsApi.set(lease.owner!, id, dataUrl, ownId || undefined);
         // Setting/clearing OUR OWN avatar propagates it to peers (signed profile).
-        if (currentEdit() && id === ownId) await avatarsApi.publish(dataUrl);
-      } catch {
-        // A superseded failure must not replace a newer optimistic edit.
+        if (currentEdit() && id === ownId)
+          await avatarsApi.publish(lease.owner!, ownId, dataUrl);
+      } catch (error) {
+        // Reconcile a current failure before reporting it. An older request
+        // cannot roll back or report an error over a newer user intent.
         if (currentEdit()) {
           finishEdit(id, revision);
           await get().load(lease.current);
+          if (lease.current() && latestIntents.get(id) === revision)
+            throw error;
         }
       } finally {
         finishEdit(id, revision);
@@ -252,7 +276,7 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
         get().local[ownId] === mine
       ) {
         try {
-          await avatarsApi.publish(mine);
+          await avatarsApi.publish(lease.owner!, ownId, mine);
         } catch {
           // A later startup or edit will retry publication.
         }

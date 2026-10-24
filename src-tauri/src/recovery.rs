@@ -245,13 +245,16 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
     }
     let password = app_state
         .session()
-        .matching(&lease, |info| info.password.clone())
+        .matching(&lease, |info| info.node_storage_password.clone())
         .map_err(CommandError::Authentication)?;
     let username = app_state
         .session()
         .matching(&lease, |info| info.user.name.clone())
         .map_err(CommandError::Authentication)?;
-    let auth_password = password.trim().to_string();
+    let auth_password = app_state
+        .session()
+        .matching(&lease, |info| info.password.clone())
+        .map_err(CommandError::Authentication)?;
     let node = node_state.clone();
     let session = app_state.session().clone();
     let authority = RuntimeAuthority::request(session.clone(), lease.clone(), node.clone())
@@ -282,7 +285,7 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
         drop(permit);
         if authority.current(|_| ()).is_ok() {
             let restart_password = session
-                .matching(&lease, |info| info.password.clone())
+                .matching(&lease, |info| info.node_storage_password.clone())
                 .map_err(CommandError::Authorization)?;
             spawn_node_runtime(app_handle, lease, restart_password, node, session);
         }
@@ -414,6 +417,74 @@ pub(crate) fn recover_interrupted_publication(root: &Path) -> Result<(), String>
     Ok(())
 }
 
+/// Commit a verified staged credential/profile pair through the recovery journal.
+/// Caller holds profile lifecycle and login namespace authority.
+pub(crate) fn publish_staged_profile(
+    root: &Path,
+    stage: &Path,
+    username: &str,
+    host_id: &str,
+) -> Result<(), CommandError> {
+    let stage_name = stage
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.starts_with("recovery-stage-"))
+        .ok_or_else(|| CommandError::Validation("Invalid account staging path".into()))?;
+    if stage.parent() != Some(root)
+        || !User::validate_username(username)
+        || !User::validate_user_id(host_id)
+    {
+        return Err(CommandError::Validation(
+            "Invalid account publication".into(),
+        ));
+    }
+    let staged_profile = stage.join("accounts").join(host_id);
+    sync_tree(&stage.join("users").join(username))
+        .map_err(|_| CommandError::Io("Could not sync staged credentials".into()))?;
+    sync_tree(&staged_profile)
+        .map_err(|_| CommandError::Io("Could not sync staged account".into()))?;
+    let auth_target = root.join("users").join(username);
+    let account_target = root.join("accounts").join(host_id);
+    if auth_target.exists() || account_target.exists() {
+        return Err(CommandError::InvalidInput(
+            "Recovery destination already exists".into(),
+        ));
+    }
+    fs::create_dir_all(root.join("users"))
+        .map_err(|_| CommandError::Io("Could not create users folder".into()))?;
+    fs::create_dir_all(root.join("accounts"))
+        .map_err(|_| CommandError::Io("Could not create accounts folder".into()))?;
+    let marker = Publication {
+        username: username.into(),
+        host_id: host_id.into(),
+        stage: stage_name.into(),
+        complete: false,
+    };
+    write_marker(root, &marker)?;
+    let publication: Result<(), CommandError> = (|| {
+        fs::rename(stage.join("users").join(username), &auth_target)
+            .map_err(|_| CommandError::Io("Could not publish local credentials".into()))?;
+        sync_directory(&root.join("users"))
+            .map_err(|_| CommandError::Io("Could not sync users folder".into()))?;
+        fs::rename(&staged_profile, &account_target)
+            .map_err(|_| CommandError::Io("Could not publish recovered account".into()))?;
+        sync_directory(&root.join("accounts"))
+            .map_err(|_| CommandError::Io("Could not sync accounts folder".into()))?;
+        // Renaming the marker is the publication commit point. A crash before
+        // this rename rolls back both targets; a crash after it retains both.
+        fs::rename(root.join(MARKER), root.join(COMPLETE_MARKER))
+            .map_err(|_| CommandError::Io("Could not complete recovery transaction".into()))?;
+        let _ = sync_directory(root);
+        let _ = fs::remove_file(root.join(COMPLETE_MARKER));
+        let _ = sync_directory(root);
+        Ok(())
+    })();
+    if publication.is_err() {
+        recover_interrupted_publication(root).map_err(CommandError::Io)?;
+    }
+    publication
+}
+
 fn restore_offline(
     root: &Path,
     source: &Path,
@@ -438,12 +509,6 @@ fn restore_offline(
         .prefix("recovery-stage-")
         .tempdir_in(root)
         .map_err(|_| CommandError::Io("Could not create recovery staging".into()))?;
-    let stage_name = stage
-        .path()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
     let auth = IdentityManager::new(FileManager::new(stage.path().to_path_buf()));
     let user = auth
         .register_user(username, password)
@@ -481,46 +546,13 @@ fn restore_offline(
         .map_err(|_| CommandError::Io("Could not sync restored credentials".into()))?;
     sync_tree(&staged_profile)
         .map_err(|_| CommandError::Io("Could not sync restored account".into()))?;
-    let auth_target = root.join("users").join(username);
-    let account_target = root.join("accounts").join(&user.user_id);
-    if auth_target.exists() || account_target.exists() {
-        return Err(CommandError::InvalidInput(
-            "Recovery destination already exists".into(),
-        ));
-    }
-    fs::create_dir_all(root.join("users"))
-        .map_err(|_| CommandError::Io("Could not create users folder".into()))?;
-    fs::create_dir_all(root.join("accounts"))
-        .map_err(|_| CommandError::Io("Could not create accounts folder".into()))?;
-    let marker = Publication {
-        username: username.into(),
-        host_id: user.user_id,
-        stage: stage_name,
-        complete: false,
-    };
-    write_marker(root, &marker)?;
-    let publication: Result<(), CommandError> = (|| {
-        fs::rename(stage.path().join("users").join(username), &auth_target)
-            .map_err(|_| CommandError::Io("Could not publish local credentials".into()))?;
-        sync_directory(&root.join("users"))
-            .map_err(|_| CommandError::Io("Could not sync users folder".into()))?;
-        fs::rename(&staged_profile, &account_target)
-            .map_err(|_| CommandError::Io("Could not publish recovered account".into()))?;
-        sync_directory(&root.join("accounts"))
-            .map_err(|_| CommandError::Io("Could not sync accounts folder".into()))?;
-        // Renaming the marker is the publication commit point. A crash before
-        // this rename rolls back both targets; a crash after it retains both.
-        fs::rename(root.join(MARKER), root.join(COMPLETE_MARKER))
-            .map_err(|_| CommandError::Io("Could not complete recovery transaction".into()))?;
-        let _ = sync_directory(root);
-        let _ = fs::remove_file(root.join(COMPLETE_MARKER));
-        let _ = sync_directory(root);
-        Ok(())
-    })();
-    if publication.is_err() {
-        recover_interrupted_publication(root).map_err(CommandError::Io)?;
-    }
-    publication?;
+    IdentityManager::new(FileManager::new(root.to_path_buf()))
+        .publish_new_account_login(username, || {
+            publish_staged_profile(root, stage.path(), username, &user.user_id)
+        })
+        .map_err(|_| {
+            CommandError::InvalidInput("Login name already exists on this device".into())
+        })??;
     Ok(RestoreComplete {
         username: username.into(),
         device_id,

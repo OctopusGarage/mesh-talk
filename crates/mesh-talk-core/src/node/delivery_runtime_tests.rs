@@ -8713,3 +8713,159 @@ async fn delivery_observation_worker_reports_only_an_observed_exchange_timeout()
     let _ = worker.await;
     let _ = server.await;
 }
+
+async fn external_recipient_delivery_after_sibling_archive(cached_prior_binding: bool) {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let cd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let sibling = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let account = Account::generate();
+    let shared_secret = account.secret_bytes();
+    let bob_account = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient_address = bl.local_addr().unwrap();
+    let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &account, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", recipient_address.port());
+    let cp = Announce::new_with_account(
+        &sibling,
+        &account,
+        "Alice sibling",
+        cl.local_addr().unwrap().port(),
+    );
+    let prior_account = Account::generate();
+    let prior_sender =
+        Announce::new_with_account(&alice, &prior_account, "Before adoption", ap.tcp_port);
+    let (a, _) = node(ad.path(), alice, account, &bp);
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    let (b, mut recipient_messages) = node(
+        bd.path(),
+        bob,
+        bob_account,
+        if cached_prior_binding {
+            &prior_sender
+        } else {
+            &ap
+        },
+    );
+    let (c, mut sibling_messages) = node(
+        cd.path(),
+        sibling,
+        Account::from_secret_bytes(shared_secret),
+        &ap,
+    );
+    if cached_prior_binding {
+        b.roster
+            .lock()
+            .unwrap()
+            .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    }
+    for (node, directory, own) in [
+        (&a, ad.path(), &ap),
+        (&b, bd.path(), &bp),
+        (&c, cd.path(), &cp),
+    ] {
+        node.configure_privacy(
+            directory,
+            "pw",
+            own,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    }
+    if cached_prior_binding {
+        b.cached_peer_snapshot_async().await.unwrap();
+        // Discovery now carries a valid certificate from the kept account, but
+        // this recipient has previously pinned the same sender device elsewhere.
+        b.roster
+            .lock()
+            .unwrap()
+            .update(&ap, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    }
+    drop(bl); // The recipient is genuinely unreachable while the sibling mirrors.
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let ct = tokio::spawn(c.clone().run_accept_loop(cl));
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"external recipient must receive", None)
+        .await
+        .unwrap();
+    let sibling_copy =
+        tokio::time::timeout(std::time::Duration::from_secs(10), sibling_messages.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        sibling_copy.text.as_slice(),
+        b"external recipient must receive"
+    );
+    assert!(recipient_messages.try_recv().is_err());
+    assert_ne!(
+        a.delivery_status(id),
+        Some(DeliveryStatus::Delivered),
+        "a sibling's archive is never recipient delivery"
+    );
+    let bl = TcpListener::bind(recipient_address).await.unwrap();
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    if cached_prior_binding {
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                recipient_messages.recv()
+            )
+            .await
+            .is_err(),
+            "a changed account certificate must not silently replace a pinned device binding"
+        );
+        assert_ne!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+        // Explicitly accepting the kept account authorizes the new device
+        // membership. Preserve the original queued message and logical ID.
+        let change = b
+            .account_binding_changes(&a.account_id())
+            .into_iter()
+            .find(|change| change.device_id == a.user_id())
+            .expect("recipient can review the sender's verified account change");
+        b.accept_account_binding_change_guarded(&change, |commit| commit())
+            .await
+            .unwrap();
+        a.flush_delivery(id).await;
+    }
+    let delivered = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        recipient_messages.recv(),
+    )
+    .await
+    .expect("the external recipient must receive independently of sibling mirroring")
+    .unwrap();
+    assert_eq!(
+        delivered.text.as_slice(),
+        b"external recipient must receive"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("only the recipient's authenticated receipt confirms delivery");
+    for task in [at, bt, ct] {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+#[tokio::test]
+async fn own_sibling_archive_cannot_confirm_or_replace_external_recipient_delivery() {
+    external_recipient_delivery_after_sibling_archive(false).await;
+}
+
+#[tokio::test]
+async fn explicit_account_acceptance_restores_adopted_sender_delivery_without_false_sibling_receipt()
+ {
+    external_recipient_delivery_after_sibling_archive(true).await;
+}

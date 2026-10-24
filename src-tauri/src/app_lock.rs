@@ -244,7 +244,7 @@ pub(crate) async fn verify_session_identity(
     // Resolve identity under the captured lease before starting an OS/password prompt.
     let username = app
         .session()
-        .matching(lease, |info| info.user.name.clone())
+        .matching(lease, |info| info.user.login_name().to_owned())
         .map_err(CommandError::Authorization)?;
     #[cfg(target_os = "macos")]
     {
@@ -339,6 +339,7 @@ mod tests {
         let user = crate::services::user::User {
             user_id: "owner".into(),
             name: "owner".into(),
+            account_login_name: None,
             display_name: "Owner".into(),
             address: "fixture".into(),
             created_at: 0,
@@ -390,6 +391,7 @@ mod tests {
         let user = crate::services::user::User {
             user_id: "owner".into(),
             name: "owner".into(),
+            account_login_name: None,
             display_name: "Owner".into(),
             address: "fixture".into(),
             created_at: 0,

@@ -2,25 +2,68 @@
   "schema": 1,
   "contracts": [
     {
-      "id": "desktop-conversation-drafts",
-      "paths": ["src-tauri/src/drafts.rs"],
+      "id": "desktop-account-documents",
+      "paths": [
+        "src-tauri/src/account_documents.rs",
+        "src-tauri/src/avatars.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["drafts::tests::"]
+          "filters": [
+            "owner_commands::tests::registered_account_documents_preserve_account_scope_cas_and_queued_owner",
+            "owner_commands::tests::registered_shared_drafts_reject_wrong_account_writer_and_queued_session",
+            "owner_commands::tests::registered_avatar_overrides_keep_tombstones_and_refuse_other_account_writes",
+            "avatars::tests::",
+            "owner_commands::tests::registered_public_avatar_",
+            "owner_commands::tests::registered_account_controls_reject_generic_writes_and_removals",
+            "owner_commands::tests::registered_account_control_source_import_checks_account_and_queued_session"
+          ]
         }
       ],
-      "consumers": ["frontend-conversation-drafts"],
       "capability": {
-        "summary": "Preserve encrypted local conversation text and protection policy atomically with idle batching and session-isolated restoration.",
+        "summary": "Adapt account document CAS writes and exact-version reads under the current desktop session and cryptographic account.",
+        "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
+        "invariants": [
+          {
+            "name": "Certified same-account authority, bounded versioned records and deletion tombstones preserve convergence without exposing private records to other group members",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          }
+        ]
+      },
+      "escalation": [
+        "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence."
+      ],
+      "consumers": [
+        "frontend-account-documents"
+      ]
+    },
+    {
+      "id": "desktop-conversation-drafts",
+      "paths": [
+        "src-tauri/src/drafts.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "drafts::tests::"
+          ]
+        }
+      ],
+      "consumers": [
+        "frontend-conversation-drafts"
+      ],
+      "capability": {
+        "summary": "Apply per-conversation encrypted account document patches with session authority, exact version checks and explicit source-only legacy import.",
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
         "invariants": [
           {
-            "name": "Ten-second idle saves serialize snapshots without periodic writes during typing; retired sessions cannot release or overwrite draft text",
+            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device\u2019s draft",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
-            "name": "Legacy text-only encrypted snapshots remain readable; reserved protection metadata is validated and written atomically with its conversation text",
+            "name": "Text and protection metadata share a version; deletion tombstones survive legacy import and unbound legacy data requires explicit kept-source attribution",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
@@ -31,7 +74,9 @@
     },
     {
       "id": "desktop-message-favorites",
-      "paths": ["src-tauri/src/message_favorites.rs"],
+      "paths": [
+        "src-tauri/src/message_favorites.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
@@ -46,7 +91,9 @@
         "src/lib/api/messageFavorites.test.ts",
         "src/lib/attachmentSave.test.ts"
       ],
-      "consumers": ["frontend-message-favorites"],
+      "consumers": [
+        "frontend-message-favorites"
+      ],
       "capability": {
         "summary": "Adapt independent Favorites queries and durable mutations with exact session/runtime authority and explicit retained-file access.",
         "guide": "docs/favorites.md",
@@ -63,7 +110,9 @@
     },
     {
       "id": "desktop-search",
-      "paths": ["src-tauri/src/owner_commands/search.rs"],
+      "paths": [
+        "src-tauri/src/owner_commands/search.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
@@ -76,8 +125,14 @@
           ]
         }
       ],
-      "frontend": ["src/lib/api.test.ts"],
-      "consumers": ["desktop-session", "frontend-chat", "frontend-owner"],
+      "frontend": [
+        "src/lib/api.test.ts"
+      ],
+      "consumers": [
+        "desktop-session",
+        "frontend-chat",
+        "frontend-owner"
+      ],
       "capability": {
         "summary": "Serve exact owner-scoped recent search and bounded read-only message context with validated reference namespaces and explicit coverage.",
         "guide": "docs/ARCHITECTURE.md#recent-search-references",
@@ -123,7 +178,9 @@
           ]
         }
       ],
-      "frontend": ["src/lib/api.test.ts"],
+      "frontend": [
+        "src/lib/api.test.ts"
+      ],
       "consumers": [
         "desktop-chat",
         "desktop-app-lock",
@@ -233,8 +290,16 @@
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
-            "name": "Saved login requires both credential and resume metadata writes; retry uses the raw native runtime secret under current unlocked session authority",
+            "name": "Typed device-linking errors preserve the failed stage and safe diagnostics across IPC without weakening desktop admission or account adoption",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Saved login requires both credential and resume metadata writes; retry uses the private canonical account login secret under current unlocked session authority",
             "reference": "docs/help/topics/first-run.md#keep-access-to-your-account"
+          },
+          {
+            "name": "Signed account nicknames project into persisted desktop and frontend state only for the current installed session; old completed markers without a signed card repair the already-bound profile, while a pending adoption never publishes its unrelated previous local nickname across restart",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
       }
@@ -249,10 +314,14 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["integrations::"]
+          "filters": [
+            "integrations::"
+          ]
         }
       ],
-      "consumers": ["frontend-local-agent-access"],
+      "consumers": [
+        "frontend-local-agent-access"
+      ],
       "capability": {
         "summary": "Control one session-owned integration service from desktop settings and maintain a short user-level agent bootstrap.",
         "guide": "docs/bot-integrations.md#desktop-local-agent-access",
@@ -286,7 +355,11 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["chat_commands::", "channel_reception::", "events::"]
+          "filters": [
+            "chat_commands::",
+            "channel_reception::",
+            "events::"
+          ]
         },
         {
           "package": "mesh-talk",
@@ -308,7 +381,9 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["contact_policy::"]
+          "filters": [
+            "contact_policy::"
+          ]
         }
       ],
       "escalation": [
@@ -317,42 +392,65 @@
     },
     {
       "id": "desktop-app-lock",
-      "paths": ["src-tauri/src/app_lock.rs"],
+      "paths": [
+        "src-tauri/src/app_lock.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["app_lock::"]
+          "filters": [
+            "app_lock::"
+          ]
         }
       ],
       "escalation": [
         "OS authentication and unlock/session lifecycle changes require focused native platform evidence."
       ],
-      "consumers": ["desktop-conversation-drafts"]
+      "consumers": [
+        "desktop-conversation-drafts"
+      ]
     },
     {
       "id": "desktop-settings",
-      "paths": ["src-tauri/src/settings.rs", "src-tauri/src/config_store.rs"],
+      "paths": [
+        "src-tauri/src/settings.rs",
+        "src-tauri/src/config_store.rs",
+        "src-tauri/src/settings/"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["settings::", "config_store::"]
+          "filters": [
+            "settings::",
+            "config_store::"
+          ]
         }
       ],
-      "consumers": ["desktop-chat"],
+      "consumers": [
+        "desktop-chat"
+      ],
       "escalation": [
         "Persisted settings and live policy application require frontend settings and native session/revision evidence."
       ]
     },
     {
       "id": "desktop-recovery",
-      "paths": ["src-tauri/src/recovery.rs", "src-tauri/src/trust.rs"],
+      "paths": [
+        "src-tauri/src/recovery.rs",
+        "src-tauri/src/trust.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["recovery::", "trust::"]
+          "filters": [
+            "recovery::",
+            "trust::"
+          ]
         }
       ],
-      "consumers": ["desktop-session"],
+      "consumers": [
+        "desktop-session"
+      ],
       "escalation": [
         "Crypto, archive and trust persistence changes require affected core recovery integration tests and frontend/native restore evidence."
       ]
@@ -377,8 +475,12 @@
           ]
         }
       ],
-      "node": ["scripts/diagnostics/background-command.test.mjs"],
-      "consumers": ["desktop-session"],
+      "node": [
+        "scripts/diagnostics/background-command.test.mjs"
+      ],
+      "consumers": [
+        "desktop-session"
+      ],
       "capability": {
         "summary": "Discover desktop and standard dedicated post-office endpoints from optional VPN inventories without trusting inventory identities.",
         "guide": "docs/routed-network-discovery.md",
@@ -399,17 +501,36 @@
     },
     {
       "id": "desktop-privacy",
-      "paths": ["src-tauri/src/privacy_commands.rs"],
+      "paths": [
+        "src-tauri/src/privacy_commands.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["privacy_commands::"]
+          "filters": [
+            "privacy_commands::",
+            "owner_commands::tests::registered_privacy_commands_reject_app_lock_and_stale_installation_without_writes",
+            "owner_commands::tests::registered_privacy_commands_queued_before_same_owner_generation_change_do_not_write",
+            "owner_commands::tests::registered_privacy_mutations_reject_logout_while_waiting_for_policy_gate"
+          ]
         }
       ],
-      "consumers": ["desktop-session"],
+      "consumers": [
+        "desktop-session"
+      ],
       "escalation": [
         "Privacy IPC/public policy changes require core guarded-admission and typed frontend consumer checks."
-      ]
+      ],
+      "capability": {
+        "summary": "Expose scoped account privacy and explicit recipient review of authenticated device account changes.",
+        "guide": "docs/peer-trust.md#recover-a-device-that-changed-accounts",
+        "invariants": [
+          {
+            "name": "Viewing account binding changes mutates nothing and acceptance requires current unlocked installation authority plus the exact reviewed device and old/new account pair",
+            "reference": "docs/peer-trust.md#recover-a-device-that-changed-accounts"
+          }
+        ]
+      }
     },
     {
       "id": "desktop-window",
@@ -421,7 +542,10 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["tray::", "window_geometry::"]
+          "filters": [
+            "tray::",
+            "window_geometry::"
+          ]
         }
       ],
       "escalation": [
@@ -438,7 +562,12 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["diagnostics::", "updates::", "perf::", "logger::"]
+          "filters": [
+            "diagnostics::",
+            "updates::",
+            "perf::",
+            "logger::"
+          ]
         }
       ],
       "escalation": [
@@ -455,7 +584,9 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["updates::"]
+          "filters": [
+            "updates::"
+          ]
         }
       ],
       "escalation": [
@@ -532,6 +663,7 @@
           "package": "mesh-talk",
           "filters": [
             "account_profile::tests::",
+            "runtime_bootstrap::tests::first_bio_command_repairs_a_legacy_linked_account_without_a_profile",
             "owner_commands::tests::registered_account_profile_commands_reject_wrong_owner_and_locked_app",
             "owner_commands::tests::registered_account_profile_commands_save_bio_without_accepting_identity_edits",
             "owner_commands::tests::registered_account_profile_commands_reject_replaced_queued_authority",
@@ -557,15 +689,21 @@
       "escalation": [
         "Run account-profile browser interaction and native owner/lock/replacement command evidence; verify ordinary rename updates the same signed profile."
       ],
-      "consumers": ["frontend-account-profile"]
+      "consumers": [
+        "frontend-account-profile"
+      ]
     },
     {
       "id": "desktop-notification-permission",
-      "paths": ["src-tauri/src/notifications.rs"],
+      "paths": [
+        "src-tauri/src/notifications.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["notifications::tests::"]
+          "filters": [
+            "notifications::tests::"
+          ]
         }
       ],
       "frontend": [
@@ -592,14 +730,21 @@
     },
     {
       "id": "desktop-google-drive-backup",
-      "paths": ["src-tauri/src/google_drive/"],
+      "paths": [
+        "src-tauri/src/google_drive/"
+      ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["google_drive::", "recovery::"]
+          "filters": [
+            "google_drive::",
+            "recovery::"
+          ]
         }
       ],
-      "consumers": ["desktop-recovery"],
+      "consumers": [
+        "desktop-recovery"
+      ],
       "capability": {
         "summary": "Transport verified encrypted recovery archives to a user-selected Google account using bounded, cancellable desktop OAuth and Drive requests.",
         "guide": "docs/backup-recovery.md#google-drive-backup-and-restore",
@@ -635,7 +780,9 @@
           ]
         }
       ],
-      "node": ["scripts/diagnostics/background-command.test.mjs"],
+      "node": [
+        "scripts/diagnostics/background-command.test.mjs"
+      ],
       "capability": {
         "summary": "Capture through the Linux Screenshot portal or an optional native X11 helper into the shared screenshot editor.",
         "guide": "docs/help/topics/screenshots.md#platform-behavior",
@@ -660,7 +807,9 @@
         "src-tauri/src/chat_commands/channels.rs",
         "src-tauri/src/chat_commands/models.rs"
       ],
-      "frontend": ["src/lib/api.test.ts"],
+      "frontend": [
+        "src/lib/api.test.ts"
+      ],
       "capability": {
         "summary": "Expose the owner-controlled recent history window for new channel members.",
         "guide": "docs/help/topics/channels.md",
@@ -685,6 +834,69 @@
           ]
         }
       ]
+    },
+    {
+      "id": "desktop-account-login",
+      "paths": [
+        "src-tauri/src/shared_account_login.rs",
+        "src-tauri/src/shared_account_login/",
+        "src-tauri/src/services/user.rs",
+        "src-tauri/src/services/auth_service.rs",
+        "src-tauri/src/desktop_session.rs",
+        "src-tauri/src/chat_commands/account.rs",
+        "src-tauri/src/linked_account.rs",
+        "src-tauri/src/recovery.rs",
+        "src-tauri/src/device_enrollment.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "shared_account_login::tests::",
+            "services::auth_service::tests::",
+            "desktop_session::",
+            "commands::tests::",
+            "runtime_bootstrap::tests::",
+            "app_lock::tests::",
+            "recovery::tests::",
+            "device_enrollment::tests::"
+          ]
+        }
+      ],
+      "frontend": [
+        "src/features/chat/LinkDeviceDialog.test.ts"
+      ],
+      "consumers": [
+        "desktop-session",
+        "desktop-app-lock",
+        "desktop-recovery",
+        "frontend-chat"
+      ],
+      "capability": {
+        "summary": "Apply unified account login credentials only to the exact live desktop session and preserve private storage keys.",
+        "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
+        "invariants": [
+          {
+            "name": "Explicit source selection shares account login name and password; nickname remains a separate public account profile field",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Credential installation checks exact session and runtime authority at atomic commit; device-bound adoption intent permits only the selected account transition",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Runtime and backup use retained node storage secrets; saved login and unlock use canonical account credentials without exposing passwords through IPC",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Signed-out enrollment creates only a device identity until source proof validates; shared credentials and the verified account profile publish together through the recovery journal with login namespace and generation guards",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          }
+        ]
+      },
+      "escalation": [
+        "Require source-to-target V4 native relogin, collision and stale-session evidence. Packaged native saved-login authorization must be observed separately from mocks."
+      ]
     }
   ],
   "prScenarios": [
@@ -704,7 +916,9 @@
         "src-tauri/tauri.conf.json",
         "src-tauri/src/owner_commands/"
       ],
-      "native": ["host"]
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "native-acceptance-harness",
@@ -715,7 +929,11 @@
         "scripts/diagnostics/native-capture.mjs",
         "scripts/evals/png-evidence.mjs"
       ],
-      "native": ["darwin", "linux", "win32"]
+      "native": [
+        "darwin",
+        "linux",
+        "win32"
+      ]
     },
     {
       "id": "desktop-account-profile-acceptance",
@@ -724,20 +942,38 @@
         "src-tauri/src/trust.rs",
         "src-tauri/src/account_profile.rs"
       ],
-      "browser": ["e2e/account-profiles.spec.ts"],
-      "native": ["host"]
+      "browser": [
+        "e2e/account-profiles.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "desktop-notification-permission-acceptance",
-      "paths": ["src-tauri/src/notifications.rs"],
-      "browser": ["e2e/notification-permission.spec.ts"],
-      "native": ["host"]
+      "paths": [
+        "src-tauri/src/notifications.rs"
+      ],
+      "browser": [
+        "e2e/notification-permission.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
     },
     {
       "id": "desktop-google-drive-acceptance",
-      "paths": ["src-tauri/src/google_drive/", "src-tauri/src/recovery.rs"],
-      "browser": ["e2e/google-drive-backup.spec.ts", "e2e/recovery.spec.ts"],
-      "native": ["host"]
+      "paths": [
+        "src-tauri/src/google_drive/",
+        "src-tauri/src/recovery.rs"
+      ],
+      "browser": [
+        "e2e/google-drive-backup.spec.ts",
+        "e2e/recovery.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
     }
   ]
 }

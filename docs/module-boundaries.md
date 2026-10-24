@@ -59,21 +59,21 @@ Paths below are relative to the repository root. `core/` abbreviates
 `crates/mesh-talk-core/src/`; `ui/` abbreviates `frontend/src/`.
 
 | Capability                                     | Authoritative implementation                                                                                                                                                    | Reuse at callers; responsibility kept separate                                                                                                                                                                                         |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Participant lifecycle                          | `core/node/participant_runtime.rs`, `core/node/runtime.rs`, `core/bin/mesh-talk-node.rs`                                                                                        | Reuse prepared/running participant ownership for common network tasks. Desktop retains profile/session bootstrap; CLI retains its data paths, REPL and post-office mode. Adopt host producers and blocking file saves into retirement. |
-| Device/account identity                        | `core/identity/`, `core/node/account_devices.rs`, `core/node/peer_directory.rs`                                                                                                 | Use verified bindings; never infer authority from names, IPs or sidebar entries.                                                                                                                                                       |
+| Device/account identity                        | `core/identity/` (including `account_login.rs`), `core/node/account_devices.rs`, `core/node/peer_directory.rs`                                                                    | Use verified bindings; never infer authority from names, IPs or sidebar entries.                                                                                                                                                                                                          |
 | Discovery and reachability                     | `core/discovery/`, `core/node/privacy_routes.rs`, `privacy_routing.rs`                                                                                                          | Transport route verification stays in core; visibility and reachability remain different facts.                                                                                                                                        |
 | Desktop VPN inventory                          | `src-tauri/src/routed_discovery.rs`, `tailscale_discovery.rs`, `easytier_discovery.rs`                                                                                          | Enumerate optional existing clients concurrently; bound, interleave and deduplicate candidates. Core retains signed probing, privacy gates and identity/route verification.                                                            |
 | Peer presentation and infrastructure filtering | `ui/lib/rosterProjection.ts`, `contactVisibility.ts`, `postOfficeOptions.ts`                                                                                                    | Reuse account/device/role lookups and role-specific selectors. Diagnostics retain infrastructure; people pickers exclude it.                                                                                                           |
 | Direct messaging                               | `core/node/dm.rs`, `dm_envelope.rs`, `dm_ratchet.rs`                                                                                                                            | Encrypt/address in core; UI creates an intent and renders its result.                                                                                                                                                                  |
-| Channels and authority                         | `core/node/channel.rs`, `channels.rs`, `channel_senders.rs`                                                                                                                     | Signed membership is authoritative. Do not derive membership or permissions from a filtered contact list.                                                                                                                              |
+| Channels and authority                         | `core/node/channel.rs`, `channels.rs`, `channel_account_authority.rs`, `channel_account_bootstrap.rs`, `channel_account_maintenance.rs`, `channel_senders.rs`                                                                                                                     | Signed account grants and full device bindings are authoritative; account inheritance, legacy migration and bounded reconciliation stay in their core owners. Do not derive membership or permissions from a filtered contact list.                                                                                                                              |
 | Group recovery/custody                         | `core/node/channel_custody.rs`, `channel_projection_cache.rs`, `session.rs`                                                                                                     | Reuse accepted membership and retained-event reconciliation; availability is not an unconditional delivery guarantee.                                                                                                                  |
 | Durable outgoing delivery                      | `core/node/delivery_store.rs`, `delivery_runtime.rs`, `delivery_receipt.rs`, `delivery_observation.rs`                                                                          | Storage owns persisted transitions; runtime owns bounded direct/relay progress and scheduling; receipts own exact completion evidence. Runtime observations describe exact attempts under the [delivery observation contract](network-design-reference.md#runtime-delivery-observations). |
 | Post-office routing/federation                 | `core/postoffice/` (including signed network membership in `network.rs`), `core/node/postbox.rs`, `opaque_relay.rs`, `bridge_directory.rs`, `bridge_client.rs`, `relay_policy.rs`                                                     | Reuse relay eligibility, opaque projection and incremental mailbox admission; directory participation does not grant relay or conversation authority.                                                                                  |
 | Transport/session reuse                        | `core/transport/`, `core/node/transport.rs`, `session_pool.rs`, `session.rs`, `account_session.rs`                                                                                                    | Reuse authenticated bounded sessions; feature modules do not open ad hoc sockets or create their own retry loops.                                                                                                                      |
 | Files/folders                                  | `core/file/`, `core/node/files.rs`, `filebook.rs`, `file_consent.rs`, `file_completion.rs`                                                                                      | Consent, chunk integrity and recipient completion remain distinct transitions. Presentation intake belongs to `ui/features/chat/attachments/useAttachmentIntake.ts`; the store retains intent acceptance/retry.                        |
 | History/search/recall/reactions                | `core/node/queries.rs`, `search.rs`, `recall.rs`, `reactions.rs`                                                                                                                | Query through core; [recent-search references](ARCHITECTURE.md#recent-search-references) reuse canonical history identity and coverage. Frontend uses verified account bindings and centralized contact visibility.                                                                                                                                        |
-| Linking and sibling replay                     | `core/node/pairing.rs`, `linking.rs`, `account_sync*.rs`, `account_preferences.rs`                                                                                              | Pairing authority and replay policy stay separate from the dialog. Host adoption belongs to `src-tauri/src/linked_account.rs`.                                                                                                         |
+| Linking and sibling replay                     | `core/node/pairing.rs`, `linking.rs`, `enrollment.rs`, `account_sync*.rs`, `account_preferences.rs`, `account_access.rs`                                                                           | Pairing authority and replay policy stay separate from the dialog. Host adoption belongs to `src-tauri/src/linked_account.rs`; signed-out enrollment belongs to `device_enrollment.rs` and reuses the recovery publication journal; private login application belongs to `shared_account_login.rs`.                                                                                            |
 | Calls                                          | `core/node/call.rs`, `ui/store/calls.ts`, `ui/features/chat/WebRtcTestDialog.tsx`                                                                                               | Core owns authenticated signaling; the call store owns call lifecycle and WebRTC media; the test dialog owns local media diagnostics. Do not reuse mailbox custody as live signaling.                                                  |
 | Auth/runtime ownership                         | `src-tauri/src/state.rs`, `chat_commands/state.rs`, `runtime_bootstrap.rs`, `runtime_admission.rs`, `linked_account.rs`, `owner_commands.rs`, `owner_commands/search.rs`                                    | Reuse session leases and runtime installation checks; commands adapt inputs and errors. Frontend work uses `ui/store/ownership.ts`.                                                                                                    |
 | Message UI transitions                         | `ui/store/chat.ts`, `outgoingIntent.ts`, `conversationState.ts`, `chatRuntimeEffects.ts`                                                                                        | Intents own acceptance, conversation state owns cache transitions, effects bridge feature stores. Do not settle messages independently in components.                                                                                  |
@@ -114,7 +114,7 @@ shows a localized mention prefix alongside the latest preview and unread count
 while any retained mention identity is unseen. Opening a conversation or receiving
 ordinary messages does not acknowledge mentions; exact viewport read evidence
 does. Owner/account-scoped receipt persistence preserves the flag independently
-of message-cache eviction. Own-account messages never classify as
+of message-cache eviction. Own-account and protected messages never classify as
 mention alerts. `conversationState.ts` retains cache, deletion and
 optimistic-message reconciliation. History callers do not coordinate those
 internal transitions or import back into the chat composition module at runtime.
@@ -158,12 +158,13 @@ consume it. Typing updates memory without re-rendering the conversation view.
 Persistence coalesces after ten seconds idle, restarting the timer on each edit;
 navigation and visibility loss request a flush. Session retirement discards
 unsaved memory, and abrupt exits may lose recent edits. `src-tauri/src/drafts.rs`
-owns bounded encrypted snapshots, session admission and atomic replacement using
-the core encrypted record-log implementation. Its cached derived key is reused
-until lock/logout; writes never repeat password derivation. Stable conversation
-keys restore across restarts while exact session handles reject retired writes.
-Text and protection metadata share one encrypted snapshot. Legacy text-only maps
-remain readable; reserved policy entries are validated before restoration. Pending
+adapts typed account-document patches under the exact desktop/runtime account.
+The core account-document store owns encrypted metadata, signed revisions, deletion
+tombstones, content-addressed blobs and bounded existing-session reconciliation.
+Text and protection metadata share one version. Whole-view absence never deletes
+another device's draft. Legacy text-only maps remain read-only until explicit kept-
+source preparation can attribute known conversations; ambiguous IDs stay untouched.
+Pending
 admission and callbacks stay in memory. Success clears only its originating draft
 revision and flushes that removal; rejection retains the draft as the sole retry
 owner. Protected inactive previews and tooltips conceal draft text.
@@ -218,9 +219,45 @@ Node profile paths retain authenticated Event processing,
 authorization and delivery. Recovery uses explicit snapshot/import operations;
 retired language metadata is never republished or restored as filtering state.
 The existing signed payload and encrypted record formats remain the same.
+`core/node/account_profile_data.rs` and `account_profile_io.rs` own the
+canonical account nickname, biography, avatar and immutable creation metadata.
+Nickname-only edits preserve other profile fields and use the same revision ordering. `src-tauri/src/runtime_bootstrap.rs` projects accepted own
+account nicknames into local credentials, live presence and frontend state under
+exact session/installation authority. Its runtime-owned producer retires with the
+node and joins admitted blocking persistence. A host-local `profile-binding.json`
+account marker migrates a legacy singleton source name once. An old string-only
+marker that already names the current account but has no authenticated profile repairs that
+missing shared profile from the established local nickname. The versioned object
+marker also records an adopted account awaiting its source profile, so repeated
+startup cannot publish the joining device's unrelated previous nickname. Existing
+authenticated profiles always win over legacy-marker repair. Contact nickname selection
+remains in `core/node/runtime.rs` and the durable name directory: verified
+announcement nicknames outrank stale legacy profile labels. This does not change
+the authenticated profile fields themselves or create personal aliases.
 
-`src-tauri/src/desktop_session.rs` owns the active desktop user, token, password
-and exact-session generation. Credential authentication and profile persistence
+`core/identity/account_login.rs` owns the versioned per-local-user credential
+envelope, canonical login resolution and the shared login-name namespace lock
+used by registration and migration. Its authenticated payload repeats the public
+account/local-user binding. Atomic publication preserves the storage username,
+local-user UUID and separate identity/node storage passwords; migration never
+rewrites retained history. A migrated user cannot fall back to the old login, and
+corrupt envelopes fail closed. Collisions preserve existing users. Guarded
+publication rechecks host authority after encryption; explicit account adoption
+also checks the previous bound account.
+
+`core/node/account_access.rs` owns bounded, signed, account-scoped opaque access
+records, their encrypted journal, revision admission and certified-sibling
+exchange. This exchange is independent of optional sync categories. Credentials
+never enter public profiles, discovery or ordinary message events.
+`src-tauri/src/shared_account_login.rs` owns the private desktop payload and its
+explicit source initialization, pre-adoption name check, device/account-bound
+adoption intent and session-guarded envelope installation. Its runtime-owned
+reconciliation updates the canonical session login and saved-login state only for
+the admitted owner. Target startup never seeds unrelated previous credentials.
+
+`src-tauri/src/desktop_session.rs` owns the active desktop user, token, retained
+identity/node storage passwords, shared account login password and exact-session
+generation. Credential authentication and profile persistence
 delegate active-session transitions to that shared owner. Commands retain auth
 operation lifetime, runtime installation and retirement, without maintaining a
 second active user/token representation. `state.rs` preserves established exports;
@@ -422,7 +459,8 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
 - Own DM/account reaction state uses an account-scoped encrypted projection with
   latest-action compaction and local erase integration. Retained peer reactions
   resolve verified historical identities rather than live presence. Reactions
-  retain best-effort fanout; portable recovery snapshots do not include them.
+  retain best-effort live fanout; certified sibling catch-up also uses the private
+  account control owner below. Portable recovery snapshots do not include them.
 - Causal traversal lives in `core/eventlog/order.rs` and is reused by node history
   persistence and sync exports before filtering/pagination. Signed logical clocks
   alone do not prove ancestry. Compaction checks retained ancestry before replacing records;
@@ -528,3 +566,24 @@ membership projection and received-history store. Desktop IPC delegates authorit
 to core; the member dialog presents the policy without independently deciding
 history eligibility. The [channel guide](help/topics/channels.md#history-for-new-members)
 owns user-visible limits and availability.
+
+### Account document projections
+
+`node/account_documents/` owns private typed metadata and blobs, not group
+authority or public identity. The existing account worker and session carry
+manifest pages and bounded chunks; there is no second network daemon. Native
+`account_documents.rs` checks exact local owner, runtime account and version
+before mutations or plaintext release. Frontend linked coordinators project
+accepted records into the owning draft, reception, pack and avatar stores; they
+never own another network synchronization loop. Pack validation remains in
+`pack.ts`; pack storage is namespaced by local owner and cryptographic account.
+`settings/shared.rs` owns the allowlist mapping of portable settings onto existing
+per-key account preferences. Device paths, system permissions, autostart and
+local-agent grants stay outside the replicated allowlist.
+`account_documents/controls.rs` owns authenticated private DM control publication,
+original-action ordering and sibling projections. `reactions.rs` and `recall.rs`
+publish accepted actions through it; generic native document mutations cannot
+create control records. Explicit kept-source preparation validates legacy caches.
+`account_sync/archive.rs` filters known recalled private bodies/cards and invalidates cached
+exports when the control revision changes. Group authority and local deletion
+remain with their existing owners.

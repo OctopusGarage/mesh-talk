@@ -12,9 +12,17 @@ A local sign-in identity and its protected application data. A local user is not
 the cross-device mesh account or a network device.
 _Avoid_: account ID, device ID when referring to the local login identity.
 
-**Username**:
-The local user's login name. It is distinct from an editable display name.
-_Avoid_: account ID, peer identity.
+**Username / account login name**:
+The name entered at sign-in. Linked desktop devices use the kept account's same
+login name and password. It is distinct from the account nickname and from the
+immutable local storage username retained internally for an existing local user.
+_Avoid_: account ID, device ID, nickname, storage directory as interchangeable names.
+
+**Local storage username**:
+The existing per-device storage namespace for a local user. Account login
+migration preserves this name and the local-user UUID; a credential envelope maps
+the shared login to the retained local owner and its separate storage secrets.
+_Avoid_: account login name, account ID, shared password.
 
 **Display name**:
 A human-readable label for presentation. It is neither unique identity nor
@@ -31,6 +39,8 @@ Account-authenticated nickname, biography and avatar, saved through ordinary
 profile editing and synchronized automatically. It carries read-only creation
 metadata when known; revisions order updates across devices.
 _Avoid_: local login profile, device identity, proof of a person's identity.
+
+Linked devices share account login credentials through private account access. Login names remain distinct from public nicknames; device identities and local encrypted-storage secrets remain distinct.
 
 **Device**:
 A participant identified by its persistent signing and key-agreement identity.
@@ -84,8 +94,10 @@ accepted user-facing label for this concept.
 _Avoid_: multicast group, Noise channel when referring to conversation membership.
 
 **Channel member**:
-A device admitted by the channel's membership state. A person-facing account
-count can combine certified devices without changing device membership authority.
+A signed account grant admitted by the channel's membership state. Certified
+devices inherit that account's accepted membership and role without another owner
+approval. Legacy channels retain device-scoped authority until a validated,
+owner-signed account migration; discovery alone never creates membership.
 _Avoid_: discovered peer, invitee, online person.
 
 **Event**:
@@ -279,3 +291,10 @@ See [channel history settings](docs/help/topics/channels.md#history-for-new-memb
   current application workflow or verification authority.
 
 The [profile and verification guide](docs/peer-trust.md) owns evidence limits and sharing rules.
+
+**Private account document**:
+A typed, account-authenticated versioned record synchronized only among certified
+sibling devices under its consent category. Its signed metadata and deletion
+tombstone are distinct from the encrypted content-addressed blob and from public
+group authority events.
+_Avoid_: arbitrary replicated settings file, public group patch, delivery receipt.

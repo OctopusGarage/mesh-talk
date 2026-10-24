@@ -16,7 +16,7 @@ use zeroize::Zeroize;
 
 /// Max messages a receiver will skip forward in one sender's chain (DoS bound) and
 /// the total buffered skipped keys.
-const MAX_SKIP: u32 = 1000;
+pub(crate) const MAX_SKIP: u32 = 1000;
 const MAX_SKIPPED_TOTAL: usize = 2000;
 
 #[derive(Debug)]
@@ -148,12 +148,33 @@ impl Drop for SenderChain {
 }
 
 impl SenderChain {
+    /// Recover a gap the normal ratchet cannot cross. Routine out-of-order
+    /// messages keep their original receive position and this device's buffered
+    /// skipped keys. Only an authenticated account snapshot may jump a stalled
+    /// receiver; its own unconsumed skipped keys survive and consumed keys do not.
+    pub(crate) fn refresh_distribution(&mut self, skd: &SenderKeyDistribution) {
+        if skd.n.saturating_sub(self.n) > MAX_SKIP {
+            self.chain_key.zeroize();
+            self.chain_key = skd.chain_key;
+            self.n = skd.n;
+        }
+    }
+
     pub fn from_distribution(skd: &SenderKeyDistribution) -> Self {
         SenderChain {
             chain_key: skd.chain_key,
             n: skd.n,
             skipped: HashMap::new(),
             order: VecDeque::new(),
+        }
+    }
+
+    /// A receive-only bootstrap starts at the current chain position. Consumed
+    /// positions and buffered skipped keys remain private to the original device.
+    pub(crate) fn current_distribution(&self) -> SenderKeyDistribution {
+        SenderKeyDistribution {
+            chain_key: self.chain_key,
+            n: self.n,
         }
     }
 
@@ -433,6 +454,34 @@ mod tests {
         }
         // order never accumulated tombstones beyond the live map.
         assert_eq!(rc.order.len(), rc.skipped.len());
+    }
+
+    #[test]
+    fn receive_bootstrap_preserves_future_keys_without_consumed_or_skipped_history() {
+        let mut sender = SenderKey::generate();
+        let mut source = SenderChain::from_distribution(&sender.distribution());
+        for _ in 0..4 {
+            sender.ratchet();
+        }
+        source.message_key(3).unwrap();
+        let snapshot = source.current_distribution();
+        assert_eq!(snapshot.n, 4);
+        let mut target = SenderChain::from_distribution(&snapshot);
+        assert!(
+            target.message_key(0).is_err(),
+            "skipped history stays on the original device"
+        );
+        assert!(
+            target.message_key(3).is_err(),
+            "consumed positions are not restored"
+        );
+        let (position, expected) = sender.ratchet();
+        assert_eq!(target.message_key(position).unwrap(), expected);
+        assert_eq!(source.message_key(position).unwrap(), expected);
+        assert!(
+            source.message_key(0).is_ok(),
+            "export does not consume the source's skipped keys"
+        );
     }
 
     #[test]

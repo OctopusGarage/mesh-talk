@@ -28,6 +28,7 @@ import {
 } from "@/lib/unreadStorage";
 import {
   emptyReception,
+  applyAccountSeen,
   mergeReception,
   receiveIdentity,
   viewIdentities,
@@ -149,6 +150,12 @@ async function pollUntilReady(
       if (isCancelled() || performance.now() >= deadline) return false;
       if (identity.owner !== owner)
         throw new Error("Node identity is not ready for this owner");
+      if (identity.display_name && useAuth.getState().user?.id === owner)
+        useAuth.setState((state) => ({
+          user: state.user
+            ? { ...state.user, display_name: identity.display_name! }
+            : null,
+        }));
       const acct = identity.account_id;
       const persistedUnread = loadUnread(owner, acct);
       const persistedPendingUnread = loadPendingUnread(owner, acct);
@@ -186,6 +193,7 @@ async function pollUntilReady(
           ...(!sameScope
             ? {
                 ...reception,
+                accountSeen: reception.accountSeen,
                 historyBaselines: Object.keys(persistedReception.ledger),
                 historyFullBaselines: loadFullHistoryBaselines(owner, acct),
               }
@@ -276,6 +284,12 @@ export interface ChatState
   deleteContact: (account: string) => Promise<boolean>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
   markActiveRead: () => void;
+  applyAccountReadReceipts: (
+    owner: string,
+    accountId: string,
+    key: string,
+    ids: string[],
+  ) => void;
   markLegacyActiveRead: () => void;
   markMessagesViewed: (key: string, ids: string[]) => void;
   revealUnread: (key: string, id: string) => Promise<boolean>;
@@ -322,6 +336,7 @@ export interface ChatState
 
 function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
   return {
+    accountSeen: undefined,
     ...emptyConversationHistory(),
     historyRevision: state.historyRevision,
     activeRequest: state.activeRequest,
@@ -339,6 +354,7 @@ function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
 /** One empty session snapshot for initial state, login, and app lock. */
 function emptySessionData() {
   return {
+    accountSeen: undefined,
     ...emptyConversationHistory(),
     expiryNow: Date.now(),
     identityEpoch: 0,
@@ -423,6 +439,12 @@ async function refreshRosterSnapshot(
       get().retryBoot();
       return;
     }
+    if (identity.display_name && useAuth.getState().user?.id === lease.owner)
+      useAuth.setState((state) => ({
+        user: state.user
+          ? { ...state.user, display_name: identity.display_name! }
+          : null,
+      }));
     const [peers, accounts] = await Promise.all([
       readWithDeadline(() => chat.listPeers()),
       readWithDeadline(() => chat.listAccounts()),
@@ -461,9 +483,16 @@ async function refreshRosterSnapshot(
         rawSet,
         get,
         [
-          ...accounts.map((account): Conversation => ({
+          // Saved Messages belongs to the runtime even when the contact
+          // directory has no row for our own account.
+          ...Array.from(
+            new Set([
+              ...accounts.map((account) => account.account_id),
+              identity.account_id,
+            ]),
+          ).map((accountId): Conversation => ({
             kind: "account",
-            id: account.account_id,
+            id: accountId,
             name: "",
           })),
           ...channels.map((channel): Conversation => ({
@@ -827,6 +856,21 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       onFileProgress: (e) => {
         if (lease.current()) applyChatFileProgress(e);
       },
+      onAccountProfile: (event) => {
+        const state = get();
+        if (
+          lease.current() &&
+          useAuth.getState().user?.id === event.user.id &&
+          state.myAccountId === event.account_id &&
+          state.myId === event.device_id
+        )
+          useAuth.setState({
+            user: event.user,
+            ...(event.saved_session != null
+              ? { savedSession: event.saved_session }
+              : {}),
+          });
+      },
       onProfile: (e) => {
         if (lease.current()) applyChatProfile(e);
       },
@@ -947,6 +991,17 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       (state.unreadIds[key]?.length ?? 0) + (state.overflowUnread[key] ?? 0);
     if (state.unread[key] !== tracked)
       rawSet({ unread: { ...state.unread, [key]: tracked } });
+  },
+
+  applyAccountReadReceipts: (owner, accountId, key, ids) => {
+    const state = get();
+    if (
+      !state.ready ||
+      state.unreadOwner !== owner ||
+      state.myAccountId !== accountId
+    )
+      return;
+    rawSet(receptionPatch(state, applyAccountSeen(state, key, ids)));
   },
 
   markActiveRead: () => {
@@ -1274,6 +1329,7 @@ function captureChat(get: Get, identitySensitive = true) {
 registerRuntimeSnapshot(() => ({
   runEpoch: useChat.getState().runEpoch,
   identityEpoch: useChat.getState().identityEpoch,
+  accountId: useChat.getState().myAccountId,
 }));
 
 export function captureChatOwnership() {
@@ -1390,12 +1446,13 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
           state,
           key,
           { ...e, own_device: own },
-          mentionsName(
-            e.text,
-            useAuth.getState().user?.display_name ||
-              useAuth.getState().user?.username ||
-              "",
-          ),
+          !e.protection &&
+            mentionsName(
+              e.text,
+              useAuth.getState().user?.display_name ||
+                useAuth.getState().user?.username ||
+                "",
+            ),
         ),
       ),
     );

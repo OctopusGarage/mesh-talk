@@ -15,19 +15,37 @@ settings to confirm the value before editing it again.
 | Appearance            | Theme/library, available theme wallpapers and wallpaper visibility.                                        |
 | Notifications & calls | Notifications, message previews, experimental calling and ringtone.                                        |
 | Connection & delivery | Invisible mode, reply permissions, discovery scope, relay master/send/receive and preferred post office.   |
-| Privacy & security    | Device privacy preset, idle/hidden locking, sensitive copy/clipboard, stay signed in and hidden contacts.  |
+| Privacy & security    | Privacy preset, idle/hidden locking, sensitive copy/clipboard, stay signed in and hidden contacts.  |
 | Files & receiving     | Attachment receiving default and download destination. Individual conversations retain their own override. |
 | History & backup      | Local retention, encrypted backup, last-backup metadata and restore guidance.                              |
 
-App startup and keychain sign-in are computer-wide choices; most communication
-preferences belong to the signed-in account on this device. Appearance can
-participate in linked-device synchronization when its category is enabled. Each
-page names its scope, with exceptions beside the affected control. Backup does
-not export the device's settings; see [backup and recovery](backup-recovery.md).
+## Linked-account scope
 
-Before issuing a pairing code, only explicitly saved local appearance choices
-seed missing account preferences. Fresh-device defaults remain local, and
-existing account values are preserved.
+With preference synchronization enabled, linked devices share portable settings:
+notifications and preview preference, retention, calling and ringtone, post-office
+master/send/receive, LAN restriction, bridge discovery/hub, privacy preset, idle and
+hidden locking, sensitive-copy confirmation and clipboard clearing. Existing
+appearance preferences include language, theme, wallpaper and library selection.
+Custom themes, stickers, avatars and their validated assets use versioned private
+account documents. Contact remarks, pins and private contact/group photos share
+account scope; they do not change a contact's public signed nickname.
+
+Download destinations, autostart, close-to-tray, stay-signed-in, update channel,
+OS authorization, local-agent grants and device sync selection remain local.
+Invisible mode and reply-permission grants remain device-local under
+[privacy controls](privacy-controls.md). Attachment acceptance is a decision by
+the receiving device, and TOFU/manual safety verification remains installation-
+local; neither is expanded by importing another device’s settings.
+Enabling a shared notification preference never grants OS permission implicitly.
+Local encrypted-storage keys and device identity also remain distinct.
+
+The explicit kept-source pairing action seeds missing portable preferences and
+legacy libraries, drafts and private photos. Storage performs create-only seeding
+atomically, preserving existing values and tombstones. Fresh joining-device defaults
+cannot overwrite established account choices. Each preference key has an independent
+version; changes overlay the current canonical settings instead of replacing an
+outdated whole-device snapshot. Backup does not export device-local settings;
+see [backup and recovery](backup-recovery.md).
 
 ## Local agent access
 
@@ -51,7 +69,7 @@ authority, credential handling and transport limits.
 
 ## System notification permission
 
-The notification switch saves the signed-in account's preference on this device;
+The notification switch saves the signed-in account's shared preference;
 it does not override operating-system authorization. While enabled, its row shows
 current system permission separately. Turning the switch on checks permission and
 requests access only when the OS has not recorded a decision. Existing denials

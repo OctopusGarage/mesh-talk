@@ -598,8 +598,9 @@ async fn join_history_round_trip_over_noise_loopback_preserves_silent_provenance
     let a_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let b_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     alice.roster.lock().unwrap().update(
-        &Announce::new(
+        &Announce::new_with_account(
             &bob.identity,
+            &bob.account,
             "Bob",
             b_listener.local_addr().unwrap().port(),
         ),
@@ -607,8 +608,9 @@ async fn join_history_round_trip_over_noise_loopback_preserves_silent_provenance
         &alice.user_id(),
     );
     bob.roster.lock().unwrap().update(
-        &Announce::new(
+        &Announce::new_with_account(
             &alice.identity,
+            &alice.account,
             "Alice",
             a_listener.local_addr().unwrap().port(),
         ),
@@ -1062,4 +1064,367 @@ async fn join_history_rejoined_source_cannot_use_old_ancestry_to_read_removal_pe
             .iter()
             .any(|entry| entry.user_id == bob.user_id())
     }));
+}
+
+#[tokio::test]
+async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_offline() {
+    use super::super::channel_account_authority::{AccountAuthorityControl, AccountGrant};
+    use super::super::channel_account_bootstrap::{DeviceControl, inheritance_account_message};
+    use crate::identity::account::Account;
+    let owner_dir = tempfile::tempdir().unwrap();
+    let anchor_dir = tempfile::tempdir().unwrap();
+    let sibling_dir = tempfile::tempdir().unwrap();
+    let owner = node(owner_dir.path());
+    let anchor = node(anchor_dir.path());
+    let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+    let (channels, _) = tokio::sync::mpsc::unbounded_channel();
+    let (files, _) = tokio::sync::mpsc::unbounded_channel();
+    let sibling = Node::open_with_account(
+        DeviceIdentity::generate(),
+        Account::from_secret_bytes(anchor.account.secret_bytes()),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channels,
+        files,
+        &sibling_dir.path().join("events"),
+        &sibling_dir.path().join("sent"),
+        "pw",
+    )
+    .unwrap();
+    let channel = owner
+        .create_channel_invited("account invitation history", vec![])
+        .await
+        .unwrap();
+    for index in 0..14 {
+        owner
+            .send_channel_message(channel, format!("frozen row {index}").as_bytes())
+            .await
+            .unwrap();
+    }
+    let root = owner
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .find(|event| event.kind == EventKind::MembershipChange)
+        .unwrap()
+        .id;
+    let proof = owner.own_group_proof();
+    let control = AccountAuthorityControl {
+        version: 1,
+        previous: None,
+        issuer: proof.clone(),
+        owner_account: owner.account.public().ed25519_pub,
+        grants: vec![AccountGrant {
+            incarnation: [1; 16],
+            pending: false,
+            original: proof.clone(),
+            membership_event: root,
+            acceptance_event: None,
+        }],
+        revoked: vec![],
+        legacy_bindings: vec![proof],
+        account_signature: vec![],
+    };
+    owner
+        .append_event(
+            channel,
+            EventKind::ChannelAccountAuthority,
+            control.signed_encode(channel, &owner.account),
+        )
+        .unwrap();
+    owner.process_channel(channel);
+    owner
+        .try_account_channel_invite(
+            channel,
+            &anchor.identity.public(),
+            &anchor.own_group_proof(),
+        )
+        .unwrap();
+    copy(&owner, &sibling, channel);
+    assert!(sibling.channel_history(channel, 100).is_empty());
+    let projection = sibling.account_group_projection(channel);
+    let authority = projection.authority.current_event().unwrap();
+    let grant = projection
+        .authority
+        .account_grant(&sibling.account.public().ed25519_pub)
+        .unwrap()
+        .id()
+        .unwrap();
+    let inherit = DeviceControl::Inherit {
+        authority,
+        grant,
+        device: sibling.own_group_proof(),
+        account_signature: sibling
+            .account
+            .sign(&inheritance_account_message(
+                channel,
+                authority,
+                grant,
+                &sibling.identity.public(),
+            ))
+            .to_vec(),
+    };
+    sibling
+        .append_event(
+            channel,
+            EventKind::ChannelDeviceInheritance,
+            inherit.encode(),
+        )
+        .unwrap();
+    sibling.process_channel(channel);
+    sibling.accept_channel_invite(channel).await.unwrap();
+    copy(&sibling, &owner, channel);
+    owner.retry_join_history().unwrap();
+    copy(&owner, &sibling, channel);
+    let history = sibling.channel_history(channel, 100);
+    assert_eq!(
+        history.len(),
+        10,
+        "the accepting account device receives only the frozen selected history while its anchor never runs"
+    );
+    assert_eq!(history[0].text, b"frozen row 4");
+    assert_eq!(history[9].text, b"frozen row 13");
+    copy(&owner, &sibling, channel);
+    assert_eq!(
+        sibling.channel_history(channel, 100).len(),
+        10,
+        "account release replay stays deduplicated"
+    );
+    let release_events = owner
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let graph = release_events
+        .iter()
+        .map(|event| (event.id, event))
+        .collect::<HashMap<_, _>>();
+    let released = release_events
+        .iter()
+        .find(|event| {
+            decode_account_release(&event.ciphertext)
+                .is_some_and(|release| release.recipient == sibling.identity.public())
+        })
+        .unwrap();
+    let projected = sibling.account_group_projection(channel);
+    let state = projected.state.as_ref().unwrap();
+    assert!(account_release_admitted(
+        state,
+        released,
+        &projected.authority,
+        &graph
+    ));
+    for tamper in 0..3 {
+        let mut body = decode_account_release(&released.ciphertext).unwrap();
+        match tamper {
+            0 => body.grant.incarnation[0] ^= 1,
+            1 => body.recipient.x25519_pub = DeviceIdentity::generate().public().x25519_pub,
+            _ => body.release.sealed_key = vec![0; SNAPSHOT_BYTES * 2 + 1],
+        }
+        let forged = Event::new(
+            &owner.identity,
+            channel,
+            999,
+            released.parents.clone(),
+            999,
+            999,
+            EventKind::ChannelDeviceInheritance,
+            encode_account_release(&body),
+        );
+        assert!(
+            !account_release_admitted(state, &forged, &projected.authority, &graph),
+            "signed source cannot substitute another grant, recipient key or oversized key payload"
+        );
+    }
+    owner
+        .try_account_channel_remove(channel, &anchor.account_id())
+        .unwrap();
+    let removed = owner.account_group_projection(channel);
+    assert!(!account_release_admitted(
+        removed.state.as_ref().unwrap(),
+        released,
+        &removed.authority,
+        &graph
+    ));
+    owner
+        .try_account_channel_invite(
+            channel,
+            &anchor.identity.public(),
+            &anchor.own_group_proof(),
+        )
+        .unwrap();
+    let reinvited = owner.account_group_projection(channel);
+    assert!(
+        !account_release_admitted(
+            reinvited.state.as_ref().unwrap(),
+            released,
+            &reinvited.authority,
+            &graph
+        ),
+        "a new account invitation cannot reuse an earlier incarnation's selected history permission"
+    );
+}
+
+#[tokio::test]
+async fn account_invitation_three_event_wal_recovers_atomically_after_restart() {
+    use super::super::channel_account_authority::{AccountAuthorityControl, AccountGrant};
+    use super::super::delivery_store::DeliveryTransaction;
+    use super::super::sentlog::SentEntry;
+    use crate::identity::account::Account;
+    let directory = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let staged = tempfile::tempdir().unwrap();
+    let owner = node(directory.path());
+    let target = node(target_dir.path());
+    let channel = owner
+        .create_channel_invited("atomic account invitation", vec![])
+        .await
+        .unwrap();
+    owner
+        .send_channel_message(channel, b"one frozen history row")
+        .await
+        .unwrap();
+    let root = owner
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .find(|event| event.kind == EventKind::MembershipChange)
+        .unwrap()
+        .id;
+    let proof = owner.own_group_proof();
+    let control = AccountAuthorityControl {
+        version: 1,
+        previous: None,
+        issuer: proof.clone(),
+        owner_account: owner.account.public().ed25519_pub,
+        grants: vec![AccountGrant {
+            incarnation: [1; 16],
+            pending: false,
+            original: proof.clone(),
+            membership_event: root,
+            acceptance_event: None,
+        }],
+        revoked: vec![],
+        legacy_bindings: vec![proof],
+        account_signature: vec![],
+    };
+    owner
+        .append_event(
+            channel,
+            EventKind::ChannelAccountAuthority,
+            control.signed_encode(channel, &owner.account),
+        )
+        .unwrap();
+    owner.process_channel(channel);
+    owner
+        .try_account_channel_invite(
+            channel,
+            &target.identity.public(),
+            &target.own_group_proof(),
+        )
+        .unwrap();
+    let all = owner
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let projection = owner.account_group_projection(channel);
+    let authority = all
+        .iter()
+        .find(|event| Some(event.id) == projection.authority.current_event())
+        .unwrap()
+        .clone();
+    let invitation = all
+        .iter()
+        .find(|event| authority.parents.contains(&event.id))
+        .unwrap()
+        .clone();
+    let offer = all.iter().find(|event| matches!(decode::<HistoryControl>(&event.ciphertext),Some(HistoryControl::Offer(offer)) if offer.invitation == invitation.id)).unwrap().clone();
+    let transaction = vec![invitation.clone(), authority, offer.clone()];
+    assert!(valid_invitation_transaction(&transaction));
+    let identity_secret = owner.identity.secret_bytes();
+    let account_secret = owner.account.secret_bytes();
+    let open = || {
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channels, _) = tokio::sync::mpsc::unbounded_channel();
+        let (files, _) = tokio::sync::mpsc::unbounded_channel();
+        Node::open_with_account(
+            DeviceIdentity::from_secret_bytes(identity_secret.0, identity_secret.1),
+            Account::from_secret_bytes(account_secret),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channels,
+            files,
+            &staged.path().join("events"),
+            &staged.path().join("sent"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let before_crash = open();
+    {
+        let mut log = before_crash.log.lock().unwrap();
+        for event in all.iter().filter(|event| event.seq < invitation.seq) {
+            log.append(event.clone()).unwrap();
+        }
+        log.sync().unwrap();
+    }
+    before_crash.process_channel(channel);
+    let senders = owner
+        .channels
+        .lock()
+        .unwrap()
+        .state(&channel)
+        .unwrap()
+        .export_my_senders();
+    before_crash
+        .delivery
+        .lock()
+        .unwrap()
+        .begin(DeliveryTransaction::ChannelOutgoing {
+            events: transaction.clone(),
+            senders,
+            sent: SentEntry {
+                conversation: channel,
+                seq: offer.seq,
+                wall_clock: offer.wall_clock,
+                plaintext: Vec::new(),
+            },
+        })
+        .unwrap();
+    assert!(
+        transaction
+            .iter()
+            .all(|event| before_crash.log.lock().unwrap().get(&event.id).is_none())
+    );
+    drop(before_crash);
+    let recovered = open();
+    assert!(
+        transaction
+            .iter()
+            .all(|event| recovered.log.lock().unwrap().get(&event.id).is_some()),
+        "one pending WAL record recovers invitation, account grant and frozen offer together"
+    );
+    let projection = recovered.account_group_projection(channel);
+    let grant = projection
+        .authority
+        .account_grant(&target.account.public().ed25519_pub)
+        .unwrap();
+    assert!(grant.pending);
+    assert_eq!(grant.membership_event, invitation.id);
+    assert!(
+        !projection
+            .authority
+            .is_member(&target.identity.public(), &target.own_group_proof())
+    );
 }

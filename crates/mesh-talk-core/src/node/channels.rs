@@ -1,8 +1,9 @@
 //! Channel lifecycle: create, membership, sender-key distribution, and sends. Split out of node.rs (one `impl Node` block per domain).
 
+use super::channel::ChannelBook;
 use super::node::now_millis;
 use super::*;
-use crate::channel::ChannelMeta;
+use crate::channel::{ChannelMeta, ChannelState};
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::event::{ConversationId, EventId, EventKind};
 use crate::identity::device::PublicIdentity;
@@ -117,6 +118,150 @@ pub struct ChannelRecovery {
 }
 
 impl Node {
+    /// A historical device grant does not authorize a newly adopted account.
+    pub(in crate::node) fn channel_identity_matches_account(&self, state: &ChannelState) -> bool {
+        let public = self.identity.public();
+        state.members().contains(&public)
+            && (state.owner_account_id().is_none()
+                || state.member_account_id(&public.user_id()) == Some(self.account_id().as_str()))
+    }
+    pub(in crate::node) fn channel_identity_is_current(&self, state: &ChannelState) -> bool {
+        if !state.is_accepted_member(&self.user_id())
+            || !state.members().contains(&self.identity.public())
+        {
+            return false;
+        }
+        let current = self.account_group_projection(state.id());
+        if current.authority.current_event().is_some() {
+            current.authority.key_epoch() == Some(state.epoch())
+                && current
+                    .authority
+                    .is_member(&self.identity.public(), &self.own_group_proof())
+        } else {
+            state.owner_account_id().is_none()
+        }
+    }
+    pub(in crate::node) fn channel_identity_can_manage(&self, state: &ChannelState) -> bool {
+        if !self.channel_identity_is_current(state) {
+            return false;
+        }
+        let current = self.account_group_projection(state.id());
+        if current.authority.current_event().is_some() {
+            current
+                .authority
+                .can_admin(&self.identity.public(), &self.own_group_proof())
+        } else {
+            state.can_admin(&self.user_id())
+        }
+    }
+
+    pub(in crate::node) fn project_channel_member_accounts(
+        &self,
+        members: &[PublicIdentity],
+    ) -> (
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    ) {
+        let mut accounts = std::collections::BTreeSet::new();
+        let mut unbound = std::collections::BTreeSet::new();
+        for member in members {
+            if self.device_is_post_office(member) {
+                continue;
+            }
+            if let Some(account) = self.account_id_for_device(member) {
+                accounts.insert(account);
+            } else {
+                unbound.insert(member.user_id());
+            }
+        }
+        (accounts, unbound)
+    }
+    /// The same verified account projection feeds group summaries and presence.
+    pub fn channel_member_account_sets(
+        &self,
+        channel: ConversationId,
+    ) -> (
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    ) {
+        let members = {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            if let Some(state) = book.state(&channel)
+                && state.owner_account_id().is_some()
+            {
+                let accounts = state
+                    .members()
+                    .iter()
+                    .filter(|member| state.is_accepted_member(&member.user_id()))
+                    .filter_map(|member| {
+                        state
+                            .member_account_id(&member.user_id())
+                            .map(str::to_owned)
+                    })
+                    .collect();
+                return (accounts, std::collections::BTreeSet::new());
+            }
+            book.state(&channel).map(|state| {
+                state
+                    .members()
+                    .iter()
+                    .filter(|member| state.is_accepted_member(&member.user_id()))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+        }
+        .unwrap_or_else(|| {
+            let log = self.log.lock().expect("log mutex not poisoned");
+            super::channel::ChannelBook::projected_metadata(channel, &log.events(&channel))
+                .map(|state| {
+                    state
+                        .members()
+                        .iter()
+                        .filter(|member| state.is_accepted_member(&member.user_id()))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+        self.project_channel_member_accounts(&members)
+    }
+
+    /// Read validated controls independently of delayed plaintext persistence.
+    fn channel_control_state(&self, channel: ConversationId) -> Result<ChannelState, NodeError> {
+        let log = self.log.lock().expect("log mutex not poisoned");
+        let events = log.events(&channel);
+        let state = ChannelBook::projected_metadata(channel, &events)
+            .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+        if state.is_dissolved() {
+            return Err(NodeError::Channel("channel is dissolved".into()));
+        }
+        Ok(state)
+    }
+
+    /// Membership decisions use verified identity, not routing visibility grants.
+    fn channel_member_account_id(&self, member: &PublicIdentity) -> Option<String> {
+        if *member == self.identity.public() {
+            return Some(self.account_id());
+        }
+        if let Some(account) = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy lock not poisoned")
+            .as_ref()
+            .and_then(|state| state.proofs.account_for(member))
+        {
+            return Some(account);
+        }
+        self.roster
+            .lock()
+            .expect("roster mutex not poisoned")
+            .historical_announcements()
+            .into_iter()
+            .find(|proof| proof.public() == *member && proof.valid_presence())
+            .and_then(|proof| proof.account_id())
+    }
+
     /// Bounded invalidations of accepted group information. After lag, consumers
     /// must reload their group inventory; messages do not emit metadata changes.
     pub fn subscribe_channel_changes(&self) -> tokio::sync::broadcast::Receiver<ConversationId> {
@@ -200,7 +345,24 @@ impl Node {
             let Some(state) = book.state(&channel) else {
                 continue;
             };
-            if state.owner() != me || state.is_dissolved() {
+            if state.owner() != me || state.is_dissolved() || state.owner_account_id().is_some() {
+                continue;
+            }
+            let projection = self.account_group_projection(channel);
+            let Some(root) = projection
+                .accepted
+                .iter()
+                .find(|member| member.public == self.identity.public())
+                .map(|member| member.membership_event)
+            else {
+                continue;
+            };
+            if !self
+                .channel_migration
+                .lock()
+                .expect("channel migration lock")
+                .permits(channel, root)
+            {
                 continue;
             }
             let accepted_accounts: HashSet<&str> = state
@@ -241,8 +403,8 @@ impl Node {
         let Some((channel, device)) = self.auto_enrollment_candidate() else {
             return Ok(false);
         };
-        self.add_channel_member(channel, device).await?;
-        Ok(true)
+        self.add_channel_member_checked_if(channel, device, true, |commit| commit())
+            .await
     }
 
     /// An invitation may be accepted automatically only when an already accepted
@@ -292,6 +454,8 @@ impl Node {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursor = 0usize;
         let mut custody_cursor = 0usize;
+        let mut account_maintenance =
+            super::channel_account_maintenance::ChannelAccountMaintenance::default();
         let mut retry_after = HashMap::new();
         let mut retry_cycle = HashMap::new();
         let mut recheck_after = HashMap::new();
@@ -325,6 +489,8 @@ impl Node {
                     Err(_) => break,
                 }
             }
+            self.maintain_account_channels(&mut account_maintenance)
+                .await;
             self.retry_channel_plaintext();
             if let Err(error) = self.auto_enroll_one_channel_sibling().await {
                 log::warn!("linked channel invitation failed; will retry: {error}");
@@ -419,12 +585,16 @@ impl Node {
     ) -> Result<(), NodeError> {
         let mut distribution = None;
         authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
             let members = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-                if !state.is_accepted_member(&self.user_id()) || state.is_dissolved() {
+                if !self.channel_identity_is_current(state) || state.is_dissolved() {
                     return Err(NodeError::Channel("not an active channel member".into()));
                 }
                 state.members().to_vec()
@@ -453,12 +623,16 @@ impl Node {
     ) -> Result<(), NodeError> {
         let mut distribution = None;
         authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
             let members = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-                if self.user_id() != state.owner() {
+                if !self.channel_identity_can_manage(state) {
                     return Err(NodeError::Channel(
                         "only the channel owner can dissolve it".into(),
                     ));
@@ -587,6 +761,7 @@ impl Node {
             }
             // Build our own channel state (sets our identity for the sender-key path).
             self.process_channel(channel);
+            self.record_channel_owner_origin(channel)?;
             // Distribute our epoch-0 sender-key distribution to every member.
             self.distribute_my_sender_key(channel, &members)?;
 
@@ -615,6 +790,9 @@ impl Node {
         let state = book
             .state(&channel)
             .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+        if !self.channel_identity_is_current(state) || state.is_dissolved() {
+            return Err(NodeError::Channel("not an active channel member".into()));
+        }
         let mut senders = state.export_my_senders();
         let key = senders
             .iter()
@@ -625,7 +803,7 @@ impl Node {
         senders.push((state.epoch(), key.serialize()));
         let sealed = seal_keys_for(
             &self.identity,
-            state.members(),
+            &state.recipient_members(),
             &key.distribution(),
             state.epoch(),
         )
@@ -691,13 +869,114 @@ impl Node {
         new_member: PublicIdentity,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.add_channel_member_checked_if(channel, new_member, false, authorize)
+            .await
+            .map(|_| ())
+    }
+
+    /// Auto-enrollment must revalidate its accepted-account evidence inside the
+    /// same commit boundary as account removal, before signing an invitation.
+    pub(in crate::node) async fn add_channel_member_checked_if(
+        &self,
+        channel: ConversationId,
+        new_member: PublicIdentity,
+        require_account_sibling: bool,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<bool, NodeError> {
+        let upgraded = self
+            .account_group_projection(channel)
+            .authority
+            .current_event()
+            .is_some();
+        let verified = if upgraded {
+            let peer = self
+                .routing_peer(&new_member.user_id())
+                .filter(|peer| peer.public == new_member)
+                .ok_or_else(|| {
+                    NodeError::Channel(
+                        "the invited account must be reachable with an updated client".into(),
+                    )
+                })?;
+            let Some((
+                super::channel_account_bootstrap::AccountGroupResponse::Capability {
+                    version: 1,
+                    ..
+                },
+                proof,
+            )) = self
+                .query_account_groups_verified(
+                    &peer,
+                    super::channel_account_bootstrap::AccountGroupRequest::Capability,
+                )
+                .await
+            else {
+                return Err(NodeError::Channel(
+                    "the invited account needs a compatible client before joining this group"
+                        .into(),
+                ));
+            };
+            if peer.account_id != proof.account_id() {
+                return Err(NodeError::Channel(
+                    "the invited account identity changed; refresh contacts and retry".into(),
+                ));
+            }
+            Some(proof)
+        } else {
+            None
+        };
+        // Policy serialization precedes host authorization and membership locks.
+        // Never retain it during network distribution.
+        let policy = self.privacy.gate.read().await;
         let mut distribution = None;
         authorize(&mut || {
-            let (name, mut new_members, new_epoch, owner) = {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
+            if self
+                .account_group_projection(channel)
+                .authority
+                .current_event()
+                .is_some()
+            {
+                let proof = verified.as_ref().ok_or_else(|| {
+                    NodeError::Channel(
+                        "group authority changed; retry the account invitation".into(),
+                    )
+                })?;
+                match self.try_account_channel_invite(channel, &new_member, proof)? {
+                    super::channel_account_controls::AccountChannelMutation::Changed(members) => {
+                        distribution = Some(members);
+                        return Ok(());
+                    }
+                    super::channel_account_controls::AccountChannelMutation::Unchanged => {
+                        return Ok(());
+                    }
+                    super::channel_account_controls::AccountChannelMutation::Legacy => {
+                        return Err(NodeError::Channel(
+                            "group authority changed; retry the account invitation".into(),
+                        ));
+                    }
+                }
+            }
+            if require_account_sibling
+                && self.auto_enrollment_candidate() != Some((channel, new_member.clone()))
+            {
+                return Ok(());
+            }
+            if require_account_sibling {
+                let durable = self.channel_control_state(channel)?;
                 let book = self.channels.lock().expect("channels mutex not poisoned");
-                let state = book
-                    .state(&channel)
-                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+                if book.state(&channel).is_none_or(|state| {
+                    state.epoch() != durable.epoch()
+                        || state.owner() != durable.owner()
+                        || state.members() != durable.members()
+                }) {
+                    return Ok(());
+                }
+            }
+            let (name, mut new_members, new_epoch, owner) = {
+                let state = self.channel_control_state(channel)?;
                 (
                     state.name().to_string(),
                     state.members().to_vec(),
@@ -707,7 +986,7 @@ impl Node {
             };
             // Only the owner may change membership — a non-owner's event would be rejected by
             // every node's `process`, so refuse it locally too (no useless event/epoch bump).
-            if self.user_id() != owner {
+            if !self.channel_can_manage(channel) {
                 return Err(NodeError::Channel(
                     "only the channel owner can change membership".into(),
                 ));
@@ -734,11 +1013,12 @@ impl Node {
             distribution = Some(new_members.clone());
             Ok(())
         })?;
+        drop(policy);
         let Some(new_members) = distribution else {
-            return Ok(());
+            return Ok(false);
         };
         self.distribute_channel(channel, &new_members).await;
-        Ok(())
+        Ok(true)
     }
 
     /// Remove the member with `member_user_id` from `channel`, bumping the epoch. Posts
@@ -761,13 +1041,39 @@ impl Node {
         member_user_id: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        // Policy serialization precedes host authorization and membership locks.
+        // Never retain it during network distribution.
+        let policy = self.privacy.gate.read().await;
         let mut distribution = None;
         authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
+            let projection = self.account_group_projection(channel);
+            if projection.authority.current_event().is_some() {
+                let account = projection
+                    .state
+                    .as_ref()
+                    .and_then(|state| state.member_account_id(member_user_id))
+                    .unwrap_or("");
+                match self.try_account_channel_remove(channel, account)? {
+                    super::channel_account_controls::AccountChannelMutation::Changed(members) => {
+                        distribution = Some(members);
+                        return Ok(());
+                    }
+                    super::channel_account_controls::AccountChannelMutation::Unchanged => {
+                        return Ok(());
+                    }
+                    super::channel_account_controls::AccountChannelMutation::Legacy => {
+                        return Err(NodeError::Channel(
+                            "group authority changed; retry account removal".into(),
+                        ));
+                    }
+                }
+            }
             let (name, mut new_members, new_epoch, owner) = {
-                let book = self.channels.lock().expect("channels mutex not poisoned");
-                let state = book
-                    .state(&channel)
-                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
+                let state = self.channel_control_state(channel)?;
                 (
                     state.name().to_string(),
                     state.members().to_vec(),
@@ -777,7 +1083,7 @@ impl Node {
             };
             // Only the owner may change membership — reject a non-owner's removal locally
             // (every node would reject the resulting event anyway).
-            if self.user_id() != owner {
+            if !self.channel_can_manage(channel) {
                 return Err(NodeError::Channel(
                     "only the channel owner can change membership".into(),
                 ));
@@ -810,10 +1116,101 @@ impl Node {
             distribution = Some(new_members.clone());
             Ok(())
         })?;
+        drop(policy);
         let Some(new_members) = distribution else {
             return Ok(());
         };
         self.distribute_channel(channel, &new_members).await;
+        Ok(())
+    }
+
+    /// Remove a person and all of its currently certified channel devices in
+    /// one owner-signed epoch. Never infer an account from a display name.
+    pub async fn remove_channel_account_members_if(
+        &self,
+        channel: ConversationId,
+        account_id: &str,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(), NodeError> {
+        // Policy serialization precedes host authorization and membership locks.
+        // Never retain it during network distribution.
+        let policy = self.privacy.gate.read().await;
+        let mut distribution = None;
+        authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
+            match self.try_account_channel_remove(channel, account_id)? {
+                super::channel_account_controls::AccountChannelMutation::Changed(members) => {
+                    distribution = Some(members);
+                    return Ok(());
+                }
+                super::channel_account_controls::AccountChannelMutation::Unchanged => return Ok(()),
+                super::channel_account_controls::AccountChannelMutation::Legacy => {}
+            }
+            let (name, members, epoch, owner) = {
+                let state = self.channel_control_state(channel)?;
+                (
+                    state.name().to_owned(),
+                    state.members().to_vec(),
+                    state.epoch(),
+                    state.owner().to_owned(),
+                )
+            };
+            if !self.channel_can_manage(channel) {
+                return Err(NodeError::Channel(
+                    "only the channel owner can change membership".into(),
+                ));
+            }
+            let own_account = self.account_id();
+            let belongs = |member: &PublicIdentity| {
+                if member.user_id() == self.user_id() {
+                    own_account == account_id
+                } else {
+                    self.channel_member_account_id(member).as_deref() == Some(account_id)
+                }
+            };
+            if members
+                .iter()
+                .any(|member| member.user_id() == owner && belongs(member))
+            {
+                return Err(NodeError::Channel(
+                    "transfer channel ownership before the owner leaves".into(),
+                ));
+            }
+            let remaining = canonical_members(
+                members
+                    .iter()
+                    .filter(|member| !belongs(member))
+                    .cloned()
+                    .collect(),
+            );
+            if remaining.len() == members.len() {
+                return Ok(());
+            }
+            if remaining.is_empty() {
+                return Err(NodeError::Channel(
+                    "cannot remove the last member of a channel".into(),
+                ));
+            }
+            let meta = ChannelMeta {
+                name,
+                members: remaining.clone(),
+                epoch: epoch
+                    .checked_add(1)
+                    .ok_or_else(|| NodeError::Channel("channel epoch exhausted".into()))?,
+                owner,
+            };
+            self.append_event(channel, EventKind::MembershipChange, meta.encode())?;
+            self.process_channel(channel);
+            distribution = Some(remaining);
+            Ok(())
+        })?;
+        drop(policy);
+        if let Some(members) = distribution {
+            self.distribute_channel(channel, &members).await;
+        }
         Ok(())
     }
 
@@ -840,20 +1237,20 @@ impl Node {
     ) -> Result<(), NodeError> {
         let mut distribution = None;
         authorize(&mut || {
-            let (current_name, members, owner) = {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
+            let (current_name, members) = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-                (
-                    state.name().to_string(),
-                    state.members().to_vec(),
-                    state.owner().to_string(),
-                )
+                (state.name().to_string(), state.members().to_vec())
             };
             // Only the owner may rename — a non-owner's event would be rejected by every node's
             // `process`, so refuse it locally too.
-            if self.user_id() != owner {
+            if !self.channel_can_manage(channel) {
                 return Err(NodeError::Channel(
                     "only the channel owner can rename the channel".into(),
                 ));
@@ -903,6 +1300,18 @@ impl Node {
     ) -> Result<(), NodeError> {
         let mut distribution = None;
         authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
+            match self.try_account_channel_transfer(channel, new_owner)? {
+                super::channel_account_controls::AccountChannelMutation::Changed(members) => {
+                    distribution = Some(members);
+                    return Ok(());
+                }
+                super::channel_account_controls::AccountChannelMutation::Unchanged => return Ok(()),
+                super::channel_account_controls::AccountChannelMutation::Legacy => {}
+            }
             let (owner, accepted) = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
                 let state = book
@@ -913,7 +1322,7 @@ impl Node {
                     state.is_accepted_member(new_owner),
                 )
             };
-            if self.user_id() != owner {
+            if !self.channel_can_manage(channel) {
                 return Err(NodeError::Channel(
                     "only the channel owner can transfer ownership".into(),
                 ));
@@ -967,22 +1376,25 @@ impl Node {
     ) -> Result<(), NodeError> {
         let mut distribution = None;
         authorize(&mut || {
-            let (owner, members) = {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
+            let members = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-                (state.owner().to_string(), state.members().to_vec())
+                if !self.channel_identity_is_current(state) {
+                    return Err(NodeError::Channel("not a channel member".into()));
+                }
+                if self.channel_identity_can_manage(state) {
+                    return Err(NodeError::Channel(
+                        "transfer channel ownership before leaving".into(),
+                    ));
+                }
+                state.members().to_vec()
             };
-            let me = self.user_id();
-            if me == owner {
-                return Err(NodeError::Channel(
-                    "transfer channel ownership before leaving".into(),
-                ));
-            }
-            if !members.iter().any(|member| member.user_id() == me) {
-                return Err(NodeError::Channel("not a channel member".into()));
-            }
             self.append_event(channel, EventKind::ChannelLeave, vec![])?;
             distribution = Some(members.clone());
             Ok(())
@@ -1009,12 +1421,16 @@ impl Node {
     ) -> Result<(), NodeError> {
         let mut distribution = None;
         authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
             let members = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-                if !state.pending_invite() || !state.is_member(&self.user_id()) {
+                if !state.pending_invite() || !self.channel_identity_matches_account(state) {
                     return Err(NodeError::Channel("no pending invitation".into()));
                 }
                 state.members().to_vec()

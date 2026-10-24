@@ -13,7 +13,16 @@ Start a group conversation and review its members from the conversation header.
 
 Open the channel's members control in the conversation header. Member profiles show known account and device identities. A known endpoint can belong to a relay; it is not proof of the person's physical location.
 
-Membership and cryptographic access are not interchangeable with merely knowing a channel name. After restoring a backup onto a new device, old channel messages may be readable as an archive while future channel messages require a new invitation from the owner.
+Membership belongs to your account. Linking another device does not require the
+group owner to invite or approve that device again. An accepted, reachable device
+on your account can provide the verified group state and fresh receiving keys;
+the owner can be offline. Your devices keep independent sending keys.
+
+Older device-only groups require a compatible client update and an automatic
+owner-signed migration before this inheritance is available. No manual approval
+is required for each device. Knowing a group name or restoring an archive alone
+does not grant access, and historical messages still require an authorized
+retained copy.
 
 ## History for new members
 
@@ -31,6 +40,11 @@ New invitation-based groups default to **Last 10 messages within 3 days**. Exist
 channels without a signed policy remain **Off**. The policy and selection are frozen
 when the owner invites a device, using that invitation's timestamp. Changes apply
 to future invitations; they cannot retract copies already received.
+
+In account-authorized groups, an invitation belongs to the account. Another
+certified device can accept it while the originally invited device is offline;
+an eligible reachable holder can release the same selected history to that device.
+The owner does not approve each device separately.
 
 An invitee receives earlier content only after accepting. The owner shares a
 separate encrypted copy; old sender-chain keys are never distributed. The copy

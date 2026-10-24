@@ -266,30 +266,12 @@ pub async fn get_presence(
         }
     }
     for channel in rt.list_channels() {
-        let pending: HashSet<_> = rt.channel_pending_members(channel.id).into_iter().collect();
-        let mut accounts = HashSet::new();
-        let mut unbound = HashSet::new();
-        for device in rt.channel_members(channel.id) {
-            let id = device.user_id();
-            if pending.contains(&id) || node.device_is_post_office(&device) {
-                continue;
-            }
-            let account = if id == rt.user_id() {
-                Some(rt.account_id().to_owned())
-            } else {
-                rt.account_id_for_device(&device)
-            };
-            if let Some(account) = account {
-                accounts.insert(account);
-            } else {
-                unbound.insert(id);
-            }
-        }
+        let (accounts, unbound) = node.channel_member_account_sets(channel.id);
         add_group(
             &mut out,
             hex::encode(channel.id.as_bytes()),
-            accounts,
-            unbound,
+            accounts.into_iter().collect(),
+            unbound.into_iter().collect(),
         );
     }
     Ok(out)

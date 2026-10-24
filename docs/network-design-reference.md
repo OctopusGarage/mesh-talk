@@ -636,6 +636,35 @@ When local storage cannot persist a received file-consent control, the current m
 
 Membership and key controls are signed authority. Invitations require normal acceptance; owners, transfers, removals and departures affect the projected authorized membership. A directory or relay cannot grant access. Historical recovery obeys invitation/key/visibility constraints and must not expose uninvited ancestry to a new participant.
 
+Account-authorized groups grant membership and owner roles to accounts, not
+individual devices. An accepted account's certified devices inherit its role
+without owner interaction. The signed account authority commits grant lifetimes,
+full device bindings and account-wide revocations. Account-root signatures cover
+management controls and new-device inheritance proofs; device signatures and
+certificates alone cannot substitute another encryption key. Pending account
+invitations grant metadata visibility only, never sender keys or content.
+Acceptance activates the account; removal revokes its entire grant lifetime,
+including offline devices. Reinvitation requires a new grant and acceptance.
+Concurrent revocations merge without restoring removed members and advance the
+key epoch before further content is sent. Conflicting additions or owner transfers
+require a fresh decision against current authority; they do not implicitly merge
+stale owner snapshots.
+
+Legacy device-only groups migrate through a new owner-authorized commitment.
+Explicit kept-source consent or locally recorded group creation binds the owner
+to the exact legacy root. Participant account bindings come from authenticated
+Noise announcements pinned to the existing full device keys; a cached UDP hint
+or an old account label cannot replace that proof. Legitimate adoption before
+this new commitment can therefore merge devices into their current account.
+Afterward its grant bindings remain immutable. Missing, conflicting or unsupported
+evidence defers migration rather than inventing historical authority. After migration, an accepted same-account sibling can
+provide signed group state and current receiving chains while the owner is
+offline. Each device generates its own sending chain. Consumed keys and another
+device's outgoing ratchet are never copied. Version 4 channel sync gates these
+new controls; older envelopes receive an upgrade response before unknown kinds
+are transferred. Group counts and composite avatars use the same accepted
+account projection; pending invitations and duplicate devices do not add people.
+
 Small groups retain direct fanout. Text/sticker distribution in larger groups seeds a bounded subset and relies on authorized member recovery; membership/key controls retain their broader bounded fanout. File manifests have their own fanout behavior and must not inherit a text-only optimization without an explicit retention/recovery design.
 
 Channel send acceptance returns the exact locally committed event ID before
@@ -667,7 +696,7 @@ Each accepted member controls **Share a copy**. A receiver can obtain its own au
 
 Newly validated messages and projected group-info changes coalesce targeted recovery work. Duplicate processing and empty rounds remain quiet. Recovery bounds concurrent groups and peer exchanges, so a stalled peer does not delay a healthy source in the same batch. Identity/channel-specific rotation distributes peer selection. Idle history reconciliation uses capped exponential backoff with jitter; discovery changes wake recovery immediately. Custody and failed plaintext retain their own retry schedules.
 
-Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A 30-second full metadata reconciliation repairs missed events and older hosts; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Local contact aliases remain local presentation preferences.
+Signed name, owner, membership, invitation and sharing changes also publish bounded local group invalidations. The desktop forwards them only under the originating runtime authority. The frontend coalesces bursts, refreshes affected member details with at most four concurrent queries, and updates the open group's name, owner and members together with its avatar cache. Failed queries preserve the last successful details. A 30-second full metadata reconciliation repairs missed events and older hosts; event-buffer lag requests a full reconciliation. Presence leases and delivery status retain their separate timing contracts. Contact aliases are private account preferences; they synchronize between certified devices without changing public nicknames or membership authority.
 
 ```mermaid
 flowchart LR
@@ -727,13 +756,248 @@ sequenceDiagram
 
 Current `send_call_signal` is ephemeral, device-addressed and uses a fresh live Noise connection. It does not append signals to the durable message log or upload them to post-office mailboxes. A participant visible only through opaque federation therefore does not automatically have a usable call-signaling path. WebRTC then needs its own permitted ICE/media path; post offices supply no TURN service. Text/file relay success proves neither requirement.
 
+
 ### G. Linking and ongoing account synchronization
+
+Device adoption prepares a durable exact-device account-transition record before
+replacing the account keystore. The old account root, adopted account root and
+unchanged device sign domain-separated transition bytes, including the complete
+Ed25519/X25519 tuple, both certificates, predecessor and nonce. Only loading the
+matching adopted account commits publication. Loading the old account discards
+an unpublished future tail; a write error alone cannot prove that atomic key
+replacement did not occur. Security rekey deliberately emits no linking continuity.
+
+Updated peers carry a bounded committed transition chain in a session-bound Noise
+presence extension. Existing announcements, certificates and channel event layouts
+remain unchanged. A receiver updates only a matching full-device prior binding,
+checks persisted lineage and rejects forks, cycles, stale replay and changed keys.
+Existing disclosure policy remains authoritative; an accepted transition does not
+mark a safety number verified, rewrite old conversation history, alias whole
+accounts, or change established account-group grants. Group count projections
+then use the repaired binding. Proofs remain available across restarts and are
+resent on authenticated reconnect, allowing an offline or upgraded recipient to
+recover without repeating per-recipient manual acceptance. Private login data,
+contact remarks and account preferences stay within certified same-account sync.
+
+Clients without this extension must upgrade to consume automatic transition
+repair. Early linking operations that did not retain the old-account signature
+cannot manufacture it after key replacement; their existing explicit account
+change recovery remains available. Names, account IDs alone, discovery hints and
+new-account certificates are insufficient replacement evidence.
+
+Typed private account documents reuse the existing certified sibling session and
+account worker. Domains cover conversation drafts (text and protection together),
+grow-only exact-message read receipts, customization packs and private avatar
+overrides, and private DM reaction/recall controls. History consent gates drafts,
+read receipts and DM controls; appearance consent gates
+libraries/photos. Shared settings retain the existing per-key preference owner.
+The native account adapter rejects stale owner/runtime/account admissions, releases
+blob bytes only for the requested current version, and uses compare-and-set writes.
+
+Each domain compares a deterministic digest of signed metadata. Mismatches exchange
+paged manifests, then only needed verified content; a patch carries a complete
+record for its key, never an unvalidated full-state replacement. Version order is
+revision, writer device and content hash, independent of wall-clock skew. Deletion
+tombstones participate in the digest. Equal metadata with a missing blob remains
+incomplete and cannot report up to date. Interrupted transfers preserve the old
+accepted version. Startup removes only managed incomplete document chunks.
+
+Manifests carry at most 64 records per turn; chunks are at most 16 KiB and a turn
+transfers at most 12 MiB. Drafts are capped at 64 KiB, packs at 12 MiB and private
+avatars at 1 MiB; the store bounds ordinary records, read receipts and aggregate
+assets separately. Unsupported legacy extensions cool down without disabling
+ordinary history. Additional document status distinguishes upgrade required,
+source consent off, transient failure and complete convergence.
+
+DM controls retain their semantic ordering: reaction state is keyed by peer,
+message, actor and emoji, with the original event timestamp and removal precedence.
+A delayed add cannot supersede a later removal. Recall records are immutable and
+apply only to the target's authenticated author and conversation; a control may
+arrive before its target. Generic document writes cannot create either control.
+Verified live controls retain the signed original event and certified author and
+observer evidence; the account signature attests the sibling's verified decryption.
+Historical recall caches lack the original recaller signature. Only explicit
+kept-source preparation can attest such a retained mark, after validating the
+retained current-account route and exact target author. Joining startup never
+attributes unbound legacy controls to the adopted account. Failed publication is
+retryable without discarding an already accepted local action.
+
+Original document domains retain version-1 requests. DM control domains use
+version 2; an older source requires an upgrade for those domains while ordinary
+history continues. Known recalls exclude private message bodies and file cards
+from account archive export, including cached pages. Control revisions invalidate
+stale exports; late original content also observes accepted recall state. Local
+hide/delete and conversation clearing do not become global recalls.
+
+Sibling file bytes use an optional checked attachment request on the same account
+session. Only that request admits the appended typed unavailable/source-disabled
+response; legacy attachment layouts and responses remain frozen. The source checks
+the exact certified account/device, active disclosure guard and local sync consent
+before observing availability. Available data keeps the existing authenticated
+manifest, byte-count and checksum validation. Transport closures, corrupt bytes
+and staging failures are never reclassified as missing content.
+
+Unavailable bytes retain their file cards and pending count. A bounded cache of
+256 peer/file observations defers identical unavailable probes for 60 seconds;
+unsupported checked requests use a peer-wide capability cooldown and the existing
+legacy byte exchange. New clients expose waiting for file copies separately from
+errors and complete convergence. Missing files cannot block messages, preferences
+or private documents, or prevent trying later available files. A later retry can
+recover bytes when any eligible sibling has a usable copy; an absent copy cannot
+be recreated from metadata. Both sides must support the checked exchange for its
+explicit availability status.
+
+Group recovery stays separate from private account records: accepted members can
+relay bounded verified device-transition proofs over the existing group-authority
+exchange. Full device tuples and old/new account signatures, plus current accepted
+requester membership, are required. A relayed binding patch never grants endpoint
+reachability or exposes account credentials, remarks, drafts or settings. Group
+authority and membership compare signed event summaries and request missing events;
+a newer claimed version without its verified authority chain is not authoritative.
 
 A one-time 128-bit code authorizes a specific device identity to obtain the account secret/certificate and eligible backfill over Noise. Enrollment is durable before use. It permits only the exact certified Ed25519/X25519 identity to adopt the account; fresh signed announcements alone cannot rebind a historical identity.
 
 The enrollment transition serializes current-code validation and durable authority changes, invalidates pre-transition managed session guards, clears idle reuse and refreshes only its current pairing exchange. Code consumption is atomic. After a lost response/adoption failure, a new valid code can authorize a restricted incoming pairing-only retry for the exact prior enrolled binding; that channel cannot enter ordinary sync, calls or attachment/history protocols before code validation. New account presence permanently retires the old-binding retry exception.
 
-Upgraded pairing uses `MTPQ2` to authenticate the requested history choice before any backfill crosses the channel. A strict no-history request requires this capability; it does not retry the legacy request. History-enabled clients may retry legacy pairing once, only before any valid response. Ongoing `MTAHS2` reconciliation separates file cards from file bytes; frozen `MTAHS1` retains its attachment-coupled behavior. Source and receiver category intersections and process-local policy revisions guard selected exports and durable imports. These changes keep the existing bounded page/frame budgets.
+Pairing requires a direct authenticated application route: a shared LAN or a
+reachable routed/VPN path can supply one. Post-office directory presence and
+opaque message custody do not tunnel enrollment or sibling synchronization.
+A mailbox address must never be dialed as if it belonged to the device. The
+dialog excludes peers with no known direct route, explains how to establish one,
+and offers discovery refresh. Roster hints are observations rather than an
+authorization or reachability verdict; the core rechecks routes and identity.
+
+The SDK/CLI initiator uses `MTPQ3` / `MTPS2` to authenticate the history
+selection and preserve immutable account creation metadata. It never downgrades
+to a metadata-losing response after connection, protocol or capability failure.
+Responders still accept frozen V1/V2 request layouts and preserve their exact
+response bytes; old clients do not gain new account metadata implicitly.
+
+Desktop pairing requires `MTPQ4` / `MTPS4`: the response includes a validated
+signed private account-access snapshot before the joining node adopts account
+keys, together with optional signed account profile and immutable creation
+metadata. It never falls back to V1/V2/V3, including when history is enabled. An older
+source requires upgrading both desktop apps and issuing a fresh code; transport
+failures still retain their actual cause. The historical SDK/CLI V1/V2 layouts
+and their explicit history negotiation remain compatible.
+
+`node/account_access.rs` admits only bounded, signed records for the current
+account and exchanges them only with eligible certified siblings over Noise.
+The opaque host payload is encrypted at rest, independently revisioned and
+independent of optional history/profile/preference switches. Public discovery,
+trust cards, contact aliases and ordinary messages never carry login passwords.
+The desktop source initializes this record only through the explicit keep-account
+action; a joining device cannot seed its former credentials during startup.
+One runtime-owned essential worker shares transport capacity and the adaptive
+control deadline (initially 15 seconds, bounded to 60 seconds), independently of
+bulk history and optional profile/preferences. Transient failures retry after
+2, 5, 15 then 30 seconds; unsupported or invalid protocol responses cool down for
+60 seconds. A verified route, key or privacy-generation change resets cooldown;
+ordinary presence heartbeats do not. Typed per-device status exposes phase,
+revision, static failure reason, attempts and retry delay, never payloads or raw
+errors. Runtime retirement cancels the worker and its admitted operation.
+`identity/account_login.rs` maps the shared login to the retained local-user UUID
+and storage namespace through an atomic encrypted envelope. The envelope retains
+separate legacy identity-auth and raw node-storage passwords without rewriting
+history. Name collisions fail before account-key adoption and are rechecked at
+publication. Migration disables previous-login fallback; corrupt or mismatched
+envelopes fail closed. `src-tauri/src/shared_account_login.rs` applies snapshots
+under the exact desktop/runtime owner and permits a cross-account replacement
+only for a matching persisted, device-bound explicit adoption intent.
+
+Signed-out enrollment uses `node/enrollment.rs` with only a device identity to
+send anonymous discovery queries and pin a signed source announcement before
+the same V4 pairing exchange. It creates no temporary account or public presence.
+A pending explicit code permits an authenticated accountless device only on a
+pairing-restricted channel; code proof still binds both device keys and history
+selection before any account data is released. Anonymous discovery queries carry
+no local identity: an empty target list selects LAN multicast, while explicit
+IPv4/IPv6 endpoints limit probing to those endpoints. Responses require the fresh
+query nonce, source signature and account certificate. The V4 response carries
+the source's signed account profile. At most three `MTPC4` fragments, each at most
+60 KiB of response bytes, reassemble at most 144 KiB, covering a supported 128 KiB
+avatar plus bounded profile/access metadata. Reordered, oversized and truncated
+sequences fail before staging; frozen earlier protocols do not use fragments. The desktop requires
+that profile and verifies shared sign-in in isolated staging before publication.
+`src-tauri/src/device_enrollment.rs` commits the staged local user and account
+through the existing recovery publication journal, guarded by the login namespace,
+signed-out session generation and profile lifecycle. Cancellation before publication
+removes staging; a committed account remains recoverable through ordinary sign-in.
+
+Generic account preferences use an account-specific encrypted journal and key
+domain. Old unscoped preference journals are preserved rather than guessed to
+belong to an adopted account. Explicit source preparation republishes its saved
+portable choices; a joining device cannot seed unrelated local defaults.
+
+The device dialog names the enrollment direction before either action: the code
+issuer keeps its account, and the code submitter adopts it. The submitter sees the
+selected device, current/target account IDs, and explicit consent to replace this
+device's account login name and password with the source account's credentials.
+The source shows its login name separately from its account nickname.
+Consent is invalidated by a different selection, account binding, route removal or
+new dialog lifetime. A checked complete-sync option enables all five supported
+categories on each participating UI before its code/request; opting out retains
+saved category choices without changing global defaults. Source contact and
+appearance snapshots are durably prepared before category enablement/code
+issuance. Joiners never seed their unrelated local defaults over source data.
+Explicit joining-device category choices are captured with device-bound adoption
+intent and survive credential installation. Signed-out enrollment stages its
+chosen history policy and application marker with the verified profile; a source
+full-sync default cannot silently enable declined history after startup.
+
+The authenticated account profile owns the account nickname, avatar and bio. Linked devices
+project that same profile into local display state. The private account-access
+record separately supplies their shared login name and password; profile data
+never substitutes for credential authority. Nickname edits preserve other card
+fields and follow the existing signed revision ordering; a joining device cannot publish its old
+local nickname as the adopted account's initial profile.
+
+Contact presentation prefers the verified nickname recorded from device
+announcements, including the durable nickname retained while offline. A legacy
+public trust card can contain an older login/display label; importing or reading
+it must not replace a known contact nickname. The card name is only a fallback
+when no verified nickname is known. Own linked-device profile projection still
+uses the shared signed account profile. It never derives a nickname from a login
+name or a contact remark. Credential synchronization preserves the private local
+storage username while presenting the canonical shared login name.
+
+The device-link picker excludes peers explicitly reported as having no known direct
+application route. Mailbox-only presence is not pairing eligibility. A selected
+peer that disappears or loses its direct route cannot be submitted; discovery can
+make it selectable again. A discovered LAN or routed/VPN candidate still requires
+transport verification. Older hosts without route provenance retain dial-time
+validation.
+
+Each pairing dial, including permit/admission waiting and staggered candidates,
+has a 25-second ceiling; individual route authentication retains the transport
+owner's adaptive deadline. The authenticated request/response shares one
+adaptive control budget (15–60 seconds) for both send and receive. Timeout drops
+the attempt and its socket/permits. It never retries a possibly consumed code.
+The host preserves typed route, connection, response-timeout, clean-close,
+history-capability and protocol failures for localized inline recovery guidance;
+raw diagnostics remain available through an optional disclosure. Code and
+account-secret bytes must not appear in errors. Successful response validation,
+one-time code consumption and bounded best-effort backfill retain their existing
+semantics.
+
+Sibling history invalidations that arrive while an older page is active retain
+one coalesced follow-up per active worker (at most four). The worker immediately
+queues that follow-up and cannot report UpToDate while it is pending; policy
+replacement/cancellation and worker failure clear the pending marker. Saved
+Messages participates in the same bounded UI history reconciliation even when
+the own account is absent from the contact roster.
+
+Every account-target enqueue persists verified recipient and sibling fanout
+bindings before constructing immutable delivery destinations. Acceptance cannot
+depend on an earlier UI roster poll. A sibling archive is independent of external
+recipient delivery and cannot produce a recipient confirmation. If a recipient
+retains a device's previous account pin, discovery does not silently replace it.
+Read-only diagnostics may expose a currently verified full-key account change;
+explicit recipient acceptance rechecks the exact device and old/new account IDs
+under current session/policy authority and changes only that reviewed binding.
+It never marks a safety number verified or merges old-account conversations.
+
+Ongoing `MTAHS2` reconciliation separates file cards from file bytes; frozen `MTAHS1` retains its attachment-coupled behavior. Source and receiver category intersections and process-local policy revisions guard selected exports and durable imports. These changes keep the existing bounded page/frame budgets.
 
 Channel archive, file-card and attachment-byte exports require both source and requester to be accepted channel members. A pending invitation alone is not read permission.
 
@@ -785,7 +1049,7 @@ flowchart LR
 
 ### Local networks and direct routed clients
 
-| ID  | Topology and settings                                          | Discovery / broadcast                                                                                                      | Data forwarding and outcome                                                                                                                                                                                              |
+| ID  | Topology and settings                                                         | Discovery / broadcast                                                                                                                                                          | Data forwarding and outcome                                                                                                                                                                                                                                                |
 | --- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | L1  | X has A/B/C; no relay.                                         | Each public client announces itself within X.                                                                              | A→B is direct Noise/TCP; group events go to authorized members and recover from another sharing member. Offline B needs a later direct route. **Current.**                                                               |
 | L2  | L1 plus P, mailbox-only; A/B use relays.                       | Clients still find each other locally; P advertises only itself as a relay.                                                | A tries direct B and may upload an opaque copy to P. B drains later. P cannot introduce a remote user. **Current.**                                                                                                      |
@@ -801,7 +1065,7 @@ flowchart LR
 
 ### One or more cross-site post offices
 
-| ID  | Topology and settings                                                                     | Discovery / broadcast                                                                              | Data forwarding and outcome                                                                                                                                                                                                             |
+| ID  | Topology and settings                                                         | Discovery / broadcast                                                                                                                                                          | Data forwarding and outcome                                                                                                                                                                                                                                                |
 | --- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | R1  | P on X; D on Y has a direct Tailscale path to P; A/B on X and D opt in.                   | P can introduce the opted-in clients to one another. D does not export E/F merely by being on Y.   | A↔D uses P's opaque mailbox if no direct client route exists. P is a single cross-site dependency. **Current model.**                                                                                                                   |
 | R2  | R1, but D does not opt into bridge discovery.                                             | D is not a public cross-site listing; A/B cannot infer D from P's LAN.                             | A previously known D may still be reachable on an independently authorized direct or known-peer path. Public listing and delivery permission are distinct. **Implemented boundary.**                                                    |
@@ -1418,7 +1682,7 @@ A deleted local record or recalled event does not recall already copied data fro
 ### Enforced limits and scheduling
 
 | Concern                              | Current implementation                                                                                                                                        | Interpretation                                                                                                                                                                                            |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Default IPv4 discovery               | Multicast `224.0.0.167`, UDP 47474; configurable discovery port.                                                                                              | Custom deployments must make the actual UDP endpoint discoverable/probeable. TCP listen ports are separately advertised/configured.                                                                       |
 | Node-managed TCP capacity            | Eight shared slots; at most seven per direction.                                                                                                              | Counts managed dialing, handshakes, active sessions, retained idle sessions and accept reservations. OS backlog sockets, UDP, WebRTC and separate relay processes are outside this budget.                |
 | Capacity wait                        | Two seconds.                                                                                                                                                  | A bound on waiting for a managed slot, not a delivery deadline.                                                                                                                                           |
@@ -1623,7 +1887,6 @@ Use affected unit/integration tests during ordinary development. Add a real loop
 True stream multiplexing, trust of unapproved discovered relays, hot federation revocation, anonymity, TURN/media relay, mailbox-backed call signaling, stronger replicated-storage guarantees and unrestricted cross-site IP routing are not implied by this baseline. Each would change authority, resource or wire semantics and needs explicit requirements, compatibility/security analysis and its own acceptance evidence.
 
 The guiding question for future changes is: **Does this preserve local-first communication, explicit authority, equal trusted relay roles, endpoint-owned delivery truth and bounded recoverable work across the actual reachable graph?** If not, revise the design deliberately before presenting the behavior as compatible.
-
 
 ## Push-driven reconciliation and recovery
 

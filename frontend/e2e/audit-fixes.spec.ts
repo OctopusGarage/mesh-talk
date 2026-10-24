@@ -4,6 +4,87 @@ import { enterChat, CHANNEL } from "./helpers/session";
 
 test.use({ viewport: { width: 760, height: 520 } });
 
+for (const viewport of [
+  { width: 760, height: 520 },
+  { width: 390, height: 720 },
+]) {
+  test(`pairing connection guidance and recovery stay usable at ${viewport.width}px`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await enterChat(page);
+    await page.evaluate(() => {
+      const internals = (
+        window as unknown as {
+          __TAURI_INTERNALS__: {
+            invoke: (
+              command: string,
+              args?: unknown,
+              options?: unknown,
+            ) => Promise<unknown>;
+          };
+        }
+      ).__TAURI_INTERNALS__;
+      const invoke = internals.invoke.bind(internals);
+      internals.invoke = (command, args, options) =>
+        command === "link_device"
+          ? Promise.reject({
+              kind: "link-timeout",
+              message: "pairing response timed out (probe diagnostic)",
+            })
+          : invoke(command, args, options);
+    });
+    const action = page.getByTestId("sidebar-action-link");
+    if (!(await action.isVisible()))
+      await page.getByTestId("sidebar-overflow").click();
+    await action.click();
+    const dialog = page.getByTestId("link-device-dialog");
+    await expect(
+      dialog.getByText(/shared network or a reachable VPN/),
+    ).toBeAttached();
+    await dialog
+      .getByRole("combobox", { name: "Device" })
+      .selectOption("device_bob_2222");
+    await dialog
+      .getByRole("textbox", { name: "pairing code" })
+      .fill("0123 4567 89ab cdef 0123 4567 89ab cdef");
+    await expect(
+      dialog.getByText("Keep this device’s account", { exact: true }),
+    ).toBeAttached();
+    await expect(dialog.getByTestId("link-account-change")).toContainText(
+      "bob",
+    );
+    await expect(dialog.getByTestId("link-account-change")).toContainText(
+      "keeps its account",
+    );
+    await expect(dialog.getByTestId("link-adopt-account")).toBeDisabled();
+    await dialog.locator("#link-account-consent").check();
+    await dialog.getByTestId("link-adopt-account").click();
+    const feedback = dialog.locator("#link-device-feedback");
+    await expect(feedback).toContainText("didn’t answer in time");
+    await feedback.scrollIntoViewIfNeeded();
+    await expect(feedback).toBeInViewport();
+    await expect(feedback.locator("details")).not.toHaveAttribute("open");
+    await feedback.getByText("Technical details").click();
+    await expect(feedback.getByText(/probe diagnostic/)).toBeVisible();
+    await feedback.getByText("Technical details").click();
+    await dialog.getByTestId("link-refresh-devices").click();
+    await expect(dialog.getByRole("status")).toContainText(
+      "Discovery requested",
+    );
+    await expect(dialog.getByTestId("link-adopt-account")).toBeEnabled();
+    expect(
+      await dialog.evaluate(
+        (element) => element.scrollWidth <= element.clientWidth + 1,
+      ),
+    ).toBe(true);
+    await feedback.scrollIntoViewIfNeeded();
+    await dialog.screenshot({
+      path: testInfo.outputPath(`pairing-${viewport.width}.png`),
+    });
+  });
+}
+
 test("member removal and dialog close have visible, usable focus targets", async ({
   page,
 }) => {
@@ -75,6 +156,34 @@ test("device linking offers user devices but excludes post office nodes", async 
   );
 });
 
+test("device linking excludes mailbox-only devices before accepting a code", async ({
+  page,
+}) => {
+  await enterChat(page, "tester", "/?data=pairing-routes");
+  const action = page.getByTestId("sidebar-action-link");
+  if (!(await action.isVisible()))
+    await page.getByTestId("sidebar-overflow").click();
+  await action.click();
+  const dialog = page.getByTestId("link-device-dialog");
+  const devices = dialog.getByRole("combobox", { name: "Device" });
+  await expect(devices.locator("option[value=device_bob_2222]")).toHaveCount(1);
+  await expect(devices.locator("option[value=device_carol_3333]")).toHaveCount(
+    0,
+  );
+  await expect(dialog.locator("#link-device-route-hint")).toContainText(
+    "cannot be selected",
+  );
+  await dialog
+    .getByRole("textbox", { name: "pairing code" })
+    .fill("0123456789abcdef0123456789abcdef");
+  const link = dialog.getByTestId("link-adopt-account");
+  await expect(link).toBeDisabled();
+  await devices.selectOption("device_bob_2222");
+  await expect(link).toBeDisabled();
+  await dialog.locator("#link-account-consent").check();
+  await expect(link).toBeEnabled();
+});
+
 test("linked-device history choice is local and survives reopening", async ({
   page,
 }) => {
@@ -85,7 +194,7 @@ test("linked-device history choice is local and survives reopening", async ({
   const history = dialog.getByRole("switch", {
     name: "Message history",
   });
-  const profile = dialog.getByRole("switch", { name: "Account avatar" });
+  const profile = dialog.getByRole("switch", { name: "Account profile" });
   const attachments = dialog.getByRole("switch", { name: "Attachments" });
   const appearance = dialog.getByRole("switch", { name: "Appearance" });
   const contacts = dialog.getByRole("switch", { name: "Contacts" });

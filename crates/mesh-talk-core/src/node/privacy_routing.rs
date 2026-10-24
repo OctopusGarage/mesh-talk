@@ -21,6 +21,9 @@ impl Node {
         &self,
         device: &crate::identity::device::PublicIdentity,
     ) -> Option<String> {
+        if *device == self.identity.public() || self.certified_sibling(device) {
+            return Some(self.account_id());
+        }
         self.historical_author(&device.ed25519_pub)
             .filter(|proof| proof.public() == *device)
             .and_then(|proof| proof.account_id())

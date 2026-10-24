@@ -18,6 +18,7 @@ export const SUPPORTED_LANGUAGES = [
 export type Language = (typeof SUPPORTED_LANGUAGES)[number];
 
 const KEY = "mesh-talk-lang";
+const localLanguageListeners = new Set<(language: Language) => void>();
 
 function isLanguage(value: string): value is Language {
   return (SUPPORTED_LANGUAGES as readonly string[]).includes(value);
@@ -40,15 +41,19 @@ export function resolveLanguage(raw: string): Language | null {
   return null;
 }
 
-/** Persisted choice, else the browser's preferred language, else English. */
-function initialLanguage(): Language {
+/** Explicit persisted choice only; browser defaults are not account preferences. */
+export function savedLanguage(): Language | null {
   if (typeof localStorage !== "undefined") {
     const stored = localStorage.getItem(KEY);
-    if (stored) {
-      const resolved = resolveLanguage(stored);
-      if (resolved) return resolved;
-    }
+    if (stored) return resolveLanguage(stored);
   }
+  return null;
+}
+
+/** Persisted choice, else the browser's preferred language, else English. */
+function initialLanguage(): Language {
+  const saved = savedLanguage();
+  if (saved) return saved;
   const nav = typeof navigator !== "undefined" ? navigator.language : "";
   return resolveLanguage(nav) ?? "en";
 }
@@ -69,8 +74,28 @@ void i18n.use(initReactI18next).init({
 
 /** Switch and persist the active language. */
 export function setLanguage(lng: Language) {
+  if (!isLanguage(lng)) return;
+  applyAccountLanguage(lng);
+  for (const listener of localLanguageListeners) listener(lng);
+}
+
+/** Account imports never emit local edits, including asynchronous i18next events. */
+export function applyAccountLanguage(value: string | null): boolean {
+  if (value !== null && !isLanguage(value)) return false;
+  const lng = value ?? "en";
   if (typeof localStorage !== "undefined") localStorage.setItem(KEY, lng);
   void i18n.changeLanguage(lng);
+  return true;
+}
+
+/** Subscribe only to explicit changes made through the local language control. */
+export function subscribeLanguageChanges(
+  listener: (language: Language) => void,
+): () => void {
+  localLanguageListeners.add(listener);
+  return () => {
+    localLanguageListeners.delete(listener);
+  };
 }
 
 export default i18n;

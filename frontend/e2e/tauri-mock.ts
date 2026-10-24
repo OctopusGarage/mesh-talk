@@ -3,6 +3,11 @@ import type {
   FavoriteMetadata,
   MessageFavorite,
 } from "../src/lib/api/messageFavorites";
+import type {
+  AccountDocumentKey,
+  AccountDocumentMeta,
+  DocumentVersion,
+} from "../src/lib/api/accountDocuments";
 import { test as base, expect } from "@playwright/test";
 import type {
   ChannelHistoryPolicy,
@@ -114,6 +119,11 @@ export const test = base.extend({
           account_id: CAROL.account_id,
         },
       ];
+      if (dataMode === "pairing-routes") {
+        peers[0].directly_reachable = true;
+        peers[1].directly_reachable = false;
+        peers[1].discovered_on_lan = false;
+      }
       if (dataMode === "post-office") {
         peers.push({
           user_id: "44444444444444444444444444444444",
@@ -834,6 +844,127 @@ export const test = base.extend({
       ) => {
         (delivery[account] ||= {})[id] = status;
       };
+      // Browser fixture only: account namespaces and CAS mirror the IPC contract;
+      // signatures, encrypted persistence and sibling transport are tested natively.
+      type MockDocument = { meta: AccountDocumentMeta; payload: string };
+      const documentCache = new Map<string, Record<string, MockDocument>>();
+      const documentScope = (args: Record<string, unknown>) => {
+        if (args.owner !== "u_self" || args.expectedAccount !== SELF.account)
+          throw new Error("Account changed");
+        return `${args.owner}:${args.expectedAccount}`;
+      };
+      const documents = (args: Record<string, unknown>) => {
+        const scope = documentScope(args);
+        let rows = documentCache.get(scope);
+        if (!rows) {
+          rows = JSON.parse(
+            localStorage.getItem(`mock-account-documents-${scope}`) ?? "{}",
+          );
+          documentCache.set(scope, rows!);
+        }
+        return rows!;
+      };
+      const persistDocuments = (args: Record<string, unknown>) => {
+        try {
+          localStorage.setItem(
+            `mock-account-documents-${documentScope(args)}`,
+            JSON.stringify(documents(args)),
+          );
+        } catch {
+          /* Large browser-only assets may exceed localStorage quota. */
+        }
+      };
+      const version = (meta: AccountDocumentMeta): DocumentVersion => ({
+        revision: meta.revision,
+        writer_device: meta.writer_device,
+        content_hash: meta.content_hash,
+      });
+      const matchesVersion = (
+        meta: AccountDocumentMeta,
+        expected: DocumentVersion | null,
+      ) =>
+        expected !== null &&
+        meta.revision === expected.revision &&
+        meta.writer_device === expected.writer_device &&
+        JSON.stringify(meta.content_hash) ===
+          JSON.stringify(expected.content_hash);
+      const writeDocument = (
+        args: Record<string, unknown>,
+        key: AccountDocumentKey,
+        payload: string,
+        expected: DocumentVersion | null,
+        tombstone = false,
+      ) => {
+        const rows = documents(args),
+          token = JSON.stringify(key),
+          old = rows[token];
+        if (old ? !matchesVersion(old.meta, expected) : expected !== null)
+          throw new Error("Document changed");
+        const revision =
+          Math.max(0, ...Object.values(rows).map((row) => row.meta.revision)) +
+          1;
+        const body = tombstone ? "" : payload;
+        const meta: AccountDocumentMeta = {
+          key,
+          revision,
+          writer_device: SELF.device,
+          content_hash: Array.from({ length: 32 }, (_, index) =>
+            tombstone ? 0 : (revision + index) % 256,
+          ),
+          content_len: atob(body).length,
+          tombstone,
+        };
+        rows[token] = { meta, payload: body };
+        persistDocuments(args);
+        return structuredClone(meta);
+      };
+      const snapshotDrafts = (args: Record<string, unknown>) => {
+        const drafts: Record<string, string> = {},
+          protections: Record<string, string> = {},
+          versions: Record<string, DocumentVersion> = {};
+        for (const { meta, payload } of Object.values(documents(args))) {
+          if (meta.key.kind !== "draft") continue;
+          const target = meta.key.conversation,
+            key = `${target.kind}:${target.id}`;
+          versions[key] = version(meta);
+          if (meta.tombstone) continue;
+          const value = JSON.parse(
+            new TextDecoder().decode(
+              Uint8Array.from(atob(payload), (character) =>
+                character.charCodeAt(0),
+              ),
+            ),
+          ) as { text: string; protection?: string | null };
+          if (value.text) drafts[key] = value.text;
+          if (value.protection) protections[key] = value.protection;
+        }
+        const snapshot = {
+          session: `mock-drafts-session:${documentScope(args)}`,
+          account_id: SELF.account,
+          drafts,
+          protections,
+          versions,
+          conflicts: [] as string[],
+        };
+        localStorage.setItem(
+          `mock-drafts-${documentScope(args)}`,
+          JSON.stringify(snapshot),
+        );
+        return snapshot;
+      };
+      const draftKey = (key: string): AccountDocumentKey => {
+        const [kind, ...parts] = key.split(":");
+        if (kind !== "account" && kind !== "channel")
+          throw new Error("Invalid draft conversation");
+        return { kind: "draft", conversation: { kind, id: parts.join(":") } };
+      };
+      const encodedDraft = (value: unknown) =>
+        btoa(
+          Array.from(new TextEncoder().encode(JSON.stringify(value)), (byte) =>
+            String.fromCharCode(byte),
+          ).join(""),
+        );
+
       const responses: Record<string, (a: Record<string, unknown>) => unknown> =
         {
           owner_node_identity: (a) => ({
@@ -1131,6 +1262,7 @@ export const test = base.extend({
           },
           add_channel_member: ok,
           remove_channel_member: ok,
+          remove_channel_account_members: ok,
           dissolve_channel: () => {
             channels[0].dissolved = true;
             return null;
@@ -1424,6 +1556,12 @@ export const test = base.extend({
                 '{"history":true,"attachments":false,"profile":true,"appearance":false,"contacts":false}',
             ),
           get_device_sync_status: () => [],
+          get_account_login_sync_status: () => ({
+            account_id: SELF.account,
+            available_revision: null,
+            applied_revision: null,
+            devices: [],
+          }),
           set_device_sync_category: (a) => {
             if (
               ![
@@ -1737,7 +1875,10 @@ export const test = base.extend({
           },
           // avatars peers propagated to us (none in the mock); publishing is a no-op
           peer_avatars: () => receivedAvatars,
-          publish_avatar: ok,
+          publish_avatar: (args) => {
+            documentScope(args);
+            return null;
+          },
 
           // persistent login: no saved session in the mock → show the login screen
           auto_login: () => null,
@@ -1796,26 +1937,157 @@ export const test = base.extend({
             return localAgentAccess;
           },
           get_app_settings: () => appSettings,
-          // Browser-only persistence stand-in; production drafts use encrypted native storage.
-          load_conversation_drafts: (a) => {
-            const saved = JSON.parse(
+          reconcile_account_settings: () => appSettings,
+          load_conversation_drafts: snapshotDrafts,
+          save_conversation_drafts: (a) => {
+            if (a.session !== `mock-drafts-session:${documentScope(a)}`)
+              throw new Error("Draft writer retired");
+            const changes = a.changes as Record<
+              string,
+              {
+                text: string;
+                protection?: string;
+                expected: DocumentVersion | null;
+              }
+            >;
+            const conflicts: string[] = [];
+            for (const [key, change] of Object.entries(changes)) {
+              try {
+                writeDocument(
+                  a,
+                  draftKey(key),
+                  encodedDraft({
+                    text: change.text,
+                    protection: change.protection,
+                  }),
+                  change.expected,
+                  !change.text && !change.protection,
+                );
+              } catch {
+                conflicts.push(key);
+              }
+            }
+            return { ...snapshotDrafts(a), conflicts };
+          },
+          publish_legacy_account_controls: (a) => {
+            documentScope(a);
+            // This fixture has no historical reaction or recall controls to import.
+            return null;
+          },
+          publish_legacy_conversation_drafts: (a) => {
+            documentScope(a);
+            const legacy = JSON.parse(
               localStorage.getItem(`mock-drafts-${a.owner}`) ?? "{}",
             );
+            const texts = (legacy.drafts ?? legacy) as Record<string, string>,
+              protections = (legacy.protections ?? {}) as Record<
+                string,
+                string
+              >;
+            let imported = 0,
+              unmapped = 0;
+            for (const key of new Set([
+              ...Object.keys(texts),
+              ...Object.keys(protections),
+            ])) {
+              const documentKey = draftKey(key);
+              if (documents(a)[JSON.stringify(documentKey)]) continue;
+              if (documentKey.kind !== "draft") continue;
+              const target = documentKey.conversation;
+              if (
+                target.kind === "account"
+                  ? ![SELF.account, BOB.account_id, CAROL.account_id].includes(
+                      target.id,
+                    )
+                  : target.id !== CHANNEL.channel_id
+              ) {
+                unmapped++;
+                continue;
+              }
+              writeDocument(
+                a,
+                documentKey,
+                encodedDraft({
+                  text: texts[key] ?? "",
+                  protection: protections[key],
+                }),
+                null,
+              );
+              imported++;
+            }
+            return { imported, unmapped };
+          },
+          get_account_documents: (a) => {
+            const items = Object.values(documents(a))
+              .map((row) => row.meta)
+              .filter((meta) => meta.key.kind === a.domain)
+              .sort((left, right) =>
+                JSON.stringify(left.key).localeCompare(
+                  JSON.stringify(right.key),
+                ),
+              );
+            const after = a.after ? JSON.stringify(a.after) : null;
+            const remaining = after
+              ? items.filter(
+                  (meta) => JSON.stringify(meta.key).localeCompare(after) > 0,
+                )
+              : items;
+            const limit = Math.min(64, Math.max(1, Number(a.limit) || 64));
+            const selected = remaining.slice(0, limit);
             return {
-              session: "mock-drafts-session",
-              drafts: saved.drafts ?? saved,
-              protections: saved.protections ?? {},
+              items: structuredClone(selected),
+              next:
+                remaining.length > limit
+                  ? selected[selected.length - 1].key
+                  : null,
+              digest: Array.from(
+                { length: 32 },
+                (_, index) => (items.length + index) % 256,
+              ),
             };
           },
-          save_conversation_drafts: (a) => {
-            localStorage.setItem(
-              `mock-drafts-${a.owner}`,
-              JSON.stringify({
-                drafts: a.drafts,
-                protections: a.protections ?? {},
-              }),
+          get_account_document_meta: (a) =>
+            structuredClone(documents(a)[JSON.stringify(a.key)]?.meta ?? null),
+          read_account_document: (a) => {
+            const row = documents(a)[JSON.stringify(a.key)];
+            if (
+              !row ||
+              row.meta.tombstone ||
+              !matchesVersion(row.meta, a.expected as DocumentVersion)
+            )
+              throw new Error("Document changed");
+            return Array.from(atob(row.payload), (character) =>
+              character.charCodeAt(0),
             );
-            return null;
+          },
+          put_account_document: (a) =>
+            writeDocument(
+              a,
+              a.key as AccountDocumentKey,
+              String(a.payloadBase64),
+              a.expected as DocumentVersion | null,
+            ),
+          remove_account_document: (a) =>
+            writeDocument(
+              a,
+              a.key as AccountDocumentKey,
+              "",
+              a.expected as DocumentVersion | null,
+              true,
+            ),
+          mark_account_message_seen: (a) => {
+            const key: AccountDocumentKey = {
+              kind: "read_receipt",
+              conversation: a.conversation as Extract<
+                AccountDocumentKey,
+                { kind: "draft" }
+              >["conversation"],
+              message_id: String(a.messageId),
+            };
+            return structuredClone(
+              documents(a)[JSON.stringify(key)]?.meta ??
+                writeDocument(a, key, "", null),
+            );
           },
           set_app_settings: (a) => {
             Object.assign(appSettings, (a.settings as object) ?? {});
@@ -1849,6 +2121,16 @@ export const test = base.extend({
 
           // Privacy has dedicated canonical-account scenarios in privacy.spec.ts.
           // Legacy roster fixtures use synthetic IDs, so keep this default empty.
+          get_account_binding_changes: (a) => ({
+            owner: String(a.owner),
+            changes: [],
+          }),
+          accept_account_binding_change: (a) => ({
+            owner: String(a.owner),
+            version: 1,
+            invisible: false,
+            allowed_accounts: [],
+          }),
           get_privacy: (a) => ({
             owner: String(a.owner),
             version: 1,

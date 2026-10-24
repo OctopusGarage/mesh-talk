@@ -27,7 +27,7 @@ const CHANNEL_PLAINTEXT_BATCH: usize = 64;
 #[derive(Default)]
 pub(in crate::node) struct PendingChannelPlaintext {
     messages: Vec<super::channel::ReceivedChannelMessage>,
-    retry_at: Option<std::time::Instant>,
+    pub(in crate::node) retry_at: Option<std::time::Instant>,
     delay_ms: u64,
     batch_id: Option<String>,
     batch_size: usize,
@@ -290,12 +290,16 @@ impl Node {
         if channel.pairing_only() {
             // A retired account proof can recover an interrupted authorized link,
             // but can never enter sync, account history, attachments or call IPC.
-            if let Ok(Ok(first)) = tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await
-                && let Some((request, history, metadata)) =
+            if let Ok(Ok(first)) = tokio::time::timeout(SERVE_IDLE_TIMEOUT, channel.recv()).await {
+                if let Some((request, history)) = PairingRequest::decode_access(&first) {
+                    self.serve_pairing_access(&mut channel, request, history)
+                        .await;
+                } else if let Some((request, history, metadata)) =
                     PairingRequest::decode_negotiated(&first)
-            {
-                self.serve_pairing_negotiated(&mut channel, request, history, metadata)
-                    .await;
+                {
+                    self.serve_pairing_negotiated(&mut channel, request, history, metadata)
+                        .await;
+                }
             }
             return;
         }
@@ -325,6 +329,23 @@ impl Node {
             _ => return, // peer error or idle past the timeout
         };
         if is_relay && !self.relay_allowed(channel.peer_identity()) {
+            return;
+        }
+        if let Some(request) = super::channel_account_bootstrap::AccountGroupRequest::decode(&first)
+        {
+            self.serve_account_group_request(&mut channel, request)
+                .await;
+            return;
+        }
+        if let Some(request) = super::account_access::AccessRequest::decode(&first) {
+            self.serve_account_access(&mut channel, request).await;
+            return;
+        }
+        if let Some((request, history)) = PairingRequest::decode_access(&first) {
+            if self.account_allowed(channel.peer_identity(), channel.peer_announcement()) {
+                self.serve_pairing_access(&mut channel, request, history)
+                    .await;
+            }
             return;
         }
         if let Some((req, history, metadata)) = PairingRequest::decode_negotiated(&first) {
@@ -358,6 +379,16 @@ impl Node {
         {
             self.serve_account_wake(&mut channel, version, &account_id, epoch, revision)
                 .await;
+            return;
+        }
+        if let Some((
+            super::account_sync_wire::AccountSyncVersion::V2,
+            super::account_sync_wire::AccountHistoryFrame::DocumentsRequest { body },
+        )) = super::account_sync_wire::AccountHistoryFrame::decode_versioned(&first)
+        {
+            if let Some(request) = super::account_documents::wire::DocumentRequest::decode(&body) {
+                self.serve_account_documents(&mut channel, request).await;
+            }
             return;
         }
         if let Some((
@@ -410,6 +441,22 @@ impl Node {
                 cursor,
                 known_digest,
                 wanted,
+            )
+            .await;
+            return;
+        }
+        if let Some((
+            super::account_sync_wire::AccountSyncVersion::V2,
+            super::account_sync_wire::AccountHistoryFrame::AttachmentRequestChecked {
+                account_id,
+                file_conv,
+            },
+        )) = super::account_sync_wire::AccountHistoryFrame::decode_versioned(&first)
+        {
+            self.serve_account_attachment_checked(
+                &mut channel,
+                &account_id,
+                crate::eventlog::event::ConversationId::new(file_conv),
             )
             .await;
             return;
@@ -1299,6 +1346,9 @@ impl Node {
             }
         }
         drop(delivery);
+        if let Err(error) = self.project_private_dm_controls(conv) {
+            log::warn!("private DM controls await durable projection: {error}");
+        }
         // A recall may arrive before its target is viewed. Persist verified
         // tombstones while the old device and peer proofs are still available,
         // so an offline backup cannot resurrect the recalled plaintext.

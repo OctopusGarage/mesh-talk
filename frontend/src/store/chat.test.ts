@@ -85,7 +85,7 @@ it("refreshes imported history when the runtime projection changes", async () =>
 
 it("retries an imported-history refresh after history is temporarily unavailable", async () => {
   let historyCalls = 0;
-  invoke.mockImplementation((command: string) => {
+  invoke.mockImplementation((command: string, args?: { account?: string }) => {
     if (command === "owner_node_identity")
       return Promise.resolve({
         owner: "host",
@@ -93,7 +93,7 @@ it("retries an imported-history refresh after history is temporarily unavailable
         account_id: "myacct",
         history_revision: 7,
       });
-    if (command === "owner_account_history") {
+    if (command === "owner_account_history" && args?.account === "friend") {
       if (++historyCalls === 1)
         return Promise.reject(new Error("temporarily unavailable"));
       return Promise.resolve([
@@ -2829,13 +2829,13 @@ it("bounds import scan work per poll and visits later conversations", async () =
     invoke.mock.calls.filter(
       ([command]) => command === "owner_account_history",
     ),
-  ).toHaveLength(20);
+  ).toHaveLength(21);
   await useChat.getState().refreshRoster();
   expect(
     invoke.mock.calls.filter(
       ([command]) => command === "owner_account_history",
     ),
-  ).toHaveLength(20);
+  ).toHaveLength(21);
 });
 
 it("continues later import scans after a failed snapshot and retries the failure", async () => {
@@ -2904,8 +2904,8 @@ it("does not restart initial baselines after the bounded identity ledger evicts 
     invoke.mock.calls.filter(
       ([command]) => command === "owner_account_history",
     ),
-  ).toHaveLength(70);
-  expect(useChat.getState().historyBaselines).toHaveLength(70);
+  ).toHaveLength(71);
+  expect(useChat.getState().historyBaselines).toHaveLength(71);
   expect(Object.keys(useChat.getState().ledger)).toHaveLength(64);
 });
 
@@ -4186,4 +4186,115 @@ it("refuses protected image admission before transfer when the intent queue is f
     invoke.mock.calls.filter(([command]) => command === "owner_enqueue_file"),
   ).toHaveLength(0);
   expect(useChat.getState().messages["account:target"]).toHaveLength(1);
+});
+
+it("projects a shared account nickname into auth and rejects retired profile events", async () => {
+  const stop = useChat.getState().start();
+  const user = {
+    id: "host",
+    username: "local-login",
+    display_name: "Shared nickname",
+  };
+  useChat.setState({ myAccountId: "myacct", myId: "me" });
+  useAuth.setState({ savedSession: "saved" });
+  captured.current?.onAccountProfile({
+    user,
+    account_id: "myacct",
+    device_id: "me",
+    saved_session: "failed",
+  });
+  expect(useAuth.getState().user?.display_name).toBe("Shared nickname");
+  expect(useAuth.getState().user?.username).toBe("local-login");
+  expect(useAuth.getState().savedSession).toBe("failed");
+  useAuth.setState((state) => ({ generation: state.generation + 1 }));
+  captured.current?.onAccountProfile({
+    user: { ...user, display_name: "Retired name" },
+    account_id: "myacct",
+    device_id: "me",
+    saved_session: "saved",
+  });
+  expect(useAuth.getState().user?.display_name).toBe("Shared nickname");
+  expect(useAuth.getState().savedSession).toBe("failed");
+  stop();
+});
+
+it("repairs a missed nickname event through the canonical runtime identity", async () => {
+  invoke.mockImplementation((command: string) =>
+    Promise.resolve(
+      command === "owner_node_identity"
+        ? {
+            owner: "host",
+            device_id: "me",
+            account_id: "myacct",
+            display_name: "Account nickname",
+          }
+        : [],
+    ),
+  );
+  await useChat.getState().refreshRoster();
+  expect(useAuth.getState().user?.display_name).toBe("Account nickname");
+});
+
+it("reconciles Saved Messages imports when the own account is absent from the contact directory", async () => {
+  let revision = 1;
+  let imported = false;
+  invoke.mockImplementation((command: string, args?: { account?: string }) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        history_revision: revision,
+      });
+    if (command === "owner_account_history")
+      return Promise.resolve(
+        args?.account === "myacct" && imported
+          ? [
+              {
+                id: "saved-on-sibling",
+                from_me: true,
+                who: "you",
+                text: "Saved on my laptop",
+                wall_clock: 1,
+              },
+            ]
+          : [],
+      );
+    return Promise.resolve([]);
+  });
+  await useChat.getState().refreshRoster();
+  expect(useChat.getState().historyBaselines).toContain("account:myacct");
+  imported = true;
+  revision++;
+  await useChat.getState().refreshRoster();
+  expect(
+    useChat.getState().ledger["account:myacct"]?.["saved-on-sibling"],
+  ).toBeDefined();
+  expect(useChat.getState().unread["account:myacct"] ?? 0).toBe(0);
+  useChat.setState({
+    active: { kind: "account", id: "myacct", name: "Saved Messages" },
+  });
+  revision++;
+  await useChat.getState().refreshRoster();
+  expect(
+    useChat.getState().messages["account:myacct"]?.map((row) => row.id),
+  ).toEqual(["saved-on-sibling"]);
+  expect(useChat.getState().messages["account:myacct"][0].fromMe).toBe(true);
+});
+it("linked read receipts reject another owner or account and clear on app lock", () => {
+  useChat.setState({
+    ...emptyReception(),
+    ready: true,
+    unreadOwner: "reader",
+    myAccountId: "account-one",
+  });
+  const apply = useChat.getState().applyAccountReadReceipts;
+  apply("other-owner", "account-one", "account:peer", ["wrong-owner"]);
+  apply("reader", "account-two", "account:peer", ["wrong-account"]);
+  expect(useChat.getState().ledger["account:peer"]).toBeUndefined();
+  apply("reader", "account-one", "account:peer", ["future"]);
+  expect(useChat.getState().accountSeen?.["account:peer"]).toEqual(["future"]);
+  expect(useChat.getState().ledger["account:peer"].future.seen).toBe(true);
+  useChat.getState().resetForLock();
+  expect(useChat.getState().accountSeen).toBeUndefined();
 });

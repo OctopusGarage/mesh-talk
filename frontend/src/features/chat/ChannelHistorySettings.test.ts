@@ -176,3 +176,30 @@ it("blocks editing when live membership becomes pending even if fetched metadata
   expect(host.querySelector("select")).toBeNull();
   expect(api.channelMembers).toHaveBeenCalledTimes(2);
 });
+
+it("allows an authoritative account-owner sibling to edit history", async () => {
+  api.channelMembers.mockResolvedValue({
+    ...info("original-device"),
+    can_manage: true,
+  });
+  await act(async () =>
+    root.render(
+      createElement(ChannelHistorySettings, {
+        channelId: "a",
+        myId: "me",
+        dissolved: false,
+        channelOwner: "original-device",
+        selfAccepted: true,
+        canManage: true,
+      }),
+    ),
+  );
+  expect(host.querySelector("select")).not.toBeNull();
+  await change("off");
+  expect(api.setChannelHistoryPolicy).toHaveBeenCalledWith("a", "off");
+});
+it("honors native denial even for a matching legacy owner device", async () => {
+  api.channelMembers.mockResolvedValue({ ...info(), can_manage: false });
+  await render();
+  expect(host.querySelector("select")).toBeNull();
+});

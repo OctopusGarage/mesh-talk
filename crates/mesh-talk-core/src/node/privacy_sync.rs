@@ -152,7 +152,7 @@ impl GuardedSyncStore<'_> {
                                     && proof.account_id().as_deref() == Some(&account.id)
                             })
                 });
-            if !manual {
+            if !manual && !self.node.certified_sibling(&self.peer) {
                 return None;
             }
         }
@@ -211,7 +211,17 @@ impl GuardedSyncStore<'_> {
                         && crate::channel::ChannelMeta::is_invitation(&event.ciphertext)
                         && crate::channel::ChannelMeta::decode(&event.ciphertext)
                             .is_some_and(|meta| meta.is_member(&self.node.user_id()));
-                    if !invitation {
+                    let own_proof = self.node.own_group_proof();
+                    let refs: Vec<_> = pending.events.iter().collect();
+                    let account =
+                        super::channel::ChannelBook::project_membership(conversation, &refs);
+                    let account_grant = event.kind == EventKind::ChannelAccountAuthority
+                        && (account.authority.is_member(&own_proof.public(), &own_proof)
+                            || account
+                                .authority
+                                .invitation_for_device(&own_proof.public(), &own_proof)
+                                .is_some());
+                    if !invitation && !account_grant {
                         return None;
                     }
                     let allowed = self.projection(state, &conversation, &pending.events);
@@ -437,6 +447,91 @@ impl GuardedSyncStore<'_> {
             .channel_projection_replays
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let me = self.node.identity.public();
+        let refs: Vec<_> = events.iter().collect();
+        let account_projection =
+            super::channel::ChannelBook::project_membership(*conversation, &refs);
+        if account_projection.authority.current_event().is_some() {
+            let authority = &account_projection.authority;
+            let own_proof = self.node.own_group_proof();
+            let own_account = self.node.account.public().ed25519_pub;
+            let peer_proof = private_state
+                .and_then(|state| state.proofs.by_author(&self.peer.ed25519_pub))
+                .or_else(|| {
+                    if private_state.is_some() {
+                        None
+                    } else {
+                        self.node
+                            .roster
+                            .lock()
+                            .expect("roster lock not poisoned")
+                            .historical_announcement(&self.peer)
+                            .cloned()
+                    }
+                })
+                .filter(|proof| proof.public() == self.peer && proof.valid_presence());
+            // Only authenticated siblings from the existing full-identity pairing
+            // registry can fetch account authorization before publishing inheritance.
+            let paired = self.node.certified_sibling(&self.peer)
+                && peer_proof
+                    .as_ref()
+                    .and_then(|proof| proof.account_cert.as_ref())
+                    .is_some_and(|certificate| certificate.account_ed25519_pub == own_account);
+            let me_allowed = authority.account_grant(&own_account).is_some();
+            let peer_allowed = peer_proof.as_ref().is_some_and(|proof| {
+                authority.is_member(&self.peer, proof)
+                    || authority.invitation_for_device(&self.peer, proof).is_some()
+            }) || (paired && me_allowed);
+            let custody = private_state.is_some_and(|state| {
+                state.own.post_office
+                    && peer_proof
+                        .as_ref()
+                        .and_then(|proof| proof.account_id())
+                        .is_some_and(|account| {
+                            state
+                                .policy
+                                .snapshot()
+                                .allowed_accounts
+                                .iter()
+                                .any(|allowed| {
+                                    allowed.id == account
+                                        && allowed.source == PermissionSource::Manual
+                                })
+                        })
+            });
+            if (me_allowed || custody) && (peer_allowed || relay) {
+                return account_projection.authorized;
+            }
+            // A removed account may learn its terminal signed decision, but no
+            // later metadata, keys or messages. This also repairs offline siblings.
+            let mut closing = Vec::new();
+            if me_allowed
+                && let Some(account) = peer_proof
+                    .as_ref()
+                    .and_then(|proof| authority.registered_account(&self.peer, proof))
+            {
+                closing.extend(authority.revocation_events(&account));
+            }
+            if paired
+                || ((peer_allowed || relay)
+                    && authority.registered_account(&me, &own_proof).is_some())
+            {
+                closing.extend(authority.revocation_events(&own_account));
+            }
+            let graph: HashMap<_, _> = events.iter().map(|event| (event.id, event)).collect();
+            let mut ancestors = HashSet::new();
+            while let Some(id) = closing.pop() {
+                if ancestors.insert(id)
+                    && let Some(event) = graph.get(&id)
+                {
+                    closing.extend_from_slice(&event.parents);
+                }
+            }
+            return account_projection
+                .authorized
+                .intersection(&ancestors)
+                .copied()
+                .collect();
+        }
         let mut allowed = HashSet::new();
         // Established channel metadata pins its owner. Historical membership only
         // authorizes that channel's history; it never grants DM/account permission.
@@ -680,6 +775,13 @@ impl GuardedSyncStore<'_> {
                 } else {
                     false
                 }
+            } else if matches!(
+                event.kind,
+                EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
+            ) {
+                // A rejected account control cannot fall through as ordinary
+                // legacy member content. Valid controls use the shared reducer.
+                false
             } else if event.kind == EventKind::ChannelOwnerTransfer {
                 membership.as_mut().is_some_and(|current| {
                     author == current.owner()
@@ -851,6 +953,12 @@ impl GuardedSyncStore<'_> {
                 visible.iter().map(|event| event.id).collect(),
             ),
             len: visible.len(),
+            requires_v4: visible.iter().any(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
+                )
+            }),
             requires_v3: visible.iter().any(|event| {
                 matches!(
                     event.kind,
@@ -1028,7 +1136,8 @@ impl GuardedSyncStore<'_> {
                     .state(conversation)
                     .is_some())
         {
-            let allowed = self.channel_projection(conversation, &events, false, false, None);
+            let allowed =
+                self.channel_projection(conversation, &events, false, false, guard.as_ref());
             return events
                 .into_iter()
                 .filter(|event| allowed.contains(&event.id))
@@ -1086,6 +1195,28 @@ impl GuardedSyncStore<'_> {
     }
 }
 impl SyncStore for GuardedSyncStore<'_> {
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
+        if let Some(metadata) = self.public_projection_metadata(conversation) {
+            return metadata.requires_v4;
+        }
+        if !self
+            .node
+            .log
+            .lock()
+            .expect("log lock not poisoned")
+            .requires_channel_v4(conversation)
+        {
+            return false;
+        }
+        // A private/rejected control must not reveal itself to this principal.
+        self.visible(conversation).iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
+            )
+        })
+    }
+
     fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
         if let Some(metadata) = self.public_projection_metadata(conversation) {
             return metadata.requires_v3;
@@ -1191,6 +1322,22 @@ impl SyncStore for GuardedSyncStore<'_> {
         self.outgoing_projection(conversation, have, true)
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+        let node = self.node;
+        let _membership = matches!(
+            event.kind,
+            EventKind::MembershipChange
+                | EventKind::ChannelAccountAuthority
+                | EventKind::ChannelDeviceInheritance
+                | EventKind::ChannelAccept
+                | EventKind::ChannelLeave
+                | EventKind::ChannelOwnerTransfer
+                | EventKind::ChannelDissolve
+        )
+        .then(|| {
+            node.channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock")
+        });
         if let Some(result) = self.stage_uninvited_channel(&event) {
             return result;
         }
@@ -1368,6 +1515,89 @@ impl SyncStore for GuardedSyncStore<'_> {
 
 #[cfg(test)]
 mod causal_export_tests {
+    #[tokio::test]
+    async fn rejected_account_authority_never_exposes_a_v4_requirement_to_legacy_members() {
+        use crate::channel::ChannelMeta;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let peer_account = Account::generate();
+        let proof = Announce::new_with_account(&peer, &peer_account, "Peer", 9);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = ConversationId::new([173; 32]);
+        let initial = Event::new(
+            &node.identity,
+            channel,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "Legacy group".into(),
+                members: vec![node.identity.public(), peer.public()],
+                epoch: 0,
+                owner: node.user_id(),
+            }
+            .encode(),
+        );
+        // A real owner signature is insufficient: the account authority body
+        // still needs its independent account-root commitment and strict reducer.
+        let rejected = Event::new(
+            &node.identity,
+            channel,
+            2,
+            vec![initial.id],
+            2,
+            0,
+            EventKind::ChannelAccountAuthority,
+            b"invalid account authority".to_vec(),
+        );
+        {
+            let mut log = node.log.lock().unwrap();
+            log.append_durable(initial.clone()).unwrap();
+            log.append_durable(rejected.clone()).unwrap();
+            assert!(log.requires_channel_v4(&channel));
+        }
+        for private in [false, true] {
+            if private {
+                node.configure_privacy(
+                    dir.path(),
+                    "pw",
+                    &node.own_group_proof(),
+                    std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+                )
+                .unwrap();
+                node.privacy
+                    .state
+                    .write()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .proofs
+                    .record(&proof)
+                    .unwrap();
+                node.set_allowed(&peer_account.account_id(), true)
+                    .await
+                    .unwrap();
+            }
+            let guarded = node.sync_store(&peer.public());
+            let store = guarded.lock().unwrap();
+            assert_eq!(store.event_ids(&channel), vec![initial.id]);
+            assert!(!store.requires_channel_v4(&channel));
+            assert!(
+                !store.requires_channel_v4(&channel),
+                "cached projection must stay principal-scoped"
+            );
+            assert!(!store.event_ids(&channel).contains(&rejected.id));
+        }
+    }
     #[tokio::test]
     async fn authorized_metadata_ids_and_bounded_pages_match_full_projection() {
         use crate::discovery::Announce;

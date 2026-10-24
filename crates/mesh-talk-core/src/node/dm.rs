@@ -221,13 +221,12 @@ impl Node {
     ) -> Result<EventId, NodeError> {
         authorize(&mut || Ok(()))?;
         let self_target = target == self.account_id();
-        if self_target {
-            // Own-device sends skip contact grants, which normally persist the
-            // certified binding. Discovery can arrive before the next host query.
-            self.cached_peer_snapshot_async()
-                .await
-                .map_err(|error| NodeError::Log(crate::eventlog::LogError::Io(error)))?;
-        }
+        // Capture every fanout device's verified binding before building the
+        // durable intent. An external contact grant persists only that account;
+        // newly discovered own siblings also need their certified account here.
+        self.cached_peer_snapshot_async()
+            .await
+            .map_err(|error| NodeError::Log(crate::eventlog::LogError::Io(error)))?;
         let dests = self.account_fanout_targets(target);
         if !self_target
             && !dests
