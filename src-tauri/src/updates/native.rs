@@ -9,7 +9,7 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 use super::{
     API_RELEASES, CancelRegistration, DOWNLOAD_CANCEL, DOWNLOAD_LOCK, DownloadProgress,
     DownloadedUpdate, Release, ReleaseAsset, UpdateChannel, client, current_identity,
-    download_and_verify, release_or_cancel, requested_release_from, selected_asset,
+    release_or_cancel, requested_release_from, selected_asset,
 };
 
 struct StagedUpdate {
@@ -166,14 +166,48 @@ fn signed_update<R: tauri::Runtime>(
         .map_err(|_| "The update metadata is invalid")?.ok_or_else(|| "This release is no longer an update".into())
 }
 
+// Only host code constructs this context; none of these inputs come from IPC.
+struct PreparationHost<'a, R: tauri::Runtime> {
+    app: &'a tauri::AppHandle<R>,
+    metadata_http: reqwest::Client,
+    signature_http: reqwest::Client,
+    payload_http: reqwest::Client,
+    releases: &'a str,
+    public_key: &'a str,
+    supported: bool,
+}
+
 #[tauri::command]
-pub async fn prepare_update(
-    app: tauri::AppHandle,
+pub async fn prepare_update<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     version: String,
     update_channel: Option<UpdateChannel>,
     on_progress: Channel<DownloadProgress>,
 ) -> Result<DownloadedUpdate, String> {
-    if !available() {
+    prepare_from(
+        PreparationHost {
+            app: &app,
+            metadata_http: client(Duration::from_secs(20))?,
+            signature_http: client(Duration::from_secs(30))?,
+            payload_http: client(Duration::from_secs(20 * 60))?,
+            releases: API_RELEASES,
+            public_key: public_key(),
+            supported: available(),
+        },
+        version,
+        update_channel,
+        on_progress,
+    )
+    .await
+}
+
+async fn prepare_from<R: tauri::Runtime>(
+    host: PreparationHost<'_, R>,
+    version: String,
+    update_channel: Option<UpdateChannel>,
+    on_progress: Channel<DownloadProgress>,
+) -> Result<DownloadedUpdate, String> {
+    if !host.supported {
         return Err("Use the manual installer for this installation".into());
     }
     let _guard = DOWNLOAD_LOCK
@@ -192,8 +226,8 @@ pub async fn prepare_update(
         .lock()
         .await = None;
     let release = requested_release_from(
-        &client(Duration::from_secs(20))?,
-        API_RELEASES,
+        &host.metadata_http,
+        host.releases,
         &version,
         channel,
         &current_identity(),
@@ -203,17 +237,24 @@ pub async fn prepare_update(
     let (payload, signature) = assets(&release, std::env::consts::OS, std::env::consts::ARCH)
         .ok_or("This release needs a manual installation")?;
     let signature = release_or_cancel(
-        signature_from(&client(Duration::from_secs(30))?, signature),
+        signature_from(&host.signature_http, signature),
         cancel.clone(),
     )
     .await?;
-    let update = signed_update(&app, &version, payload, &signature, public_key())?;
+    let update = signed_update(host.app, &version, payload, &signature, host.public_key)?;
     let directory = tempfile::tempdir().map_err(|_| "Could not prepare the update folder")?;
     let path = directory.path().join("payload");
     let mut file = tokio::fs::File::create(&path)
         .await
         .map_err(|_| "Could not create the update file")?;
-    download_and_verify(payload, &mut file, &on_progress, cancel.clone()).await?;
+    super::download_and_verify_with_client(
+        &host.payload_http,
+        payload,
+        &mut file,
+        &on_progress,
+        cancel.clone(),
+    )
+    .await?;
     drop(file);
     let bytes = tokio::fs::read(&path)
         .await
@@ -288,6 +329,13 @@ pub async fn install_update<R: tauri::Runtime>(
 mod windows_tests;
 
 #[cfg(test)]
+static TEST_STATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
+#[path = "native_https_tests.rs"]
+mod native_https_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -306,6 +354,38 @@ mod tests {
             Some("mesh-talk-update_v0.4.4_linux_aarch64.AppImage")
         );
         assert!(payload_name("v0.4.4", "linux", "armv7").is_none());
+    }
+
+    #[test]
+    fn exact_native_assets_require_a_complete_bounded_canonical_pair() {
+        let tag = "v99.0.0-nightly.42.1";
+        let name = payload_name(tag, "linux", "x86_64").unwrap();
+        let make_asset = |name: &str, size| {
+            serde_json::json!({
+                "name": name,
+                "browser_download_url": format!("https://github.com/OctopusGarage/mesh-talk/releases/download/{tag}/{name}"),
+                "digest": format!("sha256:{}", "a".repeat(64)),
+                "size": size,
+                "state": "uploaded"
+            })
+        };
+        let mut release: Release = serde_json::from_value(serde_json::json!({
+            "tag_name": tag, "draft": false, "prerelease": true,
+            "assets": [make_asset(&name, 26), make_asset(&format!("{name}.sig"), 100)]
+        }))
+        .unwrap();
+        let (payload, signature) = assets(&release, "linux", "x86_64").unwrap();
+        assert_eq!(payload.name, name);
+        assert_eq!(signature.name, format!("{name}.sig"));
+        assert!(assets(&release, "windows", "x86_64").is_none());
+        release.assets[1].size = 16 * 1024 + 1;
+        assert!(assets(&release, "linux", "x86_64").is_none());
+        release.assets[1].size = 100;
+        release.assets[1].browser_download_url = "https://example.invalid/foreign.sig".into();
+        assert!(assets(&release, "linux", "x86_64").is_none());
+        release.assets.pop();
+        assert!(assets(&release, "linux", "x86_64").is_none());
+        assert!(payload_name(tag, "unknown", "x86_64").is_none());
     }
 
     #[test]
@@ -339,6 +419,21 @@ mod tests {
         ));
         assert!(!supported_install("linux", mac, true, false, false));
         assert!(supported_install(
+            "windows",
+            Path::new("C:/mesh-talk.EXE"),
+            true,
+            false,
+            false
+        ));
+        assert!(!supported_install(
+            "windows",
+            Path::new("C:/mesh-talk.msi"),
+            true,
+            false,
+            false
+        ));
+        assert!(!supported_install("unknown", mac, true, false, false));
+        assert!(supported_install(
             "linux",
             std::path::Path::new("/home/alice/mesh-talk.AppImage"),
             true,
@@ -347,8 +442,8 @@ mod tests {
         ));
     }
     // Public verification vectors only. The throwaway private key is not shipped.
-    const FIXTURE_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEyMzNGRUE1REYzNkIwNEIKUldSTHNEYmZwZjR6RW9hWnNvS2l6THA5WXoyRFhrdk1vOWhaSXVkTDMyeHk4U0ZtRGJMSFVLc3kK";
-    const FIXTURE_SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSTHNEYmZwZjR6RXU1aWQxNmxaLzBvV3FveHFiY2cwd21KU3FhQXh1cUhYUWZwOHpnMmxleW9GNTdQM1h4N3BsZDZJblNuTEhLUmwrVVVtWTc0QkM2b3lDWDNkY1ZvRGc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyODI3NTAzCWZpbGU6dXBkYXRlci10ZXN0LXBheWxvYWQJdmVyc2lvbjo5OS4wLjAtbmlnaHRseS40Mi4xCmF1ZnNZSnkxejR3RDZzdUk5V3dmeDVyVWpGdDJDanNPTzFsOFA5TGhpekI5bjFWQm1DMHZRSWlaem5HNFVwek9NMTYzNHVZdE9RajZVMFRpWUQ4Y0NBPT0K";
+    pub(super) const FIXTURE_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEyMzNGRUE1REYzNkIwNEIKUldSTHNEYmZwZjR6RW9hWnNvS2l6THA5WXoyRFhrdk1vOWhaSXVkTDMyeHk4U0ZtRGJMSFVLc3kK";
+    pub(super) const FIXTURE_SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSTHNEYmZwZjR6RXU1aWQxNmxaLzBvV3FveHFiY2cwd21KU3FhQXh1cUhYUWZwOHpnMmxleW9GNTdQM1h4N3BsZDZJblNuTEhLUmwrVVVtWTc0QkM2b3lDWDNkY1ZvRGc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyODI3NTAzCWZpbGU6dXBkYXRlci10ZXN0LXBheWxvYWQJdmVyc2lvbjo5OS4wLjAtbmlnaHRseS40Mi4xCmF1ZnNZSnkxejR3RDZzdUk5V3dmeDVyVWpGdDJDanNPTzFsOFA5TGhpekI5bjFWQm1DMHZRSWlaem5HNFVwek9NMTYzNHVZdE9RajZVMFRpWUQ4Y0NBPT0K";
 
     #[test]
     fn signed_updates_reject_tampering_relabelled_versions_and_untrusted_keys() {
@@ -442,8 +537,9 @@ mod tests {
     }
     #[test]
     fn registered_install_rejects_unprepared_renderer_requests() {
+        let _state = TEST_STATE.blocking_lock();
         let app = tauri::test::mock_builder()
-            .invoke_handler(tauri::generate_handler![install_update])
+            .invoke_handler(tauri::generate_handler![install_update, prepare_update])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
         let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -472,6 +568,31 @@ mod tests {
         assert_eq!(
             result.unwrap_err(),
             serde_json::json!("Download and verify this update before installing")
+        );
+        let preparation = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "prepare_update".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: if cfg!(windows) {
+                    "http://tauri.localhost"
+                } else {
+                    "tauri://localhost"
+                }
+                .parse()
+                .unwrap(),
+                body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+                    "version": "99.0.0", "updateChannel": "stable", "onProgress": "__CHANNEL__:2",
+                    "supported": true, "publicKey": "renderer-controlled", "releases": "https://example.invalid"
+                })),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.into(),
+            },
+        );
+        assert_eq!(
+            preparation.unwrap_err(),
+            serde_json::json!("Use the manual installer for this installation")
         );
     }
 }
