@@ -264,6 +264,15 @@ operation lifetime, runtime installation and retirement, without maintaining a
 second active user/token representation. `state.rs` preserves established exports;
 `runtime_admission.rs` continues to own runtime/session commit authority.
 
+Core runtime preparation exposes only verified public device/account IDs after
+its existing keystore unlocks. The desktop runtime state owns the exact-session,
+startup-ticket observation and its invalidation; it grants no early runtime
+admission. The chat store binds that observation to its current owner/run and
+hydrates persisted reception state once before full readiness. Appearance then
+uses the existing account-scoped pack cache, prioritizing the selected theme.
+Transient readiness changes do not retire an unchanged appearance scope; session
+or account replacement clears both the private cache projection and its CSS.
+
 ### Focused validation ownership
 
 Module-owned `validation.json` contracts link these boundaries to development

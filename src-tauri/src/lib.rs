@@ -324,6 +324,7 @@ pub fn run_tauri_configured(
         .invoke_handler({
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 owner_commands::owner_node_identity,
+                owner_commands::owner_startup_identity,
                 owner_commands::owner_enqueue_text,
                 owner_commands::owner_reveal_message,
                 owner_commands::owner_reveal_image,

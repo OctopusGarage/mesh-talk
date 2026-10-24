@@ -197,6 +197,14 @@ export const chat = {
       owner,
       expectedAccount,
     }),
+  ownerStartupIdentity: (owner: string) =>
+    invoke<{
+      owner: string;
+      startup_id: string;
+      phase: "pending" | "identity" | "ready" | "failed";
+      account_id?: string;
+      device_id?: string;
+    } | null>("owner_startup_identity", { owner }),
   ownerIdentity: (owner: string) =>
     invoke<{
       owner: string;

@@ -42,6 +42,44 @@
       ]
     },
     {
+      "id": "frontend-startup-appearance",
+      "paths": [
+        "frontend/src/store/packs.ts",
+        "frontend/src/store/packs.test.ts",
+        "frontend/src/lib/linkedAppearance.ts",
+        "frontend/src/lib/linkedAppearance.test.ts",
+        "frontend/src/lib/linkedCustomizationPacks.ts",
+        "frontend/src/lib/linkedCustomizationPacks.test.ts",
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/e2e/theme-picker.spec.ts",
+        "frontend/e2e/helpers/packs.ts",
+        "frontend/e2e/helpers/session.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/e2e/ui-visual-regression.spec.ts"
+      ],
+      "frontend": [
+        "src/store/packs.test.ts",
+        "src/lib/linkedAppearance.test.ts",
+        "src/lib/linkedCustomizationPacks.test.ts",
+        "src/lib/theme-linked.test.ts",
+        "src/store/chat.test.ts"
+      ],
+      "capability": {
+        "summary": "Restore selected private appearance from a verified account scope before unrelated gallery loading and retain it through transient runtime readiness changes.",
+        "guide": "docs/CUSTOMIZATION_PACKS.md#account-scoped-startup-appearance",
+        "invariants": [
+          {
+            "name": "Selected-theme hydration uses verified owner/account scope; logout, replacement and stale async cache reads cannot retain private wallpaper CSS. Startup observation never grants runtime readiness.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#account-scoped-startup-appearance"
+          }
+        ]
+      },
+      "escalation": [
+        "Run focused theme-picker startup scenarios and visual regression. Verify a packaged native cold start, logout and account replacement; browser mocks do not prove keystore timing or native session authority."
+      ]
+    },
+    {
       "id": "frontend-conversation-drafts",
       "paths": [
         "frontend/src/store/drafts.ts",
@@ -1265,10 +1303,15 @@
     {
       "id": "frontend-theme-picker-acceptance",
       "paths": [
-        "frontend/e2e/theme-picker.spec.ts"
+        "frontend/e2e/theme-picker.spec.ts",
+        "frontend/e2e/helpers/packs.ts",
+        "frontend/e2e/helpers/session.ts",
+        "frontend/src/store/packs.ts",
+        "frontend/src/lib/linkedAppearance.ts"
       ],
       "browser": [
-        "e2e/theme-picker.spec.ts"
+        "e2e/theme-picker.spec.ts",
+        "e2e/ui-visual-regression.spec.ts"
       ]
     },
     {

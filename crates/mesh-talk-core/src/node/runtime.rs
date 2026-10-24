@@ -137,6 +137,14 @@ impl Default for RuntimeNetworkOptions {
     }
 }
 
+/// Public identifiers authenticated by the startup keystore unlocks.
+/// This observation does not grant access to a prepared or running node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeIdentity {
+    pub device_id: String,
+    pub account_id: String,
+}
+
 /// Inbound events forwarded to the host from independent runtime tasks.
 pub struct RuntimeEvents {
     pub on_dm: Box<dyn Fn(ReceivedDm) + Send + 'static>,
@@ -309,6 +317,27 @@ impl NodeRuntime {
             &mut dyn FnMut(&str) -> NodeRuntime,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
+        Self::start_configured_guarded_with_network_observed(
+            config,
+            events,
+            network,
+            |_| Ok(()),
+            authorize_launch,
+        )
+        .await
+    }
+
+    /// Observe authenticated public identifiers before preparing durable stores.
+    /// Rejecting the observation stops startup before any listener or store opens.
+    pub async fn start_configured_guarded_with_network_observed(
+        config: RuntimeConfig<'_>,
+        events: RuntimeEvents,
+        network: RuntimeNetworkOptions,
+        observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> NodeRuntime,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
         let RuntimeConfig {
             base_dir,
             account_id,
@@ -347,6 +376,10 @@ impl NodeRuntime {
         };
         let self_uid = identity.public().user_id();
         let account_id = account.account_id();
+        observe_identity(RuntimeIdentity {
+            device_id: self_uid.clone(),
+            account_id: account_id.clone(),
+        })?;
 
         // Dual-stack TCP listener (IPv6 + IPv4-mapped, falling back to IPv4) so the node is
         // reachable over IPv6/link-local too; OS-assigned port (0).

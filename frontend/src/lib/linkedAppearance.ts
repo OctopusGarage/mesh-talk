@@ -82,7 +82,11 @@ export async function publishAppearanceBeforeLink(
 
 /** Reconcile the signed-in account's appearance with the local theme store. */
 export function startLinkedAppearance(owner: string): () => void {
-  const stopPacks = startLinkedCustomizationPacks(owner);
+  const stopPacks = startLinkedCustomizationPacks(
+    owner,
+    useTheme.getState().theme,
+  );
+  const installedPackScope = usePacks.getState().scope;
   const stopAvatars = startLinkedAvatarOverrides(owner);
   let active = true;
   const lease = captureRuntimeOwner();
@@ -207,7 +211,11 @@ export function startLinkedAppearance(owner: string): () => void {
   return () => {
     active = false;
     publisher.stop();
+    const ownsPackScope = usePacks.getState().scope === installedPackScope;
     stopPacks();
+    // The subscriber is already inactive: explicitly revoke private CSS when
+    // this lifecycle retires, without clearing a replacement account's theme.
+    if (ownsPackScope) useTheme.getState().refresh(true);
     stopAvatars();
     unsubscribe();
     unsubscribeLanguage();

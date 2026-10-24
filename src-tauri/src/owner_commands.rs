@@ -59,6 +59,17 @@ pub async fn owner_node_identity(
         .await
 }
 
+/// Observe authenticated startup identity without admitting node operations.
+#[tauri::command]
+pub fn owner_startup_identity(
+    owner: String,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<Option<crate::chat_commands::StartupIdentity>, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    node.startup_identity(app.session(), admission.lease(), app.app_lock())
+}
+
 #[tauri::command]
 pub async fn owner_enqueue_text(
     owner: String,
@@ -700,6 +711,7 @@ mod tests {
                     crate::message_favorites::owner_read_favorite_file,
                     crate::message_favorites::owner_save_favorite_file,
                     super::owner_node_identity,
+                    super::owner_startup_identity,
                     super::owner_enqueue_text,
                     super::owner_enqueue_channel_text,
                     super::owner_enqueue_channel_sticker,
@@ -3773,6 +3785,90 @@ mod tests {
             .invoke("owner_node_identity", serde_json::json!({"owner":"bob"}))
             .unwrap();
         assert_eq!(identity["owner"], "bob");
+    }
+
+    #[test]
+    fn registered_startup_identity_is_ids_only_and_denies_locked_or_replaced_sessions() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let lease = fixture.app_state.session().capture().unwrap();
+        let authority = crate::chat_commands::RuntimeAuthority::request(
+            fixture.app_state.session().clone(),
+            lease,
+            fixture.node.clone(),
+        )
+        .unwrap();
+        let lifetime = authority.observation_lifetime();
+        let pending = fixture
+            .invoke(
+                "owner_startup_identity",
+                serde_json::json!({"owner":"alice"}),
+            )
+            .unwrap();
+        assert_eq!(pending["phase"], "pending");
+        assert!(pending.get("account_id").is_none());
+        authority
+            .observe_identity(mesh_talk_core::node::RuntimeIdentity {
+                account_id: "observed-account".into(),
+                device_id: "observed-device".into(),
+            })
+            .unwrap();
+        let identity = fixture
+            .invoke(
+                "owner_startup_identity",
+                serde_json::json!({"owner":"alice"}),
+            )
+            .unwrap();
+        assert_eq!(
+            identity,
+            serde_json::json!({
+                "owner":"alice", "startup_id":pending["startup_id"], "phase":"identity",
+                "account_id":"observed-account", "device_id":"observed-device",
+            })
+        );
+        assert!(
+            fixture
+                .invoke("owner_startup_identity", serde_json::json!({"owner":"bob"}))
+                .is_err()
+        );
+        assert!(
+            fixture
+                .invoke("owner_node_identity", serde_json::json!({"owner":"alice"}))
+                .is_err()
+        );
+        let handle = fixture.webview.app_handle();
+        crate::app_lock::lock_app(handle.state(), handle.state()).unwrap();
+        assert!(
+            fixture
+                .invoke(
+                    "owner_startup_identity",
+                    serde_json::json!({"owner":"alice"})
+                )
+                .is_err()
+        );
+        fixture.app_state.app_lock().clear();
+        drop(lifetime);
+        let failed = fixture
+            .invoke(
+                "owner_startup_identity",
+                serde_json::json!({"owner":"alice"}),
+            )
+            .unwrap();
+        assert_eq!(
+            failed,
+            serde_json::json!({
+                "owner":"alice", "startup_id":pending["startup_id"], "phase":"failed",
+            })
+        );
+        fixture.app_state.session().clear();
+        assert!(
+            fixture
+                .invoke(
+                    "owner_startup_identity",
+                    serde_json::json!({"owner":"alice"})
+                )
+                .is_err()
+        );
     }
 
     #[test]

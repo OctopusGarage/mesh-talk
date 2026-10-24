@@ -466,3 +466,10 @@ it("rejects delayed locale imports and local events after the runtime account ch
     stop();
   }
 });
+
+it("revokes rendered private theme CSS when its account appearance lifecycle ends", () => {
+  const stop = startLinkedAppearance("owner");
+  mocks.refreshTheme.mockClear();
+  stop();
+  expect(mocks.refreshTheme).toHaveBeenCalledWith(true);
+});

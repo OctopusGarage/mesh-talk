@@ -450,3 +450,166 @@ test("each theme remembers its wallpaper and previews the applied image", async 
   await page.getByTestId("theme-nature").click();
   await expect(natureLast).toHaveAttribute("aria-pressed", "true");
 });
+
+test("private wallpaper restores before the gallery and survives temporary readiness loss", async ({
+  page,
+}) => {
+  await login(page);
+  const bytes = [
+    ...readFileSync(resolve("../site/market/packs/barcelona.zip")),
+  ];
+  await page.evaluate(async (archive) => {
+    const packsPath = "/src/store/packs.ts";
+    const themePath = "/src/lib/theme.ts";
+    const { usePacks } = await import(/* @vite-ignore */ packsPath);
+    const { useTheme } = await import(/* @vite-ignore */ themePath);
+    await usePacks.getState().install(new Uint8Array(archive));
+    useTheme.getState().set("barcelona");
+  }, bytes);
+  await page.addInitScript(() => {
+    const readAll = IDBObjectStore.prototype.getAll;
+    const deferred: Array<() => void> = [];
+    let released = false;
+    Object.assign(window, {
+      releasePrivateGallery: () => {
+        released = true;
+        deferred.splice(0).forEach((finish) => finish());
+      },
+    });
+    IDBObjectStore.prototype.getAll = function (...args) {
+      const request = readAll.apply(this, args);
+      if (
+        !this.transaction.db.name.startsWith("mesh-talk-customization-account:")
+      )
+        return request;
+      Object.defineProperty(request, "onsuccess", {
+        set(callback: ((event: Event) => void) | null) {
+          request.addEventListener(
+            "success",
+            (event) => {
+              const finish = () => callback?.call(request, event);
+              if (released) finish();
+              else deferred.push(finish);
+            },
+            { once: true },
+          );
+        },
+      });
+      return request;
+    };
+  });
+  await page.goto("/");
+  await page.evaluate(() => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args?: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      releaseStartupRuntime(): void;
+    };
+    const invoke = host.__TAURI_INTERNALS__.invoke.bind(
+      host.__TAURI_INTERNALS__,
+    );
+    let released = false;
+    host.releaseStartupRuntime = () => {
+      released = true;
+    };
+    host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "owner_node_identity" && !released)
+        throw new Error("node not started");
+      if (command === "owner_startup_identity") {
+        const identity = (await invoke("owner_node_identity", args)) as Record<
+          string,
+          unknown
+        >;
+        return {
+          ...identity,
+          startup_id: "verified-private-startup",
+          phase: released ? "ready" : "identity",
+        };
+      }
+      return invoke(command, args);
+    };
+  });
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
+  await waitForChatShell(page);
+  await expect.poll(() => palette(page)).toBe("barcelona");
+  const runtimeReady = () =>
+    page.evaluate(async () => {
+      const path = "/src/store/chat.ts";
+      const { useChat } = await import(/* @vite-ignore */ path);
+      return useChat.getState().ready;
+    });
+  expect(await runtimeReady()).toBe(false);
+  const snapshot = () =>
+    page.evaluate(async () => {
+      const path = "/src/store/packs.ts";
+      const { usePacks } = await import(/* @vite-ignore */ path);
+      return {
+        scope: usePacks.getState().scope,
+        loaded: usePacks.getState().loaded,
+        wallpaper: document.documentElement.style.getPropertyValue(
+          "--pack-wallpaper-url",
+        ),
+      };
+    });
+  const initial = await snapshot();
+  expect(initial.loaded).toBe(false);
+  expect(initial.wallpaper).toContain("data:image/");
+  await page.screenshot({ path: "../tmp/wallpaper-startup-pending.png" });
+  await page.evaluate(async () => {
+    (
+      window as unknown as { releasePrivateGallery(): void }
+    ).releasePrivateGallery();
+    (
+      window as unknown as { releaseStartupRuntime(): void }
+    ).releaseStartupRuntime();
+  });
+  await expect.poll(async () => (await snapshot()).loaded).toBe(true);
+  await expect.poll(runtimeReady).toBe(true);
+  const settled = await snapshot();
+  expect(settled.wallpaper).toBe(initial.wallpaper);
+  await page.evaluate(async () => {
+    const path = "/src/store/chat.ts";
+    const { useChat } = await import(/* @vite-ignore */ path);
+    useChat.setState({ ready: false });
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+  });
+  expect(await snapshot()).toEqual(settled);
+  await page.evaluate(async () => {
+    const path = "/src/store/chat.ts";
+    const { useChat } = await import(/* @vite-ignore */ path);
+    useChat.setState({ ready: true });
+  });
+  await page.screenshot({ path: "../tmp/wallpaper-startup-ready.png" });
+  await page.evaluate(async () => {
+    const path = "/src/store/auth.ts";
+    const { useAuth } = await import(/* @vite-ignore */ path);
+    await useAuth.getState().logout();
+  });
+  await expect.poll(async () => (await snapshot()).scope).toBe(null);
+  await expect.poll(async () => (await snapshot()).wallpaper).toBe("");
+  await login(page);
+  await expect
+    .poll(async () => (await snapshot()).wallpaper)
+    .toBe(initial.wallpaper);
+  await page.evaluate(async () => {
+    const path = "/src/store/chat.ts";
+    const { useChat } = await import(/* @vite-ignore */ path);
+    useChat.setState((state: { identityEpoch: number }) => ({
+      myAccountId: "replacement-account",
+      identityEpoch: state.identityEpoch + 1,
+    }));
+  });
+  await expect
+    .poll(async () => (await snapshot()).scope?.account)
+    .toBe("replacement-account");
+  await expect.poll(async () => (await snapshot()).wallpaper).toBe("");
+});

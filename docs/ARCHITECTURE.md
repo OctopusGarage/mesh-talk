@@ -488,6 +488,12 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   writers on errors and authorizes the synchronous producer launch, installation,
   and each inbound callback against the current lease/ticket. A late rename cannot
   change a replacement session or runtime; startup uses the current matching name.
+  An IDs-only startup observation may publish the device/account identity after
+  the existing keystore unlocks, before durable stores finish opening. The host
+  binds it to that exact lease and startup ticket; replacement and failed or
+  cancelled startup revoke it. This observation permits account-scoped appearance
+  cache hydration only. It does not install a runtime or admit messaging/settings
+  commands. Full node identity and readiness still require runtime admission.
   Successful logout forgets the original login credential before awaiting teardown.
   On macOS, Stay signed in stores a password in the standard OS Keychain so a
   previously unlocked desktop can resume the session on launch. The in-app lock

@@ -118,7 +118,10 @@ export async function publishCustomizationPacksBeforeLink(
   }
   scope.requireCurrent();
 }
-export function startLinkedCustomizationPacks(owner: string): () => void {
+export function startLinkedCustomizationPacks(
+  owner: string,
+  selectedThemeId?: string,
+): () => void {
   const scope = scopeFor(owner);
   let active = true;
   let running = false;
@@ -136,7 +139,7 @@ export function startLinkedCustomizationPacks(owner: string): () => void {
     }
     running = true;
     try {
-      await store.load();
+      await store.load(selectedThemeId);
       if (!current()) return;
       const policy = await readWithDeadline(() =>
         chat.getDeviceSyncPolicy(owner),

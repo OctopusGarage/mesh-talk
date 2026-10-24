@@ -50,7 +50,9 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
     let app_handle_for_file = app_handle.clone();
     let app_handle_for_profile = app_handle.clone();
     let app_handle_for_call = app_handle.clone();
+    let observation = authority.observation_lifetime();
     tauri::async_runtime::spawn(async move {
+        let _observation = observation;
         let Ok(permit) = authority.begin().await else {
             return;
         };
@@ -73,7 +75,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 post_office_enabled: false,
                 ..Default::default()
             });
-        match mesh_talk_core::node::NodeRuntime::start_configured_guarded_with_network(
+        match mesh_talk_core::node::NodeRuntime::start_configured_guarded_with_network_observed(
             mesh_talk_core::node::RuntimeConfig {
                 base_dir: &base_dir,
                 account_id: &account_id,
@@ -139,6 +141,14 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 post_office_send_enabled: relay_settings.post_office_send_enabled,
                 post_office_receive_enabled: relay_settings.post_office_receive_enabled,
                 physical_lan_only: relay_settings.physical_lan_only,
+            },
+            |identity| {
+                authority.observe_identity(identity).map_err(|_| {
+                    mesh_talk_core::node::RuntimeError::Io(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "startup superseded",
+                    ))
+                })
             },
             |launch| {
                 authority
@@ -535,6 +545,245 @@ mod tests {
         );
         let authority = RuntimeAuthority::request(session.clone(), lease, node.clone()).unwrap();
         (session, node, authority)
+    }
+
+    fn startup_projection(
+        session: &crate::state::SessionState,
+        node: &crate::chat_commands::NodeState,
+        authority: &RuntimeAuthority,
+    ) -> serde_json::Value {
+        serde_json::to_value(
+            node.startup_identity(
+                session,
+                &authority.lease,
+                &crate::app_lock::AppLock::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn observed_identity(account: &str) -> mesh_talk_core::node::RuntimeIdentity {
+        mesh_talk_core::node::RuntimeIdentity {
+            account_id: account.into(),
+            device_id: "device".into(),
+        }
+    }
+
+    #[test]
+    fn startup_identity_failure_and_cancellation_clear_only_current_observation() {
+        let (session, node, authority) = authority();
+        let lifetime = authority.observation_lifetime();
+        let pending = startup_projection(&session, &node, &authority);
+        assert_eq!(pending["phase"], "pending");
+        assert!(pending.get("account_id").is_none());
+        authority
+            .observe_identity(observed_identity("first-account"))
+            .unwrap();
+        assert_eq!(
+            startup_projection(&session, &node, &authority)["account_id"],
+            "first-account"
+        );
+        drop(lifetime);
+        let failed = startup_projection(&session, &node, &authority);
+        assert_eq!(failed["phase"], "failed");
+        assert!(failed.get("account_id").is_none());
+        assert!(failed.get("device_id").is_none());
+
+        let replacement =
+            RuntimeAuthority::request(session.clone(), authority.lease.clone(), node.clone())
+                .unwrap();
+        let replacement_lifetime = replacement.observation_lifetime();
+        assert_ne!(
+            pending["startup_id"],
+            startup_projection(&session, &node, &replacement)["startup_id"]
+        );
+        replacement
+            .observe_identity(observed_identity("adopted-account"))
+            .unwrap();
+        assert!(
+            authority
+                .observe_identity(observed_identity("stale-account"))
+                .is_err()
+        );
+        drop(authority.observation_lifetime());
+        assert_eq!(
+            startup_projection(&session, &node, &replacement)["account_id"],
+            "adopted-account"
+        );
+        node.next_lifecycle_ticket();
+        assert!(startup_projection(&session, &node, &replacement).is_null());
+        drop(replacement_lifetime);
+    }
+
+    #[tokio::test]
+    async fn startup_identity_cancelled_while_waiting_for_serialization_clears_pending() {
+        let (session, node, authority) = authority();
+        let gate = node.test_startup_gate().lock().await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let task_authority = authority.clone();
+        let task = tokio::spawn(async move {
+            let _observation = task_authority.observation_lifetime();
+            entered_tx.send(()).unwrap();
+            let _permit = task_authority.begin().await.unwrap();
+        });
+        entered_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.is_err());
+        assert_eq!(
+            startup_projection(&session, &node, &authority)["phase"],
+            "failed"
+        );
+        drop(gate);
+    }
+
+    #[test]
+    fn startup_identity_rejects_same_owner_replacement_and_signed_out_observers() {
+        let (session, node, authority) = authority();
+        authority
+            .observe_identity(observed_identity("first-account"))
+            .unwrap();
+        let old_lifetime = authority.observation_lifetime();
+        let user = session
+            .matching(&authority.lease, |info| info.user.clone())
+            .unwrap();
+        let replacement_lease = session.publish("new-token".into(), user, "password".into());
+        let lock = crate::app_lock::AppLock::default();
+        assert!(
+            node.startup_identity(&session, &authority.lease, &lock)
+                .is_err()
+        );
+        assert!(
+            node.startup_identity(&session, &replacement_lease, &lock)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            authority
+                .observe_identity(observed_identity("stale-account"))
+                .is_err()
+        );
+        let replacement =
+            RuntimeAuthority::request(session.clone(), replacement_lease, node.clone()).unwrap();
+        replacement
+            .observe_identity(observed_identity("new-account"))
+            .unwrap();
+        drop(old_lifetime);
+        assert_eq!(
+            startup_projection(&session, &node, &replacement)["account_id"],
+            "new-account"
+        );
+        session.clear();
+        assert!(
+            node.startup_identity(&session, &replacement.lease, &lock)
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_identity_is_observable_before_runtime_installation_and_failure_retires_it() {
+        let root = tempfile::tempdir().unwrap();
+        // A real durable store open fails after the authenticated observation.
+        std::fs::create_dir_all(root.path().join("accounts/host-owner/names.log")).unwrap();
+        let (session, node, authority) = authority();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let base = root.path().to_path_buf();
+        let task_authority = authority.clone();
+        let startup = tokio::spawn(async move {
+            let _observation = task_authority.observation_lifetime();
+            let _permit = task_authority.begin().await.unwrap();
+            mesh_talk_core::node::NodeRuntime::start_configured_guarded_with_network_observed(
+                mesh_talk_core::node::RuntimeConfig {
+                    base_dir: &base,
+                    account_id: "host-owner",
+                    display_name: "Owner",
+                    password: "pw",
+                    discovery_port: 0,
+                    post_office_enabled: false,
+                    candidate_source: None,
+                },
+                mesh_talk_core::node::RuntimeEvents {
+                    on_dm: Box::new(|_| {}),
+                    on_channel: Box::new(|_| {}),
+                    on_file: Box::new(|_| {}),
+                    on_profile: Box::new(|_| {}),
+                    on_call_signal: Box::new(|_| {}),
+                },
+                mesh_talk_core::node::RuntimeNetworkOptions::default(),
+                move |identity| {
+                    task_authority.observe_identity(identity).unwrap();
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                },
+                |launch| Ok(launch("Owner")),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(15), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let identity = startup_projection(&session, &node, &authority);
+        let no_runtime = node.0.read().await.is_none();
+        let denied = node.node_for_owner(&session, "host-owner").await.is_none();
+        release_tx.send(()).unwrap();
+        assert!(startup.await.unwrap().is_err());
+        assert_eq!(identity["phase"], "identity");
+        assert_eq!(identity["account_id"].as_str().unwrap().len(), 32);
+        assert!(
+            no_runtime && denied,
+            "early observation cannot grant runtime access"
+        );
+        assert_eq!(
+            startup_projection(&session, &node, &authority)["phase"],
+            "failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_identity_installation_keeps_ready_until_next_ticket() {
+        let root = tempfile::tempdir().unwrap();
+        let (session, node, authority) = authority();
+        let lifetime = authority.observation_lifetime();
+        let permit = authority.begin().await.unwrap();
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "host-owner",
+            "Owner",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        authority
+            .observe_identity(mesh_talk_core::node::RuntimeIdentity {
+                account_id: runtime.account_id().to_owned(),
+                device_id: runtime.user_id().to_owned(),
+            })
+            .unwrap();
+        assert!(permit.install(runtime).await);
+        drop(lifetime);
+        let installed = startup_projection(&session, &node, &authority);
+        let admitted = node.node_for_owner(&session, "host-owner").await.unwrap();
+        assert_eq!(installed["phase"], "ready");
+        assert_eq!(installed["account_id"], admitted.account_id());
+        let replacement =
+            RuntimeAuthority::request(session.clone(), authority.lease.clone(), node.clone())
+                .unwrap();
+        let pending = startup_projection(&session, &node, &replacement);
+        assert_eq!(pending["phase"], "pending");
+        assert!(pending.get("account_id").is_none());
+        assert_ne!(installed["startup_id"], pending["startup_id"]);
+        assert!(node.node_for_owner(&session, "host-owner").await.is_none());
+        drop(admitted);
+        node.0.write().await.take().unwrap().stop().await;
     }
 
     #[tokio::test]

@@ -34,6 +34,7 @@ export interface PackStorage {
   publicPacks(): Promise<CustomizationPack[]>;
   legacyPacks(): Promise<CustomizationPack[]>;
   list(scope: PackScope): Promise<StoredPack[]>;
+  get?(scope: PackScope, id: string): Promise<StoredPack | undefined>;
   update(
     scope: PackScope,
     id: string,
@@ -49,7 +50,7 @@ interface PacksState {
     account: string | null,
     session?: string,
   ): void;
-  load(): Promise<void>;
+  load(selectedThemeId?: string): Promise<void>;
   install(
     bytes: Uint8Array,
     requirePack?: (pack: CustomizationPack) => void,
@@ -204,6 +205,23 @@ const storage: PackStorage = {
     );
   },
   list: (scope) => all<StoredPack>(dbName(scope)),
+  async get(scope, id) {
+    const db = await database(dbName(scope));
+    if (!db) return undefined;
+    try {
+      return await new Promise<StoredPack | undefined>((resolve, reject) => {
+        const request = db
+          .transaction(STORE, "readonly")
+          .objectStore(STORE)
+          .get(id);
+        request.onsuccess = () =>
+          resolve(request.result as StoredPack | undefined);
+        request.onerror = () => reject(request.error);
+      });
+    } finally {
+      db.close();
+    }
+  },
   update: (scope, id, mutate) => update<StoredPack>(dbName(scope), id, mutate),
 };
 
@@ -228,11 +246,37 @@ export function createPacksStore(
       };
       return { scope, current, requireCurrent };
     };
-    const reload = async () => {
+    const reload = async (selectedThemeId?: string) => {
       const lease = capture();
+      // Only an authenticated account scope can restore private appearance. Read
+      // its selected theme without cloning every unrelated gallery asset first.
+      const selected =
+        lease.scope && selectedThemeId && io.get
+          ? io
+              .get(lease.scope, selectedThemeId)
+              .then((row) => {
+                if (!lease.current() || get().loaded || !row) return;
+                const bundled = publicSnapshot.filter(
+                  (pack) => pack.id !== row.id,
+                );
+                set({
+                  packs: ordered([
+                    ...bundled,
+                    ...(row.pack?.kind === "theme" ? [row.pack] : []),
+                  ]),
+                });
+              })
+              .catch((error) => {
+                console.warn(
+                  "Could not restore selected theme; loading library",
+                  error,
+                );
+              })
+          : Promise.resolve();
       const [bundled, rows] = await Promise.all([
         io.publicPacks(),
         lease.scope ? io.list(lease.scope) : Promise.resolve([]),
+        selected,
       ]);
       if (!lease.current()) return;
       publicSnapshot = bundled;
@@ -267,10 +311,10 @@ export function createPacksStore(
           loaded: false,
         });
       },
-      async load() {
+      async load(selectedThemeId) {
         if (loading) return loading;
         if (get().loaded) return;
-        const task = reload();
+        const task = reload(selectedThemeId);
         loading = task;
         try {
           await task;

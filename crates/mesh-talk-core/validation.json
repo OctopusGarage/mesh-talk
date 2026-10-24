@@ -2,6 +2,37 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-startup-identity",
+      "paths": [
+        "crates/mesh-talk-core/src/node/runtime.rs",
+        "crates/mesh-talk-core/src/node/runtime_retirement_tests.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "startup_identity_"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Observe verified public device and account identity after the existing keystore unlocks without starting participant producers.",
+        "guide": "docs/ARCHITECTURE.md",
+        "invariants": [
+          {
+            "name": "The optional synchronous identity observer runs before durable stores open, grants no runtime authority and can abort stale startup before producers launch. Existing constructors retain their behavior.",
+            "reference": "docs/ARCHITECTURE.md"
+          }
+        ]
+      },
+      "consumers": [
+        "desktop-startup-identity"
+      ],
+      "escalation": [
+        "Verify blocked-store ordering, failed unlock and observer rejection, plus packaged desktop cold-start behavior."
+      ]
+    },
+    {
       "id": "core-account-documents",
       "paths": [
         "crates/mesh-talk-core/src/node/account_documents/"

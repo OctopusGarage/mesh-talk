@@ -79,8 +79,18 @@ export function ChatApp() {
     };
   }, [owner, generation]);
   useEffect(() => {
-    if (owner && ready && accountId) return startLinkedAppearance(owner);
-  }, [owner, generation, ready, accountId, presenceRun, presenceIdentity]);
+    // Appearance belongs to the verified account lifetime. A transient node
+    // readiness failure must not discard its already restored private assets.
+    if (owner && accountId && unreadOwner === owner)
+      return startLinkedAppearance(owner);
+  }, [
+    owner,
+    generation,
+    unreadOwner,
+    accountId,
+    presenceRun,
+    presenceIdentity,
+  ]);
   useEffect(() => {
     if (owner && ready && accountId) return startLinkedContacts(owner);
   }, [owner, generation, ready, accountId, presenceRun, presenceIdentity]);

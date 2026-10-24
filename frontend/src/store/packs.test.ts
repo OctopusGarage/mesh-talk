@@ -221,3 +221,90 @@ it("keeps bundled libraries public before login while clearing private account a
   use.getState().setScope(null, null);
   expect(use.getState().packs).toEqual([bundled]);
 });
+
+it("restores the selected private theme before unrelated library rows finish loading", async () => {
+  const { io } = memory();
+  const { parsePack } = await import("@/lib/pack");
+  const pack = parsePack(archive("private.theme"));
+  const row: StoredPack = {
+    id: pack.id,
+    pack,
+    archive: null,
+    sequence: 0,
+    pending: false,
+    version: null,
+  };
+  let finish!: (rows: StoredPack[]) => void;
+  io.list = () =>
+    new Promise((resolve) => {
+      finish = resolve;
+    });
+  io.get = vi.fn(async () => row);
+  const use = createPacksStore(io);
+  use.getState().setScope("owner", "account", "session");
+  const loading = use.getState().load(pack.id);
+  await vi.waitFor(() => expect(use.getState().packs).toEqual([pack]));
+  expect(io.get).toHaveBeenCalledWith(
+    { owner: "owner", account: "account", session: "session" },
+    pack.id,
+  );
+  expect(use.getState().loaded).toBe(false);
+  finish([row]);
+  await loading;
+  expect(use.getState().loaded).toBe(true);
+});
+
+it("does not restore a delayed selected theme after the verified account changes", async () => {
+  const { io } = memory();
+  const { parsePack } = await import("@/lib/pack");
+  const pack = parsePack(archive("private.theme"));
+  let finish!: (row: StoredPack) => void;
+  io.get = () =>
+    new Promise((resolve) => {
+      finish = resolve;
+    });
+  const use = createPacksStore(io);
+  use.getState().setScope("owner", "account");
+  const loading = use.getState().load(pack.id);
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  use.getState().setScope("owner", "replacement");
+  finish({
+    id: pack.id,
+    pack,
+    archive: null,
+    sequence: 0,
+    pending: false,
+    version: null,
+  });
+  await loading;
+  expect(use.getState().packs).toEqual([]);
+});
+
+it("keeps full library restoration available when the selected-theme read fails", async () => {
+  const { io } = memory();
+  const { parsePack } = await import("@/lib/pack");
+  const pack = parsePack(archive("private.theme"));
+  io.get = async () => {
+    throw new Error("read unavailable");
+  };
+  io.list = async () => [
+    {
+      id: pack.id,
+      pack,
+      archive: null,
+      sequence: 0,
+      pending: false,
+      version: null,
+    },
+  ];
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const use = createPacksStore(io);
+    use.getState().setScope("owner", "account");
+    await use.getState().load(pack.id);
+    expect(use.getState().packs).toEqual([pack]);
+    expect(use.getState().loaded).toBe(true);
+  } finally {
+    warning.mockRestore();
+  }
+});

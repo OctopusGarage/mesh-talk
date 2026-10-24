@@ -126,6 +126,72 @@ const BOOT_TIMEOUT_MS = 30_000;
 const BOOT_POLL_MS = 500;
 const BOOT_RECOVERY_INTERVAL_MS = 10_000;
 
+/** Both startup and full runtime identities bind persisted reception exactly once. */
+function applyVerifiedIdentity(
+  set: Set,
+  identity: {
+    owner: string;
+    account_id: string;
+    device_id: string;
+    history_revision?: number;
+  },
+  ready: boolean,
+) {
+  const owner = identity.owner;
+  const acct = identity.account_id;
+  const persistedUnread = loadUnread(owner, acct);
+  const persistedPendingUnread = loadPendingUnread(owner, acct);
+  const persistedReception = emptyReception(
+    loadReceptionLedger(owner, acct),
+    loadUnreadOverflow(owner, acct),
+  );
+  set((state) => {
+    const sameScope = state.unreadOwner === owner && state.myAccountId === acct;
+    const invalidateScope = state.unreadOwner !== "" && !sameScope;
+    const replacedScope =
+      invalidateScope ||
+      (state.myAccountId !== "" && state.myAccountId !== acct);
+    const reception = sameScope
+      ? state
+      : mergeReception(
+          { ...persistedReception, unread: persistedUnread },
+          replacedScope ? { ...emptyReception(), unread: {} } : state,
+        );
+    const unread = reception.unread;
+    const pendingUnknownUnread = sameScope
+      ? state.pendingUnknownUnread
+      : { ...persistedPendingUnread };
+    if (!sameScope && !replacedScope)
+      for (const [sender, count] of Object.entries(state.pendingUnknownUnread))
+        pendingUnknownUnread[sender] = Math.min(
+          1_000_000,
+          (pendingUnknownUnread[sender] ?? 0) + count,
+        );
+    return {
+      ...(invalidateScope ? invalidateConversationIdentity(state) : {}),
+      ...(!sameScope
+        ? {
+            ...reception,
+            accountSeen: reception.accountSeen,
+            historyBaselines: Object.keys(persistedReception.ledger),
+            historyFullBaselines: loadFullHistoryBaselines(owner, acct),
+          }
+        : {}),
+      identityEpoch: invalidateScope
+        ? state.identityEpoch + 1
+        : state.identityEpoch,
+      historyRevision: identity.history_revision ?? null,
+      myId: identity.device_id,
+      myAccountId: acct,
+      unread,
+      pendingUnknownUnread,
+      unreadOwner: owner,
+      ready,
+      bootFailed: false,
+    };
+  });
+}
+
 /**
  * Poll my_id/account_id until the node finishes opening (post-login KDF unlock takes a
  * moment), then mark ready and refresh the roster. Returns true once ready, false if the
@@ -140,82 +206,108 @@ async function pollUntilReady(
 ): Promise<boolean> {
   const deadline = performance.now() + BOOT_TIMEOUT_MS;
   while (performance.now() < deadline && !isCancelled()) {
+    const owner = captureOwner().owner;
+    if (!owner) return false;
+    const identityEpoch = get().identityEpoch;
+    const superseded = () =>
+      isCancelled() || get().identityEpoch !== identityEpoch;
+    let observedStartup:
+      Awaited<ReturnType<typeof chat.ownerStartupIdentity>> | undefined;
     try {
-      const owner = captureOwner().owner;
-      if (!owner) return false;
       const identity = await readWithDeadline(
         () => chat.ownerIdentity(owner),
         Math.min(10_000, deadline - performance.now()),
       );
-      if (isCancelled() || performance.now() >= deadline) return false;
+      if (superseded() || performance.now() >= deadline) return false;
       if (identity.owner !== owner)
         throw new Error("Node identity is not ready for this owner");
+      // Remember the native ticket even when the node was already ready at the
+      // first poll, so a later transient outage cannot look like a new startup.
+      const startup = await readWithDeadline(
+        () => chat.ownerStartupIdentity(owner),
+        Math.max(1, Math.min(2_000, deadline - performance.now())),
+      ).catch(() => undefined);
+      if (superseded() || performance.now() >= deadline) return false;
+      if (startup === null && get().startupId !== null) {
+        observedStartup = null;
+        throw new Error("Runtime startup retired during identity observation");
+      }
+      if (startup?.owner === owner && startup.startup_id) {
+        if (
+          startup.phase !== "ready" ||
+          startup.account_id !== identity.account_id ||
+          startup.device_id !== identity.device_id
+        ) {
+          observedStartup = startup;
+          throw new Error(
+            "Runtime startup changed during identity observation",
+          );
+        }
+        set({ startupId: startup.startup_id });
+      }
       if (identity.display_name && useAuth.getState().user?.id === owner)
         useAuth.setState((state) => ({
           user: state.user
             ? { ...state.user, display_name: identity.display_name! }
             : null,
         }));
+      applyVerifiedIdentity(set, identity, true);
       const acct = identity.account_id;
-      const persistedUnread = loadUnread(owner, acct);
-      const persistedPendingUnread = loadPendingUnread(owner, acct);
-      const persistedReception = emptyReception(
-        loadReceptionLedger(owner, acct),
-        loadUnreadOverflow(owner, acct),
-      );
-      set((state) => {
-        const sameScope =
-          state.unreadOwner === owner && state.myAccountId === acct;
-        const invalidateScope = state.unreadOwner !== "" && !sameScope;
-        const replacedScope =
-          invalidateScope ||
-          (state.myAccountId !== "" && state.myAccountId !== acct);
-        const reception = sameScope
-          ? state
-          : mergeReception(
-              { ...persistedReception, unread: persistedUnread },
-              replacedScope ? { ...emptyReception(), unread: {} } : state,
-            );
-        const unread = reception.unread;
-        const pendingUnknownUnread = sameScope
-          ? state.pendingUnknownUnread
-          : { ...persistedPendingUnread };
-        if (!sameScope && !replacedScope)
-          for (const [sender, count] of Object.entries(
-            state.pendingUnknownUnread,
-          ))
-            pendingUnknownUnread[sender] = Math.min(
-              1_000_000,
-              (pendingUnknownUnread[sender] ?? 0) + count,
-            );
-        return {
-          ...(invalidateScope ? invalidateConversationIdentity(state) : {}),
-          ...(!sameScope
-            ? {
-                ...reception,
-                accountSeen: reception.accountSeen,
-                historyBaselines: Object.keys(persistedReception.ledger),
-                historyFullBaselines: loadFullHistoryBaselines(owner, acct),
-              }
-            : {}),
-          identityEpoch: invalidateScope
-            ? state.identityEpoch + 1
-            : state.identityEpoch,
-          historyRevision: identity.history_revision ?? null,
-          myId: identity.device_id,
-          myAccountId: acct,
-          unread,
-          pendingUnknownUnread,
-          unreadOwner: owner,
-          ready: true,
-          bootFailed: false,
-        };
-      });
       setPushStateSupport(identity.supports_push_state ? owner : null);
       syncChatAvatarIdentity(acct, () => !isCancelled());
       await get().refreshRoster();
       return true;
     } catch {
+      if (superseded()) return false;
+      try {
+        const startup =
+          observedStartup !== undefined
+            ? observedStartup
+            : await readWithDeadline(
+                () => chat.ownerStartupIdentity(owner),
+                Math.max(1, Math.min(2_000, deadline - performance.now())),
+              );
+        if (superseded() || performance.now() >= deadline) return false;
+        if (startup === null && get().startupId !== null) {
+          resetChatFileAvailability();
+          set((state) => ({
+            ...invalidateConversationIdentity(state),
+            identityEpoch: state.identityEpoch + 1,
+            myId: "",
+            myAccountId: "",
+            startupId: null,
+          }));
+        }
+        if (startup?.owner === owner && startup.startup_id) {
+          const hasIdentity =
+            (startup.phase === "identity" || startup.phase === "ready") &&
+            Boolean(startup.account_id && startup.device_id);
+          const changed = get().startupId !== startup.startup_id;
+          if ((changed || !hasIdentity) && get().myAccountId) {
+            resetChatFileAvailability();
+            set((state) => ({
+              ...invalidateConversationIdentity(state),
+              identityEpoch: state.identityEpoch + 1,
+              myId: "",
+              myAccountId: "",
+            }));
+          }
+          set({ startupId: startup.startup_id });
+          if (hasIdentity)
+            applyVerifiedIdentity(
+              set,
+              {
+                owner,
+                device_id: startup.device_id!,
+                account_id: startup.account_id!,
+              },
+              false,
+            );
+        }
+      } catch {
+        // Older native hosts and transient observation failures retain the
+        // existing full-runtime retry path; they never grant startup identity.
+      }
       if (isCancelled() || singleAttempt) return false;
       const remaining = deadline - performance.now();
       if (remaining <= 0) return false;
@@ -247,6 +339,8 @@ export interface ChatState
   extends ConversationHistoryState, OutgoingIntentContext, ChannelActions {
   bootBusy: boolean;
   bootRequest: number;
+  /** Native startup ticket; distinct from the frontend run and account identity. */
+  startupId: string | null;
   rosterRequest: number;
   favoritesRequest: number;
   ready: boolean;
@@ -360,6 +454,7 @@ function emptySessionData() {
     identityEpoch: 0,
     bootBusy: false,
     bootRequest: 0,
+    startupId: null,
     statusBusy: false,
     rosterRequest: 0,
     favoritesRequest: 0,
@@ -641,7 +736,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   // Re-attempt the node-id poll after a boot failure (events + roster interval from the
   // original start() are still live, so we only need to re-resolve my_id/account_id).
   retryBoot: (background = false) => {
-    const lease = captureChat(get);
+    const lease = captureChat(get, false);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     if (get().bootBusy) return;

@@ -2,6 +2,38 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-startup-identity",
+      "paths": [
+        "src-tauri/src/chat_commands/state.rs",
+        "src-tauri/src/runtime_bootstrap.rs",
+        "src-tauri/src/owner_commands.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "startup_identity_"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Expose IDs-only startup appearance observation under exact desktop session, startup ticket and app-lock authority.",
+        "guide": "docs/CUSTOMIZATION_PACKS.md#account-scoped-startup-appearance",
+        "invariants": [
+          {
+            "name": "Pending, failed, canceled and replaced startups cannot disclose retired identity; observing early identity does not admit runtime commands.",
+            "reference": "docs/ARCHITECTURE.md"
+          }
+        ]
+      },
+      "consumers": [
+        "frontend-startup-appearance"
+      ],
+      "escalation": [
+        "Verify native cold startup and same-owner replacement; browser mocks alone cannot prove keystore identity or cancellation ownership."
+      ]
+    },
+    {
       "id": "desktop-account-documents",
       "paths": [
         "src-tauri/src/account_documents.rs",

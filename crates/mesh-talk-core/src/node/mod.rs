@@ -154,7 +154,9 @@ pub use profile::{MAX_AVATAR_BYTES, ProfilePayload};
 pub use ratchet_sessions::RatchetSessions;
 pub use reaction::{ReactionPayload, ReactionView, aggregate};
 pub use received_log::{ReceivedEntry, ReceivedLog};
-pub use runtime::{NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents, RuntimeNetworkOptions};
+pub use runtime::{
+    NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents, RuntimeIdentity, RuntimeNetworkOptions,
+};
 pub use search::{RecentSearchResults, ReferencedSearchHit, SearchContext, SearchReference};
 
 mod outgoing_message;

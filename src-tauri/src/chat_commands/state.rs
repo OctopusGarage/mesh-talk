@@ -12,9 +12,42 @@ pub struct NodeState(
     pub Arc<RwLock<Option<NodeRuntime>>>,
     Arc<Mutex<()>>,
     Arc<std::sync::atomic::AtomicU64>,
-    Arc<std::sync::Mutex<Option<(crate::state::SessionLease, u64)>>>,
+    Arc<std::sync::Mutex<LifecycleState>>,
     #[cfg(test)] pub(crate) Arc<std::sync::Mutex<Option<(std::path::PathBuf, u16)>>>,
 );
+
+#[derive(Default)]
+struct LifecycleState {
+    installed: Option<(SessionLease, u64)>,
+    startup: Option<StartupObservation>,
+}
+
+struct StartupObservation {
+    lease: SessionLease,
+    ticket: u64,
+    projection: StartupIdentity,
+}
+
+/// IDs-only presentation observation; it never admits operations against a node.
+#[derive(Clone, serde::Serialize)]
+pub struct StartupIdentity {
+    owner: String,
+    startup_id: String,
+    phase: StartupPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_id: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StartupPhase {
+    Pending,
+    Identity,
+    Ready,
+    Failed,
+}
 
 impl NodeState {
     /// Serialize offline recovery with runtime startup and retirement.
@@ -37,6 +70,7 @@ impl NodeState {
         self.3
             .lock()
             .unwrap()
+            .installed
             .as_ref()
             .is_some_and(|(current, _)| current == lease)
     }
@@ -61,6 +95,8 @@ impl NodeState {
     }
 
     pub(crate) fn next_lifecycle_ticket(&self) -> u64 {
+        let mut state = self.3.lock().unwrap();
+        state.startup = None;
         self.2.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1
     }
 
@@ -69,7 +105,14 @@ impl NodeState {
     }
 
     fn record_installation(&self, lease: SessionLease, ticket: u64) {
-        *self.3.lock().unwrap() = Some((lease, ticket));
+        let mut state = self.3.lock().unwrap();
+        state.installed = Some((lease.clone(), ticket));
+        if let Some(startup) = state.startup.as_mut()
+            && startup.lease == lease
+            && startup.ticket == ticket
+        {
+            startup.projection.phase = StartupPhase::Ready;
+        }
     }
 
     /// Called only under the runtime lifecycle and matching Session guards.
@@ -82,7 +125,7 @@ impl NodeState {
             .3
             .lock()
             .map_err(|_| CommandError::Internal("runtime state unavailable".into()))?;
-        if let Some((current, ticket)) = installed.as_ref() {
+        if let Some((current, ticket)) = installed.installed.as_ref() {
             if current != lease || *ticket != self.2.load(Ordering::Acquire) {
                 return Err(CommandError::Authorization(
                     "runtime session replaced".into(),
@@ -99,10 +142,36 @@ impl NodeState {
             Arc::new(RwLock::new(None)),
             Arc::new(Mutex::new(())),
             Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            Arc::new(std::sync::Mutex::new(None)),
+            Arc::new(std::sync::Mutex::new(LifecycleState::default())),
             #[cfg(test)]
             Arc::new(std::sync::Mutex::new(None)),
         )
+    }
+
+    pub(crate) fn startup_identity(
+        &self,
+        session: &SessionState,
+        lease: &SessionLease,
+        app_lock: &crate::app_lock::AppLock,
+    ) -> Result<Option<StartupIdentity>, CommandError> {
+        let revision = app_lock.authorization_revision()?;
+        session
+            .matching(lease, |_| {
+                app_lock.with_unchanged_revision(revision, || {
+                    let state = self
+                        .3
+                        .lock()
+                        .map_err(|_| CommandError::Internal("runtime state unavailable".into()))?;
+                    Ok(state
+                        .startup
+                        .as_ref()
+                        .filter(|startup| {
+                            startup.lease == *lease && self.ticket_current(startup.ticket)
+                        })
+                        .map(|startup| startup.projection.clone()))
+                })
+            })
+            .map_err(CommandError::Authorization)?
     }
 
     /// Legacy runtime snapshot, not session authority. The runtime lock is
@@ -175,13 +244,54 @@ impl RuntimeAuthority {
         lease: SessionLease,
         node: crate::chat_commands::NodeState,
     ) -> Result<Self, String> {
-        let ticket = session.matching(&lease, |_| node.next_lifecycle_ticket())?;
+        let ticket = session.matching(&lease, |_| {
+            use rand::distr::{Alphanumeric, Distribution};
+            let ticket = node.next_lifecycle_ticket();
+            node.3.lock().unwrap().startup = Some(StartupObservation {
+                lease: lease.clone(),
+                ticket,
+                projection: StartupIdentity {
+                    owner: lease.owner().to_owned(),
+                    startup_id: Alphanumeric
+                        .sample_iter(rand::rng())
+                        .take(32)
+                        .map(char::from)
+                        .collect(),
+                    phase: StartupPhase::Pending,
+                    account_id: None,
+                    device_id: None,
+                },
+            });
+            ticket
+        })?;
         Ok(Self {
             session,
             lease,
             node,
             ticket,
         })
+    }
+
+    pub(crate) fn observe_identity(
+        &self,
+        identity: mesh_talk_core::node::RuntimeIdentity,
+    ) -> Result<(), String> {
+        self.current(|_| {
+            let mut state = self.node.3.lock().unwrap();
+            let startup = state.startup.as_mut().ok_or("startup unavailable")?;
+            if startup.lease != self.lease || startup.ticket != self.ticket {
+                return Err("startup superseded");
+            }
+            startup.projection.phase = StartupPhase::Identity;
+            startup.projection.account_id = Some(identity.account_id);
+            startup.projection.device_id = Some(identity.device_id);
+            Ok(())
+        })?
+        .map_err(str::to_owned)
+    }
+
+    pub(crate) fn observation_lifetime(&self) -> StartupObservationLifetime {
+        StartupObservationLifetime(self.clone())
     }
 
     pub(crate) async fn begin(&self) -> Result<StartupPermit, String> {
@@ -209,6 +319,27 @@ impl RuntimeAuthority {
             }
             Ok(operation(info))
         })?
+    }
+}
+
+/// Failure and cancellation retire only this startup's observation. A successful
+/// installation keeps its public identity until the next lifecycle request.
+pub(crate) struct StartupObservationLifetime(RuntimeAuthority);
+
+impl Drop for StartupObservationLifetime {
+    fn drop(&mut self) {
+        let _ = self.0.current(|_| {
+            let mut state = self.0.node.3.lock().unwrap();
+            if let Some(startup) = state.startup.as_mut()
+                && startup.lease == self.0.lease
+                && startup.ticket == self.0.ticket
+                && startup.projection.phase != StartupPhase::Ready
+            {
+                startup.projection.phase = StartupPhase::Failed;
+                startup.projection.account_id = None;
+                startup.projection.device_id = None;
+            }
+        });
     }
 }
 
