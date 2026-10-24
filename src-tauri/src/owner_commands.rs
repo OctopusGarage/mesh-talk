@@ -813,7 +813,7 @@ mod tests {
                 .join(runtime.host_account_id().unwrap());
             [
                 format!("account-sync-policy-{}.log", runtime.account_id()),
-                "account-preferences.log".into(),
+                format!("account-preferences-{}.log", runtime.account_id()),
             ]
             .map(|name| std::fs::read(directory.join(name)).unwrap())
         }
@@ -2819,7 +2819,7 @@ mod tests {
             ),
             (
                 "set_account_preference",
-                serde_json::json!({"owner":"alice","category":"appearance", "key":"theme", "value":"dark"}),
+                serde_json::json!({"owner":"alice","expectedAccount":fixture.node.0.blocking_read().as_ref().unwrap().account_id(),"category":"appearance", "key":"theme", "value":"dark"}),
             ),
         ] {
             let result = fixture.invoke(command, body);
@@ -3508,7 +3508,7 @@ mod tests {
             ),
             (
                 "set_account_preference",
-                serde_json::json!({"owner":"alice","category":"appearance", "key":"theme", "value":"dark"}),
+                serde_json::json!({"owner":"alice","expectedAccount":fixture.node.0.blocking_read().as_ref().unwrap().account_id(),"category":"appearance", "key":"theme", "value":"dark"}),
             ),
             (
                 "send_file_to_account",
@@ -3586,7 +3586,7 @@ mod tests {
             ),
             (
                 "set_account_preference",
-                serde_json::json!({"owner":"alice","category":"appearance", "key":"theme", "value":"dark"}),
+                serde_json::json!({"owner":"alice","expectedAccount":fixture.node.0.blocking_read().as_ref().unwrap().account_id(),"category":"appearance", "key":"theme", "value":"dark"}),
             ),
         ];
         for lock in [false, true] {

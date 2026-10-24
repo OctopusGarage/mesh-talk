@@ -36,6 +36,7 @@ export function requiredBrowserPaths(tier) {
     ["automatic-delivery.spec.ts", "submitted text stays in its bubble after acceptance and navigation"],
     ["automatic-delivery.spec.ts", "submitted text stays in its bubble after rejection and navigation"],
     ["automatic-delivery.spec.ts", "channel acceptance reconciles repeated text once and confirmed post-office custody clears the waiting indicator"],
+    ["automatic-delivery.spec.ts", "linked-device channel history waits for copy confirmation before showing a check"],
     ["media-recovery.spec.ts", "received media recovers when bytes become available with stable fileConv"],
     ["media-lifecycle.spec.ts", "same-identity disable/re-enable never returns a revoked URL"],
     ["media-lifecycle.spec.ts", "cleanup during an admitted durable read prevents fallback and blob creation"],
