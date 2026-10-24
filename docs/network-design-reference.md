@@ -1779,6 +1779,23 @@ cancel before another request for that same key begins. These hints authorize
 neither peer identity nor recipient delivery. Repeated unreachable probes must
 leave bounded capacity for other authenticated peers and relay exchanges.
 
+Historical-route rounds launch at most two device probes concurrently. Each may
+race at most two candidates, so this producer alone consumes at most four of the
+seven outbound slots; other protocol producers still share the remaining
+capacity. A round launches at most eight devices under its existing deadline.
+Its rotating cursor advances when a child is launched, rather than when a batch
+is selected, so cancellation of a stalled prefix cannot repeatedly skip the
+queued suffix. The round owns its children through the existing runtime-work
+and cancellation lifecycle. This is a bound on historical probing, not a global
+priority scheduler or an end-to-end delivery latency guarantee.
+
+Actual outbound capacity timeouts produce a per-pool warning at most once every
+30 seconds, including the wait duration, sampled shared/outbound availability
+and accumulated timeout count. Successful acquisition and inbound waits do not
+affect this diagnostic. It includes no message or account identifiers. Capacity
+pressure is distinct from physical route latency and does not attribute a delay
+to a particular message or prove delivery.
+
 One-shot call, pairing and directory protocols keep their first-frame semantics by dialing fresh. A managed permit follows the connection lifetime. The accept loop reserves capacity before accepting and retains inbound handshake bounds. Opposite-direction progress must remain possible.
 
 **There is no “exactly one connection per relay” guarantee.** Seeing 100 people does not require 100 simultaneous TCP connections; the shared budget remains eight. Different conversations can reconcile sequentially through retained relay connections, but parallel operations can use multiple slots for the same relay. Introducing true multiplexing would require explicit stream IDs, fairness, cancellation, backpressure and compatibility design rather than silently reusing the current sequential wire.

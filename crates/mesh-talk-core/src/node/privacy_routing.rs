@@ -8,6 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Each historical probe can race two addresses. This producer alone uses at
+// most four of the seven outbound slots; other producers share the remainder.
+const MAX_ACTIVE_PRIVATE_PROBES: usize = 2;
+const MAX_PRIVATE_PROBES_PER_ROUND: usize = 8;
+
 impl Node {
     /// Infrastructure classification from a validated full device binding.
     pub fn device_is_post_office(&self, device: &crate::identity::device::PublicIdentity) -> bool {
@@ -203,30 +208,40 @@ impl Node {
         if peers.is_empty() {
             return;
         }
-        // Advance a bounded batch before awaiting. Even if all eight selected
-        // peers stall until the budget expires, later routes get the next turn.
+        // Select a bounded batch, but advance the cursor only when a device is
+        // actually launched. A canceled round must not skip its queued suffix.
         let start = self
             .privacy
             .route_probe_cursor
-            .fetch_add(8, std::sync::atomic::Ordering::Relaxed) as usize
+            .load(std::sync::atomic::Ordering::Relaxed) as usize
             % peers.len();
         peers.rotate_left(start);
-        peers.truncate(8);
-        // The selected batch is already bounded to eight. Admit each complete
-        // child before spawning: authentication may synchronously persist proof
-        // and route state after the parent has requested child cancellation.
+        peers.truncate(MAX_PRIVATE_PROBES_PER_ROUND);
+        let mut peers = peers.into_iter();
+        // Admit every complete child before spawning. The JoinSet remains owned
+        // by this round, including when its unchanged whole-round budget expires.
         let mut probes = tokio::task::JoinSet::new();
-        for peer in peers {
-            let Some(work) = self.runtime_work.admit() else {
-                return;
-            };
-            let node = self.clone();
-            probes.spawn(work.track(async move {
-                let _ = node.privacy_dial(peer.addr, &peer.public).await;
-            }));
-        }
         let _ = tokio::time::timeout(budget, async {
-            while probes.join_next().await.is_some() {}
+            loop {
+                while probes.len() < MAX_ACTIVE_PRIVATE_PROBES {
+                    let Some(peer) = peers.next() else {
+                        break;
+                    };
+                    let Some(work) = self.runtime_work.admit() else {
+                        return;
+                    };
+                    self.privacy
+                        .route_probe_cursor
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let node = self.clone();
+                    probes.spawn(work.track(async move {
+                        let _ = node.privacy_dial(peer.addr, &peer.public).await;
+                    }));
+                }
+                if probes.join_next().await.is_none() {
+                    break;
+                }
+            }
         })
         .await;
     }

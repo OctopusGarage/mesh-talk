@@ -20,6 +20,7 @@ pub(super) const MAX_TCP_CONNECTIONS: usize = 8;
 pub(super) const MAX_DIRECTION_CONNECTIONS: usize = MAX_TCP_CONNECTIONS - 1;
 const IDLE_TTL: Duration = Duration::from_secs(15);
 const CAPACITY_WAIT: Duration = Duration::from_secs(2);
+const CAPACITY_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 const ACCOUNT_CAPABILITY_COOLDOWN: Duration = Duration::from_secs(60);
 const MAX_ACCOUNT_CAPABILITIES: usize = 256;
 const MAX_ROUTE_AFFINITIES: usize = 256;
@@ -56,8 +57,26 @@ impl Drop for ExpiryTask {
     }
 }
 
+#[derive(Default)]
+struct CapacityDiagnostics {
+    next_report: Option<Instant>,
+    timeouts: u64,
+}
+
+impl CapacityDiagnostics {
+    fn timed_out(&mut self, now: Instant) -> Option<u64> {
+        self.timeouts = self.timeouts.saturating_add(1);
+        if self.next_report.is_some_and(|next| now < next) {
+            return None;
+        }
+        self.next_report = Some(now + CAPACITY_REPORT_INTERVAL);
+        Some(std::mem::take(&mut self.timeouts))
+    }
+}
+
 pub(in crate::node) struct SessionPool {
     authentication_gates: Mutex<Vec<(PeerEndpointKey, Weak<AuthenticationGate>)>>,
+    capacity_diagnostics: Mutex<CapacityDiagnostics>,
     total: Arc<Semaphore>,
     outbound: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
@@ -71,6 +90,7 @@ impl Default for SessionPool {
     fn default() -> Self {
         Self {
             authentication_gates: Mutex::new(Vec::new()),
+            capacity_diagnostics: Mutex::new(CapacityDiagnostics::default()),
             total: Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS)),
             outbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             inbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
@@ -216,11 +236,26 @@ impl SessionPool {
         }
     }
 
+    fn report_outbound_capacity_timeout(&self, waiting_since: Instant) {
+        let count = self
+            .capacity_diagnostics
+            .lock()
+            .unwrap()
+            .timed_out(Instant::now());
+        if let Some(count) = count {
+            log::warn!(target: "mesh_talk::delivery",
+                "outbound TCP capacity wait exhausted wait_ms={} shared_available={} outbound_available={} timeouts_since_report={}",
+                waiting_since.elapsed().as_millis(), self.total.available_permits(),
+                self.outbound.available_permits(), count);
+        }
+    }
+
     async fn acquire(
         &self,
         direction: &Arc<Semaphore>,
     ) -> Result<Vec<OwnedSemaphorePermit>, TransportError> {
         self.prepare_capacity(direction);
+        let waiting_since = Instant::now();
         tokio::time::timeout(CAPACITY_WAIT, async {
             let directional = direction
                 .clone()
@@ -236,7 +271,12 @@ impl SessionPool {
             Ok(vec![directional, shared])
         })
         .await
-        .map_err(|_| TransportError::Noise("TCP connection capacity busy".into()))?
+        .map_err(|_| {
+            if Arc::ptr_eq(direction, &self.outbound) {
+                self.report_outbound_capacity_timeout(waiting_since);
+            }
+            TransportError::Noise("TCP connection capacity busy".into())
+        })?
     }
 
     pub(in crate::node) async fn outbound(
@@ -528,6 +568,71 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_diagnostic_throttle_counts_timeouts_without_sliding_its_deadline() {
+        let now = Instant::now();
+        let mut diagnostics = CapacityDiagnostics::default();
+        assert_eq!(diagnostics.timed_out(now), Some(1));
+        for seconds in [0, 1, 15, 29] {
+            assert_eq!(
+                diagnostics.timed_out(now + Duration::from_secs(seconds)),
+                None
+            );
+        }
+        assert_eq!(
+            diagnostics.timed_out(now + CAPACITY_REPORT_INTERVAL),
+            Some(5)
+        );
+        assert_eq!(diagnostics.timed_out(now + Duration::from_secs(59)), None);
+        assert_eq!(
+            diagnostics.timed_out(now + CAPACITY_REPORT_INTERVAL * 2),
+            Some(2)
+        );
+        let mut independent_pool = CapacityDiagnostics::default();
+        assert_eq!(independent_pool.timed_out(now), Some(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_diagnostic_records_only_actual_outbound_capacity_timeouts() {
+        let pool = SessionPool::default();
+        let outbound = (0..MAX_DIRECTION_CONNECTIONS)
+            .map(|_| pool.try_outbound().unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            pool.capacity_diagnostics
+                .lock()
+                .unwrap()
+                .next_report
+                .is_none()
+        );
+        assert!(pool.outbound().await.is_err());
+        assert!(
+            pool.capacity_diagnostics
+                .lock()
+                .unwrap()
+                .next_report
+                .is_some()
+        );
+        assert_eq!(pool.capacity_diagnostics.lock().unwrap().timeouts, 0);
+        assert!(pool.outbound().await.is_err());
+        assert_eq!(pool.capacity_diagnostics.lock().unwrap().timeouts, 1);
+        let inbound = pool.inbound().await.unwrap();
+        assert!(pool.inbound().await.is_err());
+        assert_eq!(
+            pool.capacity_diagnostics.lock().unwrap().timeouts,
+            1,
+            "inbound timeouts must not pollute the outbound diagnostic"
+        );
+        drop(inbound);
+        drop(outbound);
+        assert!(pool.outbound().await.is_ok());
+        assert_eq!(
+            pool.capacity_diagnostics.lock().unwrap().timeouts,
+            1,
+            "successful capacity acquisition must not create a timeout record"
+        );
+    }
 
     fn authentication_key(port: u16) -> PeerEndpointKey {
         PeerEndpointKey {

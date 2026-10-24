@@ -33,6 +33,42 @@
       ]
     },
     {
+      "id": "core-private-route-probe-capacity",
+      "paths": [
+        "crates/mesh-talk-core/src/node/privacy_routing.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime_tests.rs",
+        "crates/mesh-talk-core/src/node/session_pool.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "historical_route_probe",
+            "private_probe",
+            "session_pool",
+            "historical_probe_rotation"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Keep historical route probing within its background connection budget and rotate only launched devices across canceled rounds.",
+        "guide": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance",
+        "invariants": [
+          {
+            "name": "At most two background device probes race candidates concurrently; canceled queued devices retain their next turn and healthy foreground Noise exchanges retain capacity against this producer.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Only actual outbound capacity timeouts contribute to a per-pool fixed-window bounded metadata warning; suppressed counts aggregate without sliding the next report.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          }
+        ]
+      },
+      "escalation": [
+        "Run real stalled-socket/healthy Noise capacity, rotation, cancellation and valid slow-route tests. Physical message timing remains separate from isolated contention evidence; other producers share the socket pool."
+      ]
+    },
+    {
       "id": "core-account-documents",
       "paths": [
         "crates/mesh-talk-core/src/node/account_documents/"
