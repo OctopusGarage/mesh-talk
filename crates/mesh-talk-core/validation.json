@@ -328,6 +328,10 @@
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
+            "name": "Capability maintenance probes only sibling or existing group relationships and never competes with an unrelated discovered DM route",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
             "name": "Compatible legacy migration requires established verified bindings and bounded capability checks; V4 sync protects older envelopes from new control kinds",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           }

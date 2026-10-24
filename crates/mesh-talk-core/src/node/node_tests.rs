@@ -1256,10 +1256,62 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
     assert_eq!(preview.messages, 1);
     let original_id = source.channel_history(channel, 10)[0].id;
     source.recall_channel(channel, original_id).await.unwrap();
+    let member_dir = dir.path().join("member");
+    std::fs::create_dir_all(&member_dir).unwrap();
+    let (dm_tx, _member_dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _member_channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _member_file_rx) = mpsc::unbounded_channel();
+    let member = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &member_dir.join("messages.log"),
+        &member_dir.join("sent.log"),
+        "member password",
+    )
+    .unwrap();
     source
-        .add_channel_member(channel, DeviceIdentity::generate().public())
+        .add_channel_member(channel, member.identity.public())
         .await
         .unwrap();
+    assert_eq!(
+        source.list_channels()[0].member_count,
+        1,
+        "pending invitees are not accepted members"
+    );
+    // Exercise the recipient's signed acceptance before snapshotting two members.
+    // Copy the real event DAG without requiring a network listener in this recovery test.
+    let invitation = source
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for event in invitation {
+        member.log.lock().unwrap().append(event).unwrap();
+    }
+    member.process_channel(channel);
+    member.accept_channel_invite(channel).await.unwrap();
+    let acceptance = member
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .find(|event| event.kind == EventKind::ChannelAccept)
+        .unwrap()
+        .clone();
+    source.log.lock().unwrap().append(acceptance).unwrap();
+    source.process_channel(channel);
+    assert_eq!(
+        source.list_channels()[0].member_count,
+        2,
+        "snapshot includes both accepted members"
+    );
     source
         .rename_channel(channel, "Renamed archive")
         .await
@@ -1295,13 +1347,21 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
         "new password",
     )
     .unwrap();
-    assert!(reopened.list_channels().iter().any(|summary| {
-        summary.id == channel
-            && summary.archived
-            && summary.dissolved
-            && summary.member_count == 2
-            && summary.name == "Renamed archive"
-    }));
+    let restored_channels = reopened.list_channels();
+    let summary = restored_channels
+        .iter()
+        .find(|summary| summary.id == channel)
+        .expect("restored group remains visible");
+    assert!(summary.archived, "new device retains archive presentation");
+    assert!(summary.dissolved, "restored archive retains dissolution");
+    assert_eq!(
+        summary.member_count, 2,
+        "restored archive retains both member observations"
+    );
+    assert!(
+        summary.name == "Renamed archive",
+        "restored archive retains its last validated rename"
+    );
     assert!(
         reopened
             .channel_history(channel, 10)

@@ -444,16 +444,20 @@ async fn private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_rout
             .load(std::sync::atomic::Ordering::Relaxed),
         0
     );
-    alice
-        .probe_private_routes_with_budget(Duration::from_millis(300))
-        .await;
-    assert_eq!(
+    // Each expired round launches only its two admitted children. Queued routes
+    // retain their turn rather than being skipped by the canceled round.
+    for launched in [2, 4, 6, 8] {
         alice
-            .privacy
-            .route_probe_cursor
-            .load(std::sync::atomic::Ordering::Relaxed),
-        8
-    );
+            .probe_private_routes_with_budget(Duration::from_millis(300))
+            .await;
+        assert_eq!(
+            alice
+                .privacy
+                .route_probe_cursor
+                .load(std::sync::atomic::Ordering::Relaxed),
+            launched,
+        );
+    }
     assert!(alice.roster.lock().unwrap().get(&live_id).is_none());
     {
         let round =
@@ -479,7 +483,7 @@ async fn private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_rout
             .privacy
             .route_probe_cursor
             .load(std::sync::atomic::Ordering::Relaxed),
-        16
+        10
     );
     assert!(
         alice.roster.lock().unwrap().get(&live_id).is_some(),

@@ -262,7 +262,15 @@ impl Node {
     /// One peer turn and one local channel turn; the existing recovery task owns all state.
     pub(super) async fn maintain_account_channels(&self, work: &mut ChannelAccountMaintenance) {
         let mut peers = self.routing_peers();
-        peers.retain(|peer| !peer.post_office);
+        // Capability maintenance serves existing group relationships and siblings,
+        // not every discovery entry. Unrelated probes compete with ordinary DMs
+        // and must not initiate a pull connection before contact authorization.
+        peers.retain(|peer| {
+            !peer.post_office
+                && (peer.account_id.as_deref() == Some(self.account_id().as_str())
+                    || self.group_member(&peer.public)
+                    || self.group_departure_peer(&peer.public))
+        });
         peers.sort_unstable_by_key(|peer| peer.public.user_id());
         if !peers.is_empty() {
             let peer = &peers[work.peer_cursor % peers.len()];
