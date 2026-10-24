@@ -13,8 +13,29 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_group::",
-            "node::account_documents::store::budget_tests::",
-            "node::account_documents::tests::group_control_"
+            "node::account_documents::store::tests::",
+            "node::account_documents::tests::group_control_signed_heads_and_metadata_reject_forged_or_malformed_records",
+            "node::account_documents::tests::group_control_terminal_sources_keep_other_members_but_dissolution_overrides_stale_roles",
+            "node::account_documents::tests::group_control_current_account_binding_replacement_revokes_old_owner_observation",
+            "node::account_documents::tests::group_control_old_head_replay_and_reopen_preserve_the_latest_signed_observation",
+            "node::account_documents::tests::group_control_restored_older_public_state_cannot_republish_a_newer_own_head_as_owner",
+            "node::account_documents::tests::group_control_rejected_parent_cannot_hide_a_later_applied_owner_transfer_on_restore",
+            "node::account_documents::tests::group_control_unreadable_latest_own_head_cannot_be_overwritten_by_a_restored_owner",
+            "node::account_documents::tests::group_control_source_leave_is_individual_and_all_known_left_sources_project_left",
+            "node::account_documents::tests::group_control_terminal_source_invalidates_other_cached_lifetimes_before_reinvite",
+            "node::account_documents::tests::group_control_unacknowledged_conflicting_sources_remain_reconciling",
+            "node::account_documents::tests::group_control_fresh_reinvite_keeps_private_causal_ancestors_out_of_mandatory_metadata",
+            "node::account_documents::tests::group_control_equivalent_source_knowledge_reaches_a_publication_fixed_point",
+            "node::account_documents::tests::group_control_resource_limit_publishes_a_small_invalidating_head_and_recovers",
+            "node::account_documents::tests::group_control_multifrontier_resource_invalidation_recovers_after_merge_and_reopen",
+            "node::account_documents::tests::group_control_role_control_forks_recover_after_invalidation_merge_and_reopen",
+            "node::account_documents::tests::group_control_acknowledges_present_owner_decisions_that_lose_a_canonical_fork",
+            "node::account_documents::tests::group_control_private_messages_and_reactions_do_not_republish_role_metadata",
+            "node::account_documents::tests::group_control_more_than_4096_concurrent_authorization_controls_do_not_freeze_owner",
+            "node::account_documents::tests::group_control_unavailable_obsolete_cache_cannot_orphan_a_large_negative_head",
+            "node::account_documents::tests::group_control_broken_obsolete_cache_does_not_downgrade_a_large_current_view",
+            "node::account_documents::tests::group_control_normal_authorization_history_growth_keeps_bounded_current_heads",
+            "node::account_documents::tests::group_control_removal_and_reinvite_never_reuse_the_old_membership_lifetime"
           ]
         }
       ],

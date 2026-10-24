@@ -730,7 +730,7 @@ impl AccountDocumentStore {
     }
 }
 #[cfg(test)]
-mod budget_tests {
+mod tests {
     use super::*;
     #[test]
     fn ordinary_index_rows_remain_exact_raw_metadata_json() {
