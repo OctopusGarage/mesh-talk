@@ -363,7 +363,11 @@ test("protected draft reload preserves verification mode and conceals its sideba
   await expect(bob).not.toContainText("Secret retained draft");
   expect(await bob.innerHTML()).not.toContain("Secret retained draft");
   await expect
-    .poll(() => page.evaluate(() => localStorage.getItem("mock-drafts-u_self")))
+    .poll(() =>
+      page.evaluate(() =>
+        localStorage.getItem("mock-drafts-u_self:acc_self_aaaa1111"),
+      ),
+    )
     .toContain("authenticate");
   await page.reload();
   await page.getByTestId("login-tab-signin").click();
@@ -380,6 +384,10 @@ test("protected draft reload preserves verification mode and conceals its sideba
   await bubble.getByRole("button", { name: "Verify and view" }).click();
   await expect(bubble.getByRole("textbox")).toBeVisible();
   await expect
-    .poll(() => page.evaluate(() => localStorage.getItem("mock-drafts-u_self")))
+    .poll(() =>
+      page.evaluate(() =>
+        localStorage.getItem("mock-drafts-u_self:acc_self_aaaa1111"),
+      ),
+    )
     .not.toContain("Secret retained draft");
 });

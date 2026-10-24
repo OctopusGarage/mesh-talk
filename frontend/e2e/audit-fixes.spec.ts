@@ -196,7 +196,9 @@ test("linked-device history choice is local and survives reopening", async ({
   });
   const profile = dialog.getByRole("switch", { name: "Account profile" });
   const attachments = dialog.getByRole("switch", { name: "Attachments" });
-  const appearance = dialog.getByRole("switch", { name: "Appearance" });
+  const appearance = dialog.getByRole("switch", {
+    name: "Preferences and libraries",
+  });
   const contacts = dialog.getByRole("switch", { name: "Contacts" });
   await expect(history).toHaveAttribute("aria-checked", "true");
   await expect(profile).toHaveAttribute("aria-checked", "true");
@@ -393,7 +395,9 @@ for (const theme of [null, "oled"] as const) {
       const original = win.__TAURI_INTERNALS__.invoke;
       win.__TAURI_INTERNALS__.invoke = (command, args) => {
         if (
-          command === "set_account_preference" &&
+          ["seed_account_preference", "set_account_preference"].includes(
+            command,
+          ) &&
           args.category === "appearance"
         ) {
           win.__appearanceWrites.push({ key: args.key, value: args.value });
