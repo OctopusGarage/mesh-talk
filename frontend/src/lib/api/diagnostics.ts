@@ -5,6 +5,7 @@ import type {
   EnvInfo,
   PresenceMap,
   UpdateCheck,
+  UpdateInstallPhase,
   UpdateChannel,
   DownloadedUpdate,
   DownloadProgress,
@@ -44,6 +45,32 @@ export const updates = {
     const channel = new Channel<DownloadProgress>();
     channel.onmessage = onProgress;
     return invoke<DownloadedUpdate>("download_update", {
+      version,
+      updateChannel,
+      onProgress: channel,
+    });
+  },
+  prepare: (
+    version: string,
+    onProgress: (progress: DownloadProgress) => void,
+    updateChannel: UpdateChannel = "stable",
+  ) => {
+    const channel = new Channel<DownloadProgress>();
+    channel.onmessage = onProgress;
+    return invoke<DownloadedUpdate>("prepare_update", {
+      version,
+      updateChannel,
+      onProgress: channel,
+    });
+  },
+  install: (
+    version: string,
+    onProgress: (phase: UpdateInstallPhase) => void,
+    updateChannel: UpdateChannel = "stable",
+  ) => {
+    const channel = new Channel<UpdateInstallPhase>();
+    channel.onmessage = onProgress;
+    return invoke<void>("install_update", {
       version,
       updateChannel,
       onProgress: channel,

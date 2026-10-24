@@ -952,7 +952,18 @@
       "nightlyWarning": "实验性构建可能包含缺陷。选择 Nightly 可体验即将推出的功能。",
       "stableHelp": "稳定渠道接收正式版本。切换渠道不会自动降级应用。",
       "installed": "已安装：{{version}}",
-      "stableDownload": "手动下载稳定版"
+      "stableDownload": "手动下载稳定版",
+      "updateAndRestart": "更新并重启",
+      "restartToUpdate": "重启以完成更新",
+      "installing": "正在安装更新…",
+      "restarting": "正在重启 Mesh-Talk…",
+      "automaticHelp": "Mesh-Talk 将自动安装更新并重启。系统可能会请求授权。",
+      "readyToRestart": "更新已验证。准备好后即可重启。",
+      "downloadManually": "手动下载",
+      "finishCall": "请先结束当前通话，再安装更新。",
+      "finishTransfers": "请先完成当前文件传输，再安装更新。",
+      "saveDraftsFailed": "草稿未能保存。请重试后再重启。",
+      "automaticWindowsHelp": "Windows 安装器将关闭 Mesh-Talk，并在更新后重新打开。若取消安装，请重新打开 Mesh-Talk 后重试。"
     }
   },
   "offlineConnect": {

@@ -1,0 +1,49 @@
+{
+  "name": "mesh-talk-desktop-updates-eval",
+  "version": 1,
+  "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
+  "cases": [
+    {
+      "id": "MT-UPDATER-001",
+      "name": "signed desktop updates preserve version trust, cancellation and installer handoff",
+      "subject_file": "src-tauri/src/updates/native.rs",
+      "context_files": [
+        "src-tauri/src/updates.rs",
+        "src-tauri/src/updates/channel.rs",
+        "src-tauri/src/updates/windows_tests.rs",
+        "frontend/src/store/updates.ts",
+        "frontend/src/store/updateRestart.ts",
+        "frontend/src/features/chat/UpdatePanel.tsx",
+        "scripts/release/updater.mjs",
+        ".github/workflows/release.yml",
+        "scripts/release/verify_assets.py",
+        "src-tauri/build.rs",
+        "src-tauri/tauri.conf.json",
+        "docs/updates.md",
+        "frontend/src/store/drafts.ts",
+        "scripts/release/preflight.mjs",
+        "scripts/release/check-source-checks.mjs",
+        "scripts/release/verify-release.sh",
+        "scripts/release/release-state.mjs",
+        "src-tauri/Cargo.toml",
+        "frontend/src/lib/api/drafts.ts",
+        "src-tauri/src/drafts.rs",
+        "frontend/src/store/updateRestart.test.ts",
+        "crates/mesh-talk-core/src/storage/record_log.rs",
+        "scripts/release/release-api.mjs",
+        "src-tauri/src/updates/native_https_tests.rs"
+      ],
+      "min_score": 0.9,
+      "scenario": "Review the application-owned signed full-package updater without paid OS publisher certificates. The official Tauri 2.14 SDK verify/restore_update/install APIs verify version-bound signatures and perform native replacement. Inspect caller policy and tests, distinguish delegated SDK guarantees from absent physical/hosted evidence. Windows invokes on_before_exit before ShellExecute, which can fail/cancel: resources must stay usable until successful handoff. After successful Windows handoff the old process exits, so do not claim canceled installers can always show retry in the old UI. Source and SDK fixture evidence cannot certify real production discovery, session restoration, OS authorization or publication. Report only confirmed material bugs, with concrete file/symbol evidence; distinguish missing context/runtime evidence.",
+      "rubric": [
+        "Canonical newer published release/channel/platform identity is revalidated and signed version equals the complete logical Stable/Nightly identity.",
+        "An embedded free updater public key authenticates bounded verified bytes; unsupported or unconfigured clients retain manual fallback; renderer IPC cannot supply install paths, URLs, keys, signatures or bytes.",
+        "Host-owned staged identity/channel and one-operation lifetime prevent competing installation; cancellation intent prevents automatic installation even when cancellation IPC fails or preparation finishes concurrently.",
+        "Draft writes are flushed and current calls/transfers defer restart; failed installs retain safe retry/manual recovery.",
+        "Windows pre-launch hook does not destroy Tauri resources before a possible ShellExecute/UAC failure; window geometry is saved separately, and post-handoff cancellation limits are explicit.",
+        "Trusted release sources alone receive signing secrets, full logical versions are signed, all platform payloads/signatures match verified ZIP bytes, and publication gates remain mandatory.",
+        "Documentation accurately states bootstrap, free key custody, OS trust prompts, full-package delivery and required native/hosted acceptance; no source/mock score is presented as runtime acceptance."
+      ]
+    }
+  ]
+}

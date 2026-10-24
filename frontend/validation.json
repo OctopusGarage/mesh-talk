@@ -881,6 +881,8 @@
       "paths": [
         "frontend/src/store/updates.ts",
         "frontend/src/store/updates.test.ts",
+        "frontend/src/store/updateRestart.ts",
+        "frontend/src/store/updateRestart.test.ts",
         "frontend/src/features/chat/UpdatePanel.tsx",
         "frontend/src/features/chat/UpdatePanel.test.ts",
         "frontend/src/lib/api/diagnostics.ts",
@@ -890,13 +892,18 @@
       ],
       "frontend": [
         "src/store/updates.test.ts",
+        "src/store/updateRestart.test.ts",
         "src/features/chat/UpdatePanel.test.ts",
         "src/lib/api/diagnostics.test.ts"
       ],
       "capability": {
-        "summary": "Persist a device-local explicit update channel and discard prior candidates on channel changes, preserving native release and platform authority.",
+        "summary": "Coordinate explicit signed updates, safe restart preparation and manual fallback while preserving native release, platform and channel authority.",
         "guide": "docs/updates.md",
         "invariants": [
+          {
+            "name": "Only host-eligible signed updates install automatically; cancellation prevents installation, pending drafts are flushed, active work defers restart, and native failures retain a retryable prepared update with manual fallback.",
+            "reference": "docs/updates.md#one-click-installation"
+          },
           {
             "name": "About displays the host logical build identity; channel changes never implicitly check, download or downgrade, and in-flight work prevents selection changes",
             "reference": "docs/updates.md"
@@ -1582,6 +1589,8 @@
       "paths": [
         "frontend/src/store/updates.ts",
         "frontend/src/store/updates.test.ts",
+        "frontend/src/store/updateRestart.ts",
+        "frontend/src/store/updateRestart.test.ts",
         "frontend/src/features/chat/UpdatePanel.tsx",
         "frontend/src/features/chat/UpdatePanel.test.ts",
         "frontend/src/lib/api/diagnostics.ts",

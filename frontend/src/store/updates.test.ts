@@ -6,8 +6,12 @@ const api = vi.hoisted(() => ({
   check: vi.fn(),
   download: vi.fn(),
   cancel: vi.fn(),
+  prepare: vi.fn(),
+  install: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({ updates: api }));
+const restart = vi.hoisted(() => ({ prepare: vi.fn(async () => () => {}) }));
+vi.mock("./updateRestart", () => ({ prepareUpdateRestart: restart.prepare }));
 const key = "mesh-talk-update-channel";
 const candidate = {
   channel: "nightly",
@@ -113,4 +117,153 @@ it("still works when browser storage is unavailable", async () => {
   useUpdates.getState().setChannel("nightly");
   expect(useUpdates.getState().channel).toBe("nightly");
   write.mockRestore();
+});
+
+it("downloads a signed update, saves drafts and delegates install/relaunch once", async () => {
+  const { useUpdates } = await import("./updates");
+  api.check.mockResolvedValue({ ...candidate, automatic_install: true });
+  api.prepare.mockResolvedValue({
+    path: "/private/update",
+    file_name: "app.tar.gz",
+    installable: true,
+  });
+  api.install.mockImplementation(async (_version, progress) => {
+    progress("restarting");
+  });
+  await useUpdates.getState().check();
+  await useUpdates.getState().startDownload();
+  expect(api.prepare).toHaveBeenCalledWith(
+    candidate.latest_version,
+    expect.any(Function),
+    "stable",
+  );
+  expect(restart.prepare).toHaveBeenCalledOnce();
+  expect(api.install).toHaveBeenCalledOnce();
+  expect(useUpdates.getState().phase).toBe("restarting");
+});
+
+it("keeps a verified update ready when active work defers restart, and retries without downloading again", async () => {
+  const { useUpdates } = await import("./updates");
+  api.check.mockResolvedValue({ ...candidate, automatic_install: true });
+  api.prepare.mockResolvedValue({
+    path: "/private/update",
+    file_name: "app.tar.gz",
+    installable: true,
+  });
+  restart.prepare.mockRejectedValueOnce(
+    new Error("Finish the current call before updating."),
+  );
+  await useUpdates.getState().check();
+  await useUpdates.getState().startDownload();
+  expect(useUpdates.getState()).toMatchObject({
+    phase: "downloaded",
+    error: "Finish the current call before updating.",
+  });
+  expect(api.install).not.toHaveBeenCalled();
+  await useUpdates.getState().install();
+  expect(api.prepare).toHaveBeenCalledOnce();
+  expect(api.install).toHaveBeenCalledOnce();
+});
+
+it("preserves staged state after installation failure and prevents competing operations", async () => {
+  const { useUpdates } = await import("./updates");
+  useUpdates.setState({
+    phase: "downloaded",
+    release: candidate,
+    download: {
+      path: "/private/update",
+      file_name: "app.tar.gz",
+      installable: true,
+    },
+  });
+  api.install.mockImplementation(async () => {
+    useUpdates.getState().setChannel("nightly");
+    await useUpdates.getState().check();
+    await useUpdates.getState().install();
+    throw new Error("Authorization canceled");
+  });
+  await useUpdates.getState().install();
+  expect(useUpdates.getState()).toMatchObject({
+    phase: "downloaded",
+    channel: "stable",
+    error: "Authorization canceled",
+  });
+  expect(api.check).not.toHaveBeenCalled();
+  expect(api.install).toHaveBeenCalledOnce();
+});
+
+it("never installs when cancellation races with a completed native preparation", async () => {
+  const { useUpdates } = await import("./updates");
+  api.check.mockResolvedValue({ ...candidate, automatic_install: true });
+  let finish!: (value: {
+    path: string;
+    file_name: string;
+    installable: boolean;
+  }) => void;
+  api.prepare.mockReturnValue(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  await useUpdates.getState().check();
+  const preparing = useUpdates.getState().startDownload();
+  await useUpdates.getState().cancel();
+  finish({
+    path: "/private/payload",
+    file_name: "app.tar.gz",
+    installable: true,
+  });
+  await preparing;
+  expect(api.install).not.toHaveBeenCalled();
+  expect(useUpdates.getState()).toMatchObject({
+    phase: "ready",
+    download: null,
+    error: null,
+  });
+});
+
+it("honors cancellation intent even when notifying the native downloader fails", async () => {
+  const { useUpdates } = await import("./updates");
+  api.check.mockResolvedValue({ ...candidate, automatic_install: true });
+  let finish!: (value: {
+    path: string;
+    file_name: string;
+    installable: boolean;
+  }) => void;
+  api.prepare.mockReturnValue(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  api.cancel.mockRejectedValueOnce(
+    new Error("Native cancellation unavailable"),
+  );
+  await useUpdates.getState().check();
+  const preparing = useUpdates.getState().startDownload();
+  await useUpdates.getState().cancel();
+  finish({
+    path: "/private/payload",
+    file_name: "app.tar.gz",
+    installable: true,
+  });
+  await preparing;
+  expect(api.install).not.toHaveBeenCalled();
+});
+
+it("keeps prepared bytes retryable if drafts change before installer handoff", async () => {
+  const { useUpdates } = await import("./updates");
+  useUpdates.setState({
+    phase: "downloaded",
+    release: { ...candidate, automatic_install: true },
+    download: { path: "/prepared", file_name: "payload", installable: true },
+  });
+  restart.prepare.mockResolvedValueOnce(() => {
+    throw new Error("Draft changed");
+  });
+  await useUpdates.getState().install();
+  expect(api.install).not.toHaveBeenCalled();
+  expect(useUpdates.getState()).toMatchObject({
+    phase: "downloaded",
+    error: "Draft changed",
+  });
 });

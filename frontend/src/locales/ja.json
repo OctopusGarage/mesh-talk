@@ -952,7 +952,18 @@
       "nightlyWarning": "実験的なビルドには不具合が含まれる場合があります。Nightly で開発中の機能を試せます。",
       "stableHelp": "安定版チャネルでは正式リリースを受け取ります。チャネルを切り替えても自動的にダウングレードされません。",
       "installed": "インストール済み：{{version}}",
-      "stableDownload": "安定版を手動でダウンロード"
+      "stableDownload": "安定版を手動でダウンロード",
+      "updateAndRestart": "更新して再起動",
+      "restartToUpdate": "再起動して更新",
+      "installing": "更新をインストール中…",
+      "restarting": "Mesh-Talk を再起動中…",
+      "automaticHelp": "更新をインストールして再起動します。システムが許可を求める場合があります。",
+      "readyToRestart": "更新を検証しました。準備ができたら再起動してください。",
+      "downloadManually": "手動でダウンロード",
+      "finishCall": "通話を終了してから更新してください。",
+      "finishTransfers": "ファイル転送が完了してから更新してください。",
+      "saveDraftsFailed": "下書きを保存できませんでした。再起動する前にもう一度お試しください。",
+      "automaticWindowsHelp": "Windows のインストーラーが Mesh-Talk を終了し、更新後に再起動します。インストールをキャンセルした場合は、Mesh-Talk を開き直してください。"
     }
   },
   "offlineConnect": {

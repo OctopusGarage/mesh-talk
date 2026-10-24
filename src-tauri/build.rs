@@ -16,6 +16,7 @@ fn main() {
     if let Ok(target) = std::env::var("TARGET") {
         println!("cargo:rustc-env=TARGET={target}");
     }
+    println!("cargo:rerun-if-env-changed=MESH_TALK_UPDATER_PUBLIC_KEY");
     println!("cargo:rerun-if-env-changed=MESH_TALK_BUILD_TAG");
     let base_tag = format!("v{}", std::env::var("CARGO_PKG_VERSION").unwrap());
     let build_tag =

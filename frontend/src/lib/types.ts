@@ -283,7 +283,10 @@ export interface EnvInfo {
 
 export type UpdateChannel = "stable" | "nightly";
 
+export type UpdateInstallPhase = "installing" | "restarting";
+
 export interface UpdateCheck {
+  automatic_install?: boolean;
   channel: UpdateChannel;
   current_version: string;
   latest_version: string;
@@ -301,6 +304,7 @@ export interface DownloadProgress {
 }
 
 export interface DownloadedUpdate {
+  installable?: boolean;
   path: string;
   file_name: string;
 }
