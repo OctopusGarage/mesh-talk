@@ -10,8 +10,9 @@ use std::{
 };
 const MAX_ORDINARY_KEYS: usize = 4096;
 const MAX_MESSAGE_KEYS: usize = 65536;
+const MAX_REFERENCE_KEYS: usize = 4096;
 // Read receipts have no blobs; each other retained key owns at most one blob.
-const MAX_OWNED_BLOBS: usize = MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS;
+const MAX_OWNED_BLOBS: usize = MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS + MAX_REFERENCE_KEYS;
 // Include key.salt and one replacement/partial blob interrupted before cleanup.
 const MAX_MEDIA_ENTRIES: usize = MAX_OWNED_BLOBS + 2;
 const MAX_LIVE: u64 = 128 * 1024 * 1024;
@@ -22,9 +23,9 @@ pub(in crate::node) struct AccountDocumentStore {
     account: [u8; 32],
     records: usize,
     journal_bytes: usize,
-    counts: [usize; 7],
+    counts: [usize; 8],
     live_bytes: u64,
-    digest_xor: [[u8; 32]; 7],
+    digest_xor: [[u8; 32]; 8],
     incomplete: BTreeSet<AccountDocumentKey>,
 }
 fn metadata_hash(meta: &AccountDocumentMeta) -> [u8; 32] {
@@ -100,9 +101,9 @@ impl AccountDocumentStore {
             account: *account,
             records: rows.len(),
             journal_bytes,
-            counts: [0; 7],
+            counts: [0; 8],
             live_bytes: 0,
-            digest_xor: [[0; 32]; 7],
+            digest_xor: [[0; 32]; 8],
             incomplete: BTreeSet::new(),
         };
         for bytes in rows {
@@ -173,6 +174,21 @@ impl AccountDocumentStore {
         event: &str,
     ) -> Vec<AccountDocumentMeta> {
         self.current.range(start.clone()..).take_while(|(key, _)| matches!(key, AccountDocumentKey::ChannelCustody { channel: c, event: e, .. } if c == channel && e == event)).take(4096).map(|(_, meta)| meta.clone()).collect()
+    }
+    pub(super) fn inventory_channel_rows(&self, channel: &str) -> Vec<AccountDocumentMeta> {
+        let start = AccountDocumentKey::GroupInventory {
+            channel: channel.to_owned(),
+            source_device: String::new(),
+        };
+        self.current.range(start..).take_while(|(key, _)| matches!(key, AccountDocumentKey::GroupInventory { channel: id, .. } if id == channel)).take(MAX_REFERENCE_KEYS).map(|(_, meta)| meta.clone()).collect()
+    }
+    pub(super) fn inventory_rows(&self) -> Vec<AccountDocumentMeta> {
+        self.current
+            .values()
+            .filter(|m| m.key.domain() == AccountDocumentDomain::GroupInventory)
+            .take(MAX_REFERENCE_KEYS)
+            .cloned()
+            .collect()
     }
     fn install(&mut self, meta: AccountDocumentMeta) {
         let index = meta.key.domain() as usize;
@@ -280,6 +296,9 @@ impl AccountDocumentStore {
         self.validate(&meta)?;
         if meta.key.is_private_control()
             && !match meta.key {
+                AccountDocumentKey::GroupInventory { .. } => {
+                    super::inventory::valid_payload(&meta, payload)
+                }
                 AccountDocumentKey::ChannelCustody { .. } => {
                     super::custody::valid_payload(&meta, payload)
                 }
@@ -300,7 +319,10 @@ impl AccountDocumentStore {
             .get(&meta.key)
             .filter(|old| old.order() >= meta.order())
         {
-            if old == &meta && self.incomplete.contains(&meta.key) {
+            if old == &meta
+                && !meta.tombstone
+                && (self.incomplete.contains(&meta.key) || self.get(&meta.key).is_err())
+            {
                 self.media
                     .store_bytes(
                         ConversationId::new(meta.content_hash),
@@ -366,7 +388,10 @@ impl AccountDocumentStore {
         }
         let seen = matches!(meta.key, AccountDocumentKey::ReadReceipt { .. });
         let custody = matches!(meta.key, AccountDocumentKey::ChannelCustody { .. });
-        let count = if custody {
+        let reference = matches!(meta.key, AccountDocumentKey::GroupInventory { .. });
+        let count = if reference {
+            self.counts[AccountDocumentDomain::GroupInventory as usize]
+        } else if custody {
             self.counts[AccountDocumentDomain::ChannelCustody as usize]
         } else if seen {
             self.counts[AccountDocumentDomain::ReadReceipt as usize]
@@ -374,10 +399,13 @@ impl AccountDocumentStore {
             self.counts.iter().sum::<usize>()
                 - self.counts[AccountDocumentDomain::ReadReceipt as usize]
                 - self.counts[AccountDocumentDomain::ChannelCustody as usize]
+                - self.counts[AccountDocumentDomain::GroupInventory as usize]
         };
         if !self.current.contains_key(&meta.key)
             && count
-                >= if seen || custody {
+                >= if reference {
+                    MAX_REFERENCE_KEYS
+                } else if seen || custody {
                     MAX_MESSAGE_KEYS
                 } else {
                     MAX_ORDINARY_KEYS
@@ -412,6 +440,33 @@ impl AccountDocumentStore {
 #[cfg(test)]
 mod budget_tests {
     use super::*;
+    #[test]
+    fn group_inventory_quota_is_independent_and_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        let writer = "a".repeat(32);
+        let key = AccountDocumentKey::GroupInventory {
+            channel: "1".repeat(64),
+            source_device: writer.clone(),
+        };
+        let meta = AccountDocumentMeta::new(&account, writer, key, 1, &[], true);
+        store.counts[AccountDocumentDomain::Draft as usize] = MAX_ORDINARY_KEYS;
+        store.counts[AccountDocumentDomain::ReadReceipt as usize] = MAX_MESSAGE_KEYS;
+        store.counts[AccountDocumentDomain::ChannelCustody as usize] = MAX_MESSAGE_KEYS;
+        assert!(
+            store.validate(&meta).is_ok(),
+            "other domains must not exhaust reference quota"
+        );
+        store.counts[AccountDocumentDomain::GroupInventory as usize] = MAX_REFERENCE_KEYS;
+        assert!(store.validate(&meta).is_err());
+        assert_eq!(
+            MAX_OWNED_BLOBS,
+            MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS + MAX_REFERENCE_KEYS
+        );
+    }
+
     #[test]
     fn channel_custody_quota_is_independent_and_blob_scan_accepts_legal_history() {
         let dir = tempfile::tempdir().unwrap();

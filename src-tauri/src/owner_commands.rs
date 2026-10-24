@@ -589,6 +589,13 @@ mod tests {
         }
 
         fn create(authenticated: bool) -> Self {
+            Self::create_prepared(authenticated, |_, _| {})
+        }
+
+        fn create_prepared(
+            authenticated: bool,
+            prepare: impl FnOnce(&std::path::Path, &str),
+        ) -> Self {
             // Isolate background producers from deliberately stalled legacy
             // privacy callbacks, including regressions that retain a state writer,
             // so low-core runners can still execute registered logout.
@@ -624,6 +631,7 @@ mod tests {
                     .set("a".into(), user("alice"), "pw".into());
                 "alice".into()
             };
+            prepare(root.path(), &owner);
             let node = NodeState::empty();
             let app = tauri::test::mock_builder()
                 .manage(app_state.clone())
@@ -668,6 +676,7 @@ mod tests {
                     crate::chat_commands::rename_channel,
                     crate::chat_commands::set_channel_replica_enabled,
                     crate::chat_commands::set_channel_history_policy,
+                    crate::chat_commands::list_channels,
                     crate::chat_commands::channel_members,
                     crate::chat_commands::channel_custody_statuses,
                     crate::chat_commands::add_channel_member,
@@ -1014,6 +1023,231 @@ mod tests {
     }
 
     #[test]
+    fn registered_group_inventory_projects_reference_and_rejects_queued_retirement() {
+        use mesh_talk_core::{
+            channel::{ChannelMeta, new_channel_id},
+            eventlog::{Event, EventKind, PersistentEventLog},
+            identity::{account::Account, account_keystore, device::DeviceIdentity, keystore},
+            node::{AccountDocumentDomain, AccountDocumentKey, DocumentConversation, NodeRuntime},
+        };
+        use tauri::Manager;
+        let id = new_channel_id();
+        let legacy_owner = DeviceIdentity::generate();
+        let source_device = DeviceIdentity::generate();
+        let account = Account::generate();
+        let relay = DeviceIdentity::generate();
+        let fixture = Fixture::create_prepared(false, |root, owner| {
+            let source_root = tempfile::tempdir().unwrap();
+            let source_dir = source_root.path().join("accounts/source");
+            let target_dir = root.join("accounts").join(owner);
+            std::fs::create_dir_all(&source_dir).unwrap();
+            std::fs::create_dir_all(&target_dir).unwrap();
+            keystore::save(&source_dir.join("identity.keystore"), "pw", &source_device).unwrap();
+            account_keystore::save(&source_dir.join("account.keystore"), "pw", &account).unwrap();
+            account_keystore::save(&target_dir.join("account.keystore"), "pw", &account).unwrap();
+            let mut log = PersistentEventLog::open(&source_dir.join("messages.log"), "pw").unwrap();
+            log.append_durable(Event::new(
+                &legacy_owner,
+                id,
+                1,
+                vec![],
+                1,
+                1,
+                EventKind::MembershipChange,
+                ChannelMeta {
+                    name: "Account inventory fixture".into(),
+                    members: vec![
+                        legacy_owner.public(),
+                        source_device.public(),
+                        relay.public(),
+                    ],
+                    epoch: 0,
+                    owner: legacy_owner.public().user_id(),
+                }
+                .encode(),
+            ))
+            .unwrap();
+            drop(log);
+            let reservation = reserve_discovery_port();
+            let source = tauri::async_runtime::block_on(NodeRuntime::start(
+                source_root.path(),
+                "source",
+                "Source",
+                "pw",
+                reservation.local_addr().unwrap().port(),
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+            ))
+            .unwrap();
+            drop(reservation);
+            // Reuse the fixture's real signed discovery seam for a legacy
+            // infrastructure member; no proof or inventory record is fabricated.
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket
+                .send_to(
+                    &mesh_talk_core::discovery::announce::encode(
+                        &mesh_talk_core::discovery::Announce::new_post_office(
+                            &relay, "Relay", 4242,
+                        ),
+                    ),
+                    (std::net::Ipv4Addr::LOCALHOST, source.discovery_port()),
+                )
+                .unwrap();
+            tauri::async_runtime::block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !source.handle().device_is_post_office(&relay.public()) {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                source
+                    .handle()
+                    .put_account_document_if(
+                        AccountDocumentKey::Draft {
+                            conversation: DocumentConversation::Account(account.account_id()),
+                        },
+                        b"synthetic inventory wake".to_vec(),
+                        None,
+                        |commit| commit(),
+                    )
+                    .unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while source
+                        .handle()
+                        .account_documents(AccountDocumentDomain::GroupInventory, None, 64)
+                        .unwrap()
+                        .items
+                        .first()
+                        .and_then(|meta| source.handle().account_document(&meta.key).unwrap())
+                        .is_none_or(|document| {
+                            serde_json::from_slice::<serde_json::Value>(document.payload()).unwrap()
+                                ["member_count"]
+                                != 2
+                        })
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                source.stop().await;
+            });
+            // Reopen a real account-private metadata artifact produced by the
+            // source worker. No membership/key event is installed on the target.
+            fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+                if from.is_dir() {
+                    std::fs::create_dir_all(to).unwrap();
+                    for entry in std::fs::read_dir(from).unwrap() {
+                        let entry = entry.unwrap();
+                        copy_tree(&entry.path(), &to.join(entry.file_name()));
+                    }
+                } else {
+                    std::fs::copy(from, to).unwrap();
+                }
+            }
+            for entry in std::fs::read_dir(&source_dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry
+                    .file_name()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("account-document")
+                {
+                    copy_tree(&entry.path(), &target_dir.join(entry.file_name()));
+                }
+            }
+        });
+        let rows = fixture
+            .invoke("list_channels", serde_json::json!({}))
+            .unwrap();
+        let reference = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["channel_id"] == hex::encode(id.as_bytes()))
+            .unwrap();
+        assert_eq!(reference["name"], "Account inventory fixture");
+        assert_eq!(reference["shared_reference"], true);
+        assert_eq!(reference["legacy_membership"], true);
+        assert_eq!(reference["archived"], true);
+        assert_eq!(reference["can_manage"], false);
+        assert_eq!(reference["member_count"], 2);
+        let body = serde_json::json!({"channelId":hex::encode(id.as_bytes())});
+        let members = fixture.invoke("channel_members", body.clone()).unwrap();
+        assert_eq!(members["owner"], legacy_owner.public().user_id());
+        assert_eq!(members["members"].as_array().unwrap().len(), 2);
+        assert_eq!(members["can_manage"], false);
+        for (command, extra) in [
+            (
+                "set_channel_history_policy",
+                serde_json::json!({"policy":"off"}),
+            ),
+            (
+                "set_channel_replica_enabled",
+                serde_json::json!({"enabled":true}),
+            ),
+            ("leave_channel", serde_json::json!({})),
+        ] {
+            let mut input = extra;
+            input["channelId"] = serde_json::json!(hex::encode(id.as_bytes()));
+            assert!(
+                fixture.invoke(command, input).is_err(),
+                "descriptive references cannot authorize {command}"
+            );
+        }
+        assert!(
+            fixture
+                .node
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .channel_members(id)
+                .is_empty()
+        );
+        for (command, input) in [
+            ("list_channels", serde_json::json!({})),
+            ("channel_members", body),
+        ] {
+            for lock in [true, false] {
+                fixture.app_state.app_lock().clear();
+                let (entered, captured) = std::sync::mpsc::channel();
+                *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+                let lifecycle = fixture.node.0.blocking_write();
+                let webview = fixture.webview.clone();
+                let input = input.clone();
+                let pending = std::thread::spawn(move || invoke(&webview, command, input));
+                captured
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+                if lock {
+                    crate::app_lock::lock_app(
+                        fixture.webview.state::<AppState>(),
+                        fixture.webview.state::<crate::app_lock::AppLock>(),
+                    )
+                    .unwrap();
+                } else {
+                    fixture.app_state.session().set(
+                        "replacement".into(),
+                        user("alice"),
+                        "pw".into(),
+                    );
+                }
+                drop(lifecycle);
+                assert_eq!(
+                    pending.join().unwrap().unwrap_err()["kind"],
+                    "authorization"
+                );
+                *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+            }
+        }
+    }
+
+    #[test]
     fn registered_channel_custody_rejects_lock_and_queued_session_replacement() {
         use tauri::Manager;
         let fixture = Fixture::new();
@@ -1079,13 +1313,21 @@ mod tests {
             .unwrap()
             .account_id()
             .to_owned();
-        for kind in ["dm_reaction", "dm_recall", "channel_custody"] {
+        for kind in [
+            "dm_reaction",
+            "dm_recall",
+            "channel_custody",
+            "group_inventory",
+        ] {
             let mut key = serde_json::json!({"kind":kind,"peer_account":"11".repeat(16),"target":"22".repeat(32),"actor_account":account});
             if kind == "dm_reaction" {
                 key["emoji"] = serde_json::json!("👍");
             }
             if kind == "channel_custody" {
                 key = serde_json::json!({"kind": kind, "channel": "22".repeat(32), "event": "33".repeat(32), "holder": "44".repeat(16)});
+            }
+            if kind == "group_inventory" {
+                key = serde_json::json!({"kind":kind,"channel":"22".repeat(32),"source_device":"44".repeat(16)});
             }
             for command in ["put_account_document", "remove_account_document"] {
                 let result = fixture.invoke(command,serde_json::json!({"owner":"alice","expectedAccount":account,"key":key,"payloadBase64":"e30=","expected":null}));

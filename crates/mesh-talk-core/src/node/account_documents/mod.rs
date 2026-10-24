@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 mod controls;
 mod custody;
+mod inventory;
+pub use inventory::{GroupInventoryMember, GroupInventoryReference};
 pub(super) mod store;
 pub(super) mod sync;
 #[cfg(test)]
@@ -22,6 +24,7 @@ pub enum AccountDocumentDomain {
     DmReaction,
     DmRecall,
     ChannelCustody,
+    GroupInventory,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
@@ -61,6 +64,10 @@ pub enum AccountDocumentKey {
         event: String,
         holder: String,
     },
+    GroupInventory {
+        channel: String,
+        source_device: String,
+    },
 }
 impl DocumentConversation {
     fn valid(&self) -> bool {
@@ -86,10 +93,15 @@ impl AccountDocumentKey {
             Self::DmReaction { .. } => AccountDocumentDomain::DmReaction,
             Self::DmRecall { .. } => AccountDocumentDomain::DmRecall,
             Self::ChannelCustody { .. } => AccountDocumentDomain::ChannelCustody,
+            Self::GroupInventory { .. } => AccountDocumentDomain::GroupInventory,
         }
     }
     fn valid(&self) -> bool {
         match self {
+            Self::GroupInventory {
+                channel,
+                source_device,
+            } => hex(channel, 64) && hex(source_device, 32),
             Self::ChannelCustody {
                 channel,
                 event,
@@ -138,6 +150,7 @@ impl AccountDocumentKey {
     }
     fn limit(&self) -> usize {
         match self {
+            Self::GroupInventory { .. } => 128 * 1024,
             Self::ChannelCustody { .. } => 4096,
             Self::Draft { .. } => 64 * 1024,
             Self::ReadReceipt { .. } => 0,
@@ -149,24 +162,18 @@ impl AccountDocumentKey {
     pub fn is_private_control(&self) -> bool {
         matches!(
             self,
-            Self::DmReaction { .. } | Self::DmRecall { .. } | Self::ChannelCustody { .. }
+            Self::DmReaction { .. }
+                | Self::DmRecall { .. }
+                | Self::ChannelCustody { .. }
+                | Self::GroupInventory { .. }
         )
     }
     fn protocol_version(&self) -> u8 {
         match self {
+            Self::GroupInventory { .. } => 4,
             Self::ChannelCustody { .. } => 3,
             Self::DmReaction { .. } | Self::DmRecall { .. } => 2,
             _ => 1,
-        }
-    }
-    fn category(&self) -> SyncCategory {
-        match self {
-            Self::Draft { .. }
-            | Self::ReadReceipt { .. }
-            | Self::DmReaction { .. }
-            | Self::DmRecall { .. }
-            | Self::ChannelCustody { .. } => SyncCategory::History,
-            _ => SyncCategory::Appearance,
         }
     }
 }
@@ -220,6 +227,7 @@ impl AccountDocumentMeta {
             && self.revision > 0
             && self.revision <= 9_007_199_254_740_991
             && hex(&self.writer_device, 32)
+            && (!matches!(&self.key, AccountDocumentKey::GroupInventory { source_device, .. } if source_device != &self.writer_device))
             && self.content_len as usize <= self.key.limit()
             && (self.content_len != 0
                 || self.content_hash

@@ -1732,6 +1732,11 @@ fn private_control_request_versions_keep_legacy_domains_unchanged() {
         (AccountDocumentDomain::ChannelCustody, 1, false),
         (AccountDocumentDomain::ChannelCustody, 2, false),
         (AccountDocumentDomain::ChannelCustody, 3, true),
+        (AccountDocumentDomain::GroupInventory, 1, false),
+        (AccountDocumentDomain::GroupInventory, 2, false),
+        (AccountDocumentDomain::GroupInventory, 3, false),
+        (AccountDocumentDomain::GroupInventory, 4, true),
+        (AccountDocumentDomain::Draft, 4, false),
     ] {
         let request = DocumentRequest {
             version,
@@ -1840,7 +1845,7 @@ async fn unsupported_control_domains_do_not_pause_legacy_draft_updates() {
     source
         .put_account_document_if(key(), b"after probe".to_vec(), Some(old.version()), |c| c())
         .unwrap();
-    for _ in 0..4 {
+    for _ in 0..2 {
         target
             .pull_account_documents_page(&peer, &mut cursor)
             .await
@@ -1900,7 +1905,7 @@ async fn unsupported_channel_custody_cooldown_does_not_hide_legacy_document_fail
         post_office: false,
         routes: vec![],
     };
-    let mut cursor = sync::DocumentSyncCursor::default();
+    let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
     assert!(
         target
             .pull_account_documents_page(&peer, &mut cursor)
@@ -2279,5 +2284,1135 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         reopened.channel_custody_count(channel, event),
         Some(1),
         "certified explicit members deduplicate after discovery is forgotten"
+    );
+}
+
+#[tokio::test]
+async fn group_inventory_worker_shares_two_legacy_groups_without_owner_and_survives_restart() {
+    group_inventory_worker_scenario(false).await;
+}
+#[tokio::test]
+async fn group_inventory_worker_keeps_directory_when_all_optional_categories_are_off() {
+    group_inventory_worker_scenario(true).await;
+}
+async fn group_inventory_worker_scenario(optional_off: bool) {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        discovery::Announce,
+        eventlog::{Event, EventKind},
+        node::account_devices::AccountDevice,
+    };
+    use tokio::net::TcpListener;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let source_path = dir.path().join("source");
+    let source = node(&source_path, &Account::generate());
+    let target_path = dir.path().join("target");
+    let target = node(&target_path, &account);
+    let mut ids = Vec::new();
+    for name in ["Labali", "labali"] {
+        let id = new_channel_id();
+        let event = Event::new(
+            &owner.identity,
+            id,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: name.into(),
+                members: vec![owner.identity.public(), source.identity.public()],
+                epoch: 0,
+                owner: owner.user_id(),
+            }
+            .encode(),
+        );
+        for node in [&owner, &source] {
+            node.log.lock().unwrap().append(event.clone()).unwrap();
+            node.process_channel(id);
+        }
+        assert!(source.channel_owner_account_id(id).is_none());
+        ids.push(id);
+    }
+    // The exact legacy device grant remains valid after this device adopts the
+    // current root; reconstruct its metadata rather than copying old-root docs.
+    source.prepare_account_transition(&account).unwrap();
+    let secret = source.identity.secret_bytes();
+    drop(source);
+    let source = node_with_identity(
+        &source_path,
+        &account,
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+    );
+    let owner_announce =
+        Announce::new_with_account(&owner.identity, &owner.account, "Owner canonical", 4242);
+    source.roster.lock().unwrap().update(
+        &owner_announce,
+        "127.0.0.1".parse().unwrap(),
+        &source.user_id(),
+    );
+    drop(owner); // No third-party owner participates in inventory synchronization.
+    if optional_off {
+        source
+            .put_account_document_if(key(), b"must not transfer".to_vec(), None, |commit| {
+                commit()
+            })
+            .unwrap();
+        for node in [&source, &target] {
+            for category in [
+                SyncCategory::History,
+                SyncCategory::Attachments,
+                SyncCategory::Appearance,
+                SyncCategory::Contacts,
+                SyncCategory::Profile,
+            ] {
+                node.set_device_sync_category(category, false).unwrap();
+            }
+        }
+    }
+    for (a, b) in [(&source, &target), (&target, &source)] {
+        a.account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: b.identity.public(),
+                certificate: account.certify(&b.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    for (node, path, name, port) in [
+        (&source, &source_path, "source", address.port()),
+        (&target, &target_path, "target", 4243),
+    ] {
+        node.configure_privacy(
+            path,
+            "pw",
+            &Announce::new_with_account(&node.identity, &account, name, port),
+            std::sync::Arc::new(crate::discovery::DiscoveryVisibility::default()),
+        )
+        .unwrap();
+    }
+    source
+        .remember_peer(
+            &owner_announce.public(),
+            Some(&owner_announce),
+            "127.0.0.1".parse().unwrap(),
+        )
+        .unwrap();
+    target.roster.lock().unwrap().update(
+        &Announce::new_with_account(&source.identity, &account, "source", address.port()),
+        address.ip(),
+        &target.user_id(),
+    );
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let source_worker = tokio::spawn(source.clone().run_account_history_loop());
+    let worker = tokio::spawn(target.clone().run_account_history_loop());
+    let result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        while !ids
+            .iter()
+            .all(|id| target.list_channels().iter().any(|row| row.id == *id))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    source_worker.abort();
+    server.abort();
+    let _ = worker.await;
+    let _ = source_worker.await;
+    let _ = server.await;
+    assert!(
+        result.is_ok(),
+        "same-account descriptive inventory must include both distinct legacy groups with their owner offline: source={:?}; rows={:?}; target status={:?}",
+        source.list_channels(),
+        source
+            .account_documents(AccountDocumentDomain::GroupInventory, None, 64)
+            .unwrap()
+            .items,
+        target.device_sync_status()
+    );
+    if optional_off {
+        assert!(
+            target.account_document(&key()).unwrap().is_none(),
+            "mandatory directory exchange must not enable optional history documents"
+        );
+    }
+    for id in &ids {
+        let row = target
+            .list_channels()
+            .into_iter()
+            .find(|row| row.id == *id)
+            .unwrap();
+        assert!(row.archived);
+        let reference = target.channel_shared_reference(*id).unwrap();
+        assert!(
+            reference
+                .members
+                .iter()
+                .any(|member| member.public.user_id() == reference.owner
+                    && member.name.as_deref() == Some("Owner canonical")),
+            "offline owner display names must come from the certified source snapshot"
+        );
+        assert!(!target.channel_can_manage(*id));
+        assert!(
+            target.channel_members(*id).is_empty(),
+            "display references must never become membership"
+        );
+    }
+    let secret = target.identity.secret_bytes();
+    let identity = DeviceIdentity::from_secret_bytes(secret.0, secret.1);
+    drop(target);
+    drop(source);
+    let reopened = node_with_identity(&target_path, &account, identity);
+    for id in ids {
+        assert!(reopened.list_channels().iter().any(|row| row.id == id));
+    }
+}
+
+fn group_inventory_legacy_fixture(
+    owner: &Node,
+    source: &Node,
+    name: &str,
+) -> crate::eventlog::ConversationId {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        eventlog::{Event, EventKind},
+    };
+    let id = new_channel_id();
+    let event = Event::new(
+        &owner.identity,
+        id,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: name.into(),
+            members: vec![owner.identity.public(), source.identity.public()],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    source.log.lock().unwrap().append(event).unwrap();
+    source.process_channel(id);
+    id
+}
+fn group_inventory_source_document(
+    source: &Node,
+    id: crate::eventlog::ConversationId,
+) -> AccountDocument {
+    source.publish_group_inventory(&mut None);
+    source
+        .account_document(&AccountDocumentKey::GroupInventory {
+            channel: hex::encode(id.as_bytes()),
+            source_device: source.user_id(),
+        })
+        .unwrap()
+        .unwrap()
+}
+#[test]
+fn group_inventory_preserves_unchanged_revision_heals_blobs_and_rejects_forged_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let id = group_inventory_legacy_fixture(&owner, &source, "Real group");
+    let first = group_inventory_source_document(&source, id);
+    let second = group_inventory_source_document(&source, id);
+    assert_eq!(
+        first.meta, second.meta,
+        "unchanged local snapshots must not churn revisions"
+    );
+    source
+        .account_documents
+        .lock()
+        .unwrap()
+        .remove_blob_for_test(first.meta.content_hash);
+    assert!(source.account_document(&first.meta.key).is_err());
+    let healed = group_inventory_source_document(&source, id);
+    assert_eq!(healed.meta, first.meta);
+    assert_eq!(healed.payload(), first.payload());
+    assert!(
+        source
+            .put_account_document_if(
+                first.meta.key.clone(),
+                first.payload().to_vec(),
+                Some(first.meta.version()),
+                |commit| commit()
+            )
+            .is_err()
+    );
+    assert!(
+        source
+            .remove_account_document_if(
+                first.meta.key.clone(),
+                Some(first.meta.version()),
+                |commit| commit()
+            )
+            .is_err()
+    );
+    let target = node(&dir.path().join("target"), &account);
+    let mut value: serde_json::Value = serde_json::from_slice(first.payload()).unwrap();
+    value["source_device"] = serde_json::json!("a".repeat(32));
+    let forged = serde_json::to_vec(&value).unwrap();
+    let forged_meta = AccountDocumentMeta::new(
+        &account,
+        source.user_id(),
+        first.meta.key.clone(),
+        first.meta.revision + 1,
+        &forged,
+        false,
+    );
+    assert!(
+        target
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(forged_meta, &forged)
+            .is_err()
+    );
+    let foreign = Account::generate();
+    let foreign_meta = AccountDocumentMeta::new(
+        &foreign,
+        source.user_id(),
+        first.meta.key.clone(),
+        first.meta.revision + 1,
+        first.payload(),
+        false,
+    );
+    assert!(
+        target
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(foreign_meta, first.payload())
+            .is_err()
+    );
+    value = serde_json::from_slice(first.payload()).unwrap();
+    value["observer"]["certificate"] =
+        serde_json::to_value(foreign.certify(&source.identity.public().ed25519_pub)).unwrap();
+    let payload = serde_json::to_vec(&value).unwrap();
+    let meta = AccountDocumentMeta::new(
+        &account,
+        source.user_id(),
+        first.meta.key.clone(),
+        first.meta.revision + 1,
+        &payload,
+        false,
+    );
+    assert!(
+        target
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(meta, &payload)
+            .is_err()
+    );
+}
+
+#[test]
+fn group_inventory_sources_retract_independently_and_restore_absence_preserves_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let a = node(&dir.path().join("a"), &account);
+    let b = node(&dir.path().join("b"), &account);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let target = node(&dir.path().join("target"), &account);
+    let id = group_inventory_legacy_fixture(&owner, &a, "Before");
+    let first = group_inventory_source_document(&a, id);
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(first.meta.clone(), first.payload())
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(first.payload()).unwrap();
+    value["source_device"] = serde_json::json!(b.user_id());
+    value["observer"] = serde_json::to_value(crate::node::account_devices::AccountDevice {
+        public: b.identity.public(),
+        certificate: account.certify(&b.identity.public().ed25519_pub),
+    })
+    .unwrap();
+    value["members"].as_array_mut().unwrap().push(serde_json::json!({"public":b.identity.public(),"account_id":account.account_id(),"pending":false,"post_office":false,"name":"Sibling"}));
+    value["name"] = serde_json::json!("Newer");
+    // Both accepted devices project to the same account member.
+    let payload = serde_json::to_vec(&value).unwrap();
+    let second_key = AccountDocumentKey::GroupInventory {
+        channel: hex::encode(id.as_bytes()),
+        source_device: b.user_id(),
+    };
+    let second = AccountDocumentMeta::new(
+        &account,
+        b.user_id(),
+        second_key.clone(),
+        first.meta.revision + 1,
+        &payload,
+        false,
+    );
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(second.clone(), &payload)
+        .unwrap();
+    assert_eq!(target.channel_shared_reference(id).unwrap().name, "Newer");
+    let retraction = AccountDocumentMeta::new(
+        &account,
+        b.user_id(),
+        second_key,
+        second.revision + 1,
+        &[],
+        true,
+    );
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(retraction, &[])
+        .unwrap();
+    assert!(
+        !target
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(second, &payload)
+            .unwrap()
+    );
+    assert_eq!(
+        target.channel_shared_reference(id).unwrap().name,
+        "Before",
+        "one source retraction cannot erase another source"
+    );
+    target.publish_group_inventory(&mut None);
+    assert_eq!(
+        target.channel_shared_reference(id).unwrap().name,
+        "Before",
+        "borrowed reference cannot be re-exported under target source"
+    );
+    assert!(
+        target
+            .account_document_meta(&AccountDocumentKey::GroupInventory {
+                channel: hex::encode(id.as_bytes()),
+                source_device: target.user_id()
+            })
+            .is_none()
+    );
+    // A partial restore of this source's book does not assert a group deletion.
+    *a.channels.lock().unwrap() = crate::node::channel::ChannelBook::new();
+    a.publish_group_inventory(&mut None);
+    assert_eq!(
+        a.account_document_meta(&first.meta.key).unwrap(),
+        first.meta
+    );
+    assert!(a.channel_shared_reference(id).is_some());
+}
+
+#[tokio::test]
+async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_old_modern_membership()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = Account::generate();
+    let current = Account::generate();
+    let source_path = dir.path().join("source");
+    let source = node(&source_path, &previous);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let legacy = group_inventory_legacy_fixture(&owner, &source, "Still authorized legacy grant");
+    let modern = source
+        .create_channel("Old root modern", vec![])
+        .await
+        .unwrap();
+    let mut maintenance =
+        crate::node::channel_account_maintenance::ChannelAccountMaintenance::default();
+    for _ in 0..source.list_channels().len() {
+        source.maintain_account_channels(&mut maintenance).await;
+    }
+    assert!(source.channel_owner_account_id(modern).is_some());
+    let old_document = group_inventory_source_document(&source, legacy);
+    source.prepare_account_transition(&current).unwrap();
+    let secret = source.identity.secret_bytes();
+    drop(source);
+    let adopted = node_with_identity(
+        &source_path,
+        &current,
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+    );
+    assert!(
+        adopted
+            .account_document_meta(&old_document.meta.key)
+            .is_none(),
+        "old root documents must not be copied on adoption"
+    );
+    adopted.publish_group_inventory(&mut None);
+    let new_document = adopted
+        .account_document(&old_document.meta.key)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        new_document.meta.account_public,
+        old_document.meta.account_public
+    );
+    assert!(
+        adopted
+            .account_document_meta(&AccountDocumentKey::GroupInventory {
+                channel: hex::encode(modern.as_bytes()),
+                source_device: adopted.user_id()
+            })
+            .is_none()
+    );
+    let sibling = node(&dir.path().join("sibling"), &current);
+    sibling
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(new_document.meta.clone(), new_document.payload())
+        .unwrap();
+    assert!(sibling.channel_shared_reference(legacy).is_some());
+    assert!(!sibling.channel_can_send(legacy));
+    assert!(!sibling.channel_can_manage(legacy));
+    assert!(sibling.channel_members(legacy).is_empty());
+}
+
+#[tokio::test]
+async fn group_inventory_v4_cooldown_keeps_v1_v2_v3_and_never_probes_disabled_domains() {
+    use crate::{
+        discovery::roster::PeerRecord,
+        node::{
+            account_devices::AccountDevice,
+            account_sync_wire::{AccountHistoryFrame, AccountSessionRequest, AccountSyncVersion},
+        },
+    };
+    use std::{
+        sync::{Arc, Mutex},
+        time::Instant,
+    };
+    use tokio::net::TcpListener;
+    for optional_off in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let source = node(&dir.path().join("old-source"), &account);
+        let target = node(&dir.path().join("target"), &account);
+        for (a, b) in [(&source, &target), (&target, &source)] {
+            a.account_devices
+                .lock()
+                .unwrap()
+                .insert(AccountDevice {
+                    public: b.identity.public(),
+                    certificate: account.certify(&b.identity.public().ed25519_pub),
+                })
+                .unwrap();
+            a.set_device_sync_category(SyncCategory::Appearance, !optional_off)
+                .unwrap();
+            a.set_device_sync_category(SyncCategory::History, !optional_off)
+                .unwrap();
+        }
+        source
+            .put_account_document_if(key(), b"optional draft".to_vec(), None, |commit| commit())
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let versions = Arc::new(Mutex::new(Vec::new()));
+        let observed = versions.clone();
+        let serving = source.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let server = serving.clone();
+                let observed = observed.clone();
+                tokio::spawn(async move {
+                    let mut channel = server.privacy_accept(stream).await.unwrap();
+                    while let Ok(bytes) = channel.recv().await {
+                        let Some((
+                            _,
+                            AccountHistoryFrame::SessionRequest {
+                                request_id,
+                                request: AccountSessionRequest::Documents { body },
+                            },
+                        )) = AccountHistoryFrame::decode_versioned(&bytes)
+                        else {
+                            break;
+                        };
+                        let request: wire::DocumentRequest = serde_json::from_slice(&body).unwrap();
+                        observed.lock().unwrap().push(request.version);
+                        if request.version == 4 {
+                            break;
+                        }
+                        if channel
+                            .send(
+                                &AccountHistoryFrame::SessionReady { request_id }
+                                    .encode_version(AccountSyncVersion::V2)
+                                    .unwrap(),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if !server.serve_account_documents(&mut channel, request).await {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let peer = PeerRecord {
+            public: source.identity.public(),
+            addr: address,
+            name: "older sibling".into(),
+            account_id: Some(account.account_id()),
+            last_seen: Instant::now(),
+            post_office: false,
+            routes: vec![],
+        };
+        let mut cursor = sync::DocumentSyncCursor::default();
+        assert!(
+            target
+                .pull_account_documents_page(&peer, &mut cursor)
+                .await
+                .is_err()
+        );
+        assert!(cursor.status(target.device_sync_policy()).2);
+        for _ in 0..16 {
+            target
+                .pull_account_documents_page(&peer, &mut cursor)
+                .await
+                .unwrap();
+        }
+        let versions = versions.lock().unwrap().clone();
+        assert_eq!(
+            versions.iter().filter(|version| **version == 4).count(),
+            1,
+            "optional rejection has its own negative cooldown"
+        );
+        if optional_off {
+            assert_eq!(
+                versions,
+                vec![4],
+                "disabled optional domains cannot be attempted after selector wraps"
+            );
+            assert!(
+                !cursor.pending,
+                "no eligible work must not create an immediate retry spin"
+            );
+            assert!(target.account_document(&key()).unwrap().is_none());
+        } else {
+            for version in [1, 2, 3] {
+                assert!(
+                    versions.contains(&version),
+                    "v4 rejection must preserve v{version}"
+                );
+            }
+            assert_eq!(
+                target.account_document(&key()).unwrap().unwrap().payload(),
+                b"optional draft"
+            );
+            assert_ne!(
+                cursor.digests[6], [0; 32],
+                "v3 custody still settles independently"
+            );
+        }
+        assert!(
+            cursor.status(target.device_sync_policy()).2,
+            "other versions cannot clear the mandatory inventory upgrade hint"
+        );
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+#[test]
+fn group_inventory_archive_projection_is_coherent_and_real_local_state_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let id = group_inventory_legacy_fixture(&owner, &source, "Latest descriptive snapshot");
+    let document = group_inventory_source_document(&source, id);
+    let mut target = node(&dir.path().join("target"), &account);
+    std::sync::Arc::get_mut(&mut target)
+        .unwrap()
+        .archived_channels
+        .push(crate::node::ChannelSummary {
+            id,
+            name: "Old archived name".into(),
+            member_count: 99,
+            owner: "a".repeat(32),
+            archived: true,
+            dissolved: false,
+            left: false,
+            pending_invite: false,
+        });
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(document.meta.clone(), document.payload())
+        .unwrap();
+    let rows = target.list_channels();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    let reference = target.channel_shared_reference(id).unwrap();
+    assert_eq!(row.name, reference.name);
+    assert_eq!(row.member_count, reference.member_count);
+    assert_eq!(row.owner, reference.owner);
+    assert!(row.archived);
+    // A real local book remains the authority for the native/UI projection.
+    let event = source.log.lock().unwrap().events(&id)[0].clone();
+    target.log.lock().unwrap().append(event).unwrap();
+    // The target is absent from this legacy event, so merely retaining that event
+    // must not install membership or make the reference writable.
+    target.process_channel(id);
+    assert!(!target.channel_can_send(id));
+    assert!(target.channel_members(id).is_empty());
+    assert!(source.channel_shared_reference(id).is_none());
+    assert!(!source.list_channels()[0].archived);
+}
+
+#[test]
+fn group_inventory_partial_roster_is_explicit_bounded_and_retains_owner_observer() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        eventlog::{Event, EventKind},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let id = new_channel_id();
+    let mut members = vec![owner.identity.public(), source.identity.public()];
+    members.extend((0..255).map(|_| DeviceIdentity::generate().public()));
+    let event = Event::new(
+        &owner.identity,
+        id,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Large group".into(),
+            members,
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    source.log.lock().unwrap().append(event).unwrap();
+    source.process_channel(id);
+    let document = group_inventory_source_document(&source, id);
+    let reference: GroupInventoryReference = serde_json::from_slice(document.payload()).unwrap();
+    assert!(!reference.members_complete);
+    assert_eq!(reference.members.len(), 256);
+    assert_eq!(reference.member_count, 257);
+    assert!(
+        reference
+            .members
+            .iter()
+            .any(|member| member.public == source.identity.public())
+    );
+    assert!(
+        reference
+            .members
+            .iter()
+            .any(|member| member.public == owner.identity.public())
+    );
+    let target = node(&dir.path().join("target"), &account);
+    let mut forged: serde_json::Value = serde_json::from_slice(document.payload()).unwrap();
+    forged["members_complete"] = serde_json::json!(true);
+    let payload = serde_json::to_vec(&forged).unwrap();
+    let meta = AccountDocumentMeta::new(
+        &account,
+        source.user_id(),
+        document.meta.key.clone(),
+        document.meta.revision + 1,
+        &payload,
+        false,
+    );
+    assert!(
+        target
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(meta, &payload)
+            .is_err(),
+        "truncated facts cannot claim a complete roster"
+    );
+}
+
+#[test]
+fn group_inventory_publishes_validated_departure_and_dissolution_without_granting_membership() {
+    use crate::{
+        channel::ChannelMeta,
+        eventlog::{Event, EventKind},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let target = node(&dir.path().join("target"), &account);
+    let id = group_inventory_legacy_fixture(&owner, &source, "Status fixture");
+    let initial = group_inventory_source_document(&source, id);
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(initial.meta.clone(), initial.payload())
+        .unwrap();
+    let (parents, lamport) = source.log.lock().unwrap().prepare(&id).unwrap();
+    let departure = Event::new(
+        &owner.identity,
+        id,
+        2,
+        parents,
+        lamport,
+        2,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Status fixture".into(),
+            members: vec![owner.identity.public()],
+            epoch: 1,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    source.log.lock().unwrap().append(departure).unwrap();
+    source.process_channel(id);
+    assert!(!source.channel_can_send(id));
+    let left = group_inventory_source_document(&source, id);
+    assert!(left.meta.revision > initial.meta.revision);
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(left.meta.clone(), left.payload())
+        .unwrap();
+    let reference = target.channel_shared_reference(id).unwrap();
+    assert!(reference.left);
+    assert_eq!(reference.member_count, 1);
+    assert!(!reference.dissolved);
+    let (parents, lamport) = source.log.lock().unwrap().prepare(&id).unwrap();
+    source
+        .log
+        .lock()
+        .unwrap()
+        .append(Event::new(
+            &owner.identity,
+            id,
+            3,
+            parents,
+            lamport,
+            3,
+            EventKind::ChannelDissolve,
+            vec![],
+        ))
+        .unwrap();
+    source.process_channel(id);
+    let dissolved = group_inventory_source_document(&source, id);
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(dissolved.meta.clone(), dissolved.payload())
+        .unwrap();
+    assert!(target.channel_shared_reference(id).unwrap().dissolved);
+    assert!(
+        target.list_channels()[0].archived
+            && target.list_channels()[0].left
+            && target.list_channels()[0].dissolved
+    );
+    assert!(target.channel_members(id).is_empty());
+    assert!(!target.channel_can_send(id));
+    assert!(!target.channel_can_manage(id));
+}
+
+#[test]
+fn group_inventory_post_office_display_fact_keeps_existing_member_count_consistent() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        discovery::Announce,
+        eventlog::{Event, EventKind},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let relay = DeviceIdentity::generate();
+    source.roster.lock().unwrap().update(
+        &Announce::new_post_office(&relay, "Relay", 4242),
+        "127.0.0.1".parse().unwrap(),
+        &source.user_id(),
+    );
+    assert!(source.device_is_post_office(&relay.public()));
+    let id = new_channel_id();
+    source
+        .log
+        .lock()
+        .unwrap()
+        .append(Event::new(
+            &owner.identity,
+            id,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "Legacy group with explicit relay".into(),
+                members: vec![
+                    owner.identity.public(),
+                    source.identity.public(),
+                    relay.public(),
+                ],
+                epoch: 0,
+                owner: owner.user_id(),
+            }
+            .encode(),
+        ))
+        .unwrap();
+    source.process_channel(id);
+    assert_eq!(source.list_channels()[0].member_count, 2);
+    source.publish_group_inventory(&mut None);
+    let key = AccountDocumentKey::GroupInventory {
+        channel: hex::encode(id.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let document = source
+        .account_document(&key)
+        .unwrap()
+        .expect("verified infrastructure facts cannot prevent inventory publication");
+    let reference: GroupInventoryReference = serde_json::from_slice(document.payload()).unwrap();
+    assert_eq!(reference.member_count, 2);
+    assert_eq!(reference.members.len(), 3);
+    assert!(reference.members_complete);
+    let value: serde_json::Value = serde_json::from_slice(document.payload()).unwrap();
+    let relay_fact = value["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["public"] == serde_json::to_value(relay.public()).unwrap())
+        .unwrap();
+    assert_eq!(relay_fact["post_office"], true);
+    let target = node(&dir.path().join("target"), &account);
+    target
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(document.meta.clone(), document.payload())
+        .unwrap();
+    assert_eq!(target.list_channels()[0].member_count, 2);
+    assert!(
+        target.channel_members(id).is_empty(),
+        "infrastructure display facts cannot become memberships"
+    );
+}
+
+#[test]
+fn group_inventory_long_canonical_names_fit_payload_budget_and_preserve_required_members() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        discovery::Announce,
+        eventlog::{Event, EventKind},
+    };
+    for owner_is_observer in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let source = node(&dir.path().join("source"), &account);
+        let external_owner = DeviceIdentity::generate();
+        let owner = if owner_is_observer {
+            &source.identity
+        } else {
+            &external_owner
+        };
+        let name = "😀".repeat(50);
+        assert_eq!(name.len(), 200);
+        source.set_profile_display_name(&name).unwrap();
+        let mut members = vec![source.identity.public()];
+        if !owner_is_observer {
+            members.push(owner.public());
+            source.roster.lock().unwrap().update(
+                &Announce::new(owner, &name, 4242),
+                "127.0.0.1".parse().unwrap(),
+                &source.user_id(),
+            );
+        }
+        while members.len() < 256 {
+            let peer = DeviceIdentity::generate();
+            source.roster.lock().unwrap().update(
+                &Announce::new_with_account(&peer, &account, &name, 4242),
+                "127.0.0.1".parse().unwrap(),
+                &source.user_id(),
+            );
+            members.push(peer.public());
+        }
+        let id = new_channel_id();
+        source
+            .log
+            .lock()
+            .unwrap()
+            .append(Event::new(
+                owner,
+                id,
+                1,
+                vec![],
+                1,
+                1,
+                EventKind::MembershipChange,
+                ChannelMeta {
+                    name: "Long canonical member names".into(),
+                    members,
+                    epoch: 0,
+                    owner: owner.public().user_id(),
+                }
+                .encode(),
+            ))
+            .unwrap();
+        source.process_channel(id);
+        let count = source.list_channels()[0].member_count;
+        source.publish_group_inventory(&mut None);
+        let key = AccountDocumentKey::GroupInventory {
+            channel: hex::encode(id.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let document = source
+            .account_document(&key)
+            .unwrap()
+            .expect("valid long canonical member names must not suppress group inventory");
+        assert!(document.payload().len() <= key.limit());
+        let reference: GroupInventoryReference =
+            serde_json::from_slice(document.payload()).unwrap();
+        assert_eq!(reference.member_count, count);
+        assert!(
+            !reference.members_complete,
+            "byte-budget truncation must be explicit"
+        );
+        assert!(reference.members.len() < 256);
+        assert!(
+            reference
+                .members
+                .iter()
+                .all(|member| member.name.as_deref() == Some(&name))
+        );
+        assert!(
+            reference
+                .members
+                .iter()
+                .any(|member| member.public == owner.public())
+        );
+        assert!(
+            reference
+                .members
+                .iter()
+                .any(|member| member.public == source.identity.public())
+        );
+        let repeated = group_inventory_source_document(&source, id);
+        assert_eq!(
+            repeated.meta, document.meta,
+            "deterministic budgeting must not churn revisions"
+        );
+        let target = node(&dir.path().join("target"), &account);
+        target
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(document.meta.clone(), document.payload())
+            .unwrap();
+        assert_eq!(target.list_channels()[0].member_count, count);
+        assert!(
+            !target
+                .channel_shared_reference(id)
+                .unwrap()
+                .members_complete
+        );
+        assert!(!target.channel_can_send(id));
+    }
+}
+
+#[tokio::test]
+async fn group_inventory_display_labels_cover_real_create_and_rename_without_changing_book_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let long = "界".repeat(342);
+    let boundary = format!("{}x", "界".repeat(341));
+    assert_eq!(boundary.len(), 1024);
+    let cases = [
+        long.as_str(),
+        "Team\nChat",
+        "\n\t\r",
+        "",
+        "  Ordinary name  ",
+        boundary.as_str(),
+    ];
+    for name in cases {
+        let id = source.create_channel(name, vec![]).await.unwrap();
+        source.publish_group_inventory(&mut None);
+        let key = AccountDocumentKey::GroupInventory {
+            channel: hex::encode(id.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let document = source
+            .account_document(&key)
+            .unwrap()
+            .expect("a valid real group name must always have an inventory display label");
+        let reference: GroupInventoryReference =
+            serde_json::from_slice(document.payload()).unwrap();
+        assert!(reference.name.len() <= 1024 && !reference.name.chars().any(char::is_control));
+        assert_eq!(
+            source.channels.lock().unwrap().state(&id).unwrap().name(),
+            name
+        );
+        assert_eq!(reference.channel_id, hex::encode(id.as_bytes()));
+        if name == long {
+            assert!(reference.name.ends_with('…'));
+            assert!(long.starts_with(reference.name.trim_end_matches('…')));
+        } else if name == "Team\nChat" {
+            assert_eq!(reference.name, "Team Chat");
+        } else if name.trim().is_empty() {
+            assert!(reference.name.contains(&hex::encode(id.as_bytes())[..12]));
+        } else {
+            assert_eq!(
+                reference.name, name,
+                "ordinary names and exact UTF-8 byte boundaries must remain intact"
+            );
+        }
+        assert_eq!(
+            group_inventory_source_document(&source, id).meta,
+            document.meta
+        );
+    }
+    let id = source
+        .create_channel("Before rename", vec![])
+        .await
+        .unwrap();
+    let initial = group_inventory_source_document(&source, id);
+    source.rename_channel(id, &long).await.unwrap();
+    let renamed = group_inventory_source_document(&source, id);
+    let reference: GroupInventoryReference = serde_json::from_slice(renamed.payload()).unwrap();
+    assert!(reference.name.ends_with('…') && reference.name.len() <= 1024);
+    assert!(
+        renamed.meta.revision > initial.meta.revision,
+        "a long valid rename must not leave the previous inventory label stale"
+    );
+    assert_eq!(
+        source.channels.lock().unwrap().state(&id).unwrap().name(),
+        long
+    );
+    source.rename_channel(id, "Team\nChat").await.unwrap();
+    let controlled = group_inventory_source_document(&source, id);
+    let reference: GroupInventoryReference = serde_json::from_slice(controlled.payload()).unwrap();
+    assert_eq!(reference.name, "Team Chat");
+    assert_eq!(
+        source.channels.lock().unwrap().state(&id).unwrap().name(),
+        "Team\nChat"
+    );
+    assert_eq!(
+        group_inventory_source_document(&source, id).meta,
+        controlled.meta
     );
 }

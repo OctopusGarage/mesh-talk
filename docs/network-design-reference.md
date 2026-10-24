@@ -665,6 +665,36 @@ new controls; older envelopes receive an upgrade response before unknown kinds
 are transferred. Group counts and composite avatars use the same accepted
 account projection; pending invitations and duplicate devices do not add people.
 
+Same-account group inventory is independent of that authority upgrade. Certified
+devices exchange bounded, versioned descriptive references through the existing
+private account-document session, including legacy groups currently held by only
+one of their devices. This metadata follows the mandatory account-directory
+contract even when optional personal-data categories are off. Other document
+domains retain their own policies; unsupported inventory exchange must neither
+disable supported older domains nor leave an immediate retry loop.
+
+References merge by exact group ID, never by name. A device publishes observations
+from its actually authorized local group state, not from references received from
+another device. Prior account documents are never reassigned after adoption;
+current legacy device membership and modern account binding remain separate
+eligibility rules. A local absence is not evidence of global deletion. Source
+retractions and later observations retain their version ordering, and one source
+cannot erase another source's valid reference.
+
+Authoritative local state wins over descriptive references. Borrowed member facts
+are display data: they cannot enter the ChannelBook, establish network account
+bindings, grant membership, install keys, enable sends or authorize management.
+A reference-only group remains read-only until validated authority is available.
+No additional plaintext history store or history-wire version is introduced.
+Member display facts are capped at 256 per source snapshot, retaining its owner
+and observer. The snapshot carries the full accepted-account count and an explicit
+roster-completeness flag; consumers must identify a partial roster rather than
+presenting it as every member. Source status flags describe that device's observed
+group state and do not establish account-wide authority or departure.
+Descriptive labels normalize control characters and bound UTF-8 text with a
+visible ellipsis or ID fallback. Invalid display text must not suppress a group
+entry, and this projection never renames its authoritative local group.
+
 Small groups retain direct fanout. Text/sticker distribution in larger groups seeds a bounded subset and relies on authorized member recovery; membership/key controls retain their broader bounded fanout. File manifests have their own fanout behavior and must not inherit a text-only optimization without an explicit retention/recovery design.
 
 Channel send acceptance returns the exact locally committed event ID before

@@ -24,6 +24,22 @@ is required for each device. Knowing a group name or restoring an archive alone
 does not grant access, and historical messages still require an authorized
 retained copy.
 
+## Groups across your devices
+
+Your linked devices share the group directory and known member details even
+when a legacy group has not completed its format upgrade. Group names are labels:
+two groups with similar names remain separate when their IDs differ.
+
+A shared reference makes the group visible while its verified group state is
+being obtained. It does not grant membership or copy sending keys. The app keeps
+that reference read-only and explains the group-format requirement; it must not
+describe it as a restored backup or request separate approval for every linked
+device. The original device keeps its existing group access.
+
+Group-directory metadata is account topology. Turning off optional message
+history does not hide the groups already held by your account's devices. It also
+does not enable message-history transfer or change any other synchronization choice.
+
 ## Understand message copy status
 
 A group message's check marks report confirmed stored copies held by other

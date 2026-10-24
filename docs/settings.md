@@ -124,6 +124,12 @@ messages and file information with certified devices on your account.
 bytes. Both endpoints must permit the relevant category. Turning these off does
 not disable conversations with other people or groups.
 
+The group directory remains available across linked devices independently of
+these optional data switches. It contains descriptive group and member facts,
+including references to legacy groups on another device; it contains no message
+bodies or sending keys and does not grant access. A reference remains read-only
+until the device obtains the group's validated state.
+
 Upgraded devices can synchronize file cards without downloading their contents.
 Older devices retain their existing attachment-coupled metadata behavior; the
 linked-device status explains when an upgrade is needed. Choosing no history

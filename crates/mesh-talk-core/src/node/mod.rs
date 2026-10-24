@@ -21,7 +21,8 @@ mod account_profile;
 mod account_session;
 pub use account_documents::{
     AccountDocument, AccountDocumentDomain, AccountDocumentKey, AccountDocumentMeta,
-    AccountDocumentPage, DocumentConversation, DocumentVersion,
+    AccountDocumentPage, DocumentConversation, DocumentVersion, GroupInventoryMember,
+    GroupInventoryReference,
 };
 pub(crate) mod account_suppression;
 pub(crate) mod account_sync;

@@ -609,3 +609,14 @@ The document store keeps a separate bounded custody-key quota and an owned-file
 scan budget consistent with legal document counts. `media_store.rs` prunes the
 enumerated unreferenced regular files in one pass, preserving live files and
 synchronizing the parent directory before successful return.
+
+`account_documents/inventory.rs` owns source-certified descriptive group snapshots,
+bounded automatic publication and account-private reference projection. It reuses
+the document version/digest owner and private account worker. The group directory
+is mandatory account topology; optional history, profile, appearance and contact
+data retain their existing policies. A source reads real local group state and
+never republishes a borrowed reference as authority. The native channel adapter
+may project reference member facts for display under runtime admission; group
+authorization, keys and mutations remain exclusively with the existing channel
+owners. The frontend distinguishes this read-only reference from a backup archive
+and removes its explanation when real validated group state arrives.

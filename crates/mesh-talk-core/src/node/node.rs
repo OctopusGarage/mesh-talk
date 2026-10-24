@@ -1013,6 +1013,7 @@ impl Node {
                 })
             })
             .collect();
+        let local_ids: std::collections::HashSet<_> = book.channel_ids().into_iter().collect();
         channels.extend(
             self.archived_channels
                 .iter()
@@ -1026,7 +1027,35 @@ impl Node {
                 channel.member_count = accounts.len() + unbound.len();
             }
         }
-        channels
+        let mut by_id: std::collections::BTreeMap<_, _> = channels
+            .into_iter()
+            .map(|channel| (*channel.id.as_bytes(), channel))
+            .collect();
+        for reference in self.group_inventory_references().into_values() {
+            let Ok(bytes) = hex::decode(&reference.channel_id) else {
+                continue;
+            };
+            let Ok(bytes) = <[u8; 32]>::try_from(bytes) else {
+                continue;
+            };
+            let id = ConversationId::new(bytes);
+            if !local_ids.contains(&id) {
+                by_id.insert(
+                    bytes,
+                    ChannelSummary {
+                        id,
+                        name: reference.name,
+                        member_count: reference.member_count,
+                        owner: reference.owner,
+                        archived: true,
+                        dissolved: reference.dissolved,
+                        left: reference.left,
+                        pending_invite: reference.pending_invite,
+                    },
+                );
+            }
+        }
+        by_id.into_values().collect()
     }
 
     /// Owner account authority from the validated group projection.

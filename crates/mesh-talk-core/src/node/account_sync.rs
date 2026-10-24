@@ -238,11 +238,6 @@ impl Node {
                     status.phase = SyncPhase::Disabled;
                     status.error = None;
                 }
-                if !policy.history && !policy.appearance {
-                    status.document_phase = SyncPhase::Disabled;
-                    status.document_error = None;
-                    status.document_requires_upgrade = false;
-                }
                 status
             })
             .collect::<Vec<_>>();
@@ -1614,8 +1609,10 @@ impl Node {
         let mut attachment_unsupported: HashMap<String, tokio::time::Instant> = HashMap::new();
         let mut revision = self.device_sync_policy_snapshot().1;
         let mut custody_migration = None;
+        let mut inventory_publication = None;
         loop {
             self.migrate_channel_custody(&mut custody_migration);
+            self.publish_group_inventory(&mut inventory_publication);
             while active.len() < HISTORY_WORKERS {
                 let Some((id, peer)) = queue.pop_front() else {
                     break;
@@ -1827,7 +1824,7 @@ impl Node {
                     }
                 }
             }
-            let (policy, current_revision) = self.device_sync_policy_snapshot();
+            let (_, current_revision) = self.device_sync_policy_snapshot();
             if current_revision != revision {
                 // Cancellation drops every network future. Blocking writers retain retirement
                 // admission and perform their own current-policy checks before commit.
@@ -1847,11 +1844,6 @@ impl Node {
                 attachment_unsupported.clear();
                 revision = current_revision;
                 enqueue_all = true;
-            }
-            if !policy.history && !policy.attachments && !policy.appearance && !policy.contacts {
-                queue.clear();
-                cursors.clear();
-                continue;
             }
             if enqueue_all {
                 for device in self.linked_devices() {

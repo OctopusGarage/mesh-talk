@@ -297,7 +297,16 @@ The [profile and verification guide](docs/peer-trust.md) owns evidence limits an
 
 **Private account document**:
 A typed, account-authenticated versioned record synchronized only among certified
-sibling devices under its consent category. Its signed metadata and deletion
+sibling devices under its domain policy. Optional personal data follows its
+consent category; group-directory metadata follows the existing mandatory account
+topology contract and contains no message bodies or keys. Its signed metadata and deletion
 tombstone are distinct from the encrypted content-addressed blob and from public
 group authority events.
 _Avoid_: arbitrary replicated settings file, public group patch, delivery receipt.
+
+**Shared group reference**:
+An account-private descriptive snapshot supplied by a certified device that
+legitimately holds the group. It preserves the group's exact identity and known
+member facts before another device obtains validated group state. It does not
+create membership, management authority, sending permission or receiving keys.
+_Avoid_: accepted invitation, backup restoration, device approval, authority grant.

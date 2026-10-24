@@ -2,6 +2,44 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-account-group-inventory",
+      "paths": [
+        "src-tauri/src/chat_commands/channels.rs",
+        "src-tauri/src/account_documents.rs",
+        "src-tauri/src/owner_commands.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "owner_commands::tests::registered_group_inventory_projects_reference_and_rejects_queued_retirement",
+            "group_inventory_display_roster_matches_legacy_people_and_preserves_modern_members",
+            "owner_commands::tests::registered_account_controls_reject_generic_writes_and_removals"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Project shared group references and bounded display member facts under current desktop runtime authority.",
+        "guide": "docs/help/topics/channels.md#groups-across-your-devices",
+        "invariants": [
+          {
+            "name": "Reference flags, owner/name/member facts and completeness are coherent; can_manage is false and core sends/mutations still require real membership.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          },
+          {
+            "name": "Queued reads cannot release the retired runtime's group inventory after lock, logout or same-owner replacement.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          }
+        ]
+      },
+      "consumers": [
+        "frontend-account-group-inventory"
+      ],
+      "escalation": [
+        "Exercise registered reference list/member IPC, queued owner and lock retirement, and actual native same-account group lists. Browser mocks do not establish account-document transport."
+      ]
+    },
+    {
       "id": "desktop-shared-channel-custody",
       "paths": [
         "src-tauri/src/account_documents.rs",
@@ -45,7 +83,12 @@
         {
           "package": "mesh-talk",
           "filters": [
-            "startup_identity_"
+            "registered_startup_identity_is_ids_only_and_denies_locked_or_replaced_sessions",
+            "startup_identity_cancelled_while_waiting_for_serialization_clears_pending",
+            "startup_identity_failure_and_cancellation_clear_only_current_observation",
+            "startup_identity_installation_keeps_ready_until_next_ticket",
+            "startup_identity_is_observable_before_runtime_installation_and_failure_retires_it",
+            "startup_identity_rejects_same_owner_replacement_and_signed_out_observers"
           ]
         }
       ],
@@ -80,7 +123,8 @@
             "owner_commands::tests::registered_shared_drafts_reject_wrong_account_writer_and_queued_session",
             "owner_commands::tests::registered_avatar_overrides_keep_tombstones_and_refuse_other_account_writes",
             "avatars::tests::",
-            "owner_commands::tests::registered_public_avatar_",
+            "registered_public_avatar_rejects_originating_wrong_account",
+            "registered_public_avatar_rejects_queued_same_owner_account_replacement",
             "owner_commands::tests::registered_account_controls_reject_generic_writes_and_removals",
             "owner_commands::tests::registered_account_control_source_import_checks_account_and_queued_session"
           ]

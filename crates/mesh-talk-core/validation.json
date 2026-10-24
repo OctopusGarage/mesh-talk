@@ -2,6 +2,44 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-account-group-inventory",
+      "paths": [
+        "crates/mesh-talk-core/src/node/account_documents/inventory.rs",
+        "crates/mesh-talk-core/src/node/node.rs",
+        "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/queries.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::account_documents::",
+            "node::account_sync::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Share exact-ID descriptive group inventory across certified account devices without fabricating group authority.",
+        "guide": "docs/help/topics/channels.md#groups-across-your-devices",
+        "invariants": [
+          {
+            "name": "Legacy groups currently held by an authorized device remain visible to its certified siblings with the owner offline; descriptive references never grant membership, keys, sending or management.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Mandatory account-directory metadata remains independent of optional personal-data switches; unsupported v4 preserves existing v1/v2/v3 domains and does not create a retry spin.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          }
+        ]
+      },
+      "consumers": [
+        "desktop-account-group-inventory"
+      ],
+      "escalation": [
+        "Require real legacy-owner/member/sibling private-session convergence, source-offline restart, adoption scoping, policy-off metadata-only transfer, bounded roster and no-authority assertions. Reference state must never enter authoritative group or peer binding stores."
+      ]
+    },
+    {
       "id": "core-shared-channel-custody",
       "paths": [
         "crates/mesh-talk-core/src/node/channel_custody.rs",
@@ -55,7 +93,8 @@
         {
           "package": "mesh-talk-core",
           "filters": [
-            "startup_identity_"
+            "startup_identity_precedes_blocked_durable_store_and_matches_runtime",
+            "startup_identity_rejection_stops_before_listener_and_durable_stores"
           ]
         }
       ],
@@ -87,10 +126,13 @@
         {
           "package": "mesh-talk-core",
           "filters": [
-            "historical_route_probe",
-            "private_probe",
-            "session_pool",
-            "historical_probe_rotation"
+            "historical_route_probes_leave_capacity_for_healthy_foreground_sync",
+            "pinned_private_probe_keeps_routes_without_online_presence_or_new_grants",
+            "private_probe_does_not_multiply_handshakes_for_one_devices_cached_addresses",
+            "private_probe_refreshes_public_presence_before_its_lease_expires",
+            "private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_routes",
+            "node::session_pool::",
+            "historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel"
           ]
         }
       ],
@@ -191,12 +233,12 @@
             "identity::account_transition::tests::",
             "node::account_transition_store::tests::",
             "node::account_transition_runtime::tests::",
-            "transport::presence_auth::account_transition_tests::",
+            "transition_auth_binds_the_chain_visibility_and_noise_session",
             "node::runtime::tests::authenticated_link_stages_transition_until_loaded_keystore_restart",
             "node::runtime::tests::failed_link_keystore_save_does_not_publish_and_can_retry_after_restart",
             "node::runtime::tests::stale_link_authorization_cannot_stage_an_account_transition",
             "node::runtime::tests::security_rekey_does_not_publish_linking_account_continuity",
-            "node::peer_directory::tests::transition_"
+            "transition_requires_existing_full_identity_pin_and_atomic_persistence"
           ]
         }
       ],
@@ -241,15 +283,18 @@
             "node::channel_account_bootstrap::tests::",
             "node::channel_account_maintenance::tests::",
             "channel::model::tests::account_invites_receive_no_content_keys_until_the_account_accepts",
-            "node::session::tests::account_authority_",
+            "account_authority_arriving_after_probe_restarts_without_legacy_followup_leak",
+            "account_authority_negotiates_v4_and_transfers_in_both_directions",
+            "account_authority_rejects_events_in_older_followup_envelopes",
+            "account_authority_requires_v4_for_fingerprint_and_event_transfer",
             "eventlog::persist::tests::account_channel_version_index_rejects_invalid_events_and_survives_restart",
             "node::node::tests::group_summary_and_presence_count_accounts_while_unknown_devices_remain_distinct",
             "node::channel_account_controls::tests::",
-            "node::reactions::acceptance_tests::channel_content_controls_recheck_membership_at_durable_acceptance",
+            "channel_content_controls_recheck_membership_at_durable_acceptance",
             "node::join_history::tests::account_invitation_history_reaches_accepting_sibling_while_anchor_is_offline",
             "node::join_history::tests::account_invitation_three_event_wal_recovers_atomically_after_restart",
             "channel::model::tests::current_receive_snapshot_recovers_a_gap_without_restoring_consumed_keys",
-            "node::privacy_sync::causal_export_tests::rejected_account_authority_never_exposes_a_v4_requirement_to_legacy_members",
+            "rejected_account_authority_never_exposes_a_v4_requirement_to_legacy_members",
             "channel::model::tests::routine_receive_snapshot_preserves_small_out_of_order_messages"
           ]
         }
@@ -818,12 +863,12 @@
             "node::opaque_relay::",
             "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
             "node::trust_card::tests::",
-            "node::node::tests::trust_card_propagates_signed_claims_over_loopback",
-            "node::node::tests::trust_card_projection_retry_and_restart_preserve_avatar_and_identity_lifetime",
-            "node::node::tests::trust_card_reconciles_newer_sibling_legacy_avatar",
-            "node::node::tests::trust_card_exhausted_avatar_revision_rejects_before_either_store_mutates",
-            "node::node::tests::trust_card_terminal_legacy_avatar_reconciles_on_restart",
-            "node::node::tests::trust_card_linked_device_pair_preserves_metadata_and_requires_card_parent",
+            "node::node::tests::account_profile_propagates_signed_claims_over_loopback",
+            "node::node::tests::account_profile_projection_retry_and_restart_preserve_avatar_and_identity_lifetime",
+            "node::node::tests::account_profile_reconciles_newer_sibling_legacy_avatar",
+            "node::node::tests::account_profile_exhausted_avatar_revision_rejects_before_either_store_mutates",
+            "node::node::tests::account_profile_terminal_legacy_avatar_reconciles_on_restart",
+            "node::node::tests::account_profile_linked_device_pair_preserves_metadata_and_requires_card_parent",
             "node::runtime::tests::account_nickname_preserves_bio_and_wins_over_host_name_on_restart",
             "node::runtime::tests::contact_nickname_survives_a_stale_signed_card_name_and_restart",
             "node::runtime::tests::offline_account_names_survive_roster_expiry_and_restart_without_presence",
@@ -1141,7 +1186,7 @@
             "identity::account_login::tests::",
             "identity::manager::tests::",
             "node::account_access::tests::",
-            "node::linking::pairing_selection_tests::",
+            "node::linking::",
             "node::enrollment::tests::",
             "node::pairing::"
           ]

@@ -13,9 +13,10 @@ use tokio::net::TcpStream;
 pub(in crate::node) struct DocumentSyncCursor {
     pub(super) domain: usize,
     pub(super) after: Option<AccountDocumentKey>,
-    pub(super) digests: [[u8; 32]; 7],
+    pub(super) digests: [[u8; 32]; 8],
     pub(in crate::node) retry_at: Option<Instant>,
     pub(in crate::node) error: Option<String>,
+    error_domain: Option<AccountDocumentDomain>,
     pub(in crate::node) pending: bool,
     pub(in crate::node) up_to_date: bool,
     pub(in crate::node) requires_upgrade: bool,
@@ -27,15 +28,18 @@ pub(in crate::node) struct DocumentSyncCursor {
     control_upgrade: bool,
     custody_retry_at: Option<Instant>,
     custody_upgrade: bool,
+    inventory_retry_at: Option<Instant>,
+    inventory_upgrade: bool,
 }
 impl Default for DocumentSyncCursor {
     fn default() -> Self {
         Self {
-            domain: 6,
+            domain: 7,
             after: None,
-            digests: [[0; 32]; 7],
+            digests: [[0; 32]; 8],
             retry_at: None,
             error: None,
+            error_domain: None,
             pending: false,
             up_to_date: false,
             requires_upgrade: false,
@@ -47,10 +51,20 @@ impl Default for DocumentSyncCursor {
             control_upgrade: false,
             custody_retry_at: None,
             custody_upgrade: false,
+            inventory_retry_at: None,
+            inventory_upgrade: false,
         }
     }
 }
 impl DocumentSyncCursor {
+    fn inventory_unavailable(&mut self) {
+        self.inventory_retry_at = Some(Instant::now() + Duration::from_secs(300));
+        self.inventory_upgrade = true;
+        self.after = None;
+        self.domain = 6;
+        self.pending = true;
+        self.up_to_date = false;
+    }
     fn custody_unavailable(&mut self) {
         self.custody_retry_at = Some(Instant::now() + Duration::from_secs(300));
         self.custody_upgrade = true;
@@ -78,17 +92,21 @@ impl DocumentSyncCursor {
         policy: super::super::DeviceSyncPolicy,
     ) -> (super::super::SyncPhase, Option<String>, bool) {
         use super::super::SyncPhase;
-        if !policy.history && !policy.appearance {
-            return (SyncPhase::Disabled, None, false);
-        }
-        let upgrade = self.requires_upgrade && (!self.control_upgrade || policy.history)
-            || self.custody_upgrade && policy.history;
-        if let Some(error) = &self.error {
+        let upgrade = self.requires_upgrade
+            && ((policy.history || policy.appearance) && !self.control_upgrade
+                || policy.history && self.control_upgrade)
+            || self.custody_upgrade && policy.history
+            || self.inventory_upgrade;
+        if let Some(error) = &self.error
+            && (policy.history
+                || policy.appearance
+                || self.error_domain == Some(AccountDocumentDomain::GroupInventory))
+        {
             return (SyncPhase::Error, Some(error.clone()), upgrade);
         }
         let mut enabled = 0u8;
         for (i, domain) in DOMAINS.iter().enumerate() {
-            if policy.enabled(category(*domain)) {
+            if document_enabled(*domain, policy) {
                 enabled |= 1 << i;
             }
         }
@@ -117,7 +135,7 @@ impl DocumentSyncCursor {
     }
 }
 
-const DOMAINS: [AccountDocumentDomain; 7] = [
+const DOMAINS: [AccountDocumentDomain; 8] = [
     AccountDocumentDomain::Draft,
     AccountDocumentDomain::ReadReceipt,
     AccountDocumentDomain::CustomizationPack,
@@ -125,6 +143,7 @@ const DOMAINS: [AccountDocumentDomain; 7] = [
     AccountDocumentDomain::DmReaction,
     AccountDocumentDomain::DmRecall,
     AccountDocumentDomain::ChannelCustody,
+    AccountDocumentDomain::GroupInventory,
 ];
 fn category(domain: AccountDocumentDomain) -> SyncCategory {
     match domain {
@@ -132,9 +151,15 @@ fn category(domain: AccountDocumentDomain) -> SyncCategory {
         | AccountDocumentDomain::ReadReceipt
         | AccountDocumentDomain::DmReaction
         | AccountDocumentDomain::DmRecall
-        | AccountDocumentDomain::ChannelCustody => SyncCategory::History,
+        | AccountDocumentDomain::ChannelCustody
+        | AccountDocumentDomain::GroupInventory => SyncCategory::History,
         _ => SyncCategory::Appearance,
     }
+}
+/// Group inventory follows the mandatory account directory contract. Optional
+/// message/history and appearance domains retain their existing policy gates.
+fn document_enabled(domain: AccountDocumentDomain, policy: super::super::DeviceSyncPolicy) -> bool {
+    domain == AccountDocumentDomain::GroupInventory || policy.enabled(category(domain))
 }
 fn failure() -> NodeError {
     NodeError::Channel("invalid account document exchange".into())
@@ -153,7 +178,7 @@ impl Node {
             return false;
         }
         let (policy, revision) = self.device_sync_policy_snapshot();
-        let enabled = policy.enabled(category(request.domain));
+        let enabled = document_enabled(request.domain, policy);
         let domain = request.domain;
         let after = request.after;
         let known = request.known_digest;
@@ -280,6 +305,7 @@ impl Node {
             return Ok(());
         }
         cursor.error = None;
+        cursor.error_domain = None;
         if cursor
             .custody_retry_at
             .is_some_and(|at| at <= Instant::now())
@@ -292,16 +318,25 @@ impl Node {
         {
             cursor.control_retry_at = None;
         }
+        if cursor
+            .inventory_retry_at
+            .is_some_and(|at| at <= Instant::now())
+        {
+            cursor.inventory_retry_at = None;
+        }
         let policy = self.device_sync_policy();
+        let mut eligible = false;
         for _ in 0..DOMAINS.len() {
             if ((4..6).contains(&cursor.domain) && cursor.control_retry_at.is_some())
                 || (cursor.domain == 6 && cursor.custody_retry_at.is_some())
+                || (cursor.domain == 7 && cursor.inventory_retry_at.is_some())
             {
                 cursor.domain = (cursor.domain + 1) % DOMAINS.len();
                 cursor.after = None;
                 continue;
             }
-            if policy.enabled(category(DOMAINS[cursor.domain])) {
+            if document_enabled(DOMAINS[cursor.domain], policy) {
+                eligible = true;
                 break;
             }
             cursor.visited |= 1 << cursor.domain;
@@ -309,8 +344,8 @@ impl Node {
             cursor.domain = (cursor.domain + 1) % DOMAINS.len();
             cursor.after = None;
         }
-        if !policy.history && !policy.appearance {
-            cursor.up_to_date = true;
+        if !eligible {
+            cursor.up_to_date = false;
             cursor.pending = false;
             return Ok(());
         }
@@ -318,6 +353,7 @@ impl Node {
         let result = self.pull_document_exchange(peer, cursor).await;
         if result.is_err()
             && match attempted_domain {
+                AccountDocumentDomain::GroupInventory => cursor.inventory_retry_at.is_some(),
                 AccountDocumentDomain::ChannelCustody => cursor.custody_retry_at.is_some(),
                 AccountDocumentDomain::DmReaction | AccountDocumentDomain::DmRecall => {
                     cursor.control_retry_at.is_some()
@@ -335,6 +371,7 @@ impl Node {
             if cursor.retry_at.is_none_or(|at| at <= Instant::now()) {
                 cursor.retry_at = Some(Instant::now() + Duration::from_secs(5));
                 cursor.error = Some("account document exchange interrupted".into());
+                cursor.error_domain = Some(attempted_domain);
             }
         }
         result
@@ -348,6 +385,7 @@ impl Node {
         let (_, revision) = self.device_sync_policy_snapshot();
         let request = DocumentRequest {
             version: match domain {
+                AccountDocumentDomain::GroupInventory => 4,
                 AccountDocumentDomain::ChannelCustody => 3,
                 AccountDocumentDomain::DmReaction | AccountDocumentDomain::DmRecall => 2,
                 _ => 1,
@@ -372,7 +410,9 @@ impl Node {
                 if request.version >= 2
                     && matches!(&error,NodeError::Session(super::super::session::SessionError::Transport(TransportError::Io(e))) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe))
                 {
-                    if request.version == 3 {
+                    if request.version == 4 {
+                        cursor.inventory_unavailable();
+                    } else if request.version == 3 {
                         cursor.custody_unavailable();
                     } else {
                         cursor.controls_unavailable();
@@ -399,7 +439,9 @@ impl Node {
                 Err(error) => {
                     let pre_reply_close = matches!(&error,TransportError::Io(e) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe));
                     if request.version >= 2 && pre_reply_close {
-                        if request.version == 3 {
+                        if request.version == 4 {
+                            cursor.inventory_unavailable();
+                        } else if request.version == 3 {
                             cursor.custody_unavailable();
                         } else {
                             cursor.controls_unavailable();
@@ -420,6 +462,10 @@ impl Node {
             match frame {
                 AccountHistoryFrame::DocumentHeader { body } => {
                     cursor.supported = true;
+                    if request.version == 4 {
+                        cursor.inventory_retry_at = None;
+                        cursor.inventory_upgrade = false;
+                    }
                     if request.version == 3 {
                         cursor.custody_retry_at = None;
                         cursor.custody_upgrade = false;
@@ -468,6 +514,10 @@ impl Node {
                 }
                 AccountHistoryFrame::DocumentsComplete { body } => {
                     cursor.supported = true;
+                    if request.version == 4 {
+                        cursor.inventory_retry_at = None;
+                        cursor.inventory_upgrade = false;
+                    }
                     if request.version == 3 {
                         cursor.custody_retry_at = None;
                         cursor.custody_upgrade = false;
@@ -526,7 +576,10 @@ impl Node {
                         };
                         cursor.domain = (cursor.domain + 1) % DOMAINS.len();
                     }
-                    let mut supported_mask = 127u8;
+                    let mut supported_mask = 255u8;
+                    if cursor.inventory_retry_at.is_some() {
+                        supported_mask &= !128;
+                    }
                     if cursor.control_retry_at.is_some() {
                         supported_mask &= !48;
                     }
@@ -538,7 +591,8 @@ impl Node {
                     cursor.up_to_date = cursor.settled & supported_mask == supported_mask
                         && cursor.remotely_disabled == 0
                         && !cursor.requires_upgrade
-                        && !cursor.custody_upgrade;
+                        && !cursor.custody_upgrade
+                        && !cursor.inventory_upgrade;
                     cursor.retry_at = None;
                     cursor.error = None;
                     channel.recycle(self);
@@ -560,7 +614,7 @@ impl Node {
             let _commit = node.account_sync_commit.lock().expect("sync commit mutex");
             let (policy, current) = node.device_sync_policy_snapshot();
             if current != revision
-                || !policy.enabled(meta.key.category())
+                || !document_enabled(meta.key.domain(), policy)
                 || !node.certified_sibling(&peer)
             {
                 return Err(NodeError::Authorization(
@@ -619,7 +673,7 @@ mod status_tests {
             ..policy
         };
         let status = cursor.status(off);
-        assert_eq!(status.0, SyncPhase::Disabled);
+        assert_eq!(status.0, SyncPhase::CatchingUp);
         assert!(!status.2);
         assert!(status.1.is_none());
     }
