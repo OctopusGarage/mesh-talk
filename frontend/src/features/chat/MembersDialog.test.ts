@@ -850,3 +850,67 @@ it("does not infer management from account roster identity or matching display n
   const html = renderToStaticMarkup(createElement(MembersDialog));
   expect(html).not.toContain('data-testid="dissolve-channel-trigger"');
 });
+
+it("shows a partial reference roster count without membership controls or invented presence", () => {
+  chatState.channels = [
+    {
+      channel_id: "channel",
+      name: "Group",
+      owner: "owner-device",
+      member_count: 256,
+      shared_reference: true,
+      reference_members_complete: false,
+      can_manage: true,
+    },
+  ];
+  const html = renderToStaticMarkup(createElement(MembersDialog));
+  expect(html).toContain("256 members");
+  expect(html).toContain("Only known members are shown");
+  for (const text of [
+    "dissolve-channel-trigger",
+    "Disable replica",
+    "Leave channel",
+    "Add member",
+    "Updating member presence",
+    "known online",
+  ])
+    expect(html).not.toContain(text);
+});
+
+it("retires a pending removal when the same group becomes shared information", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  chatState.members = [
+    ...defaultMembers,
+    { user_id: "peer-device", account_id: "peer-account", name: "Alice" },
+  ];
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="member-remove-account-peer-account"]',
+        )!
+        .click(),
+    );
+    expect(container.textContent).toContain("Remove Alice");
+    chatState.channels = [
+      {
+        channel_id: "channel",
+        name: "Group",
+        owner: "owner-device",
+        member_count: 2,
+        shared_reference: true,
+        can_manage: true,
+      },
+    ];
+    await act(async () => root.render(createElement(MembersDialog)));
+    expect(container.textContent).not.toContain("Remove Alice");
+    expect(container.textContent).not.toContain("Transfer ownership");
+    expect(chatState.removeMemberAccount).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    vi.unstubAllGlobals();
+  }
+});

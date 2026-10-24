@@ -31,8 +31,7 @@ interface AttachmentSendOptions extends ProtectionPolicy {
   onHandoff?: () => void;
 }
 
-function writable() {
-  const { active, channels } = useChat.getState();
+function writable({ active, channels } = useChat.getState()) {
   return (
     !!active &&
     !(
@@ -40,7 +39,8 @@ function writable() {
       channels.some(
         (channel) =>
           channel.channel_id === active.id &&
-          (channel.archived ||
+          (channel.shared_reference ||
+            channel.archived ||
             channel.dissolved ||
             channel.left ||
             channel.pending_invite),
@@ -297,7 +297,8 @@ export function useAttachmentIntake(
       if (
         key !== previousKey ||
         state.runEpoch !== previous.runEpoch ||
-        state.identityEpoch !== previous.identityEpoch
+        state.identityEpoch !== previous.identityEpoch ||
+        (writable(previous) && !writable(state))
       ) {
         conversationEpoch.current++;
         setScreenshot(null);

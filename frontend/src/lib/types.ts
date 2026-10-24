@@ -137,6 +137,10 @@ export interface ChannelRecovery {
   checked_at?: number | null;
 }
 export interface ChannelInfo {
+  /** Informational account inventory; never grants membership or management. */
+  shared_reference?: boolean;
+  legacy_membership?: boolean;
+  reference_members_complete?: boolean;
   /** Native authorization; false overrides legacy device ownership. */
   can_manage?: boolean;
   owner_account_id?: string | null;

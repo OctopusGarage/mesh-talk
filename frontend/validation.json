@@ -8,14 +8,25 @@
         "frontend/src/features/chat/sidebar/conversationList.ts",
         "frontend/src/features/chat/sidebar/conversationList.test.ts",
         "frontend/src/features/chat/ConversationHeaders.tsx",
+        "frontend/src/features/chat/ConversationHeaders.test.ts",
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/MembersDialog.test.ts",
+        "frontend/src/features/chat/channelPermissions.ts",
+        "frontend/src/features/chat/channelPermissions.test.ts",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
         "frontend/e2e/group-sync.spec.ts"
       ],
       "frontend": [
         "src/features/chat/sidebar/conversationList.test.ts",
         "src/features/chat/Sidebar.test.ts",
+        "src/features/chat/ConversationHeaders.test.ts",
+        "src/features/chat/ConversationHeadersSession.test.ts",
+        "src/features/chat/MembersDialog.test.ts",
+        "src/components/GroupAvatar.test.ts",
         "src/features/chat/channelPermissions.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts",
         "src/store/channelRefresh.test.ts"
       ],
       "capability": {
@@ -23,11 +34,11 @@
         "guide": "docs/help/topics/channels.md#groups-across-your-devices",
         "invariants": [
           {
-            "name": "Distinct case-sensitive group IDs remain separate; reference-only rows retain read-only controls and an honest group-format explanation.",
+            "name": "Different group IDs remain separate even when names differ only in letter case; reference-only rows retain read-only controls and an honest group-format explanation.",
             "reference": "docs/help/topics/channels.md#groups-across-your-devices"
           },
           {
-            "name": "Bounded member snapshots disclose incompleteness and never invent owner or self permissions; missing native fields preserve older hosts.",
+            "name": "Bounded member snapshots disclose incompleteness and never invent owner or self permissions; missing native fields preserve older hosts. Reference state retires pending member actions and attachment intake, including asynchronous staging.",
             "reference": "docs/module-boundaries.md#account-document-projections"
           }
         ]

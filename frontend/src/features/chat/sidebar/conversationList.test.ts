@@ -96,3 +96,42 @@ it("deduplicates people across devices, excludes relays and self, and keeps hidd
     onlinePeople: 0,
   });
 });
+
+it.each([false, true])(
+  "preserves case-distinct group IDs in pinned=%s lists and prioritizes shared information",
+  (pinned) => {
+    const list = conversationList(
+      [],
+      [
+        channel("Labali", {
+          name: "Labali",
+          shared_reference: true,
+          archived: true,
+          dissolved: true,
+          left: true,
+          pending_invite: true,
+        }),
+        channel("labali", { name: "labali" }),
+      ],
+      pinned
+        ? {
+            Labali: { pinned: true, custom_alias: null },
+            labali: { pinned: true, custom_alias: null },
+          }
+        : {},
+      i18n.getFixedT("en"),
+    );
+    const rows = pinned ? list.pinnedRows : list.channelRows;
+    expect(rows.map((row) => row.id)).toEqual(["Labali", "labali"]);
+    expect(rows[0].subtitle).toBe("Shared group information");
+    expect(rows[0].prioritizeSubtitle).toBe(true);
+    const actual = conversationList(
+      [],
+      [channel("Labali")],
+      {},
+      i18n.getFixedT("en"),
+    );
+    expect(actual.channelRows).toHaveLength(1);
+    expect(actual.channelRows[0].subtitle).toBe("3 members");
+  },
+);

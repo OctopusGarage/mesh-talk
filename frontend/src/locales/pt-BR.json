@@ -269,7 +269,10 @@
     "markConversationRead": "Marcar conversa como lida",
     "peerChecked": "Um membro disponível foi consultado",
     "peerCheckedDetail": "Última consulta a um membro acessível: {{time}}. Membros offline podem ter mais mensagens.",
-    "moreUnread": "Mais mensagens não lidas"
+    "moreUnread": "Mais mensagens não lidas",
+    "sharedReference": "Informações compartilhadas do grupo",
+    "sharedReferenceHint": "Um dispositivo vinculado compartilhou estas informações do grupo. Mensagens e controles de participação exigem um estado do grupo verificado neste dispositivo.",
+    "legacySharedReferenceHint": "Este grupo usa um formato de participação anterior. Enviar mensagens exige uma atualização do formato do grupo e da participação da conta; estas informações não concedem participação."
   },
   "presence": {
     "onlineWeak": "Online · conexão lenta",
@@ -904,7 +907,8 @@
     "transferBeforeLeave": "Transfira a propriedade para outro membro antes de sair deste canal.",
     "devices": "Dispositivos ({{count}})",
     "deviceIdentity": "Dispositivo {{id}}",
-    "addLinkedDevice": "Adicionar dispositivo vinculado"
+    "addLinkedDevice": "Adicionar dispositivo vinculado",
+    "referencePartial": "Apenas membros conhecidos são exibidos. Esta lista compartilhada é parcial devido aos limites de tamanho."
   },
   "createChannel": {
     "trigger": "Novo canal",

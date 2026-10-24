@@ -120,3 +120,23 @@ it("shows the active account's About text with a full-text title and never anoth
     ),
   ).not.toContain("Long personal");
 });
+
+it("uses known reference member count without inventing presence or old lifecycle claims", () => {
+  const html = renderToStaticMarkup(
+    createElement(ChannelHeader, {
+      id: "group",
+      name: "Study",
+      memberCount: 256,
+      sharedReference: true,
+      archived: true,
+      dissolved: true,
+      left: true,
+      pendingInvite: true,
+    }),
+  );
+  expect(html).toContain("Shared group information");
+  expect(html).toContain("256 members");
+  expect(html).not.toContain("online");
+  expect(html).not.toContain("Updating");
+  expect(html).not.toContain("Dissolved");
+});

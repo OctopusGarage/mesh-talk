@@ -269,7 +269,10 @@
     "markConversationRead": "将会话标为已读",
     "peerChecked": "已检查可连接的成员",
     "peerCheckedDetail": "上次检查可连接的成员：{{time}}。离线成员可能还有其他消息。",
-    "moreUnread": "还有更多未读消息"
+    "moreUnread": "还有更多未读消息",
+    "sharedReference": "共享的群组信息",
+    "sharedReferenceHint": "这些群组信息由已关联设备共享。发送消息和管理成员需要本设备获得经过验证的群组状态。",
+    "legacySharedReferenceHint": "此群组使用较早的成员格式。发送消息需要更新群组格式与账号成员资格；这些信息不授予成员资格。"
   },
   "presence": {
     "onlineWeak": "在线 · 连接较慢",
@@ -904,7 +907,8 @@
     "transferBeforeLeave": "退出前请先将群主转让给其他成员。",
     "devices": "设备（{{count}} 台）",
     "deviceIdentity": "设备 {{id}}",
-    "addLinkedDevice": "添加关联设备"
+    "addLinkedDevice": "添加关联设备",
+    "referencePartial": "仅显示已知成员。受大小限制，此共享成员列表并不完整。"
   },
   "createChannel": {
     "trigger": "新建频道",

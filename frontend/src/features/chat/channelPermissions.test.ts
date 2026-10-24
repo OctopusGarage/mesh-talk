@@ -22,3 +22,12 @@ it("falls back to exact legacy device ownership only when the new field is absen
   expect(canManageChannel({ owner: "" }, "")).toBe(false);
   expect(canManageChannel(undefined, "me")).toBe(false);
 });
+
+it("denies shared-reference authority even when stale native or owner flags grant it", () => {
+  expect(
+    canManageChannel(
+      { owner: "me", can_manage: true, shared_reference: true },
+      "me",
+    ),
+  ).toBe(false);
+});

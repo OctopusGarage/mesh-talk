@@ -269,7 +269,10 @@
     "markConversationRead": "Mark conversation as read",
     "peerChecked": "Checked an available member",
     "peerCheckedDetail": "Last checked a reachable member: {{time}}. Offline members may have more messages.",
-    "moreUnread": "More unread messages"
+    "moreUnread": "More unread messages",
+    "sharedReference": "Shared group information",
+    "sharedReferenceHint": "This group information was shared by a linked device. Messaging and membership controls require verified group state on this device.",
+    "legacySharedReferenceHint": "This group uses an earlier membership format. Messaging requires a group-format and account-membership update; this information does not grant membership."
   },
   "presence": {
     "onlineWeak": "Online · slow connection",
@@ -904,7 +907,8 @@
     "transferBeforeLeave": "Transfer ownership to another member before you leave this channel.",
     "devices": "Devices ({{count}})",
     "deviceIdentity": "Device {{id}}",
-    "addLinkedDevice": "Add linked device"
+    "addLinkedDevice": "Add linked device",
+    "referencePartial": "Only known members are shown. This shared roster is partial because of size limits."
   },
   "createChannel": {
     "trigger": "New channel",

@@ -269,7 +269,10 @@
     "markConversationRead": "將對話標為已讀",
     "peerChecked": "已檢查連到線嘅成員",
     "peerCheckedDetail": "上次檢查連到線嘅成員：{{time}}。離線成員可能仲有其他訊息。",
-    "moreUnread": "仲有更多未讀訊息"
+    "moreUnread": "仲有更多未讀訊息",
+    "sharedReference": "共享嘅群組資訊",
+    "sharedReferenceHint": "呢啲群組資訊由已連結裝置共享。傳送訊息同管理成員需要本裝置取得經過驗證嘅群組狀態。",
+    "legacySharedReferenceHint": "呢個群組用緊較早嘅成員格式。傳送訊息需要更新群組格式同帳號成員資格；呢啲資訊唔會授予成員資格。"
   },
   "presence": {
     "onlineWeak": "在線 · 連線較慢",
@@ -904,7 +907,8 @@
     "transferBeforeLeave": "退出前請先將群主轉畀其他成員。",
     "devices": "裝置（{{count}} 部）",
     "deviceIdentity": "裝置 {{id}}",
-    "addLinkedDevice": "加入已連結裝置"
+    "addLinkedDevice": "加入已連結裝置",
+    "referencePartial": "只顯示已知成員。受大小限制，呢份共享成員清單並唔完整。"
   },
   "createChannel": {
     "trigger": "建立新頻道",

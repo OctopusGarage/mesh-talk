@@ -269,7 +269,10 @@
     "markConversationRead": "会話を既読にする",
     "peerChecked": "接続可能なメンバーを確認済み",
     "peerCheckedDetail": "接続可能なメンバーの最終確認: {{time}}。オフラインのメンバーに他のメッセージがある可能性があります。",
-    "moreUnread": "他にも未読メッセージがあります"
+    "moreUnread": "他にも未読メッセージがあります",
+    "sharedReference": "共有されたグループ情報",
+    "sharedReferenceHint": "リンク済みデバイスから共有されたグループ情報です。メッセージ送信とメンバー管理には、このデバイスで検証済みのグループ状態が必要です。",
+    "legacySharedReferenceHint": "このグループは以前のメンバーシップ形式を使用しています。メッセージ送信にはグループ形式とアカウントのメンバーシップの更新が必要です。この情報だけではメンバーになりません。"
   },
   "presence": {
     "onlineWeak": "オンライン · 低速接続",
@@ -904,7 +907,8 @@
     "transferBeforeLeave": "退出する前に、別のメンバーへオーナー権限を移してください。",
     "devices": "デバイス（{{count}}台）",
     "deviceIdentity": "デバイス {{id}}",
-    "addLinkedDevice": "リンク済みデバイスを追加"
+    "addLinkedDevice": "リンク済みデバイスを追加",
+    "referencePartial": "既知のメンバーのみ表示しています。サイズ制限により、共有された名簿は一部のみです。"
   },
   "createChannel": {
     "trigger": "新しいチャンネル",

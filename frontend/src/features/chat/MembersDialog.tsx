@@ -76,6 +76,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const channel = useChat((s) =>
     s.channels?.find((item) => item.channel_id === channelId),
   );
+  const sharedReference = channel?.shared_reference === true;
   const authority = {
     ...channel,
     owner: channelOwner,
@@ -142,7 +143,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     setConfirming(null);
     setConfirmLeave(null);
     setActivitySnapshot(null);
-  }, [active?.id]);
+  }, [active?.id, sharedReference]);
   useEffect(() => {
     if (!open || active?.kind !== "channel") return;
     let live = true;
@@ -164,7 +165,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     return () => {
       live = false;
     };
-  }, [open, active?.id, active?.kind]);
+  }, [open, active?.id, active?.kind, sharedReference]);
   useEffect(() => {
     if (!open || active?.kind !== "channel") return;
     let live = true;
@@ -270,6 +271,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
       isSelf && replicaOverride !== null
         ? replicaOverride
         : m.replica_enabled !== false;
+    if (sharedReference) return null;
     return (
       <>
         {m.pending && (
@@ -433,21 +435,39 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle className="flex items-baseline gap-2">
+          <DialogTitle className="flex min-w-0 flex-wrap items-baseline gap-2">
             {t("members.title")}
             <span className="font-display text-base font-normal tabular-nums text-muted-foreground">
-              {channelId && presenceMap[channelId]?.member_count != null
-                ? t("presence.groupSummary", {
-                    total: presenceMap[channelId].member_count,
-                    online: presenceMap[channelId].online_count ?? 0,
+              {sharedReference
+                ? t("conversation.members", {
+                    count: channel?.member_count ?? 0,
                   })
-                : t("presence.groupUpdating")}
+                : channelId && presenceMap[channelId]?.member_count != null
+                  ? t("presence.groupSummary", {
+                      total: presenceMap[channelId].member_count,
+                      online: presenceMap[channelId].online_count ?? 0,
+                    })
+                  : t("presence.groupUpdating")}
             </span>
           </DialogTitle>
-          <DialogDescription>{t("members.description")}</DialogDescription>
-          <p className="text-xs text-muted-foreground">
-            {t("members.replicaHelp")}
-          </p>
+          <DialogDescription>
+            {t(
+              sharedReference
+                ? "conversation.sharedReference"
+                : "members.description",
+            )}
+          </DialogDescription>
+          {sharedReference ? (
+            channel?.reference_members_complete === false && (
+              <p className="text-xs text-muted-foreground">
+                {t("members.referencePartial")}
+              </p>
+            )
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {t("members.replicaHelp")}
+            </p>
+          )}
           {replicaError && (
             <p role="alert" className="text-sm text-destructive">
               {t("members.replicaError")}
@@ -455,7 +475,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
           )}
         </DialogHeader>
 
-        {open && channelId && (
+        {!sharedReference && open && channelId && (
           <ChannelHistorySettings
             channelId={channelId}
             channelOwner={channelOwner}
@@ -699,7 +719,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             {t("members.dissolve")}
           </Button>
         )}
-        {pendingRemoval?.channelId === channelId && (
+        {!sharedReference && pendingRemoval?.channelId === channelId && (
           <div className="space-y-3 rounded-lg border border-destructive/30 p-3">
             <p className="break-words text-sm" role="status">
               {t("members.confirmRemove", { name: pendingRemoval.name })}
@@ -722,7 +742,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             </div>
           </div>
         )}
-        {pendingTransfer?.channelId === channelId && (
+        {!sharedReference && pendingTransfer?.channelId === channelId && (
           <div className="space-y-3 rounded-lg border p-3">
             <p className="break-words text-sm" role="status">
               {t("members.confirmTransfer", { name: pendingTransfer.name })}
@@ -785,7 +805,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             />
           </div>
         )}
-        {activity.length > 0 && (
+        {!sharedReference && activity.length > 0 && (
           <div className="space-y-2 border-t pt-3">
             <h3 className="text-xs font-semibold text-muted-foreground">
               {t("members.activity")}
@@ -836,7 +856,15 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
           </div>
         )}
         <div className="border-t pt-3">
-          {dissolved ? (
+          {sharedReference ? (
+            <p className="text-xs text-muted-foreground">
+              {t(
+                channel?.legacy_membership
+                  ? "conversation.legacySharedReferenceHint"
+                  : "conversation.sharedReferenceHint",
+              )}
+            </p>
+          ) : dissolved ? (
             <p className="text-xs text-muted-foreground">
               {t("conversation.dissolvedChannelHint")}
             </p>
