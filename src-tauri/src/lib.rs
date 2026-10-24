@@ -184,7 +184,14 @@ pub fn run_tauri_configured(
     // Extensions come after single-instance, which must remain the first plugin.
     extend(builder)
         // Restore window size/position across launches (clamps off-screen geometry).
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        & !tauri_plugin_window_state::StateFlags::VISIBLE,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -273,15 +280,12 @@ pub fn run_tauri_configured(
                 }
             }
 
-            // The window is created hidden in `tauri.conf.json`, then explicitly shown only
-            // for normal launches. This avoids a visible flash on Windows autostart where a
-            // visible window would otherwise be created first and hidden later in setup.
-            if !std::env::args().any(|a| a == "--hidden")
-                && let Some(window) = app.get_webview_window("main")
-            {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            // Keep the initial window hidden until its safe/authorized surface
+            // is decoded. Explicit tray/single-instance visibility still wins.
+            crate::window_visibility::defer_initial_presentation(
+                app.handle(),
+                !std::env::args().any(|argument| argument == "--hidden"),
+            );
 
             #[cfg(debug_assertions)]
             if configured_data_root().is_none() {
@@ -297,6 +301,7 @@ pub fn run_tauri_configured(
         // Close-to-tray: if "minimize to tray" is on, hide instead of exiting so the
         // node runtime stays alive and keeps receiving. Quit (tray menu) is the real exit.
         .on_window_event(|window, event| {
+            crate::window_visibility::observe_window_event(window, event);
             if let WindowEvent::CloseRequested { api, .. } = event
                 && window.label() == "main"
             {
@@ -311,6 +316,9 @@ pub fn run_tauri_configured(
                 }
             }
         })
+        .manage(crate::window_visibility::InitialPresentation::new(
+            !std::env::args().any(|argument| argument == "--hidden"),
+        ))
         .manage(app_state.app_lock().clone())
         .manage(app_state)
         .manage(settings_state)
@@ -323,6 +331,7 @@ pub fn run_tauri_configured(
         .manage(crate::google_drive::DriveState::default())
         .invoke_handler({
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                crate::window_visibility::initial_presentation_ready,
                 owner_commands::owner_node_identity,
                 owner_commands::owner_startup_identity,
                 owner_commands::owner_enqueue_text,

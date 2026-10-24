@@ -308,7 +308,9 @@
     }
   }
 
-  html[data-palette]:not([data-wallpaper="off"]) [data-testid="chat-shell"] {
+  html[data-palette]:not([data-wallpaper="off"])
+    [data-appearance-ready]
+    :is([data-testid="chat-shell"], [data-appearance-canvas]) {
     background-position: center;
     background-repeat: no-repeat;
     background-size: cover;
@@ -326,7 +328,9 @@
     background-color: hsl(var(--conversation-surface));
   }
 
-  html[data-pack-theme]:not([data-wallpaper="off"]) [data-testid="chat-shell"] {
+  html[data-pack-theme]:not([data-wallpaper="off"])
+    [data-appearance-ready]
+    :is([data-testid="chat-shell"], [data-appearance-canvas]) {
     background-image:
       linear-gradient(
         hsl(var(--background) / 0.44),
@@ -336,7 +340,8 @@
   }
 
   html[data-pack-theme][data-palette="argentina"]:not([data-wallpaper="off"])
-    [data-testid="chat-shell"] {
+    [data-appearance-ready]
+    :is([data-testid="chat-shell"], [data-appearance-canvas]) {
     background-image:
       radial-gradient(
         125% 92% at 50% 34%,
@@ -352,7 +357,8 @@
   }
 
   html[data-pack-theme][data-palette="barcelona"]:not([data-wallpaper="off"])
-    [data-testid="chat-shell"] {
+    [data-appearance-ready]
+    :is([data-testid="chat-shell"], [data-appearance-canvas]) {
     background-image:
       radial-gradient(
         125% 90% at 50% 32%,
@@ -368,7 +374,8 @@
   }
 
   html[data-pack-theme][data-palette="messi"]:not([data-wallpaper="off"])
-    [data-testid="chat-shell"] {
+    [data-appearance-ready]
+    :is([data-testid="chat-shell"], [data-appearance-canvas]) {
     background-image:
       radial-gradient(
         125% 92% at 50% 34%,
@@ -384,7 +391,8 @@
   }
 
   html[data-pack-theme][data-palette="nature"]:not([data-wallpaper="off"])
-    [data-testid="chat-shell"] {
+    [data-appearance-ready]
+    :is([data-testid="chat-shell"], [data-appearance-canvas]) {
     background-image:
       linear-gradient(
         hsl(var(--background) / 0.4),
@@ -394,7 +402,8 @@
   }
 
   html[data-pack-theme][data-palette="cat-acrylic"]:not([data-wallpaper="off"])
-    [data-testid="chat-shell"] {
+    [data-appearance-ready]
+    :is([data-testid="chat-shell"], [data-appearance-canvas]) {
     background-image:
       linear-gradient(
         hsl(var(--background) / 0.38),

@@ -115,6 +115,21 @@ identifier. A temporary readiness failure retains the same account's restored
 appearance. Logout, account adoption or session replacement revokes the old
 scope and its wallpaper CSS, including delayed cache reads.
 
+The application root owns authenticated runtime and appearance startup before the
+chat view is downloaded. Its startup canvas uses the same wallpaper composition
+as chat and renders private images only for the matching unlocked user, account
+and runtime session.
+
+Normal native launches keep the initial window hidden until that authorized
+surface and selected local wallpaper are ready for display. The pack owner
+records when the selected-theme lookup has settled for the current scope; this
+permits display while unrelated gallery enumeration continues. Storage without
+that lookup retains full-library completion as a fallback.
+Signed-out and locked launches prepare their public entry surfaces. A one-shot
+native fallback preserves startup liveness; hidden autostart and explicit user
+visibility choices remain authoritative. Full message-store readiness and remote
+account synchronization do not delay a locally prepared appearance.
+
 ## Marketplace publishing
 
 [OctopusGarage/marketplace](https://github.com/OctopusGarage/marketplace) owns the shared pack specification, validator, creator Studio, source artwork, catalog, and immutable versioned ZIPs. Its GitHub Pages site hosts the public catalog at `https://octopusgarage.github.io/marketplace/catalog.json`. A listing gives the app ID, version, type, supported apps, ZIP size and SHA-256. Mesh Talk checks the catalog path, size, hash, and manifest identity before installing. The catalog currently lists 15 packs; artwork rights review status is marked `pending` for migrated packs and must be checked before reuse elsewhere.

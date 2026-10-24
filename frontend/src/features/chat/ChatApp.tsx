@@ -20,7 +20,6 @@ import { useAuth } from "@/store/auth";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { usePrivacy } from "@/store/privacy";
 import { ease, useMotionOK } from "@/lib/motion";
-import { startLinkedAppearance } from "@/lib/linkedAppearance";
 import { startLinkedContacts } from "@/lib/linkedContacts";
 import { useDrafts } from "@/store/drafts";
 import { startLinkedReadReceipts } from "@/lib/linkedReadReceipts";
@@ -32,7 +31,6 @@ export function ChatApp() {
   const recoveryFocus = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
   const motionOK = useMotionOK();
-  const start = useChat((s) => s.start);
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
   const draftError = useDrafts((s) => s.error);
@@ -78,19 +76,6 @@ export function ChatApp() {
       usePrivacy.getState().reset();
     };
   }, [owner, generation]);
-  useEffect(() => {
-    // Appearance belongs to the verified account lifetime. A transient node
-    // readiness failure must not discard its already restored private assets.
-    if (owner && accountId && unreadOwner === owner)
-      return startLinkedAppearance(owner);
-  }, [
-    owner,
-    generation,
-    unreadOwner,
-    accountId,
-    presenceRun,
-    presenceIdentity,
-  ]);
   useEffect(() => {
     if (owner && ready && accountId) return startLinkedContacts(owner);
   }, [owner, generation, ready, accountId, presenceRun, presenceIdentity]);
@@ -187,12 +172,6 @@ export function ChatApp() {
       cancelAnimationFrame(focusFrame);
     };
   }, [totalUnread, owner, generation, markLegacyActiveRead]);
-
-  useEffect(() => {
-    if (!owner) return;
-    const stop = start();
-    return stop;
-  }, [start, owner, generation]);
 
   useEffect(() => {
     if (owner && ready) return startAutomaticDownloads();

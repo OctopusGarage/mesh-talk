@@ -1138,6 +1138,30 @@ roots and a dev-only embedded WebDriver. The normal entry point has no driver pl
 storage override. Three-platform native scenarios and the usability rubric are documented
 in [platform validation](platform-validation.md).
 
+### Initial native presentation
+
+The application root starts the existing authenticated runtime and account-scoped
+appearance coordinators before loading the chat view. Startup and chat share
+wallpaper composition; synchronous owner, account, runtime-session and lock checks
+conceal retired images before asynchronous cleanup.
+
+The native main window starts hidden. Its visibility owner accepts one renderer
+acknowledgement after a safe entry surface or verified local appearance and decoded
+selected image have a committed layout. The pack owner publishes selected-theme
+preparation under its current scope/session, so unrelated library enumeration
+does not hold the initial window. Full-library completion remains a storage
+fallback when point lookup is unavailable or fails. This preparation does
+not await full node readiness or remote peers. Hidden webviews use a layout/timer
+boundary because animation frames may be suspended before mapping.
+
+The same native owner supplies a ten-second fault fallback for normal launches.
+Both paths claim the pending show on the native main thread. Explicit visibility
+and close/minimize choices retire it, preventing delayed focus or redisplay.
+Hidden autostart never arms an automatic show. The window-state plugin restores
+geometry and decorations without restoring visibility. Presentation IPC is
+allowed for the locked entry screen, targets only the main window, and admits no
+account data or runtime operation.
+
 ### Recent search references
 
 The opt-in core `Node::search_recent` query returns `RecentSearchResults`: matches

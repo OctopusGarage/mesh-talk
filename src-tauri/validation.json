@@ -168,7 +168,7 @@
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
         "invariants": [
           {
-            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device\u2019s draft",
+            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device’s draft",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
@@ -646,19 +646,36 @@
       "paths": [
         "src-tauri/src/tray.rs",
         "src-tauri/src/window_geometry.rs",
-        "src-tauri/src/window_visibility.rs"
+        "src-tauri/src/window_visibility.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/app_lock.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk",
           "filters": [
             "tray::",
-            "window_geometry::"
+            "window_geometry::",
+            "window_visibility::tests::",
+            "app_lock::tests::locked_commands_allow_only_unlock_and_preferences"
           ]
         }
       ],
       "escalation": [
-        "Tray visibility, window controls and native geometry require focused native platform and browser acceptance."
+        "Verify registered main-window presentation IPC, queued hide/ack/fallback ordering and hidden launch. Preserve X11 placement and geometry; require actual packaged first-visible-frame evidence plus browser image/library readiness and unchanged visuals."
+      ],
+      "capability": {
+        "summary": "Own native placement, explicit visibility and safe one-shot initial presentation without restoring persisted visibility over launch intent.",
+        "guide": "docs/ARCHITECTURE.md#initial-native-presentation",
+        "invariants": [
+          {
+            "name": "Normal initial show waits for an authorized prepared renderer or bounded fault fallback; hidden launch, explicit visibility and queued retirement remain authoritative. Presentation IPC never admits account content.",
+            "reference": "docs/ARCHITECTURE.md#initial-native-presentation"
+          }
+        ]
+      },
+      "consumers": [
+        "frontend-startup-appearance"
       ]
     },
     {

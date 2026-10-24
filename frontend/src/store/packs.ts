@@ -45,6 +45,8 @@ interface PacksState {
   scope: PackScope | null;
   packs: CustomizationPack[];
   loaded: boolean;
+  /** Selected point lookup settled for this exact scope, before full enumeration. */
+  preparedThemeId: string | null;
   setScope(
     owner: string | null,
     account: string | null,
@@ -250,20 +252,29 @@ export function createPacksStore(
       const lease = capture();
       // Only an authenticated account scope can restore private appearance. Read
       // its selected theme without cloning every unrelated gallery asset first.
+      const publicRead = io.publicPacks().then((bundled) => {
+        if (lease.current()) publicSnapshot = bundled;
+        return bundled;
+      });
       const selected =
         lease.scope && selectedThemeId && io.get
           ? io
               .get(lease.scope, selectedThemeId)
-              .then((row) => {
-                if (!lease.current() || get().loaded || !row) return;
+              .then(async (row) => {
+                // An absent private row needs the public snapshot to establish
+                // a bundled selection or its known plain fallback. A private
+                // row (including a tombstone) settles without unrelated assets.
+                if (!row) await publicRead;
+                if (!lease.current() || get().loaded) return;
                 const bundled = publicSnapshot.filter(
-                  (pack) => pack.id !== row.id,
+                  (pack) => pack.id !== row?.id,
                 );
                 set({
                   packs: ordered([
                     ...bundled,
-                    ...(row.pack?.kind === "theme" ? [row.pack] : []),
+                    ...(row?.pack?.kind === "theme" ? [row.pack] : []),
                   ]),
+                  preparedThemeId: selectedThemeId,
                 });
               })
               .catch((error) => {
@@ -274,7 +285,7 @@ export function createPacksStore(
               })
           : Promise.resolve();
       const [bundled, rows] = await Promise.all([
-        io.publicPacks(),
+        publicRead,
         lease.scope ? io.list(lease.scope) : Promise.resolve([]),
         selected,
       ]);
@@ -293,6 +304,7 @@ export function createPacksStore(
       scope: null,
       packs: [],
       loaded: false,
+      preparedThemeId: null,
       setScope(owner, account, session) {
         const previous = get().scope;
         if (
@@ -309,6 +321,7 @@ export function createPacksStore(
           scope: owner && account ? { owner, account, session } : null,
           packs: ordered(publicSnapshot.slice()),
           loaded: false,
+          preparedThemeId: null,
         });
       },
       async load(selectedThemeId) {

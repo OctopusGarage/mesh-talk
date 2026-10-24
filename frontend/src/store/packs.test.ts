@@ -249,6 +249,7 @@ it("restores the selected private theme before unrelated library rows finish loa
     pack.id,
   );
   expect(use.getState().loaded).toBe(false);
+  expect(use.getState().preparedThemeId).toBe(pack.id);
   finish([row]);
   await loading;
   expect(use.getState().loaded).toBe(true);
@@ -278,6 +279,7 @@ it("does not restore a delayed selected theme after the verified account changes
   });
   await loading;
   expect(use.getState().packs).toEqual([]);
+  expect(use.getState().preparedThemeId).toBeNull();
 });
 
 it("keeps full library restoration available when the selected-theme read fails", async () => {
@@ -308,3 +310,42 @@ it("keeps full library restoration available when the selected-theme read fails"
     warning.mockRestore();
   }
 });
+
+it.each(["bundled", "missing", "tombstone"] as const)(
+  "settles a known %s selected-theme result before unrelated rows",
+  async (kind) => {
+    const { io } = memory();
+    const { parsePack } = await import("@/lib/pack");
+    const pack = parsePack(archive("selected.theme"));
+    io.publicPacks = async () => (kind === "missing" ? [] : [pack]);
+    io.get = async () =>
+      kind === "tombstone"
+        ? {
+            id: pack.id,
+            pack: null,
+            archive: null,
+            sequence: 0,
+            pending: false,
+            version: null,
+          }
+        : undefined;
+    let finish!: (rows: StoredPack[]) => void;
+    io.list = () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      });
+    const use = createPacksStore(io);
+    use.getState().setScope("owner", "account", "session");
+    const loading = use.getState().load(pack.id);
+    await vi.waitFor(() =>
+      expect(use.getState().preparedThemeId).toBe(pack.id),
+    );
+    expect(use.getState().loaded).toBe(false);
+    expect(use.getState().packs).toEqual(kind === "bundled" ? [pack] : []);
+    use.getState().setScope("owner", "account", "replacement-session");
+    expect(use.getState().preparedThemeId).toBeNull();
+    finish([]);
+    await loading;
+    expect(use.getState().preparedThemeId).toBeNull();
+  },
+);

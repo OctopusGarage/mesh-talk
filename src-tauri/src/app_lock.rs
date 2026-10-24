@@ -181,7 +181,7 @@ pub fn set_call_active(
 pub fn allowed_while_locked(command: &str) -> bool {
     matches!(
         command,
-        "lock_status" | "unlock_app" | "logout" | "delete_temp_file"
+        "lock_status" | "unlock_app" | "logout" | "delete_temp_file" | "initial_presentation_ready"
     )
 }
 
@@ -360,6 +360,7 @@ mod tests {
     #[test]
     fn locked_commands_allow_only_unlock_and_preferences() {
         assert!(allowed_while_locked("unlock_app"));
+        assert!(allowed_while_locked("initial_presentation_ready"));
         assert!(!allowed_while_locked("account_history"));
         assert!(!allowed_while_locked("read_media"));
         assert!(!allowed_while_locked("owner_enqueue_text"));

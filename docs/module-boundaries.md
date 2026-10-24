@@ -273,6 +273,14 @@ uses the existing account-scoped pack cache, prioritizing the selected theme.
 Transient readiness changes do not retire an unchanged appearance scope; session
 or account replacement clears both the private cache projection and its CSS.
 
+`frontend/src/App.tsx` owns this authenticated lifetime before lazy chat loading.
+`lib/initialPresentation.ts` prepares its authorized image and committed layout;
+it does not choose another account or restore a second theme projection.
+`src-tauri/src/window_visibility.rs` owns one-shot initial presentation, explicit
+visibility precedence and its bounded fallback. Window-state persistence retains
+geometry and decoration, while launch policy owns visibility. A renderer
+acknowledgement is presentation-only and grants no runtime or content authority.
+
 ### Focused validation ownership
 
 Module-owned `validation.json` contracts link these boundaries to development
