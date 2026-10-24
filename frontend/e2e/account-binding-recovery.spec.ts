@@ -1,5 +1,6 @@
 import { test, expect } from "./tauri-mock";
 import { enterChat, openBobDm, BOB } from "./helpers/session";
+import { windowsSnapshotProfile } from "./helpers/visual-snapshot";
 import type { Page } from "@playwright/test";
 import type { AccountBindingChange } from "../src/lib/api/privacy";
 
@@ -120,8 +121,14 @@ test("recipient reviews exact account changes and accepts one device without ver
         (element) => element.scrollWidth <= element.clientWidth,
       ),
     ).toBe(true);
+    // Native UI font metrics change wrapping; retain strict platform references.
+    const profile =
+      process.platform === "win32"
+        ? await windowsSnapshotProfile(recovery.locator("h3"))
+        : process.platform;
+    const suffix = profile === "darwin" ? "" : `-${profile}`;
     await expect(recovery).toHaveScreenshot(
-      `account-binding-recovery-${size}.png`,
+      `account-binding-recovery-${size}${suffix}.png`,
       { animations: "disabled" },
     );
   }
