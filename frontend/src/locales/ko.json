@@ -889,7 +889,18 @@
       "nightlyWarning": "실험적 빌드에는 버그가 있을 수 있습니다. 새 기능을 미리 사용하려면 나이틀리를 선택하세요.",
       "stableHelp": "안정 버전 채널에서는 정식 릴리스를 받습니다. 채널을 변경해도 앱이 자동으로 이전 버전으로 돌아가지는 않습니다.",
       "installed": "설치된 버전: {{version}}",
-      "stableDownload": "안정 버전 직접 다운로드"
+      "stableDownload": "안정 버전 직접 다운로드",
+      "updateAndRestart": "업데이트 후 다시 시작",
+      "restartToUpdate": "다시 시작하여 업데이트",
+      "installing": "업데이트 설치 중…",
+      "restarting": "Mesh-Talk 다시 시작 중…",
+      "automaticHelp": "Mesh-Talk이 업데이트를 설치한 후 다시 시작합니다. 시스템에서 권한을 요청할 수 있습니다.",
+      "readyToRestart": "업데이트가 확인되었습니다. 준비되면 다시 시작하세요.",
+      "downloadManually": "수동으로 다운로드",
+      "finishCall": "업데이트하기 전에 현재 통화를 종료하세요.",
+      "finishTransfers": "업데이트하기 전에 현재 파일 전송을 완료하세요.",
+      "saveDraftsFailed": "초안을 저장하지 못했습니다. 다시 시작하기 전에 다시 시도하세요.",
+      "automaticWindowsHelp": "Windows 설치 프로그램이 Mesh-Talk을 종료하고 업데이트 후 다시 시작합니다. 설치를 취소한 경우 Mesh-Talk을 다시 열어 재시도하세요."
     }
   },
   "offlineConnect": {

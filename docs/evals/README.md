@@ -208,3 +208,19 @@ credential disclosure, evidence is sanitized under `target/ai-eval/local-agent-l
 and test identities never use the real desktop profile or user instruction file.
 A passing send proves durable local acceptance and retry behavior; this fixture
 does not prove delivery to a second device or native settings interaction.
+
+## Desktop updater acceptance
+
+The [desktop updater suite](desktop-updates-ai-eval-suite.json) reviews version-bound
+signatures, device/channel authority, cancellation, private staging, restart preparation
+and the Windows installer handoff. Its contexts include the Windows launch-failure
+regression: the SDK calls its pre-exit hook before ShellExecute can fail, so the
+application must not retire native resources at that point.
+
+```bash
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/desktop-updates-ai-eval-suite.json --report target/ai-eval/desktop-updates-report.json
+```
+
+The score is a source review. Real signed application replacement, authorization
+cancellation, relaunch, persistent data/session restoration and verified hosted
+publication remain separate acceptance requirements in [the update guide](../updates.md).

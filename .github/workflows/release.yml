@@ -67,6 +67,10 @@ jobs:
       attestations: write
     env:
       ARTIFACT_TAG: ${{ needs.preflight.outputs.tag }}
+      # Free updater keys are available only to the existing trusted publication sources.
+      MESH_TALK_UPDATER_PUBLIC_KEY: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/v')) && vars.MESH_TALK_UPDATER_PUBLIC_KEY || '' }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/v')) && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/v')) && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
       MESH_TALK_BUILD_TAG: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/')) && needs.preflight.outputs.tag || format('v{0}-dev', needs.preflight.outputs.version) }}
     strategy:
       fail-fast: false
@@ -158,13 +162,16 @@ jobs:
           npm run build
           npm run check:build-syntax
 
+      - name: Prepare optional signed updater artifacts
+        run: node scripts/release/updater.mjs prepare
+
       # 6️⃣ Build Tauri app
       - name: Build Tauri app
         run: |
           cd src-tauri
           # Local release builds use four codegen units for speed. Ship the
           # smaller single-unit binary on every release target.
-          node ../frontend/node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }} -- --config profile.release.package.mesh-talk.codegen-units=1
+          node ../frontend/node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }} --config ../tmp/updater-build.json -- --config profile.release.package.mesh-talk.codegen-units=1
 
       - name: Build headless post-office node
         run: cargo build --locked --release --target ${{ matrix.target }} -p mesh-talk-core --bin mesh-talk-node
@@ -197,6 +204,9 @@ jobs:
           done
 
           ls -lh release || true
+
+      - name: Collect version-bound updater artifacts
+        run: node scripts/release/updater.mjs collect ${{ matrix.target }}
 
       # 8️⃣ Generate SHA256 checksums
       - name: Generate SHA256 checksums
@@ -298,6 +308,14 @@ jobs:
               zip -r "$ZIP_NAME" release/*.AppImage release/*.deb release/*.rpm release/SHA256SUMS
               ;;
           esac
+
+          # Bind standalone updater bytes and signatures to the same verified ZIP.
+          shopt -s nullglob
+          updater_files=(release/mesh-talk-update_*)
+          if [[ "${#updater_files[@]}" -gt 0 ]]; then
+            zip "$ZIP_NAME" "${updater_files[@]}"
+            cp "${updater_files[@]}" release_zips/
+          fi
 
           BUNDLE_FILE="${ZIP_NAME}.bundle"
           cosign sign-blob --yes --bundle "$BUNDLE_FILE" "$ZIP_NAME"

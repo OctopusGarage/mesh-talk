@@ -447,10 +447,14 @@
     },
     {
       "id": "desktop-updates",
+      "consumers": ["frontend-updates"],
       "paths": [
         "src-tauri/src/updates.rs",
         "src-tauri/src/updates/",
-        "docs/updates.md"
+        "docs/updates.md",
+        "src-tauri/examples/native-update-eval.rs",
+        "src-tauri/examples/native-update-linux-eval.rs",
+        "src-tauri/examples/native-update-windows-eval.rs"
       ],
       "rust": [
         {
@@ -459,10 +463,11 @@
         }
       ],
       "escalation": [
-        "Updater/native process and release artifact changes require explicit native/release validation; verify logical About/diagnostics versions and numeric native metadata agree with the canonical target; exercise same-base Nightly replacement on each native installer and exact-source hosted signing/publication."
+        "Updater/native process and release artifact changes require explicit native/release validation; verify logical About/diagnostics versions and numeric native metadata agree with the canonical target; exercise same-base Nightly replacement on each native installer and exact-source hosted signing/publication.",
+        "Build the three native updater acceptance examples on their target OS, use alternate identifiers and disposable profiles, and verify signed replacement/relaunch plus rejected tampering. SDK fixtures do not certify production GitHub discovery, login/session/draft recovery or interactive OS authorization. Windows must also execute the resource-preserving installer launch-failure regression."
       ],
       "capability": {
-        "summary": "Discover explicit update channels and revalidate immutable build identity before verified manual device-matching downloads.",
+        "summary": "Discover explicit update channels and verify device-matching downloads, with version-bound signed native installation and restart when supported.",
         "guide": "docs/updates.md",
         "invariants": [
           {
@@ -470,7 +475,7 @@
             "reference": "docs/updates.md"
           },
           {
-            "name": "Revalidate the exact canonical release and its channel before downloading; verify size and SHA-256 before exposing the final path. Channel selection never changes identity, local data or installs software.",
+            "name": "Revalidate the exact canonical release and its channel before downloading; verify size and SHA-256 before exposing the final path. Native installation additionally requires the embedded public key and a matching signed full logical version. Channel selection never changes identity, local data or installs software.",
             "reference": "docs/updates.md"
           }
         ]
