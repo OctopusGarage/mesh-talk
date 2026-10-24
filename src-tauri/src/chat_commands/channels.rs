@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use serde::Serialize;
+use tauri::Manager;
 
 /// A channel as shown in the chat UI.
 #[derive(Serialize)]
@@ -160,7 +161,7 @@ pub struct ChannelCustodyInfo {
     post_offices: usize,
 }
 
-/// Historical, authenticated durable-copy confirmations for this device's own
+/// Historical, authenticated durable-copy confirmations for this account's own
 /// channel messages. These counts do not imply recipient delivery or reading.
 #[tauri::command]
 pub async fn channel_custody_statuses<R: tauri::Runtime>(
@@ -179,22 +180,24 @@ pub async fn channel_custody_statuses<R: tauri::Runtime>(
         .iter()
         .map(|id| parse_event_id(id))
         .collect::<Result<Vec<_>, _>>()?;
-    let node = state.node_handle().await?;
-    let statuses = ids
-        .into_iter()
-        .filter_map(|id| {
-            node.channel_custody_count(channel, id)
-                .map(|replicas| ChannelCustodyInfo {
-                    id: id.to_hex(),
-                    replicas,
-                    post_offices: node
-                        .channel_post_office_custody_count(channel, id)
-                        .unwrap_or(0),
+    let admission = RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state)?;
+    admission
+        .with_runtime(move |runtime| {
+            let node = runtime.handle();
+            Ok(ids
+                .into_iter()
+                .filter_map(|id| {
+                    let replicas = node.channel_custody_count(channel, id)?;
+                    let post_offices = node.channel_post_office_custody_count(channel, id)?;
+                    Some(ChannelCustodyInfo {
+                        id: id.to_hex(),
+                        replicas,
+                        post_offices,
+                    })
                 })
+                .collect())
         })
-        .collect();
-    crate::app_lock::reject_if_locked(&app)?;
-    Ok(statuses)
+        .await
 }
 
 #[derive(Serialize)]

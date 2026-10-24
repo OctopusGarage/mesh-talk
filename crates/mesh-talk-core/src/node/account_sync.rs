@@ -1613,7 +1613,9 @@ impl Node {
             HashMap::new();
         let mut attachment_unsupported: HashMap<String, tokio::time::Instant> = HashMap::new();
         let mut revision = self.device_sync_policy_snapshot().1;
+        let mut custody_migration = None;
         loop {
+            self.migrate_channel_custody(&mut custody_migration);
             while active.len() < HISTORY_WORKERS {
                 let Some((id, peer)) = queue.pop_front() else {
                     break;

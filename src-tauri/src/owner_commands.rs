@@ -669,6 +669,7 @@ mod tests {
                     crate::chat_commands::set_channel_replica_enabled,
                     crate::chat_commands::set_channel_history_policy,
                     crate::chat_commands::channel_members,
+                    crate::chat_commands::channel_custody_statuses,
                     crate::chat_commands::add_channel_member,
                     crate::chat_commands::remove_channel_member,
                     crate::chat_commands::remove_channel_account_members,
@@ -1013,6 +1014,61 @@ mod tests {
     }
 
     #[test]
+    fn registered_channel_custody_rejects_lock_and_queued_session_replacement() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let body = serde_json::json!({"channelId":"11".repeat(32),"ids":["22".repeat(32)]});
+        assert_eq!(
+            fixture
+                .invoke("channel_custody_statuses", body.clone())
+                .unwrap(),
+            serde_json::json!([])
+        );
+        for lock in [true, false] {
+            fixture.app_state.app_lock().clear();
+            let (entered, captured) = std::sync::mpsc::channel();
+            *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+            let lifecycle = fixture.node.0.blocking_write();
+            let webview = fixture.webview.clone();
+            let input = body.clone();
+            let pending =
+                std::thread::spawn(move || invoke(&webview, "channel_custody_statuses", input));
+            captured
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            if lock {
+                crate::app_lock::lock_app(
+                    fixture.webview.state::<AppState>(),
+                    fixture.webview.state::<crate::app_lock::AppLock>(),
+                )
+                .unwrap();
+            } else {
+                fixture
+                    .app_state
+                    .session()
+                    .set("replacement".into(), user("alice"), "pw".into());
+            }
+            drop(lifecycle);
+            assert_eq!(
+                pending.join().unwrap().unwrap_err()["kind"],
+                "authorization"
+            );
+            *fixture.app_state.owner_command_captured.lock().unwrap() = None;
+        }
+        fixture.app_state.app_lock().clear();
+        fixture
+            .app_state
+            .session()
+            .set("foreign".into(), user("bob"), "pw".into());
+        assert_eq!(
+            fixture
+                .invoke("channel_custody_statuses", body)
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+    }
+
+    #[test]
     fn registered_account_controls_reject_generic_writes_and_removals() {
         let fixture = Fixture::new();
         let account = fixture
@@ -1023,10 +1079,13 @@ mod tests {
             .unwrap()
             .account_id()
             .to_owned();
-        for kind in ["dm_reaction", "dm_recall"] {
+        for kind in ["dm_reaction", "dm_recall", "channel_custody"] {
             let mut key = serde_json::json!({"kind":kind,"peer_account":"11".repeat(16),"target":"22".repeat(32),"actor_account":account});
             if kind == "dm_reaction" {
                 key["emoji"] = serde_json::json!("👍");
+            }
+            if kind == "channel_custody" {
+                key = serde_json::json!({"kind": kind, "channel": "22".repeat(32), "event": "33".repeat(32), "holder": "44".repeat(16)});
             }
             for command in ["put_account_document", "remove_account_document"] {
                 let result = fixture.invoke(command,serde_json::json!({"owner":"alice","expectedAccount":account,"key":key,"payloadBase64":"e30=","expected":null}));

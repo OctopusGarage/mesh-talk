@@ -717,6 +717,25 @@ If all six are accepted members with the needed keys, B can serve A's retained e
 
 Replica custody counts and exact-have checks are historical copy evidence. They are not a lease guaranteeing a holder will remain online forever, a human read receipt, or proof that every group destination received the event.
 
+Linked devices share the sender account's copy observations through the existing
+certified private account-document channel. Versioned records bind each claim to
+its exact channel, event and holder, including negative rechecks. They carry an
+account device's attestation of its authenticated check; they do not introduce
+holder-signed delivery receipts. Later confirmations and revocations reconcile
+independently of the immutable message-history digest. Local legacy observations
+migrate automatically without replacing newer shared revisions.
+
+The displayed member-copy count deduplicates accepted external member accounts
+and excludes the sender's entire account. Own-device synchronization and opaque
+post-office custody remain separate facts. A device missing status data displays
+an unavailable state; it must not invent a zero-copy claim or a positive check.
+Unsupported optional custody exchange must leave older supported account-data
+domains usable. History synchronization policy also governs this private domain.
+Post-office observations remain a separate historical aggregate: one missing
+recipient wrapper or a connection timeout cannot retract another wrapper's
+confirmed copy at the same office. Unsupported custody exchange is exposed as
+requiring an upgrade, even while the older supported domains continue.
+
 ### E. Files, folders, consent and completion
 
 ```mermaid

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 mod controls;
+mod custody;
 pub(super) mod store;
 pub(super) mod sync;
 #[cfg(test)]
@@ -20,6 +21,7 @@ pub enum AccountDocumentDomain {
     AvatarOverride,
     DmReaction,
     DmRecall,
+    ChannelCustody,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
@@ -54,6 +56,11 @@ pub enum AccountDocumentKey {
         target: String,
         actor_account: String,
     },
+    ChannelCustody {
+        channel: String,
+        event: String,
+        holder: String,
+    },
 }
 impl DocumentConversation {
     fn valid(&self) -> bool {
@@ -78,10 +85,20 @@ impl AccountDocumentKey {
             Self::AvatarOverride { .. } => AccountDocumentDomain::AvatarOverride,
             Self::DmReaction { .. } => AccountDocumentDomain::DmReaction,
             Self::DmRecall { .. } => AccountDocumentDomain::DmRecall,
+            Self::ChannelCustody { .. } => AccountDocumentDomain::ChannelCustody,
         }
     }
     fn valid(&self) -> bool {
         match self {
+            Self::ChannelCustody {
+                channel,
+                event,
+                holder,
+            } => {
+                hex(channel, 64)
+                    && hex(event, 64)
+                    && hex(holder.strip_prefix("relay:").unwrap_or(holder), 32)
+            }
             Self::Draft { conversation } => conversation.valid(),
             Self::ReadReceipt {
                 conversation,
@@ -121,6 +138,7 @@ impl AccountDocumentKey {
     }
     fn limit(&self) -> usize {
         match self {
+            Self::ChannelCustody { .. } => 4096,
             Self::Draft { .. } => 64 * 1024,
             Self::ReadReceipt { .. } => 0,
             Self::CustomizationPack { .. } => 12 * 1024 * 1024,
@@ -129,17 +147,25 @@ impl AccountDocumentKey {
         }
     }
     pub fn is_private_control(&self) -> bool {
-        matches!(self, Self::DmReaction { .. } | Self::DmRecall { .. })
+        matches!(
+            self,
+            Self::DmReaction { .. } | Self::DmRecall { .. } | Self::ChannelCustody { .. }
+        )
     }
     fn protocol_version(&self) -> u8 {
-        if self.is_private_control() { 2 } else { 1 }
+        match self {
+            Self::ChannelCustody { .. } => 3,
+            Self::DmReaction { .. } | Self::DmRecall { .. } => 2,
+            _ => 1,
+        }
     }
     fn category(&self) -> SyncCategory {
         match self {
             Self::Draft { .. }
             | Self::ReadReceipt { .. }
             | Self::DmReaction { .. }
-            | Self::DmRecall { .. } => SyncCategory::History,
+            | Self::DmRecall { .. }
+            | Self::ChannelCustody { .. } => SyncCategory::History,
             _ => SyncCategory::Appearance,
         }
     }

@@ -10,11 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::net::TcpStream;
-#[derive(Default)]
 pub(in crate::node) struct DocumentSyncCursor {
     pub(super) domain: usize,
     pub(super) after: Option<AccountDocumentKey>,
-    pub(super) digests: [[u8; 32]; 6],
+    pub(super) digests: [[u8; 32]; 7],
     pub(in crate::node) retry_at: Option<Instant>,
     pub(in crate::node) error: Option<String>,
     pub(in crate::node) pending: bool,
@@ -26,10 +25,43 @@ pub(in crate::node) struct DocumentSyncCursor {
     supported: bool,
     control_retry_at: Option<Instant>,
     control_upgrade: bool,
+    custody_retry_at: Option<Instant>,
+    custody_upgrade: bool,
+}
+impl Default for DocumentSyncCursor {
+    fn default() -> Self {
+        Self {
+            domain: 6,
+            after: None,
+            digests: [[0; 32]; 7],
+            retry_at: None,
+            error: None,
+            pending: false,
+            up_to_date: false,
+            requires_upgrade: false,
+            remotely_disabled: 0,
+            visited: 0,
+            settled: 0,
+            supported: false,
+            control_retry_at: None,
+            control_upgrade: false,
+            custody_retry_at: None,
+            custody_upgrade: false,
+        }
+    }
 }
 impl DocumentSyncCursor {
+    fn custody_unavailable(&mut self) {
+        self.custody_retry_at = Some(Instant::now() + Duration::from_secs(300));
+        self.custody_upgrade = true;
+        self.after = None;
+        self.domain = 0;
+        self.pending = true;
+        self.up_to_date = false;
+    }
     fn controls_unavailable(&mut self) {
         self.control_retry_at = Some(Instant::now() + Duration::from_secs(300));
+        self.custody_retry_at = self.control_retry_at;
         self.requires_upgrade = true;
         self.control_upgrade = true;
         self.retry_at = None;
@@ -49,7 +81,8 @@ impl DocumentSyncCursor {
         if !policy.history && !policy.appearance {
             return (SyncPhase::Disabled, None, false);
         }
-        let upgrade = self.requires_upgrade && (!self.control_upgrade || policy.history);
+        let upgrade = self.requires_upgrade && (!self.control_upgrade || policy.history)
+            || self.custody_upgrade && policy.history;
         if let Some(error) = &self.error {
             return (SyncPhase::Error, Some(error.clone()), upgrade);
         }
@@ -84,20 +117,22 @@ impl DocumentSyncCursor {
     }
 }
 
-const DOMAINS: [AccountDocumentDomain; 6] = [
+const DOMAINS: [AccountDocumentDomain; 7] = [
     AccountDocumentDomain::Draft,
     AccountDocumentDomain::ReadReceipt,
     AccountDocumentDomain::CustomizationPack,
     AccountDocumentDomain::AvatarOverride,
     AccountDocumentDomain::DmReaction,
     AccountDocumentDomain::DmRecall,
+    AccountDocumentDomain::ChannelCustody,
 ];
 fn category(domain: AccountDocumentDomain) -> SyncCategory {
     match domain {
         AccountDocumentDomain::Draft
         | AccountDocumentDomain::ReadReceipt
         | AccountDocumentDomain::DmReaction
-        | AccountDocumentDomain::DmRecall => SyncCategory::History,
+        | AccountDocumentDomain::DmRecall
+        | AccountDocumentDomain::ChannelCustody => SyncCategory::History,
         _ => SyncCategory::Appearance,
     }
 }
@@ -246,6 +281,12 @@ impl Node {
         }
         cursor.error = None;
         if cursor
+            .custody_retry_at
+            .is_some_and(|at| at <= Instant::now())
+        {
+            cursor.custody_retry_at = None;
+        }
+        if cursor
             .control_retry_at
             .is_some_and(|at| at <= Instant::now())
         {
@@ -253,7 +294,9 @@ impl Node {
         }
         let policy = self.device_sync_policy();
         for _ in 0..DOMAINS.len() {
-            if cursor.domain >= 4 && cursor.control_retry_at.is_some() {
+            if ((4..6).contains(&cursor.domain) && cursor.control_retry_at.is_some())
+                || (cursor.domain == 6 && cursor.custody_retry_at.is_some())
+            {
                 cursor.domain = (cursor.domain + 1) % DOMAINS.len();
                 cursor.after = None;
                 continue;
@@ -272,7 +315,9 @@ impl Node {
             return Ok(());
         }
         let result = self.pull_document_exchange(peer, cursor).await;
-        if result.is_err() && cursor.control_retry_at.is_some() {
+        if result.is_err()
+            && (cursor.control_retry_at.is_some() || cursor.custody_retry_at.is_some())
+        {
             return result;
         }
         if result.is_err() {
@@ -295,13 +340,10 @@ impl Node {
         let domain = DOMAINS[cursor.domain];
         let (_, revision) = self.device_sync_policy_snapshot();
         let request = DocumentRequest {
-            version: if matches!(
-                domain,
-                AccountDocumentDomain::DmReaction | AccountDocumentDomain::DmRecall
-            ) {
-                2
-            } else {
-                1
+            version: match domain {
+                AccountDocumentDomain::ChannelCustody => 3,
+                AccountDocumentDomain::DmReaction | AccountDocumentDomain::DmRecall => 2,
+                _ => 1,
             },
             account_id: self.account_id(),
             domain,
@@ -320,10 +362,14 @@ impl Node {
         let mut channel = match exchange {
             Ok(channel) => channel,
             Err(error) => {
-                if request.version == 2
+                if request.version >= 2
                     && matches!(&error,NodeError::Session(super::super::session::SessionError::Transport(TransportError::Io(e))) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe))
                 {
-                    cursor.controls_unavailable();
+                    if request.version == 3 {
+                        cursor.custody_unavailable();
+                    } else {
+                        cursor.controls_unavailable();
+                    }
                 }
                 return Err(error);
             }
@@ -345,8 +391,12 @@ impl Node {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     let pre_reply_close = matches!(&error,TransportError::Io(e) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe));
-                    if request.version == 2 && pre_reply_close {
-                        cursor.controls_unavailable();
+                    if request.version >= 2 && pre_reply_close {
+                        if request.version == 3 {
+                            cursor.custody_unavailable();
+                        } else {
+                            cursor.controls_unavailable();
+                        }
                     } else if !cursor.supported && pre_reply_close {
                         cursor.requires_upgrade = true;
                         cursor.retry_at = Some(Instant::now() + Duration::from_secs(300));
@@ -363,6 +413,10 @@ impl Node {
             match frame {
                 AccountHistoryFrame::DocumentHeader { body } => {
                     cursor.supported = true;
+                    if request.version == 3 {
+                        cursor.custody_retry_at = None;
+                        cursor.custody_upgrade = false;
+                    }
                     if request.version == 2 {
                         cursor.requires_upgrade = false;
                         cursor.control_upgrade = false;
@@ -407,6 +461,10 @@ impl Node {
                 }
                 AccountHistoryFrame::DocumentsComplete { body } => {
                     cursor.supported = true;
+                    if request.version == 3 {
+                        cursor.custody_retry_at = None;
+                        cursor.custody_upgrade = false;
+                    }
                     if request.version == 2 {
                         cursor.requires_upgrade = false;
                         cursor.control_upgrade = false;
@@ -461,16 +519,19 @@ impl Node {
                         };
                         cursor.domain = (cursor.domain + 1) % DOMAINS.len();
                     }
-                    let supported_mask = if cursor.control_retry_at.is_some() {
-                        15
-                    } else {
-                        63
-                    };
+                    let mut supported_mask = 127u8;
+                    if cursor.control_retry_at.is_some() {
+                        supported_mask &= !48;
+                    }
+                    if cursor.custody_retry_at.is_some() {
+                        supported_mask &= !64;
+                    }
                     cursor.pending =
                         cursor.after.is_some() || cursor.visited & supported_mask != supported_mask;
                     cursor.up_to_date = cursor.settled & supported_mask == supported_mask
                         && cursor.remotely_disabled == 0
-                        && !cursor.requires_upgrade;
+                        && !cursor.requires_upgrade
+                        && !cursor.custody_upgrade;
                     cursor.retry_at = None;
                     cursor.error = None;
                     channel.recycle(self);
@@ -509,6 +570,7 @@ impl Node {
             if changed {
                 node.documents_changed();
                 if private_control {
+                    node.delivery_status_notify.notify_waiters();
                     node.note_account_history_change();
                 }
             }

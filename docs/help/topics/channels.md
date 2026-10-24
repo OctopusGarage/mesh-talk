@@ -24,6 +24,19 @@ is required for each device. Knowing a group name or restoring an archive alone
 does not grant access, and historical messages still require an authorized
 retained copy.
 
+## Understand message copy status
+
+A group message's check marks report confirmed stored copies held by other
+member accounts. They do not mean everyone received or read the message. Copies
+on your own linked devices do not count as another member's confirmation.
+
+Your linked devices synchronize these historical confirmations with message
+history enabled. **Copy status unavailable** means this device has not obtained
+the status yet; **No member copy confirmed** means no eligible member copy is
+currently confirmed in the available evidence. A post-office copy has a separate
+label. A holder can later delete a copy, so an old confirmation is not a permanent
+availability guarantee.
+
 ## History for new members
 
 The owner can open the channel's member controls and change **History for new members**.

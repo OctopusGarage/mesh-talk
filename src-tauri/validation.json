@@ -2,6 +2,39 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-shared-channel-custody",
+      "paths": [
+        "src-tauri/src/account_documents.rs",
+        "src-tauri/src/chat_commands/channels.rs",
+        "src-tauri/src/owner_commands.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "owner_commands::tests::registered_channel_custody_rejects_lock_and_queued_session_replacement",
+            "owner_commands::tests::registered_account_controls_reject_generic_writes_and_removals"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Project own-account group copy evidence under current desktop session/runtime authority and deny forged generic control writes.",
+        "guide": "docs/help/topics/channels.md#understand-message-copy-status",
+        "invariants": [
+          {
+            "name": "Sibling-authored outgoing history can expose confirmed external-member counts; stale sessions and wrong accounts cannot release old runtime projections.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          }
+        ]
+      },
+      "consumers": [
+        "frontend-shared-channel-custody"
+      ],
+      "escalation": [
+        "Verify registered IPC and actual linked-device group footer convergence."
+      ]
+    },
+    {
       "id": "desktop-startup-identity",
       "paths": [
         "src-tauri/src/chat_commands/state.rs",

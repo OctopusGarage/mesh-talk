@@ -75,19 +75,23 @@ export function DeliveryFooter({
     !message.file &&
     !message.pending &&
     !message.failed
-      ? Math.min(message.replicas ?? 0, 2) ||
-        ((message.postOfficeCopies ?? 0) > 0 ? 1 : 0)
+      ? message.replicas === undefined && message.postOfficeCopies === undefined
+        ? "unknown"
+        : Math.min(message.replicas ?? 0, 2) ||
+          ((message.postOfficeCopies ?? 0) > 0 ? 1 : 0)
       : undefined;
   const postOfficeOnly =
     (message.replicas ?? 0) === 0 && (message.postOfficeCopies ?? 0) > 0;
   const custodyLabel =
     custody === undefined
       ? ""
-      : postOfficeOnly
-        ? t("message.custody.postOffice")
-        : t(
-            `message.custody.${custody === 0 ? "local" : custody === 1 ? "one" : "multiple"}`,
-          );
+      : custody === "unknown"
+        ? t("message.custody.unknown")
+        : postOfficeOnly
+          ? t("message.custody.postOffice")
+          : t(
+              `message.custody.${custody === 0 ? "local" : custody === 1 ? "one" : "multiple"}`,
+            );
   const saved =
     isPersonal &&
     message.fromMe &&
@@ -167,10 +171,12 @@ export function DeliveryFooter({
           aria-describedby={tooltip}
           data-custody={custody}
         >
-          <span aria-hidden="true">
-            {custody === 0 ? "◷" : custody === 1 ? "✓" : "✓✓"}
-          </span>
-          {(custody === 0 || postOfficeOnly) && (
+          {custody !== "unknown" && (
+            <span aria-hidden="true">
+              {custody === 0 ? "◷" : custody === 1 ? "✓" : "✓✓"}
+            </span>
+          )}
+          {(custody === "unknown" || custody === 0 || postOfficeOnly) && (
             <span aria-hidden="true">{custodyLabel}</span>
           )}
           <span
@@ -180,9 +186,11 @@ export function DeliveryFooter({
           >
             {custodyLabel} ·{" "}
             {t(
-              postOfficeOnly
-                ? "message.custody.postOfficeHelp"
-                : "message.custody.help",
+              custody === "unknown"
+                ? "message.custody.unknownHelp"
+                : postOfficeOnly
+                  ? "message.custody.postOfficeHelp"
+                  : "message.custody.help",
             )}
           </span>
         </span>

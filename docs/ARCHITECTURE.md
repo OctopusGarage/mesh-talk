@@ -430,6 +430,17 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   An offline peer cannot be rechecked, so the count is still historical evidence,
   not proof that a peer currently has the event, nor a delivery or read receipt.
   Post offices are not counted as group-member copies.
+  Certified devices of the sender's account share custody observations through
+  the existing private account-document session. Observations name the exact
+  channel, event and holder; account-authenticated revisions and negative
+  observations prevent stale positive replay. They attest to an account device's
+  authenticated durable-have check, not an independently signed holder receipt.
+  Status queries also recognize retained outgoing history authored by a certified
+  sibling. Counts group accepted external member accounts once and exclude all
+  sender-account devices; legacy membership retains verified device fallback.
+  Missing observation data is unknown, rather than evidence of zero copies.
+  The optional custody domain requires an upgraded sibling while existing
+  supported document domains continue with older peers.
   The ignored `channel_replica_scale_rehearsal` test runs a repeatable 5/20/50
   member Noise duplex exercise with every fifth recipient initially offline,
   then recovers them from another member after the origin exits. It reports

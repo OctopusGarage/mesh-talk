@@ -86,6 +86,328 @@ fn node_with_identity(
     )
     .unwrap()
 }
+
+#[tokio::test]
+async fn channel_custody_is_shared_with_certified_sibling_while_holder_is_offline() {
+    channel_custody_sibling_scenario(true).await;
+}
+
+#[tokio::test]
+async fn channel_custody_never_counts_sender_sibling_as_other_member() {
+    channel_custody_sibling_scenario(false).await;
+}
+
+async fn channel_custody_sibling_scenario(external_online: bool) {
+    use crate::{discovery::Announce, node::account_devices::AccountDevice};
+    use std::{net::IpAddr, time::Duration};
+    use tokio::net::TcpListener;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let other = Account::generate();
+    let a = node(&dir.path().join("a"), &account);
+    let sibling = node(&dir.path().join("sibling"), &account);
+    let bob = node(&dir.path().join("bob"), &other);
+    for (left, right) in [(&a, &sibling), (&sibling, &a)] {
+        left.account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: right.identity.public(),
+                certificate: account.certify(&right.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    let mut servers = Vec::new();
+    for (current, owner) in [(&a, &account), (&sibling, &account), (&bob, &other)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        for observer in [&a, &sibling, &bob] {
+            if observer.user_id() != current.user_id() {
+                observer.roster.lock().unwrap().update(
+                    &Announce::new_with_account(
+                        &current.identity,
+                        owner,
+                        "fixture",
+                        address.port(),
+                    ),
+                    IpAddr::from([127, 0, 0, 1]),
+                    &observer.user_id(),
+                );
+            }
+        }
+        servers.push(tokio::spawn(current.clone().run_accept_loop(listener)));
+    }
+    let channel = a
+        .create_channel(
+            "custody fixture",
+            vec![sibling.identity.public(), bob.identity.public()],
+        )
+        .await
+        .unwrap();
+    if !external_online {
+        servers[2].abort();
+        a.roster.lock().unwrap().forget(&bob.identity.public());
+    }
+    a.send_channel_message(channel, b"synthetic custody fixture")
+        .await
+        .unwrap();
+    let event = a.channel_history(channel, 10)[0].id;
+    if external_online {
+        assert!(
+            bob.channel_history(channel, 10)
+                .iter()
+                .any(|row| row.id == event)
+        );
+        let key = AccountDocumentKey::ChannelCustody {
+            channel: hex::encode(channel.as_bytes()),
+            event: event.to_hex(),
+            holder: bob.user_id(),
+        };
+        let before = a.account_document_meta(&key).unwrap();
+        a.account_documents
+            .lock()
+            .unwrap()
+            .remove_blob_for_test(before.content_hash);
+        let reopened =
+            AccountDocumentStore::open(&dir.path().join("a"), "pw", &account.public().ed25519_pub)
+                .unwrap();
+        *a.account_documents.lock().unwrap() = reopened;
+        assert_eq!(
+            a.channel_custody_count(channel, event),
+            None,
+            "unreadable positive evidence is unknown, never zero confirmed copies"
+        );
+        let peer = a.routing_peer(&bob.user_id()).unwrap();
+        a.recheck_channel_custody_peer(channel, event, &peer).await;
+        assert_eq!(
+            a.account_document_meta(&key).unwrap(),
+            before,
+            "identical positive evidence repairs its blob without version churn"
+        );
+        assert!(a.account_document(&key).unwrap().is_some());
+        assert_eq!(a.channel_custody_count(channel, event), Some(1));
+        servers[2].abort();
+        a.roster.lock().unwrap().forget(&bob.identity.public());
+        sibling
+            .roster
+            .lock()
+            .unwrap()
+            .forget(&bob.identity.public());
+    }
+    let worker = tokio::spawn(sibling.clone().run_account_history_loop());
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while !sibling
+            .channel_history(channel, 10)
+            .iter()
+            .any(|row| row.id == event && row.from_me)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("sibling imports the exact outgoing message");
+    let expected = usize::from(external_online);
+    let mut final_expected = expected;
+    let actual = tokio::time::timeout(Duration::from_secs(8), async {
+        while sibling.channel_custody_count(channel, event) != Some(expected) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if !external_online && actual.is_ok() {
+        sibling
+            .set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        for observer in [&a, &sibling] {
+            observer.roster.lock().unwrap().update(
+                &Announce::new_with_account(&bob.identity, &other, "Bob", port),
+                IpAddr::from([127, 0, 0, 1]),
+                &observer.user_id(),
+            );
+        }
+        let bob_server = tokio::spawn(bob.clone().run_accept_loop(listener));
+        let members = a
+            .channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .members()
+            .to_vec();
+        a.distribute_channel_message(channel, &members, event).await;
+        assert_eq!(a.channel_custody_count(channel, event), Some(1));
+        assert_eq!(
+            bob.channel_custody_count(channel, event),
+            None,
+            "incoming foreign history is never own custody"
+        );
+        let source_peer = sibling.routing_peer(&a.user_id()).unwrap();
+        let mut cursor =
+            sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        sibling
+            .pull_account_documents_page(&source_peer, &mut cursor)
+            .await
+            .unwrap();
+        assert_eq!(
+            sibling.channel_custody_count(channel, event),
+            Some(0),
+            "history-off must not import a late confirmation"
+        );
+        sibling
+            .set_device_sync_category(SyncCategory::History, true)
+            .unwrap();
+        let mut cursor =
+            sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        sibling
+            .pull_account_documents_page(&source_peer, &mut cursor)
+            .await
+            .unwrap();
+        assert_eq!(
+            sibling.channel_custody_count(channel, event),
+            Some(1),
+            "confirmation arriving after history must update independently"
+        );
+        let held = a.channel_custody_observations(channel, event).into_iter().find(|meta| matches!(&meta.key, AccountDocumentKey::ChannelCustody { holder, .. } if holder == &bob.user_id())).unwrap();
+        let old_payload = a
+            .account_document(&held.key)
+            .unwrap()
+            .unwrap()
+            .payload()
+            .to_vec();
+        // Model complete durable ciphertext loss on the synthetic holder. A real
+        // authenticated negative probe uses the exact runtime recheck operation.
+        bob_server.abort();
+        let secret = bob.identity.secret_bytes();
+        let lost = node_with_identity(
+            &dir.path().join("bob-lost"),
+            &other,
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        );
+        lost.roster.lock().unwrap().update(
+            &Announce::new_with_account(&a.identity, &account, "A1", source_peer.addr.port()),
+            source_peer.addr.ip(),
+            &lost.user_id(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        a.roster.lock().unwrap().update(
+            &Announce::new_with_account(&lost.identity, &other, "Bob", port),
+            IpAddr::from([127, 0, 0, 1]),
+            &a.user_id(),
+        );
+        let lost_server = tokio::spawn(lost.clone().run_accept_loop(listener));
+        let bob_peer = a.routing_peer(&bob.user_id()).unwrap();
+        a.recheck_channel_custody_peer(channel, event, &bob_peer)
+            .await;
+        assert_eq!(a.channel_custody_count(channel, event), Some(0));
+        let mut cursor =
+            sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        sibling
+            .pull_account_documents_page(&source_peer, &mut cursor)
+            .await
+            .unwrap();
+        assert_eq!(
+            sibling.channel_custody_count(channel, event),
+            Some(0),
+            "negative evidence must propagate after the earlier positive"
+        );
+        assert!(
+            !sibling
+                .account_documents
+                .lock()
+                .unwrap()
+                .merge(held, &old_payload)
+                .unwrap(),
+            "stale positive replay cannot undo the shared tombstone"
+        );
+        assert_eq!(sibling.channel_custody_count(channel, event), Some(0));
+        a.channel_custody
+            .lock()
+            .unwrap()
+            .confirm(event, &bob.user_id())
+            .unwrap();
+        a.migrate_channel_custody(&mut None);
+        assert_eq!(
+            a.channel_custody_count(channel, event),
+            Some(0),
+            "an old journal positive cannot resurrect the newer shared negative"
+        );
+        let secret = sibling.identity.secret_bytes();
+        let negative_reopened = node_with_identity(
+            &dir.path().join("sibling"),
+            &account,
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+        );
+        assert_eq!(
+            negative_reopened.channel_custody_count(channel, event),
+            Some(0),
+            "the negative survives a fresh encrypted-store open"
+        );
+        drop(negative_reopened);
+        a.retry_one_channel_custody(
+            0,
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+        )
+        .await;
+        assert!(
+            lost.log.lock().unwrap().get(&event).is_some(),
+            "a shared negative must allow retry despite an old local journal positive"
+        );
+        // Apply the receiver's retained controls before asking it to qualify
+        // the repaired copy. The first exchange bootstrapped its lost state.
+        lost.process_channel(channel);
+        a.retry_one_channel_custody(
+            0,
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+        )
+        .await;
+        assert_eq!(
+            a.channel_custody_count(channel, event),
+            Some(1),
+            "a fresh authenticated probe repairs the negative; receiver={:?}",
+            lost.list_channels()
+        );
+        let mut cursor =
+            sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        sibling
+            .pull_account_documents_page(&source_peer, &mut cursor)
+            .await
+            .unwrap();
+        assert_eq!(sibling.channel_custody_count(channel, event), Some(1));
+        final_expected = 1;
+        lost_server.abort();
+    }
+    worker.abort();
+    for server in servers {
+        server.abort();
+    }
+    let secret = sibling.identity.secret_bytes();
+    let reopened = node_with_identity(
+        &dir.path().join("sibling"),
+        &account,
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+    );
+    assert_eq!(
+        reopened.channel_custody_count(channel, event),
+        Some(final_expected),
+        "a fresh node must retain synchronized observations and tombstones"
+    );
+    assert_eq!(
+        a.channel_custody_count(channel, event),
+        Some(final_expected),
+        "sender siblings do not count as another member account; sibling status={:?}",
+        sibling.channel_custody_count(channel, event)
+    );
+    assert!(
+        actual.is_ok(),
+        "authenticated external custody must converge on sibling: {:?}",
+        sibling.channel_custody_count(channel, event)
+    );
+}
 #[tokio::test]
 async fn certified_siblings_transfer_large_typed_document_over_existing_account_session() {
     use crate::{discovery::roster::PeerRecord, node::account_devices::AccountDevice};
@@ -596,7 +918,7 @@ async fn old_peer_document_probe_has_negative_cooldown_and_history_still_works()
         account_id: Some(account.account_id()),
         last_seen: std::time::Instant::now(),
     };
-    let mut cursor = sync::DocumentSyncCursor::default();
+    let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::Draft);
     assert!(
         target
             .pull_account_documents_page(&peer, &mut cursor)
@@ -1407,6 +1729,9 @@ fn private_control_request_versions_keep_legacy_domains_unchanged() {
         (AccountDocumentDomain::DmReaction, 1, false),
         (AccountDocumentDomain::DmReaction, 2, true),
         (AccountDocumentDomain::DmRecall, 2, true),
+        (AccountDocumentDomain::ChannelCustody, 1, false),
+        (AccountDocumentDomain::ChannelCustody, 2, false),
+        (AccountDocumentDomain::ChannelCustody, 3, true),
     ] {
         let request = DocumentRequest {
             version,
@@ -1531,6 +1856,129 @@ async fn unsupported_control_domains_do_not_pause_legacy_draft_updates() {
     let _ = task.await;
 }
 
+#[tokio::test]
+async fn unsupported_channel_custody_does_not_pause_v2_controls_or_legacy_drafts() {
+    use crate::{
+        discovery::roster::PeerRecord,
+        node::{
+            account_devices::AccountDevice,
+            account_sync_wire::{AccountHistoryFrame, AccountSessionRequest, AccountSyncVersion},
+        },
+    };
+    use std::time::Instant;
+    use tokio::net::TcpListener;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("old-source"), &account);
+    let target = node(&dir.path().join("new-target"), &account);
+    for (a, b) in [(&source, &target), (&target, &source)] {
+        a.account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: b.identity.public(),
+                certificate: account.certify(&b.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    let old = source
+        .put_account_document_if(key(), b"before probe".to_vec(), None, |c| c())
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = source.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let server = serving.clone();
+            tokio::spawn(async move {
+                let mut channel = server.privacy_accept(stream).await.unwrap();
+                while let Ok(bytes) = channel.recv().await {
+                    let Some((
+                        _,
+                        AccountHistoryFrame::SessionRequest {
+                            request_id,
+                            request: AccountSessionRequest::Documents { body },
+                        },
+                    )) = AccountHistoryFrame::decode_versioned(&bytes)
+                    else {
+                        break;
+                    };
+                    let request: wire::DocumentRequest = serde_json::from_slice(&body).unwrap();
+                    if request.version > 2 {
+                        break;
+                    }
+                    if channel
+                        .send(
+                            &AccountHistoryFrame::SessionReady { request_id }
+                                .encode_version(AccountSyncVersion::V2)
+                                .unwrap(),
+                        )
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    if !server.serve_account_documents(&mut channel, request).await {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    let peer = PeerRecord {
+        public: source.identity.public(),
+        addr: address,
+        name: "old source".into(),
+        account_id: Some(account.account_id()),
+        last_seen: Instant::now(),
+        post_office: false,
+        routes: vec![],
+    };
+    let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+    assert!(
+        target
+            .pull_account_documents_page(&peer, &mut cursor)
+            .await
+            .is_err()
+    );
+    assert!(
+        cursor.status(target.device_sync_policy()).2,
+        "unsupported custody must retain its history upgrade hint"
+    );
+    source
+        .put_account_document_if(key(), b"after probe".to_vec(), Some(old.version()), |c| c())
+        .unwrap();
+    source
+        .set_device_sync_category(SyncCategory::Appearance, true)
+        .unwrap();
+    target
+        .set_device_sync_category(SyncCategory::Appearance, true)
+        .unwrap();
+    for _ in 0..6 {
+        target
+            .pull_account_documents_page(&peer, &mut cursor)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        target.account_document(&key()).unwrap().unwrap().payload(),
+        b"after probe",
+        "legacy domains must keep converging during optional control cooldown"
+    );
+    assert!(
+        cursor.status(target.device_sync_policy()).2,
+        "V2 success must not clear the custody upgrade hint"
+    );
+    assert!(!cursor.up_to_date);
+    assert_eq!(
+        cursor.domain, 6,
+        "both V2 control domains still exchange during custody cooldown"
+    );
+    task.abort();
+    let _ = task.await;
+}
+
 #[test]
 fn private_recall_witness_cannot_recall_another_accounts_target() {
     use crate::{
@@ -1598,5 +2046,159 @@ fn private_recall_witness_cannot_recall_another_accounts_target() {
             .account_history(&peer.account_id(), 10)
             .iter()
             .all(|message| !message.recalled)
+    );
+}
+
+#[tokio::test]
+async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit_legacy_members() {
+    use crate::{discovery::Announce, eventlog::EventId, node::account_devices::AccountDevice};
+    use tokio::net::TcpListener;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let bob_account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let sibling = node(&dir.path().join("sibling"), &account);
+    let bob = node(&dir.path().join("bob"), &bob_account);
+    let bob2 = node(&dir.path().join("bob2"), &bob_account);
+    for (left, right) in [(&source, &sibling), (&sibling, &source)] {
+        left.account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: right.identity.public(),
+                certificate: account.certify(&right.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    let mut servers = Vec::new();
+    let mut addresses = Vec::new();
+    for current in [&source, &sibling, &bob, &bob2] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        addresses.push(address);
+        // Bare signed announcements model a legacy member before its verified
+        // account certificate becomes available through discovery.
+        for observer in [&source, &sibling, &bob, &bob2] {
+            if observer.user_id() != current.user_id() {
+                let announce = if current.user_id() == source.user_id()
+                    || current.user_id() == sibling.user_id()
+                {
+                    Announce::new_with_account(
+                        &current.identity,
+                        &account,
+                        "fixture",
+                        address.port(),
+                    )
+                } else {
+                    Announce::new(&current.identity, "fixture", address.port())
+                };
+                observer.roster.lock().unwrap().update(
+                    &announce,
+                    address.ip(),
+                    &observer.user_id(),
+                );
+            }
+        }
+        servers.push(tokio::spawn(current.clone().run_accept_loop(listener)));
+    }
+    let channel = source
+        .create_channel(
+            "legacy custody certificate refresh",
+            vec![
+                bob.identity.public(),
+                bob2.identity.public(),
+                sibling.identity.public(),
+            ],
+        )
+        .await
+        .unwrap();
+    source
+        .send_channel_message(channel, b"synthetic certificate refresh")
+        .await
+        .unwrap();
+    let event = source.channel_history(channel, 10)[0].id;
+    assert_eq!(
+        source.channel_custody_count(channel, event),
+        Some(2),
+        "unbound explicit legacy members have separate device principals"
+    );
+    let key = AccountDocumentKey::ChannelCustody {
+        channel: hex::encode(channel.as_bytes()),
+        event: event.to_hex(),
+        holder: bob.user_id(),
+    };
+    let before = source.account_document_meta(&key).unwrap();
+    let source_peer = sibling.routing_peer(&source.user_id()).unwrap();
+    let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+    sibling
+        .pull_account_documents_page(&source_peer, &mut cursor)
+        .await
+        .unwrap();
+    assert_eq!(sibling.channel_custody_count(channel, event), Some(2));
+    for (holder, address) in [(&bob, addresses[2]), (&bob2, addresses[3])] {
+        source.roster.lock().unwrap().update(
+            &Announce::new_with_account(&holder.identity, &bob_account, "Bob", address.port()),
+            address.ip(),
+            &source.user_id(),
+        );
+        let peer = source.routing_peer(&holder.user_id()).unwrap();
+        source
+            .recheck_channel_custody_peer(channel, event, &peer)
+            .await;
+    }
+    let upgraded = source.account_document_meta(&key).unwrap();
+    assert!(upgraded.revision > before.revision);
+    assert_ne!(upgraded.content_hash, before.content_hash);
+    let peer = source.routing_peer(&bob.user_id()).unwrap();
+    source
+        .recheck_channel_custody_peer(channel, event, &peer)
+        .await;
+    assert_eq!(
+        source.account_document_meta(&key).unwrap(),
+        upgraded,
+        "unchanged positive rechecks do not churn revisions"
+    );
+    let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+    sibling
+        .pull_account_documents_page(&source_peer, &mut cursor)
+        .await
+        .unwrap();
+    assert_eq!(
+        sibling.channel_custody_count(channel, event),
+        Some(1),
+        "positive runtime rechecks upgrade the sibling's certified principal projection"
+    );
+    assert!(
+        source
+            .put_account_document_if(
+                key.clone(),
+                b"forged".to_vec(),
+                Some(upgraded.version()),
+                |commit| commit()
+            )
+            .is_err()
+    );
+    assert!(
+        source
+            .remove_account_document_if(key, Some(upgraded.version()), |commit| commit())
+            .is_err()
+    );
+    assert_eq!(
+        source.channel_custody_count(channel, EventId::new([0; 32])),
+        None
+    );
+    for server in servers {
+        server.abort();
+    }
+    let secret = sibling.identity.secret_bytes();
+    let reopened = node_with_identity(
+        &dir.path().join("sibling"),
+        &account,
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+    );
+    assert_eq!(
+        reopened.channel_custody_count(channel, event),
+        Some(1),
+        "certified explicit members deduplicate after discovery is forgotten"
     );
 }

@@ -2,6 +2,50 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-shared-channel-custody",
+      "paths": [
+        "crates/mesh-talk-core/src/node/channel_custody.rs",
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/node/account_documents/custody.rs",
+        "crates/mesh-talk-core/src/node/node_tests.rs",
+        "crates/mesh-talk-core/src/node/media_store.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::channel_custody::",
+            "node::account_documents::",
+            "node::account_sync::",
+            "node::media_store::",
+            "node::node::tests::channel_custody_inherited_holder_requires_signed_account_authority",
+            "node::node::tests::channel_custody_post_office_observation_survives_sibling_sync_without_relay",
+            "channel_custody_retry_skips_own_siblings_and_already_confirmed_account"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Share exact-event group-copy observations between certified sender-account devices without inventing external-member delivery.",
+        "guide": "docs/help/topics/channels.md#understand-message-copy-status",
+        "invariants": [
+          {
+            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. Generic document writes cannot create custody controls.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Custody keys retain a separate bounded quota; legal document counts survive reopening, and orphan cleanup scans owned regular files once while preserving live data.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          }
+        ]
+      },
+      "consumers": [
+        "desktop-shared-channel-custody"
+      ],
+      "escalation": [
+        "Require real linked-sibling/other-member loopback evidence, holder-offline/restart and delayed confirmation/revocation convergence. Verify old optional-domain rejection preserves supported domains."
+      ]
+    },
+    {
       "id": "core-startup-identity",
       "paths": [
         "crates/mesh-talk-core/src/node/runtime.rs",

@@ -21,7 +21,9 @@ fn account(runtime: &NodeRuntime, expected: &str) -> Result<(), CommandError> {
 fn editable(key: &AccountDocumentKey) -> Result<(), CommandError> {
     if matches!(
         key,
-        AccountDocumentKey::DmReaction { .. } | AccountDocumentKey::DmRecall { .. }
+        AccountDocumentKey::DmReaction { .. }
+            | AccountDocumentKey::DmRecall { .. }
+            | AccountDocumentKey::ChannelCustody { .. }
     ) {
         return Err(CommandError::Authorization(
             "account controls require verified event ingestion".into(),

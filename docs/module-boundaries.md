@@ -597,3 +597,15 @@ create control records. Explicit kept-source preparation validates legacy caches
 `account_sync/archive.rs` filters known recalled private bodies/cards and invalidates cached
 exports when the control revision changes. Group authority and local deletion
 remain with their existing owners.
+
+`channel_custody.rs` owns locally observed exact-event possession and retractions;
+`account_documents/custody.rs` owns their account-private versioned publication
+and sibling projection. It reuses certified account sessions and document digests,
+without adding a group transport or claiming recipient delivery. Channel authority
+determines eligible external member principals. The footer distinguishes missing
+status from a known zero count; its status coordinator clears stale projections
+only for the messages and runtime lifetime it requested.
+The document store keeps a separate bounded custody-key quota and an owned-file
+scan budget consistent with legal document counts. `media_store.rs` prunes the
+enumerated unreferenced regular files in one pass, preserving live files and
+synchronizing the parent directory before successful return.

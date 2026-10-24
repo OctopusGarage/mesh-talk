@@ -266,6 +266,9 @@ _Avoid_: file downloaded because its message arrived.
 **Group history replica**:
 A retained authorized copy served by an accepted channel member. It is distinct
 from an opaque post-office copy whose holder cannot decrypt channel content.
+Displayed copy confirmations count distinct external member accounts, excluding
+the sender's linked devices. The sender account can share its historical
+observations privately across devices; unknown status is separate from zero.
 _Avoid_: post-office membership, global archive.
 
 **Join-history copy**:

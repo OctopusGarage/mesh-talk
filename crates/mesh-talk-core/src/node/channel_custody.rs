@@ -7,7 +7,7 @@ use crate::eventlog::LogError;
 use crate::eventlog::event::EventId;
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 const MAGIC: &[u8; 6] = b"MTCUST";
@@ -21,24 +21,44 @@ struct CustodyRecord {
 pub struct ChannelCustodyStore {
     file: EncryptedRecordLog<CustodyRecord>,
     confirmed: HashMap<EventId, HashSet<String>>,
+    observations: BTreeMap<(EventId, String), bool>,
 }
 
 impl ChannelCustodyStore {
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, records) = EncryptedRecordLog::<CustodyRecord>::open(path, password, MAGIC)?;
         let mut confirmed: HashMap<EventId, HashSet<String>> = HashMap::new();
+        let mut observations = BTreeMap::new();
         for row in records {
             if let Some(peer) = row.peer.strip_prefix('!') {
+                observations.insert((row.event, peer.to_owned()), false);
                 confirmed.entry(row.event).or_default().remove(peer);
             } else {
+                observations.insert((row.event, row.peer.clone()), true);
                 confirmed.entry(row.event).or_default().insert(row.peer);
             }
         }
-        Ok(Self { file, confirmed })
+        Ok(Self {
+            file,
+            confirmed,
+            observations,
+        })
     }
 
     pub fn peers(&self, event: EventId) -> HashSet<String> {
         self.confirmed.get(&event).cloned().unwrap_or_default()
+    }
+
+    pub(in crate::node) fn observations_after(
+        &self,
+        after: Option<&(EventId, String)>,
+    ) -> Vec<((EventId, String), bool)> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        self.observations
+            .range((after.map_or(Unbounded, Excluded), Unbounded))
+            .take(32)
+            .map(|(key, value)| (key.clone(), *value))
+            .collect()
     }
 
     pub fn confirm(&mut self, event: EventId, peer: &str) -> Result<(), LogError> {
@@ -54,6 +74,7 @@ impl ChannelCustodyStore {
             event,
             peer: peer.to_owned(),
         })?;
+        self.observations.insert((event, peer.to_owned()), true);
         self.confirmed
             .entry(event)
             .or_default()
@@ -75,6 +96,7 @@ impl ChannelCustodyStore {
             event,
             peer: format!("!{peer}"),
         })?;
+        self.observations.insert((event, peer.to_owned()), false);
         if let Some(set) = self.confirmed.get_mut(&event) {
             set.remove(peer);
         }
@@ -113,6 +135,10 @@ mod tests {
         drop(store);
         let mut store = ChannelCustodyStore::open(&path, "pw").unwrap();
         assert!(store.peers(event).is_empty());
+        assert_eq!(
+            store.observations_after(None),
+            vec![((event, "bob".into()), false)]
+        );
         store.confirm(event, "bob").unwrap();
         assert_eq!(store.peers(event).len(), 1);
     }

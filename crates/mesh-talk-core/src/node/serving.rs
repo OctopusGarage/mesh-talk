@@ -278,6 +278,8 @@ impl Node {
                         }
                     }
                     if held {
+                        self.publish_channel_custody(conv, id, &po.public, true, false, true)
+                            .map_err(|error| SessionError::Serialization(error.to_string()))?;
                         self.channel_custody
                             .lock()
                             .expect("channel custody lock")

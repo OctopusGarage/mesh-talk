@@ -1774,39 +1774,185 @@ impl Node {
         );
     }
 
-    /// Number of current member devices that previously proved durable custody of
-    /// one of this device's messages. A historical confirmation is not a guarantee
-    /// that the peer still has its copy, and is never a recipient delivery receipt.
+    /// Number of distinct other accepted member accounts with historical
+    /// authenticated custody evidence. This never establishes delivery or reading.
+    /// A sibling-authored row without synchronized evidence remains unknown.
     pub fn channel_custody_count(&self, channel: ConversationId, id: EventId) -> Option<usize> {
-        let me = crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
-        let own_message = self
+        {
+            let book = self.channels.lock().expect("channels mutex");
+            let state = book.state(&channel)?;
+            if !self.channel_identity_matches_account(state) {
+                return None;
+            }
+        }
+        let own_devices: HashSet<_> = self
+            .linked_devices()
+            .into_iter()
+            .map(|device| device.public.user_id())
+            .chain(std::iter::once(self.user_id()))
+            .collect();
+        let own_local = self
             .log
             .lock()
-            .expect("log mutex not poisoned")
+            .expect("log mutex")
             .get(&id)
             .is_some_and(|event| {
                 event.conversation_id == channel
-                    && event.author == me
                     && event.kind == EventKind::Message
+                    && event.author.user_id() == self.user_id()
             });
-        if !own_message {
+        let own_signed = self
+            .log
+            .lock()
+            .expect("log mutex")
+            .get(&id)
+            .is_some_and(|event| {
+                event.conversation_id == channel
+                    && event.kind == EventKind::Message
+                    && own_devices.contains(&event.author.user_id())
+            });
+        let own_archived = self
+            .received
+            .lock()
+            .expect("received mutex")
+            .entry(id)
+            .is_some_and(|row| row.conversation == channel && own_devices.contains(&row.from));
+        if !own_signed && !own_archived {
             return None;
         }
-        let members: HashSet<_> = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.state(&channel)?
-                .members()
-                .iter()
-                .map(|member| member.user_id())
-                .filter(|member| book.replica_enabled(channel, member))
-                .collect()
-        };
-        let confirmed = self
+        let observations = self.channel_custody_observations(channel, id);
+        if !own_local && observations.is_empty() {
+            return None;
+        }
+        let (principals, unreadable) = self.confirmed_channel_custody_principals(channel, id);
+        if unreadable && principals.is_empty() {
+            None
+        } else {
+            Some(principals.len())
+        }
+    }
+
+    /// One verified principal rule owns display, retry budgets and recheck peers.
+    /// A certificate cannot expand a legacy device-only membership grant.
+    pub(in crate::node) fn channel_custody_member_principal(
+        &self,
+        channel: ConversationId,
+        member: &PublicIdentity,
+        witnessed_account: Option<String>,
+    ) -> Option<String> {
+        if *member == self.identity.public()
+            || self.certified_sibling(member)
+            || self.device_is_post_office(member)
+        {
+            return None;
+        }
+        let account = self.account_id_for_device(member).or(witnessed_account);
+        if account.as_deref() == Some(self.account_id().as_str()) {
+            return None;
+        }
+        let book = self.channels.lock().expect("channels mutex");
+        let state = book.state(&channel)?;
+        if !book.replica_enabled(channel, &member.user_id()) {
+            return None;
+        }
+        if state.members().contains(member) && state.is_accepted_member(&member.user_id()) {
+            return match state
+                .member_account_id(&member.user_id())
+                .map(str::to_owned)
+                .or(account)
+            {
+                Some(account) if account != self.account_id() => Some(format!("account:{account}")),
+                Some(_) => None,
+                None if state.owner_account_id().is_none() => {
+                    Some(format!("device:{}", member.user_id()))
+                }
+                None => None,
+            };
+        }
+        let account = account?;
+        (state.owner_account_id().is_some()
+            && state.members().iter().any(|accepted| {
+                state.is_accepted_member(&accepted.user_id())
+                    && state.member_account_id(&accepted.user_id()) == Some(account.as_str())
+            }))
+        .then(|| format!("account:{account}"))
+    }
+
+    fn channel_custody_repair_members(&self, channel: ConversationId) -> Vec<PublicIdentity> {
+        let mut members = self
+            .channels
+            .lock()
+            .expect("channels mutex")
+            .state(&channel)
+            .map(|state| state.members().to_vec())
+            .unwrap_or_default();
+        for proof in self.historical_peer_proofs() {
+            let public = proof.public();
+            if !members.contains(&public)
+                && self
+                    .channel_custody_member_principal(channel, &public, None)
+                    .is_some()
+            {
+                members.push(public);
+            }
+        }
+        members
+    }
+
+    fn effective_channel_custody_observations(
+        &self,
+        channel: ConversationId,
+        id: EventId,
+    ) -> (
+        HashSet<String>,
+        Vec<super::account_documents::AccountDocumentMeta>,
+    ) {
+        let observations = self.channel_custody_observations(channel, id);
+        let mut confirmed = self
             .channel_custody
             .lock()
-            .expect("channel_custody mutex not poisoned")
+            .expect("custody mutex")
             .peers(id);
-        Some(confirmed.intersection(&members).count())
+        for meta in &observations {
+            if let super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } =
+                &meta.key
+            {
+                if meta.tombstone {
+                    confirmed.remove(holder);
+                } else {
+                    confirmed.insert(holder.clone());
+                }
+            }
+        }
+        (confirmed, observations)
+    }
+
+    fn confirmed_channel_custody_principals(
+        &self,
+        channel: ConversationId,
+        id: EventId,
+    ) -> (HashSet<String>, bool) {
+        let (confirmed, observations) = self.effective_channel_custody_observations(channel, id);
+        let members = self
+            .channels
+            .lock()
+            .expect("channels mutex")
+            .state(&channel)
+            .map(|state| state.members().to_vec())
+            .unwrap_or_default();
+        let unreadable = observations.iter().any(|meta| {
+            !meta.tombstone && self.channel_custody_holder_binding(&meta.key).is_none()
+        });
+        let principals = confirmed.into_iter().filter_map(|device| {
+            if device.starts_with("relay:") { return None; }
+            if let Some(meta) = observations.iter().find(|meta| !meta.tombstone && matches!(&meta.key, super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } if holder == &device)) {
+                let (holder, account) = self.channel_custody_holder_binding(&meta.key)?;
+                return self.channel_custody_member_principal(channel, &holder, account);
+            }
+            let member = members.iter().find(|member| member.user_id() == device)?;
+            self.channel_custody_member_principal(channel, member, None)
+        }).collect();
+        (principals, unreadable)
     }
 
     /// Historical exact-wrapper custody confirmed by post offices, separate
@@ -1817,11 +1963,13 @@ impl Node {
         id: EventId,
     ) -> Option<usize> {
         self.channel_custody_count(channel, id)?;
+        let (confirmed, observations) = self.effective_channel_custody_observations(channel, id);
+        let unreadable = observations.iter().any(|meta| !meta.tombstone && matches!(&meta.key, super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } if holder.starts_with("relay:")) && self.channel_custody_holder_binding(&meta.key).is_none());
+        if unreadable {
+            return None;
+        }
         Some(
-            self.channel_custody
-                .lock()
-                .expect("channel custody lock")
-                .peers(id)
+            confirmed
                 .iter()
                 .filter(|peer| peer.starts_with("relay:"))
                 .count(),
@@ -1844,13 +1992,24 @@ impl Node {
                 Ok(held) => {
                     if held {
                         let device = peer.public.user_id();
-                        let mut custody = self
-                            .channel_custody
-                            .lock()
-                            .expect("channel_custody mutex not poisoned");
-                        if !custody.peers(event_id).contains(&device)
-                            && custody.confirm(event_id, &device).is_ok()
-                        {
+                        let witnessed = self
+                            .publish_channel_custody(
+                                channel,
+                                event_id,
+                                &peer.public,
+                                true,
+                                false,
+                                false,
+                            )
+                            .is_ok();
+                        let persisted = witnessed
+                            && self
+                                .channel_custody
+                                .lock()
+                                .expect("channel custody mutex")
+                                .confirm(event_id, &device)
+                                .is_ok();
+                        if persisted {
                             self.delivery_status_notify.notify_waiters();
                         }
                     }
@@ -1907,30 +2066,33 @@ impl Node {
             return;
         };
         let cycle = advance_custody_cursor(channel, (lamport, event_id), after, cycles);
-        let confirmed = self
-            .channel_custody
-            .lock()
-            .expect("channel_custody mutex not poisoned")
-            .peers(event_id);
-        let peer = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.state(&channel).and_then(|state| {
-                let peers: Vec<_> = state
-                    .members()
-                    .iter()
-                    .filter(|member| {
-                        confirmed.contains(&member.user_id())
-                            && book.replica_enabled(channel, &member.user_id())
-                    })
-                    .filter_map(|member| {
-                        self.routing_peer(&member.user_id())
-                            .filter(|peer| peer.public == *member)
-                    })
-                    .collect();
-                select_custody_peer(peers, cycle)
+        let (confirmed, _) = self.effective_channel_custody_observations(channel, event_id);
+        let members = self.channel_custody_repair_members(channel);
+        let peers = members
+            .iter()
+            .filter(|member| {
+                confirmed.contains(&member.user_id())
+                    && self
+                        .channel_custody_member_principal(channel, member, None)
+                        .is_some()
             })
-        };
+            .filter_map(|member| {
+                self.routing_peer(&member.user_id())
+                    .filter(|peer| peer.public == *member)
+            })
+            .collect();
+        let peer = select_custody_peer(peers, cycle);
         let Some(peer) = peer else { return };
+        self.recheck_channel_custody_peer(channel, event_id, &peer)
+            .await;
+    }
+
+    pub(in crate::node) async fn recheck_channel_custody_peer(
+        &self,
+        channel: ConversationId,
+        event_id: EventId,
+        peer: &PeerRecord,
+    ) {
         let check = async {
             let mut conn = self.privacy_sync_dial(peer.addr, &peer.public).await.ok()?;
             let held = request_durable_have(&mut conn, channel, event_id)
@@ -1939,23 +2101,32 @@ impl Node {
             self.recycle_sync_channel(conn);
             Some(held)
         };
-        if matches!(
-            tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, check).await,
-            Ok(Some(false))
-        ) && self
-            .channel_custody
-            .lock()
-            .expect("channel_custody mutex not poisoned")
-            .revoke(event_id, &peer.public.user_id())
-            .is_ok()
+        let Ok(Some(held)) = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, check).await
+        else {
+            return;
+        };
+        if self
+            .publish_channel_custody(channel, event_id, &peer.public, held, false, false)
+            .is_err()
         {
+            return;
+        }
+        let recorded = {
+            let mut store = self.channel_custody.lock().expect("channel custody mutex");
+            if held {
+                store.confirm(event_id, &peer.public.user_id())
+            } else {
+                store.revoke(event_id, &peer.public.user_id())
+            }
+        };
+        if recorded.is_ok() {
             self.delivery_status_notify.notify_waiters();
         }
     }
 
     /// Retry one insufficiently replicated own message per tick. The event log is
     /// the durable pending queue, so a restart cannot forget local-only messages.
-    async fn retry_one_channel_custody(
+    pub(in crate::node) async fn retry_one_channel_custody(
         &self,
         cursor: usize,
         after: &mut HashMap<ConversationId, (u64, EventId)>,
@@ -1977,8 +2148,9 @@ impl Node {
             return;
         }
         channels.sort_unstable_by_key(|(channel, _)| *channel.as_bytes());
-        let (channel, members) = &channels[cursor % channels.len()];
+        let (channel, _) = &channels[cursor % channels.len()];
         let channel = *channel;
+        let members = self.channel_custody_repair_members(channel);
         let author =
             crate::eventlog::event::Author::from_ed25519(self.identity.public().ed25519_pub);
         let candidates: Vec<_> = {
@@ -1999,24 +2171,20 @@ impl Node {
         {
             let target = members
                 .iter()
-                .filter(|member| {
-                    member.user_id() != me
-                        && self.channel_replica_enabled(channel, &member.user_id())
-                })
-                .count()
+                .filter_map(|member| self.channel_custody_member_principal(channel, member, None))
+                .collect::<HashSet<_>>()
+                .len()
                 .min(2);
             if target == 0 || self.channel_custody_count(channel, event_id).unwrap_or(0) >= target {
                 continue;
             }
-            let confirmed = self
-                .channel_custody
-                .lock()
-                .expect("channel_custody mutex not poisoned")
-                .peers(event_id);
+            let (principals, _) = self.confirmed_channel_custody_principals(channel, event_id);
             let peers = members
                 .iter()
-                .filter(|member| member.user_id() != me && !confirmed.contains(&member.user_id()))
-                .filter(|member| self.channel_replica_enabled(channel, &member.user_id()))
+                .filter(|member| {
+                    self.channel_custody_member_principal(channel, member, None)
+                        .is_some_and(|principal| !principals.contains(&principal))
+                })
                 .filter_map(|member| {
                     self.routing_peer(&member.user_id())
                         .filter(|peer| peer.public == *member)
@@ -2231,6 +2399,93 @@ mod fanout_tests {
     use crate::identity::device::DeviceIdentity;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::Instant;
+
+    #[tokio::test]
+    async fn channel_custody_retry_skips_own_siblings_and_already_confirmed_account() {
+        use crate::{
+            discovery::Announce,
+            identity::account::Account,
+            node::{account_devices::AccountDevice, test_support::node_with_files},
+        };
+        for external in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let account = Account::generate();
+            let holder_account = if external {
+                Account::generate()
+            } else {
+                Account::from_secret_bytes(account.secret_bytes())
+            };
+            let holder = DeviceIdentity::generate();
+            let alternate = DeviceIdentity::generate();
+            let proof = Announce::new_with_account(&holder, &holder_account, "holder", 9);
+            let (node, _, _) = node_with_files(
+                dir.path(),
+                DeviceIdentity::generate(),
+                Account::from_secret_bytes(account.secret_bytes()),
+                &proof,
+            );
+            if !external {
+                node.account_devices
+                    .lock()
+                    .unwrap()
+                    .insert(AccountDevice {
+                        public: holder.public(),
+                        certificate: account.certify(&holder.public().ed25519_pub),
+                    })
+                    .unwrap();
+            }
+            let members = if external {
+                vec![holder.public(), alternate.public()]
+            } else {
+                vec![holder.public()]
+            };
+            let channel = node
+                .create_channel("retry custody fixture", members)
+                .await
+                .unwrap();
+            node.send_channel_message(channel, b"synthetic retry target")
+                .await
+                .unwrap();
+            let event = node.channel_history(channel, 10)[0].id;
+            if external {
+                node.publish_channel_custody(channel, event, &holder.public(), true, false, false)
+                    .unwrap();
+                node.channel_custody
+                    .lock()
+                    .unwrap()
+                    .confirm(event, &holder.public().user_id())
+                    .unwrap();
+                assert_eq!(node.channel_custody_count(channel, event), Some(1));
+            }
+            // A newly advertised endpoint accepts TCP but intentionally never
+            // completes Noise. Any unnecessary retry is observable at this socket.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            for identity in [&holder, &alternate] {
+                node.roster.lock().unwrap().update(
+                    &Announce::new_with_account(
+                        identity,
+                        &holder_account,
+                        "holder",
+                        address.port(),
+                    ),
+                    address.ip(),
+                    &node.user_id(),
+                );
+            }
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                node.retry_one_channel_custody(0, &mut HashMap::new(), &mut HashMap::new()),
+            )
+            .await
+            .expect("a satisfied or empty external-principal target must not open a retry");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                    .await
+                    .is_err()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn group_recovery_reconnect_resets_idle_backoff_immediately() {

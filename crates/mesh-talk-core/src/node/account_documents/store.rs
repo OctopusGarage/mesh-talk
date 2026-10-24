@@ -8,6 +8,12 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     path::Path,
 };
+const MAX_ORDINARY_KEYS: usize = 4096;
+const MAX_MESSAGE_KEYS: usize = 65536;
+// Read receipts have no blobs; each other retained key owns at most one blob.
+const MAX_OWNED_BLOBS: usize = MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS;
+// Include key.salt and one replacement/partial blob interrupted before cleanup.
+const MAX_MEDIA_ENTRIES: usize = MAX_OWNED_BLOBS + 2;
 const MAX_LIVE: u64 = 128 * 1024 * 1024;
 pub(in crate::node) struct AccountDocumentStore {
     file: EncryptedRecordLog<Vec<u8>>,
@@ -16,9 +22,9 @@ pub(in crate::node) struct AccountDocumentStore {
     account: [u8; 32],
     records: usize,
     journal_bytes: usize,
-    counts: [usize; 6],
+    counts: [usize; 7],
     live_bytes: u64,
-    digest_xor: [[u8; 32]; 6],
+    digest_xor: [[u8; 32]; 7],
     incomplete: BTreeSet<AccountDocumentKey>,
 }
 fn metadata_hash(meta: &AccountDocumentMeta) -> [u8; 32] {
@@ -63,7 +69,7 @@ impl AccountDocumentStore {
         match std::fs::read_dir(blob_root.join("media")) {
             Ok(entries) => {
                 for (i, entry) in entries.enumerate() {
-                    if i >= 8192 {
+                    if i >= MAX_MEDIA_ENTRIES {
                         return Err(corrupt());
                     }
                     let entry = entry.map_err(LogError::Io)?;
@@ -94,9 +100,9 @@ impl AccountDocumentStore {
             account: *account,
             records: rows.len(),
             journal_bytes,
-            counts: [0; 6],
+            counts: [0; 7],
             live_bytes: 0,
-            digest_xor: [[0; 32]; 6],
+            digest_xor: [[0; 32]; 7],
             incomplete: BTreeSet::new(),
         };
         for bytes in rows {
@@ -159,6 +165,14 @@ impl AccountDocumentStore {
         hash.update(self.digest_xor[index]);
         hash.update((self.counts[index] as u64).to_be_bytes());
         hash.finalize().into()
+    }
+    pub(super) fn list_custody(
+        &self,
+        start: &AccountDocumentKey,
+        channel: &str,
+        event: &str,
+    ) -> Vec<AccountDocumentMeta> {
+        self.current.range(start.clone()..).take_while(|(key, _)| matches!(key, AccountDocumentKey::ChannelCustody { channel: c, event: e, .. } if c == channel && e == event)).take(4096).map(|(_, meta)| meta.clone()).collect()
     }
     fn install(&mut self, meta: AccountDocumentMeta) {
         let index = meta.key.domain() as usize;
@@ -264,7 +278,14 @@ impl AccountDocumentStore {
         payload: &[u8],
     ) -> Result<bool, LogError> {
         self.validate(&meta)?;
-        if meta.key.is_private_control() && !super::controls::valid_payload(&meta, payload) {
+        if meta.key.is_private_control()
+            && !match meta.key {
+                AccountDocumentKey::ChannelCustody { .. } => {
+                    super::custody::valid_payload(&meta, payload)
+                }
+                _ => super::controls::valid_payload(&meta, payload),
+            }
+        {
             return Err(corrupt());
         }
         if (!meta.tombstone
@@ -344,13 +365,24 @@ impl AccountDocumentStore {
             return Err(corrupt());
         }
         let seen = matches!(meta.key, AccountDocumentKey::ReadReceipt { .. });
-        let count = if seen {
+        let custody = matches!(meta.key, AccountDocumentKey::ChannelCustody { .. });
+        let count = if custody {
+            self.counts[AccountDocumentDomain::ChannelCustody as usize]
+        } else if seen {
             self.counts[AccountDocumentDomain::ReadReceipt as usize]
         } else {
             self.counts.iter().sum::<usize>()
                 - self.counts[AccountDocumentDomain::ReadReceipt as usize]
+                - self.counts[AccountDocumentDomain::ChannelCustody as usize]
         };
-        if !self.current.contains_key(&meta.key) && count >= if seen { 65536 } else { 4096 } {
+        if !self.current.contains_key(&meta.key)
+            && count
+                >= if seen || custody {
+                    MAX_MESSAGE_KEYS
+                } else {
+                    MAX_ORDINARY_KEYS
+                }
+        {
             return Err(corrupt());
         }
         let previous = self
@@ -380,6 +412,44 @@ impl AccountDocumentStore {
 #[cfg(test)]
 mod budget_tests {
     use super::*;
+    #[test]
+    fn channel_custody_quota_is_independent_and_blob_scan_accepts_legal_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        let key = AccountDocumentKey::ChannelCustody {
+            channel: "1".repeat(64),
+            event: "2".repeat(64),
+            holder: "3".repeat(32),
+        };
+        let meta = AccountDocumentMeta::new(&account, "a".repeat(32), key, 1, &[], true);
+        store.counts[AccountDocumentDomain::Draft as usize] = MAX_ORDINARY_KEYS;
+        store.counts[AccountDocumentDomain::ReadReceipt as usize] = MAX_MESSAGE_KEYS;
+        assert!(
+            store.validate(&meta).is_ok(),
+            "other domains cannot exhaust custody capacity"
+        );
+        store.counts[AccountDocumentDomain::ChannelCustody as usize] = MAX_MESSAGE_KEYS;
+        assert!(
+            store.validate(&meta).is_err(),
+            "custody must retain its own finite cap"
+        );
+        drop(store);
+        let media = dir
+            .path()
+            .join(format!("account-document-blobs-{}", account.account_id()))
+            .join("media");
+        // Legal histories can exceed the former arbitrary 8192-directory-entry
+        // limit. Magic-prefixed orphans avoid triggering unrelated plaintext migration.
+        for index in 0..8193 {
+            std::fs::write(media.join(format!("{index:064x}.bin")), b"MTMEDIA1").unwrap();
+        }
+        assert!(
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).is_ok()
+        );
+    }
+
     #[test]
     fn ordinary_and_seen_metadata_caps_are_independent_and_never_evict_rows() {
         let dir = tempfile::tempdir().unwrap();

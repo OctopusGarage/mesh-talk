@@ -16,13 +16,13 @@ impl DocumentRequest {
             return None;
         }
         let request: Self = serde_json::from_slice(body).ok()?;
-        ((request.version == 1
-            && !matches!(
-                request.domain,
-                AccountDocumentDomain::DmReaction | AccountDocumentDomain::DmRecall
-            )
-            || request.version == 2)
-            && hex(&request.account_id, 32)
+        ((match request.domain {
+            AccountDocumentDomain::ChannelCustody => request.version == 3,
+            AccountDocumentDomain::DmReaction | AccountDocumentDomain::DmRecall => {
+                request.version == 2
+            }
+            _ => request.version == 1 || request.version == 2,
+        }) && hex(&request.account_id, 32)
             && request
                 .after
                 .as_ref()

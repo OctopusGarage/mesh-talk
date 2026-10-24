@@ -2,6 +2,34 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-shared-channel-custody",
+      "paths": [
+        "frontend/src/features/chat/DeliveryFooter.tsx",
+        "frontend/src/features/chat/deliveryFooter.test.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/store/outgoingIntent.test.ts",
+        "frontend/e2e/automatic-delivery.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/deliveryFooter.test.ts",
+        "src/store/outgoingIntent.test.ts",
+        "src/store/chat.test.ts"
+      ],
+      "capability": {
+        "summary": "Render unknown, zero, external-member and post-office copy observations distinctly across linked devices.",
+        "guide": "docs/help/topics/channels.md#understand-message-copy-status",
+        "invariants": [
+          {
+            "name": "Absent status never becomes a zero or positive claim; omitted rows retire stale counts only within the requested message/runtime scope.",
+            "reference": "docs/help/topics/channels.md#understand-message-copy-status"
+          }
+        ]
+      },
+      "escalation": [
+        "Run targeted channel copy-status and acceptance browser scenarios plus applicable visual regression; mocked IPC does not certify account-document receipt exchange."
+      ]
+    },
+    {
       "id": "frontend-account-documents",
       "paths": [
         "frontend/src/lib/api/accountDocuments.ts",
