@@ -123,3 +123,85 @@ for (const allowed of [true, false]) {
     );
   });
 }
+
+for (const width of [1300, 1000]) {
+  test(`previous-account groups preserve history without current-account actions at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: 800 });
+    const previousName = "此前账号的历史群聊：保留本机记录与较长的群名称";
+    const previousId = "chan_previous_account";
+    await page.addInitScript(
+      ({ id, name }) => {
+        const host = window as unknown as {
+          __TAURI_INTERNALS__: {
+            invoke: (
+              command: string,
+              args: Record<string, unknown>,
+            ) => Promise<unknown>;
+          };
+        };
+        const original = host.__TAURI_INTERNALS__.invoke;
+        host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+          const result = await original(command, args);
+          if (command !== "list_channels") return result;
+          const channels = result as Array<Record<string, unknown>>;
+          return [
+            ...channels,
+            {
+              ...channels[0],
+              channel_id: id,
+              name,
+              previous_account: "acc_previous",
+              left: true,
+              pending_invite: true,
+              can_manage: false,
+            },
+          ];
+        };
+      },
+      { id: previousId, name: previousName },
+    );
+    await enterChat(page);
+    await expect(
+      page.getByTestId(`conversation-row-${CHANNEL.id}`),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId(`conversation-row-${previousId}`),
+    ).toHaveCount(0);
+    const history = page.getByTestId("previous-account-groups");
+    await expect(history).toBeVisible();
+    await expect(history).not.toHaveAttribute("open", "");
+    const summary = history.locator("summary");
+    await summary.focus();
+    await page.keyboard.press("Enter");
+    const group = history.getByRole("button", { name: previousName });
+    await expect(group).toBeVisible();
+    await expect(group).toHaveAttribute("title", previousName);
+    await group.click();
+    await expect(page.getByTestId("conversation-header")).toContainText(
+      "Previous account",
+    );
+    await expect(page.getByTestId("conversation-header")).not.toContainText(
+      "Left channel",
+    );
+    await expect(page.getByTestId("conversation-empty")).toHaveText(
+      "No messages are kept on this device.",
+    );
+    await expect(
+      page.getByText(
+        "This group belongs to a previous account. You can read the history kept on this device.",
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Accept invitation" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByTestId("pending-invite-decline-trigger"),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("composer-more-tools")).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath(`previous-account-${width}.png`),
+    });
+  });
+}

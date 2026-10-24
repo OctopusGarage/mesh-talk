@@ -2,12 +2,57 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-account-group-operations",
+      "paths": [
+        "crates/mesh-talk-core/src/node/account_group/",
+        "crates/mesh-talk-core/src/node/account_documents/group_control.rs",
+        "crates/mesh-talk-core/src/node/account_documents/store.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::account_group::",
+            "node::account_documents::store::budget_tests::",
+            "node::account_documents::tests::group_control_"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Apply one account group role across certified devices while preserving public signer authority and explicit execution availability.",
+        "guide": "docs/module-boundaries.md#account-and-device-ownership",
+        "invariants": [
+          {
+            "name": "A verified owner account retains its owner role on owner, member and reference-only sibling devices; reachability cannot downgrade role and descriptive inventory cannot establish it.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Every group action uses account authority with current source lifetime and public signer validation; an owner account must transfer ownership before leaving on any device.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "A required local recovery receipt and its source head share one durable index append; compaction retains the matching receipt, budget failure preserves the previous pair, and a complete replacement may release it.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          }
+        ]
+      },
+      "consumers": [
+        "core-node",
+        "core-channel-account-membership",
+        "desktop-account-group-inventory"
+      ],
+      "escalation": [
+        "Require signed legacy-owner/member/reference sibling scenarios, current account binding, offline availability, transfer/revocation replay, durable pending operations and exact committed effects. Role display tests do not prove mutation authority or native cross-device convergence."
+      ]
+    },
+    {
       "id": "core-account-group-inventory",
       "paths": [
         "crates/mesh-talk-core/src/node/account_documents/inventory.rs",
         "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
-        "crates/mesh-talk-core/src/node/queries.rs"
+        "crates/mesh-talk-core/src/node/queries.rs",
+        "crates/mesh-talk-core/src/node/channels.rs"
       ],
       "rust": [
         {
@@ -35,6 +80,10 @@
           {
             "name": "Mandatory account-directory metadata remains independent of optional personal-data switches; unsupported v4 preserves existing v1/v2/v3 domains and does not create a retry spin.",
             "reference": "docs/module-boundaries.md#account-document-projections"
+          },
+          {
+            "name": "Modern memberships from a previous account remain archived for the exact local device unless the current account has a valid accepted or pending account-wide grant; legacy membership and genuine current-account departure remain distinct.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
           }
         ]
       },

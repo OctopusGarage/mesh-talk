@@ -2309,15 +2309,40 @@ impl Node {
         tokio::pin!(direct, relay);
         // Both alternatives share the same bounded wall-clock window. Custody
         // cannot cancel recipient progress; exact recipient confirmation can.
-        let ((held, direct_elapsed, direct_timeout), (relay_held, relay_elapsed, relay_timeout)) = tokio::select! {
-            result = &mut direct => {
-                let still_pending = self.delivery.lock().expect("delivery lock not poisoned")
-                    .contains_work_event(destination.event.id);
-                if still_pending { (result, relay.await) }
-                else { (result, (false, started.elapsed(), false)) }
-            },
-            result = &mut relay => (direct.await, result),
+        let retired = async {
+            loop {
+                let changed = self.delivery_status_notify.notified();
+                tokio::pin!(changed);
+                // Register before checking durable state: notify_waiters does
+                // not retain a permit for a future subscriber.
+                changed.as_mut().enable();
+                if !self
+                    .delivery
+                    .lock()
+                    .expect("delivery lock not poisoned")
+                    .contains_work_event(destination.event.id)
+                {
+                    return;
+                }
+                changed.await;
+            }
         };
+        tokio::pin!(retired);
+        let mut direct_result = None;
+        let mut relay_result = None;
+        while direct_result.is_none() || relay_result.is_none() {
+            tokio::select! {
+                _ = &mut retired => break,
+                result = &mut direct, if direct_result.is_none() => direct_result = Some(result),
+                result = &mut relay, if relay_result.is_none() => relay_result = Some(result),
+            }
+        }
+        // Dropping an unfinished alternative releases its socket and peer lane.
+        // Custody or another destination's receipt leaves this event pending.
+        let (held, direct_elapsed, direct_timeout) =
+            direct_result.unwrap_or((false, started.elapsed(), false));
+        let (relay_held, relay_elapsed, relay_timeout) =
+            relay_result.unwrap_or((false, started.elapsed(), false));
         if started.elapsed() >= std::time::Duration::from_secs(10) {
             log::warn!(target: "mesh_talk::delivery",
                 "slow delivery attempt direct_ms={} relay_ms={} direct_held={} relay_held={} budget_ms={}",

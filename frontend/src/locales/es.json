@@ -176,7 +176,8 @@
     "resize": "Redimensionar barra lateral",
     "strandedAlone": "¿No ves a nadie? Conecta sin Wi-Fi",
     "strandedNoNetwork": "Sin red — crea un enlace directo",
-    "peopleOnLan": "Personas observadas en línea por este cliente: {{count}}"
+    "peopleOnLan": "Personas observadas en línea por este cliente: {{count}}",
+    "previousAccountGroups": "Grupos de cuentas anteriores ({{count}})"
   },
   "recovery": {
     "mediaUnavailable": "No disponible en esta copia",
@@ -272,7 +273,10 @@
     "moreUnread": "Más mensajes sin leer",
     "sharedReference": "Información compartida del grupo",
     "sharedReferenceHint": "Un dispositivo vinculado compartió esta información del grupo. Los mensajes y los controles de membresía requieren un estado del grupo verificado en este dispositivo.",
-    "legacySharedReferenceHint": "Este grupo usa un formato de membresía anterior. Para enviar mensajes se requiere actualizar el formato del grupo y la membresía de la cuenta; esta información no concede membresía."
+    "legacySharedReferenceHint": "Este grupo usa un formato de membresía anterior. Para enviar mensajes se requiere actualizar el formato del grupo y la membresía de la cuenta; esta información no concede membresía.",
+    "previousAccountChannel": "Cuenta anterior",
+    "previousAccountChannelHint": "Este grupo pertenece a una cuenta anterior. Puedes consultar el historial guardado en este dispositivo.",
+    "previousAccountEmpty": "No hay mensajes guardados en este dispositivo."
   },
   "presence": {
     "onlineWeak": "En línea · conexión lenta",

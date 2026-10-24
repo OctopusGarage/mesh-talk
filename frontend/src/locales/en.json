@@ -176,7 +176,8 @@
     "resize": "Resize sidebar",
     "strandedAlone": "Can't see anyone? Connect without Wi-Fi",
     "strandedNoNetwork": "Not on any network — set up a direct link",
-    "peopleOnLan": "People observed online by this client: {{count}}"
+    "peopleOnLan": "People observed online by this client: {{count}}",
+    "previousAccountGroups": "Previous account groups ({{count}})"
   },
   "recovery": {
     "mediaUnavailable": "Unavailable in this backup",
@@ -272,7 +273,10 @@
     "moreUnread": "More unread messages",
     "sharedReference": "Shared group information",
     "sharedReferenceHint": "This group information was shared by a linked device. Messaging and membership controls require verified group state on this device.",
-    "legacySharedReferenceHint": "This group uses an earlier membership format. Messaging requires a group-format and account-membership update; this information does not grant membership."
+    "legacySharedReferenceHint": "This group uses an earlier membership format. Messaging requires a group-format and account-membership update; this information does not grant membership.",
+    "previousAccountChannel": "Previous account",
+    "previousAccountChannelHint": "This group belongs to a previous account. You can read the history kept on this device.",
+    "previousAccountEmpty": "No messages are kept on this device."
   },
   "presence": {
     "onlineWeak": "Online · slow connection",

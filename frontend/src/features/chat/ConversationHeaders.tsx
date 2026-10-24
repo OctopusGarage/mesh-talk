@@ -138,12 +138,14 @@ export function ChannelHeader({
   left,
   pendingInvite,
   sharedReference = false,
+  previousAccount = false,
   memberCount,
 }: {
   id: string;
   name: string;
   memberCount: number;
   sharedReference?: boolean;
+  previousAccount?: boolean;
   archived: boolean;
   dissolved: boolean;
   left: boolean;
@@ -171,19 +173,25 @@ export function ChannelHeader({
         </div>
         <div
           className="text-xs text-muted-foreground"
-          title={sharedReference ? undefined : t("presence.knownOnlineHint")}
+          title={
+            sharedReference || previousAccount
+              ? undefined
+              : t("presence.knownOnlineHint")
+          }
         >
-          {sharedReference
-            ? `${t("conversation.sharedReference")} · ${t("conversation.members", { count: memberCount })}`
-            : dissolved
-              ? t("conversation.dissolvedChannel")
-              : archived
-                ? t("conversation.archivedChannel")
-                : left
-                  ? t("conversation.leftChannel")
-                  : pendingInvite
-                    ? t("conversation.pendingInvite")
-                    : groupPresenceLabel(presence, t)}
+          {previousAccount
+            ? t("conversation.previousAccountChannel")
+            : sharedReference
+              ? `${t("conversation.sharedReference")} · ${t("conversation.members", { count: memberCount })}`
+              : dissolved
+                ? t("conversation.dissolvedChannel")
+                : archived
+                  ? t("conversation.archivedChannel")
+                  : left
+                    ? t("conversation.leftChannel")
+                    : pendingInvite
+                      ? t("conversation.pendingInvite")
+                      : groupPresenceLabel(presence, t)}
         </div>
       </div>
     </div>

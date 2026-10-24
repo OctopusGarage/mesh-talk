@@ -176,7 +176,8 @@
     "resize": "调整侧边栏宽度",
     "strandedAlone": "找不到人？试试无网直连",
     "strandedNoNetwork": "未连接任何网络 · 设置直连",
-    "peopleOnLan": "当前客户端已知在线 {{count}} 人"
+    "peopleOnLan": "当前客户端已知在线 {{count}} 人",
+    "previousAccountGroups": "此前账号的群（{{count}}）"
   },
   "recovery": {
     "mediaUnavailable": "此备份中不可用",
@@ -272,7 +273,10 @@
     "moreUnread": "还有更多未读消息",
     "sharedReference": "共享的群组信息",
     "sharedReferenceHint": "这些群组信息由已关联设备共享。发送消息和管理成员需要本设备获得经过验证的群组状态。",
-    "legacySharedReferenceHint": "此群组使用较早的成员格式。发送消息需要更新群组格式与账号成员资格；这些信息不授予成员资格。"
+    "legacySharedReferenceHint": "此群组使用较早的成员格式。发送消息需要更新群组格式与账号成员资格；这些信息不授予成员资格。",
+    "previousAccountChannel": "此前账号的群",
+    "previousAccountChannelHint": "这个群属于此前使用的账号。此设备上保留的历史记录仍可查看。",
+    "previousAccountEmpty": "此设备未保留消息。"
   },
   "presence": {
     "onlineWeak": "在线 · 连接较慢",

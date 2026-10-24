@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 mod controls;
 mod custody;
+mod group_control;
 mod inventory;
 pub use inventory::{GroupInventoryMember, GroupInventoryReference};
 pub(super) mod store;
@@ -25,6 +26,7 @@ pub enum AccountDocumentDomain {
     DmRecall,
     ChannelCustody,
     GroupInventory,
+    GroupControl,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
@@ -68,6 +70,10 @@ pub enum AccountDocumentKey {
         channel: String,
         source_device: String,
     },
+    GroupControl {
+        channel: String,
+        source_device: String,
+    },
 }
 impl DocumentConversation {
     fn valid(&self) -> bool {
@@ -94,11 +100,16 @@ impl AccountDocumentKey {
             Self::DmRecall { .. } => AccountDocumentDomain::DmRecall,
             Self::ChannelCustody { .. } => AccountDocumentDomain::ChannelCustody,
             Self::GroupInventory { .. } => AccountDocumentDomain::GroupInventory,
+            Self::GroupControl { .. } => AccountDocumentDomain::GroupControl,
         }
     }
     fn valid(&self) -> bool {
         match self {
             Self::GroupInventory {
+                channel,
+                source_device,
+            }
+            | Self::GroupControl {
                 channel,
                 source_device,
             } => hex(channel, 64) && hex(source_device, 32),
@@ -151,6 +162,7 @@ impl AccountDocumentKey {
     fn limit(&self) -> usize {
         match self {
             Self::GroupInventory { .. } => 128 * 1024,
+            Self::GroupControl { .. } => super::account_group::wire::MAX_HEAD_BYTES,
             Self::ChannelCustody { .. } => 4096,
             Self::Draft { .. } => 64 * 1024,
             Self::ReadReceipt { .. } => 0,
@@ -166,11 +178,13 @@ impl AccountDocumentKey {
                 | Self::DmRecall { .. }
                 | Self::ChannelCustody { .. }
                 | Self::GroupInventory { .. }
+                | Self::GroupControl { .. }
         )
     }
     fn protocol_version(&self) -> u8 {
         match self {
             Self::GroupInventory { .. } => 4,
+            Self::GroupControl { .. } => 5,
             Self::ChannelCustody { .. } => 3,
             Self::DmReaction { .. } | Self::DmRecall { .. } => 2,
             _ => 1,
@@ -228,6 +242,7 @@ impl AccountDocumentMeta {
             && self.revision <= 9_007_199_254_740_991
             && hex(&self.writer_device, 32)
             && (!matches!(&self.key, AccountDocumentKey::GroupInventory { source_device, .. } if source_device != &self.writer_device))
+            && (!matches!(&self.key, AccountDocumentKey::GroupControl { source_device, .. } if source_device != &self.writer_device))
             && self.content_len as usize <= self.key.limit()
             && (self.content_len != 0
                 || self.content_hash
@@ -303,7 +318,7 @@ impl fmt::Debug for AccountDocument {
             .finish()
     }
 }
-fn content_hash(payload: &[u8]) -> [u8; 32] {
+pub(in crate::node) fn content_hash(payload: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"mesh-talk-account-document-content-v1");
     h.update(payload);

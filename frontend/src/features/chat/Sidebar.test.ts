@@ -21,6 +21,7 @@ const { chatState, policyState } = vi.hoisted(() => ({
       archived?: boolean;
       pending_invite?: boolean;
       left?: boolean;
+      previous_account?: string | null;
     }>,
     peers: [],
     favorites: {} as Record<
@@ -147,6 +148,36 @@ beforeEach(async () => {
   policyState.contacts = {};
   policyState.loaded = true;
   await i18n.changeLanguage("en");
+});
+
+it("keeps previous-account history accessible outside the active group list", () => {
+  chatState.channels = [
+    {
+      channel_id: "old",
+      name: "Prior group",
+      owner: "owner",
+      member_count: 2,
+      left: true,
+      previous_account: "previous",
+    },
+    {
+      channel_id: "current",
+      name: "Current group",
+      owner: "me",
+      member_count: 2,
+    },
+  ];
+  chatState.favorites.old = { pinned: true, custom_alias: null };
+  const html = renderToStaticMarkup(createElement(Sidebar));
+  expect(html).not.toContain('data-testid="conversation-row-old"');
+  expect(html).toContain('data-testid="conversation-row-current"');
+  const history = html.match(
+    /<details([^>]*data-testid="previous-account-groups"[^>]*)>([\s\S]*?)<\/details>/u,
+  );
+  expect(history).not.toBeNull();
+  expect(history?.[1]).not.toMatch(/\bopen(?:=|\s|$)/u);
+  expect(history?.[2]).toContain("<button");
+  expect(history?.[2]).toContain("Prior group");
 });
 
 it("keeps Message Yourself available without peers or loaded contacts", () => {

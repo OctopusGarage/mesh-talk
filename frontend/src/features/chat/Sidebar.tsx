@@ -203,12 +203,18 @@ export function Sidebar() {
   const renamingOwnedChannel =
     renameId !== null && ownedChannel(renameId) !== undefined;
 
-  const { pinnedRows, accountRows, channelRows, hiddenChannels, listSize } =
-    useMemo(
-      () =>
-        conversationList(accounts, channels, favorites, t, myAccountId, ready),
-      [accounts, channels, favorites, t, ready, myAccountId],
-    );
+  const {
+    pinnedRows,
+    accountRows,
+    channelRows,
+    hiddenChannels,
+    previousAccountRows,
+    listSize,
+  } = useMemo(
+    () =>
+      conversationList(accounts, channels, favorites, t, myAccountId, ready),
+    [accounts, channels, favorites, t, ready, myAccountId],
+  );
   const pinnedCount = pinnedRows.length;
   const {
     attachNav,
@@ -311,7 +317,7 @@ export function Sidebar() {
         <SectionLabel action={<CreateChannelDialog />}>
           {t("sidebar.channels")}
         </SectionLabel>
-        {channels.length === 0 && (
+        {channels.every((channel) => !!channel.previous_account) && (
           <p className="px-2.5 py-2 text-xs text-muted-foreground">
             {t("sidebar.noChannels")}
           </p>
@@ -322,6 +328,31 @@ export function Sidebar() {
           firstPosition={pinnedCount + accountRows.length + 1}
           listRef={virtualChannelsRef}
         />
+        {previousAccountRows.length > 0 && (
+          <details
+            data-testid="previous-account-groups"
+            className="px-2.5 pt-3 text-xs text-muted-foreground"
+          >
+            <summary className="cursor-pointer rounded-md py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              {t("sidebar.previousAccountGroups", {
+                count: previousAccountRows.length,
+              })}
+            </summary>
+            <div className="space-y-1 pb-2">
+              {previousAccountRows.map((row) => (
+                <button
+                  key={row.id}
+                  type="button"
+                  className="block w-full min-w-0 rounded-md px-2 py-2 text-start hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(hover:none)]:min-h-11"
+                  title={row.conv.name}
+                  onClick={() => void useChat.getState().open(row.conv)}
+                >
+                  <span className="block truncate">{row.conv.name}</span>
+                </button>
+              ))}
+            </div>
+          </details>
+        )}
         {hiddenChannels.length > 0 && (
           <details className="px-2.5 pt-3 text-xs text-muted-foreground">
             <summary className="cursor-pointer rounded-md py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">

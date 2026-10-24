@@ -176,7 +176,8 @@
     "resize": "調整側邊欄寬度",
     "strandedAlone": "找不到其他人？嘗試無網絡直連",
     "strandedNoNetwork": "未連接至任何網絡 · 設定直連",
-    "peopleOnLan": "呢個客戶端已知在線 {{count}} 人"
+    "peopleOnLan": "呢個客戶端已知在線 {{count}} 人",
+    "previousAccountGroups": "之前帳戶嘅群組（{{count}}）"
   },
   "recovery": {
     "mediaUnavailable": "呢份備份冇呢個檔案",
@@ -272,7 +273,10 @@
     "moreUnread": "仲有更多未讀訊息",
     "sharedReference": "共享嘅群組資訊",
     "sharedReferenceHint": "呢啲群組資訊由已連結裝置共享。傳送訊息同管理成員需要本裝置取得經過驗證嘅群組狀態。",
-    "legacySharedReferenceHint": "呢個群組用緊較早嘅成員格式。傳送訊息需要更新群組格式同帳號成員資格；呢啲資訊唔會授予成員資格。"
+    "legacySharedReferenceHint": "呢個群組用緊較早嘅成員格式。傳送訊息需要更新群組格式同帳號成員資格；呢啲資訊唔會授予成員資格。",
+    "previousAccountChannel": "之前帳戶嘅群組",
+    "previousAccountChannelHint": "呢個群組屬於之前用嘅帳戶。你仍然可以睇呢部裝置保留嘅歷史記錄。",
+    "previousAccountEmpty": "呢部裝置冇保留訊息。"
   },
   "presence": {
     "onlineWeak": "在線 · 連線較慢",

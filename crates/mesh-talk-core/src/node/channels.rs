@@ -118,6 +118,30 @@ pub struct ChannelRecovery {
 }
 
 impl Node {
+    /// Historical membership belonging to an account other than the active one.
+    pub fn channel_previous_account(&self, channel: ConversationId) -> Option<String> {
+        let projection = self.account_group_projection(channel);
+        let state = projection.state.as_ref()?;
+        let public = self.identity.public();
+        if projection.authority.current_event().is_none() || !state.members().contains(&public) {
+            return None;
+        }
+        let previous = state.member_account_id(&public.user_id())?;
+        if previous == self.account_id() {
+            return None;
+        }
+        // A current account grant or invitation may name another certified
+        // device. Its account authority takes precedence over the old tuple.
+        if projection
+            .authority
+            .account_grant(&self.account.public().ed25519_pub)
+            .is_some()
+        {
+            return None;
+        }
+        Some(previous.to_owned())
+    }
+
     /// A historical device grant does not authorize a newly adopted account.
     pub(in crate::node) fn channel_identity_matches_account(&self, state: &ChannelState) -> bool {
         let public = self.identity.public();

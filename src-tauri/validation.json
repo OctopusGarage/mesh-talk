@@ -6,15 +6,18 @@
       "paths": [
         "src-tauri/src/chat_commands/channels.rs",
         "src-tauri/src/account_documents.rs",
-        "src-tauri/src/owner_commands.rs"
+        "src-tauri/src/owner_commands.rs",
+        "src-tauri/src/chat_commands/models.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk",
           "filters": [
             "owner_commands::tests::registered_group_inventory_projects_reference_and_rejects_queued_retirement",
+            "owner_commands::tests::registered_group_control_requires_typed_access_for_every_generic_document_command",
             "group_inventory_display_roster_matches_legacy_people_and_preserves_modern_members",
-            "owner_commands::tests::registered_account_controls_reject_generic_writes_and_removals"
+            "owner_commands::tests::registered_account_controls_reject_generic_writes_and_removals",
+            "owner_commands::tests::registered_account_group_access_keeps_owner_role_when_its_source_is_offline"
           ]
         }
       ],
@@ -29,6 +32,18 @@
           {
             "name": "Queued reads cannot release the retired runtime's group inventory after lock, logout or same-owner replacement.",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
+            "name": "Private group control documents cannot be listed, read, written or removed through generic document IPC; consumers use typed account group interfaces.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Previous-account archive scope is derived from verified modern authority and the current full device identity; a current account grant or invitation takes precedence.",
+            "reference": "docs/help/topics/channels.md#groups-across-your-devices"
+          },
+          {
+            "name": "Registered list/member reads project account role separately from executor readiness; an offline original owner preserves Owner on a nonmember sibling without inventing public membership or exposing private control payloads.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
           }
         ]
       },
@@ -702,7 +717,9 @@
     },
     {
       "id": "desktop-updates",
-      "consumers": ["frontend-updates"],
+      "consumers": [
+        "frontend-updates"
+      ],
       "paths": [
         "src-tauri/src/updates.rs",
         "src-tauri/src/updates/",

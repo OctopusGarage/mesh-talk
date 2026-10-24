@@ -2745,6 +2745,159 @@ async fn recalled_history_snapshot_never_emits_a_later_plaintext_frame() {
 }
 
 #[tokio::test]
+async fn account_sync_sibling_recalls_imported_saved_text() {
+    sibling_recalls_saved_item(false).await;
+}
+
+#[tokio::test]
+async fn account_sync_sibling_recalls_imported_protected_saved_card() {
+    sibling_recalls_saved_item(true).await;
+}
+
+async fn sibling_recalls_saved_item(protected_file: bool) {
+    let (dir, source, sibling) = sibling_nodes();
+    for node in [&source, &sibling] {
+        node.set_device_sync_category(SyncCategory::Attachments, true)
+            .unwrap();
+    }
+    let account = source.account_id();
+    let target = if protected_file {
+        let path = dir.path().join("protected-saved.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nprivate saved item").unwrap();
+        source
+            .enqueue_protected_file_to_account_progress_expiring_if(
+                &account,
+                &path,
+                crate::file::FileKind::Media,
+                |_| {},
+                None,
+                crate::protection::MessageProtection::Click,
+                |commit| commit(),
+            )
+            .await
+            .unwrap()
+            .0
+    } else {
+        source
+            .enqueue_to_account(&account, b"saved on the original device", None)
+            .await
+            .unwrap()
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = sibling_peer(&sibling, &source, listener.local_addr().unwrap());
+    let source_proof = source.signed_announce("source", listener.local_addr().unwrap().port());
+    let sibling_proof = sibling.signed_announce("sibling", 9);
+    for (node, directory, proof) in [
+        (&source, dir.path().join("source"), &source_proof),
+        (&sibling, dir.path().join("receiver"), &sibling_proof),
+    ] {
+        node.configure_privacy(
+            &directory,
+            "pw",
+            proof,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(source.clone().run_accept_loop(listener));
+    sibling
+        .pull_account_history_page(&peer, None, [0; 32])
+        .await
+        .unwrap();
+    let conversation = super::super::conversation::account_conversation_id(&account, &account);
+    assert!(
+        sibling
+            .sentlog
+            .lock()
+            .unwrap()
+            .entries(&conversation)
+            .is_empty()
+    );
+    let imported = sibling.account_history(&account, 10);
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0].id, target);
+    assert!(imported[0].from_me);
+    assert_eq!(imported[0].file.is_some(), protected_file);
+    if protected_file {
+        let protected = sibling
+            .received_files
+            .lock()
+            .unwrap()
+            .entries(&conversation)
+            .into_iter()
+            .find(|row| row.event_id == target)
+            .unwrap();
+        let ordinary = crate::file::FileManifest {
+            name: "ordinary.png".into(),
+            size: 0,
+            mime: "image/png".into(),
+            checksum: crate::file::file_checksum(&[]),
+            file_key: [0; 32],
+            file_conv: ConversationId::new([41; 32]),
+            chunk_count: 1,
+        }
+        .encode();
+        for (index, author, payload) in [
+            (41, "ff".repeat(16), protected.plaintext),
+            (42, sibling.user_id(), ordinary),
+            (43, sibling.user_id(), b"malformed manifest".to_vec()),
+        ] {
+            let invalid = EventId::new([index; 32]);
+            sibling
+                .received_files
+                .lock()
+                .unwrap()
+                .record(
+                    conversation,
+                    author,
+                    super::super::node::now_millis(),
+                    &payload,
+                    invalid,
+                )
+                .unwrap();
+            assert!(sibling.recall_account(&account, invalid).await.is_err());
+            assert!(
+                !sibling
+                    .recalls
+                    .lock()
+                    .unwrap()
+                    .targets(&conversation)
+                    .contains(&invalid)
+            );
+        }
+        assert!(
+            sibling
+                .account_documents(super::super::AccountDocumentDomain::DmRecall, None, 64,)
+                .unwrap()
+                .items
+                .is_empty(),
+            "invalid cached cards cannot mint account recall controls"
+        );
+    }
+    sibling.recall_account(&account, target).await.unwrap();
+    assert!(
+        sibling
+            .account_history(&account, 10)
+            .iter()
+            .find(|row| row.id == target)
+            .unwrap()
+            .recalled
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if source.account_history(&account, 10)[0].recalled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the original device accepts a sibling's Saved Messages recall");
+    tasks.shutdown().await;
+}
+
+#[tokio::test]
 async fn recalled_private_file_blocks_late_cards_and_stale_sibling_byte_release() {
     let (dir, original, stale) = sibling_nodes();
     let receiver = open_sibling(&dir.path().join("file-receiver"), &original.account);

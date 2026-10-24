@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    eventlog::{LogError, event::ConversationId},
+    eventlog::{EventId, LogError, event::ConversationId},
+    identity::device::PublicIdentity,
     node::media_store::MediaStore,
     storage::record_log::EncryptedRecordLog,
 };
@@ -11,11 +12,91 @@ use std::{
 const MAX_ORDINARY_KEYS: usize = 4096;
 const MAX_MESSAGE_KEYS: usize = 65536;
 const MAX_REFERENCE_KEYS: usize = 4096;
+const MAX_GROUP_CONTROL_KEYS: usize = 4096;
 // Read receipts have no blobs; each other retained key owns at most one blob.
-const MAX_OWNED_BLOBS: usize = MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS + MAX_REFERENCE_KEYS;
+const MAX_OWNED_BLOBS: usize =
+    MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS + MAX_REFERENCE_KEYS + MAX_GROUP_CONTROL_KEYS;
 // Include key.salt and one replacement/partial blob interrupted before cleanup.
 const MAX_MEDIA_ENTRIES: usize = MAX_OWNED_BLOBS + 2;
 const MAX_LIVE: u64 = 128 * 1024 * 1024;
+// These are local encrypted-index limits, independent of document wire quotas.
+const MAX_LOCAL_ROW: usize = 12 * 1024 * 1024;
+const MAX_LOCAL_FRONTIER: usize = 131_072;
+const MAX_LOCAL_RECEIPTS: usize = 32 * 1024 * 1024;
+const MAX_COMPACT_INDEX: usize = 112 * 1024 * 1024;
+const INDEX_HEADER: usize = 6 + crate::storage::encryption::SALT_SIZE;
+// bincode Vec length, frame length, nonce, and AES-GCM tag.
+const INDEX_FRAME: usize = 8 + 4 + crate::storage::encryption::NONCE_SIZE + 16;
+
+/// Never serialized into a wire metadata header or accepted from a remote merge.
+#[derive(Clone, Serialize, Deserialize)]
+struct LocalPublicationReceipt {
+    version: u8,
+    account_public: [u8; 32],
+    source: PublicIdentity,
+    group: [u8; 32],
+    revision: u64,
+    content_hash: [u8; 32],
+    frontier_hex: String,
+}
+impl LocalPublicationReceipt {
+    fn matches(&self, meta: &AccountDocumentMeta, source: &PublicIdentity) -> bool {
+        self.version == 1
+            && self.account_public == meta.account_public
+            && self.source == *source
+            && self.revision == meta.revision
+            && self.content_hash == meta.content_hash
+            && !meta.tombstone
+            && matches!(&meta.key, AccountDocumentKey::GroupControl { channel, source_device }
+                if *channel == hex::encode(self.group) && *source_device == source.user_id()
+                    && meta.writer_device == *source_device)
+    }
+    fn frontier(&self) -> Option<Vec<EventId>> {
+        if self.frontier_hex.is_empty()
+            || !self.frontier_hex.len().is_multiple_of(64)
+            || self.frontier_hex.len() > MAX_LOCAL_FRONTIER * 64
+        {
+            return None;
+        }
+        let bytes = hex::decode(&self.frontier_hex).ok()?;
+        let ids: Vec<_> = bytes
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .map(|bytes| EventId::new(*bytes))
+            .collect();
+        ids.windows(2).all(|pair| pair[0] < pair[1]).then_some(ids)
+    }
+}
+#[derive(Serialize, Deserialize)]
+struct LocalIndexRow {
+    #[serde(flatten)]
+    meta: AccountDocumentMeta,
+    #[serde(
+        default,
+        rename = "_local_group_publication",
+        skip_serializing_if = "Option::is_none"
+    )]
+    receipt: Option<serde_json::Value>,
+}
+struct RetainedPublicationReceipt {
+    receipt: LocalPublicationReceipt,
+    encoded_len: usize,
+    row_len: usize,
+}
+fn encode_row(
+    meta: &AccountDocumentMeta,
+    receipt: Option<&LocalPublicationReceipt>,
+) -> Result<Vec<u8>, LogError> {
+    match receipt {
+        None => serde_json::to_vec(meta).map_err(|_| corrupt()),
+        Some(receipt) => serde_json::to_vec(&LocalIndexRow {
+            meta: meta.clone(),
+            receipt: Some(serde_json::to_value(receipt).map_err(|_| corrupt())?),
+        })
+        .map_err(|_| corrupt()),
+    }
+}
 pub(in crate::node) struct AccountDocumentStore {
     file: EncryptedRecordLog<Vec<u8>>,
     media: MediaStore,
@@ -23,10 +104,15 @@ pub(in crate::node) struct AccountDocumentStore {
     account: [u8; 32],
     records: usize,
     journal_bytes: usize,
-    counts: [usize; 8],
+    counts: [usize; 9],
     live_bytes: u64,
-    digest_xor: [[u8; 32]; 8],
+    digest_xor: [[u8; 32]; 9],
     incomplete: BTreeSet<AccountDocumentKey>,
+    local_receipts: BTreeMap<AccountDocumentKey, RetainedPublicationReceipt>,
+    receipt_bytes: usize,
+    index_bytes: usize,
+    #[cfg(test)]
+    receipt_limit: usize,
 }
 fn metadata_hash(meta: &AccountDocumentMeta) -> [u8; 32] {
     let mut hash = Sha256::new();
@@ -93,7 +179,8 @@ impl AccountDocumentStore {
             &id,
         )
         .map_err(LogError::Io)?;
-        let journal_bytes = rows.iter().map(|r| r.len() + 32).sum();
+        let journal_bytes =
+            INDEX_HEADER + rows.iter().map(|r| r.len() + INDEX_FRAME).sum::<usize>();
         let mut store = Self {
             file,
             media,
@@ -101,23 +188,40 @@ impl AccountDocumentStore {
             account: *account,
             records: rows.len(),
             journal_bytes,
-            counts: [0; 8],
+            counts: [0; 9],
             live_bytes: 0,
-            digest_xor: [[0; 32]; 8],
+            digest_xor: [[0; 32]; 9],
             incomplete: BTreeSet::new(),
+            local_receipts: BTreeMap::new(),
+            receipt_bytes: 0,
+            index_bytes: INDEX_HEADER,
+            #[cfg(test)]
+            receipt_limit: MAX_LOCAL_RECEIPTS,
         };
         for bytes in rows {
-            if bytes.len() > 8192 {
+            if bytes.len() > MAX_LOCAL_ROW {
                 return Err(corrupt());
             }
-            let row: AccountDocumentMeta = serde_json::from_slice(&bytes).map_err(|_| corrupt())?;
-            store.validate(&row)?;
+            let row: LocalIndexRow = serde_json::from_slice(&bytes).map_err(|_| corrupt())?;
+            if bytes.len() > 8192
+                && (row.receipt.is_none()
+                    || !matches!(row.meta.key, AccountDocumentKey::GroupControl { .. }))
+            {
+                return Err(corrupt());
+            }
+            store.validate(&row.meta)?;
+            let receipt = row
+                .receipt
+                .and_then(|value| serde_json::from_value::<LocalPublicationReceipt>(value).ok())
+                .filter(|receipt| {
+                    receipt.matches(&row.meta, &receipt.source) && receipt.frontier().is_some()
+                });
             if store
                 .current
-                .get(&row.key)
-                .is_none_or(|old| old.order() < row.order())
+                .get(&row.meta.key)
+                .is_none_or(|old| old.order() < row.meta.order())
             {
-                store.install(row);
+                store.install_record(row.meta, receipt);
             }
         }
         for key in store.current.keys() {
@@ -138,6 +242,14 @@ impl AccountDocumentStore {
     #[cfg(test)]
     pub(super) fn fail_index_for_test(&mut self, fail: bool) {
         self.file.fail_appends_for_test(fail).unwrap();
+    }
+    #[cfg(test)]
+    pub(super) fn publication_budget_for_test(&mut self, limit: usize) {
+        self.receipt_limit = limit;
+    }
+    #[cfg(test)]
+    pub(super) fn compact_next_for_test(&mut self) {
+        self.records = self.current.len().saturating_mul(2).saturating_add(32);
     }
     pub(super) fn meta(&self, key: &AccountDocumentKey) -> Option<AccountDocumentMeta> {
         self.current.get(key).cloned()
@@ -190,7 +302,52 @@ impl AccountDocumentStore {
             .cloned()
             .collect()
     }
+    pub(super) fn group_control_rows(&self, channel: &str) -> Vec<AccountDocumentMeta> {
+        let start = AccountDocumentKey::GroupControl {
+            channel: channel.to_owned(),
+            source_device: String::new(),
+        };
+        self.current.range(start..)
+            .take_while(|(key, _)| matches!(key, AccountDocumentKey::GroupControl { channel: id, .. } if id == channel))
+            .take(MAX_GROUP_CONTROL_KEYS).map(|(_, meta)| meta.clone()).collect()
+    }
+    #[cfg(test)]
     fn install(&mut self, meta: AccountDocumentMeta) {
+        self.install_record(meta, None);
+    }
+    fn install_record(
+        &mut self,
+        meta: AccountDocumentMeta,
+        receipt: Option<LocalPublicationReceipt>,
+    ) {
+        if let Some(old) = self.current.get(&meta.key) {
+            let row_len = self.local_receipts.get(&meta.key).map_or_else(
+                || encode_row(old, None).expect("metadata serializes").len(),
+                |old| old.row_len,
+            );
+            self.index_bytes -= row_len + INDEX_FRAME;
+        }
+        if let Some(old) = self.local_receipts.remove(&meta.key) {
+            self.receipt_bytes -= old.encoded_len;
+        }
+        let row_len = encode_row(&meta, receipt.as_ref())
+            .expect("local metadata serializes")
+            .len();
+        self.index_bytes += row_len + INDEX_FRAME;
+        if let Some(receipt) = receipt {
+            let encoded_len = serde_json::to_vec(&receipt)
+                .expect("local receipt serializes")
+                .len();
+            self.receipt_bytes += encoded_len;
+            self.local_receipts.insert(
+                meta.key.clone(),
+                RetainedPublicationReceipt {
+                    receipt,
+                    encoded_len,
+                    row_len,
+                },
+            );
+        }
         let index = meta.key.domain() as usize;
         if let Some(old) = self.current.get(&meta.key) {
             let old_hash = metadata_hash(old);
@@ -288,14 +445,87 @@ impl AccountDocumentStore {
         self.merge(meta.clone(), payload).map_err(NodeError::Log)?;
         Ok(meta)
     }
+    pub(super) fn group_control_payload_fits(
+        &self,
+        key: &AccountDocumentKey,
+        bytes: usize,
+    ) -> bool {
+        let old = self.current.get(key);
+        (old.is_some()
+            || self.counts[AccountDocumentDomain::GroupControl as usize] < MAX_GROUP_CONTROL_KEYS)
+            && self
+                .live_bytes
+                .saturating_sub(
+                    old.filter(|meta| !meta.tombstone)
+                        .map_or(0, |meta| u64::from(meta.content_len)),
+                )
+                .saturating_add(bytes as u64)
+                <= MAX_LIVE
+    }
     pub(super) fn merge(
         &mut self,
         meta: AccountDocumentMeta,
         payload: &[u8],
     ) -> Result<bool, LogError> {
+        self.merge_record(meta, payload, None)
+    }
+    pub(super) fn merge_local_group_control(
+        &mut self,
+        meta: AccountDocumentMeta,
+        payload: &[u8],
+        frontier: Vec<EventId>,
+    ) -> Result<bool, LogError> {
+        let head =
+            crate::node::account_group::wire::GroupControlHead::decode(payload, &self.account)
+                .ok_or_else(corrupt)?;
+        let receipt = if head.access.complete_frontier {
+            None
+        } else {
+            if frontier.is_empty() || frontier.len() > MAX_LOCAL_FRONTIER {
+                return Err(corrupt());
+            }
+            let receipt = LocalPublicationReceipt {
+                version: 1,
+                account_public: self.account,
+                source: head.proof.public(),
+                group: *head.group.as_bytes(),
+                revision: meta.revision,
+                content_hash: meta.content_hash,
+                frontier_hex: frontier.iter().map(EventId::to_hex).collect(),
+            };
+            if !receipt.matches(&meta, &head.proof.public())
+                || receipt.frontier().as_ref() != Some(&frontier)
+            {
+                return Err(corrupt());
+            }
+            Some(receipt)
+        };
+        self.merge_record(meta, payload, receipt)
+    }
+    pub(super) fn local_publication_frontier(
+        &self,
+        meta: &AccountDocumentMeta,
+        source: &PublicIdentity,
+    ) -> Option<Vec<EventId>> {
+        let retained = self.local_receipts.get(&meta.key)?;
+        retained
+            .receipt
+            .matches(meta, source)
+            .then(|| retained.receipt.frontier())
+            .flatten()
+    }
+    fn merge_record(
+        &mut self,
+        meta: AccountDocumentMeta,
+        payload: &[u8],
+        receipt: Option<LocalPublicationReceipt>,
+    ) -> Result<bool, LogError> {
         self.validate(&meta)?;
         if meta.key.is_private_control()
             && !match meta.key {
+                AccountDocumentKey::GroupControl { .. } => {
+                    super::group_control::valid_payload(&meta, payload)
+                }
                 AccountDocumentKey::GroupInventory { .. } => {
                     super::inventory::valid_payload(&meta, payload)
                 }
@@ -335,6 +565,52 @@ impl AccountDocumentStore {
             }
             return Ok(false);
         }
+        let bytes = encode_row(&meta, receipt.as_ref())?;
+        let old_receipt = self.local_receipts.get(&meta.key);
+        let receipt_len = receipt
+            .as_ref()
+            .map(|receipt| serde_json::to_vec(receipt).map(|bytes| bytes.len()))
+            .transpose()
+            .map_err(|_| corrupt())?
+            .unwrap_or(0);
+        let old_row_len = self
+            .current
+            .get(&meta.key)
+            .map(|old| {
+                old_receipt.map_or_else(
+                    || encode_row(old, None).map(|bytes| bytes.len()),
+                    |old| Ok(old.row_len),
+                )
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let index_bytes = self
+            .index_bytes
+            .saturating_sub(if self.current.contains_key(&meta.key) {
+                old_row_len + INDEX_FRAME
+            } else {
+                0
+            })
+            .saturating_add(bytes.len() + INDEX_FRAME);
+        let receipt_bytes = self
+            .receipt_bytes
+            .saturating_sub(old_receipt.map_or(0, |old| old.encoded_len))
+            .saturating_add(receipt_len);
+        let receipt_limit = MAX_LOCAL_RECEIPTS;
+        #[cfg(test)]
+        let receipt_limit = receipt_limit.min(self.receipt_limit);
+        if bytes.len()
+            > if receipt.is_some() {
+                MAX_LOCAL_ROW
+            } else {
+                8192
+            }
+            || receipt_bytes > receipt_limit
+            || index_bytes > MAX_COMPACT_INDEX
+        {
+            // Never orphan a retained incomplete head by evicting its receipt.
+            return Err(corrupt());
+        }
         if meta.content_len > 0 && !meta.tombstone {
             self.media
                 .store_bytes(
@@ -344,7 +620,6 @@ impl AccountDocumentStore {
                 )
                 .map_err(LogError::Io)?;
         }
-        let bytes = serde_json::to_vec(&meta).map_err(|_| corrupt())?;
         let old_hash = self
             .current
             .get(&meta.key)
@@ -352,14 +627,25 @@ impl AccountDocumentStore {
             .map(|m| m.content_hash);
         let commit = (|| {
             if self.records >= self.current.len().saturating_mul(2).saturating_add(32)
-                || self.journal_bytes + bytes.len() + 32 > 120 * 1024 * 1024
+                || self.journal_bytes + bytes.len() + INDEX_FRAME > 120 * 1024 * 1024
             {
-                let rows: Result<Vec<_>, _> =
-                    self.current.values().map(serde_json::to_vec).collect();
+                let rows: Result<Vec<_>, _> = self
+                    .current
+                    .values()
+                    .map(|meta| {
+                        encode_row(
+                            meta,
+                            self.local_receipts
+                                .get(&meta.key)
+                                .map(|retained| &retained.receipt),
+                        )
+                    })
+                    .collect();
                 let rows = rows.map_err(|_| corrupt())?;
                 self.file.rewrite(&rows)?;
                 self.records = self.current.len();
-                self.journal_bytes = rows.iter().map(|r| r.len() + 32).sum();
+                self.journal_bytes =
+                    INDEX_HEADER + rows.iter().map(|r| r.len() + INDEX_FRAME).sum::<usize>();
             }
             self.file.append_durable(&bytes)
         })();
@@ -372,9 +658,9 @@ impl AccountDocumentStore {
             }
             return Err(error);
         }
-        self.journal_bytes += bytes.len() + 32;
+        self.journal_bytes += bytes.len() + INDEX_FRAME;
         self.records += 1;
-        self.install(meta);
+        self.install_record(meta, receipt);
         if let Some(old_hash) = old_hash
             && !self.live().contains(&ConversationId::new(old_hash))
         {
@@ -389,7 +675,10 @@ impl AccountDocumentStore {
         let seen = matches!(meta.key, AccountDocumentKey::ReadReceipt { .. });
         let custody = matches!(meta.key, AccountDocumentKey::ChannelCustody { .. });
         let reference = matches!(meta.key, AccountDocumentKey::GroupInventory { .. });
-        let count = if reference {
+        let group_control = matches!(meta.key, AccountDocumentKey::GroupControl { .. });
+        let count = if group_control {
+            self.counts[AccountDocumentDomain::GroupControl as usize]
+        } else if reference {
             self.counts[AccountDocumentDomain::GroupInventory as usize]
         } else if custody {
             self.counts[AccountDocumentDomain::ChannelCustody as usize]
@@ -400,10 +689,13 @@ impl AccountDocumentStore {
                 - self.counts[AccountDocumentDomain::ReadReceipt as usize]
                 - self.counts[AccountDocumentDomain::ChannelCustody as usize]
                 - self.counts[AccountDocumentDomain::GroupInventory as usize]
+                - self.counts[AccountDocumentDomain::GroupControl as usize]
         };
         if !self.current.contains_key(&meta.key)
             && count
-                >= if reference {
+                >= if group_control {
+                    MAX_GROUP_CONTROL_KEYS
+                } else if reference {
                     MAX_REFERENCE_KEYS
                 } else if seen || custody {
                     MAX_MESSAGE_KEYS
@@ -441,6 +733,110 @@ impl AccountDocumentStore {
 mod budget_tests {
     use super::*;
     #[test]
+    fn ordinary_index_rows_remain_exact_raw_metadata_json() {
+        let account = Account::generate();
+        let meta = AccountDocumentMeta::new(
+            &account,
+            "a".repeat(32),
+            AccountDocumentKey::Draft {
+                conversation: DocumentConversation::Account("b".repeat(32)),
+            },
+            1,
+            b"private draft",
+            false,
+        );
+        let raw = serde_json::to_vec(&meta).unwrap();
+        assert!(encode_row(&meta, None).unwrap() == raw);
+        let row: LocalIndexRow = serde_json::from_slice(&raw).unwrap();
+        assert!(row.meta == meta && row.receipt.is_none());
+        // Match the storage owner's actual bincode/encrypted frame shape.
+        assert_eq!(
+            bincode::serialized_size(&raw).unwrap() as usize + 4 + 12 + 16,
+            raw.len() + INDEX_FRAME
+        );
+    }
+    #[test]
+    fn publication_receipts_bind_exact_metadata_and_reject_invalid_frontiers() {
+        let account = Account::generate();
+        let device = DeviceIdentity::generate().public();
+        let meta = AccountDocumentMeta::new(
+            &account,
+            device.user_id(),
+            AccountDocumentKey::GroupControl {
+                channel: hex::encode([1; 32]),
+                source_device: device.user_id(),
+            },
+            9,
+            b"signed head placeholder for local record scope",
+            false,
+        );
+        let receipt = LocalPublicationReceipt {
+            version: 1,
+            account_public: meta.account_public,
+            source: device.clone(),
+            group: [1; 32],
+            revision: meta.revision,
+            content_hash: meta.content_hash,
+            frontier_hex: hex::encode([2; 32]),
+        };
+        assert!(receipt.matches(&meta, &device));
+        assert_eq!(receipt.frontier().unwrap(), vec![EventId::new([2; 32])]);
+        for field in 0..6 {
+            let mut wrong = receipt.clone();
+            match field {
+                0 => wrong.account_public[0] ^= 1,
+                1 => wrong.source.x25519_pub[0] ^= 1,
+                2 => wrong.group[0] ^= 1,
+                3 => wrong.revision += 1,
+                4 => wrong.content_hash[0] ^= 1,
+                _ => wrong.version += 1,
+            }
+            assert!(!wrong.matches(&meta, &device));
+        }
+        for frontier in [
+            String::new(),
+            "00".into(),
+            hex::encode([2; 32]).repeat(2),
+            "00".repeat((MAX_LOCAL_FRONTIER + 1) * 32),
+        ] {
+            let mut wrong = receipt.clone();
+            wrong.frontier_hex = frontier;
+            assert!(wrong.frontier().is_none());
+        }
+        let ordinary = encode_row(&meta, None).unwrap();
+        let augmented = encode_row(&meta, Some(&receipt)).unwrap();
+        assert!(augmented.len() > ordinary.len());
+        let parsed: LocalIndexRow = serde_json::from_slice(&augmented).unwrap();
+        assert!(parsed.meta == meta && parsed.receipt.is_some());
+    }
+    #[test]
+    fn group_control_quota_is_separate_and_existing_heads_can_advance_at_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        let writer = "a".repeat(32);
+        let key = AccountDocumentKey::GroupControl {
+            channel: "1".repeat(64),
+            source_device: writer.clone(),
+        };
+        let meta = AccountDocumentMeta::new(&account, writer.clone(), key.clone(), 1, &[], false);
+        store.counts[AccountDocumentDomain::Draft as usize] = MAX_ORDINARY_KEYS;
+        store.counts[AccountDocumentDomain::ReadReceipt as usize] = MAX_MESSAGE_KEYS;
+        store.counts[AccountDocumentDomain::ChannelCustody as usize] = MAX_MESSAGE_KEYS;
+        store.counts[AccountDocumentDomain::GroupInventory as usize] = MAX_REFERENCE_KEYS;
+        assert!(store.validate(&meta).is_ok());
+        store.counts[AccountDocumentDomain::GroupControl as usize] = MAX_GROUP_CONTROL_KEYS;
+        assert!(store.validate(&meta).is_err());
+        store.counts[AccountDocumentDomain::GroupControl as usize] -= 1;
+        store.install(meta);
+        let updated = AccountDocumentMeta::new(&account, writer, key, 2, &[], false);
+        assert!(
+            store.validate(&updated).is_ok(),
+            "a head revision must not allocate a new document key"
+        );
+    }
+    #[test]
     fn group_inventory_quota_is_independent_and_bounded() {
         let dir = tempfile::tempdir().unwrap();
         let account = Account::generate();
@@ -455,6 +851,7 @@ mod budget_tests {
         store.counts[AccountDocumentDomain::Draft as usize] = MAX_ORDINARY_KEYS;
         store.counts[AccountDocumentDomain::ReadReceipt as usize] = MAX_MESSAGE_KEYS;
         store.counts[AccountDocumentDomain::ChannelCustody as usize] = MAX_MESSAGE_KEYS;
+        store.counts[AccountDocumentDomain::GroupControl as usize] = MAX_GROUP_CONTROL_KEYS;
         assert!(
             store.validate(&meta).is_ok(),
             "other domains must not exhaust reference quota"
@@ -463,7 +860,7 @@ mod budget_tests {
         assert!(store.validate(&meta).is_err());
         assert_eq!(
             MAX_OWNED_BLOBS,
-            MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS + MAX_REFERENCE_KEYS
+            MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS + MAX_REFERENCE_KEYS + MAX_GROUP_CONTROL_KEYS
         );
     }
 

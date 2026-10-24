@@ -40,6 +40,12 @@ Group-directory metadata is account topology. Turning off optional message
 history does not hide the groups already held by your account's devices. It also
 does not enable message-history transfer or change any other synchronization choice.
 
+**Previous account groups** contains local history whose account-authorized
+membership still belongs to the account used before linking. You can expand this
+section to read retained messages. These rows are separate from your current
+account's group directory and do not offer joining or sending actions. Linking
+devices does not merge two separate accounts' group memberships or ownership.
+
 ## Understand message copy status
 
 A group message's check marks report confirmed stored copies held by other

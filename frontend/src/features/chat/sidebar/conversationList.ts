@@ -40,6 +40,7 @@ export function conversationList(
   const accountRows: ConversationListRow[] = [];
   const channelRows: ConversationListRow[] = [];
   const hiddenChannels: ConversationListRow[] = [];
+  const previousAccountRows: ConversationListRow[] = [];
   if (ownAccount && personalReady) {
     accountRows.push({
       id: ownAccount,
@@ -83,19 +84,22 @@ export function conversationList(
         id,
         name: favorites[id]?.custom_alias || c.name,
       },
-      pinned: favorites[id]?.pinned ?? false,
-      subtitle: c.shared_reference
-        ? t("conversation.sharedReference")
-        : c.dissolved
-          ? t("conversation.dissolvedChannel")
-          : c.archived
-            ? t("conversation.archivedChannel")
-            : c.left
-              ? t("conversation.leftChannel")
-              : c.pending_invite
-                ? t("conversation.pendingInvite")
-                : t("conversation.members", { count: c.member_count }),
+      pinned: !c.previous_account && (favorites[id]?.pinned ?? false),
+      subtitle: c.previous_account
+        ? t("conversation.previousAccountChannel")
+        : c.shared_reference
+          ? t("conversation.sharedReference")
+          : c.dissolved
+            ? t("conversation.dissolvedChannel")
+            : c.archived
+              ? t("conversation.archivedChannel")
+              : c.left
+                ? t("conversation.leftChannel")
+                : c.pending_invite
+                  ? t("conversation.pendingInvite")
+                  : t("conversation.members", { count: c.member_count }),
       prioritizeSubtitle: !!(
+        c.previous_account ||
         c.shared_reference ||
         c.dissolved ||
         c.archived ||
@@ -103,6 +107,10 @@ export function conversationList(
         c.pending_invite
       ),
     };
+    if (c.previous_account && !favorites[id]?.hidden) {
+      previousAccountRows.push(row);
+      continue;
+    }
     (favorites[id]?.hidden
       ? hiddenChannels
       : row.pinned
@@ -115,6 +123,7 @@ export function conversationList(
     accountRows,
     channelRows,
     hiddenChannels,
+    previousAccountRows,
     listSize: pinnedRows.length + accountRows.length + channelRows.length,
   };
 }

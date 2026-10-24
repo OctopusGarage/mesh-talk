@@ -46,6 +46,25 @@ const render = () =>
       pendingInvite: false,
     }),
   );
+it("labels previous-account history before stale membership flags and presence", () => {
+  const html = renderToStaticMarkup(
+    createElement(ChannelHeader, {
+      id: "group",
+      name: "History",
+      memberCount: 4,
+      archived: true,
+      dissolved: false,
+      left: true,
+      pendingInvite: true,
+      previousAccount: true,
+    }),
+  );
+  expect(html).toContain("Previous account");
+  expect(html).not.toContain("Left channel");
+  expect(html).not.toContain("Archived channel");
+  expect(html).not.toContain("Pending invitation");
+  expect(html).not.toContain("known online");
+});
 it("shows client-relative person counts including zero without a group online dot", () => {
   usePresence.setState({
     map: {

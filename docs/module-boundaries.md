@@ -550,6 +550,73 @@ Markdown rendering, static publication and read-only documentation MCP. These
 modules consume no private messaging state and introduce no core protocol
 responsibility. See [help system maintenance](help-system.md).
 
+### Account and device ownership
+
+User authority belongs to the account; a device supplies an execution context.
+Every consumer must distinguish that authority from current execution
+availability. A group owner account is the owner on every certified device,
+including a device absent from a legacy physical roster. A member account can
+leave from any certified device; an owner account must transfer ownership first
+on every device. Public signer validation remains authoritative for actual
+protocol effects. An inventory row or display name cannot establish authority.
+
+| Account-owned state or action | Device-owned execution or state |
+| --- | --- |
+| Login credentials, nickname, avatar and biography | Device signing identity, local storage namespace and storage encryption secrets |
+| Private contact remarks, contact state, favorites and portable preferences | Physical paths, OS permissions, autostart and local integration grants |
+| Group membership, owner role and permission to administer or leave | Current routes, connections and eligible signers for legacy controls |
+| Logical messages, account read state and synchronized private controls | Original event signatures, local media cache and device sharing choices |
+
+Group send, invitation, membership and administration consumers must use the same
+account authorization decision. The ability to execute one action locally does
+not grant permission to sign another action. In a legacy group, a member device
+can send while an owner action waits for an eligible owner signer. Such waiting
+must not downgrade the displayed account role, manufacture a grant, or report an
+uncommitted effect as successful. A private group reference remains descriptive;
+verified source authority and the public channel rules govern execution.
+
+Account-private role observations trust an authenticated account device to report
+the canonical result of its full public channel reducer. Receivers verify the
+actual source's full signed binding and observation signature. An owner's
+adoption of the account requires that owner's independently signed binding.
+A member device may relay that binding while retaining its own member role.
+Execution always revalidates the actual public membership, lifetime, authority
+and signer through the owning channel implementation.
+
+Cross-source reconciliation names exact signed heads by full source identity,
+revision and hash. A source attests supersession only after its full public view
+contains and resolves the referenced observation's lifetime and authority
+decisions. Incomparable observations require reconciliation. Source revisions,
+wall clocks, event counts and role ranking cannot establish cross-source
+precedence. Replacement heads invalidate superseded observations; bounded
+revision floors and terminal observations prevent delayed replay from restoring
+obsolete roles. Only real local group observations may be published as a
+device's physical source state.
+
+The existing account-document index owns local publication recovery. An incomplete
+source head and its exact account, full-device, revision and hash-bound recovery
+frontier share one encrypted durable index append. Compaction preserves that
+pair; capacity or write failure preserves the previous pair. A required receipt
+is retained until an atomic replacement makes it unnecessary. These local index
+extensions are excluded from wire metadata and remote ingestion; ordinary index
+rows retain their existing JSON representation.
+
+This trust boundary covers private account replicas. A compromised account
+device can fabricate private observations; public event and signer validation
+remain enforced independently. Account metadata synchronization carries bounded
+observations and reconciliation references, so optional history sharing can stay
+disabled without exporting message bodies or sender keys to prove role state.
+
+The desktop exposes private group control state through typed account group
+interfaces. Generic account document IPC rejects this domain for listing,
+metadata, payload reads, writes and removal; it cannot expose operation payloads
+or bypass verified control ingestion.
+List and member IPC expose the current account role separately from execution
+readiness. Their typed projection contains account and device identifiers,
+role and readiness, without raw keys or private operation bodies. A failed
+observation explicitly requires reconciliation rather than restoring cached
+authority.
+
 ### Account profiles and private trust
 
 `identity/account.rs` and `identity/account_keystore.rs` own immutable creation

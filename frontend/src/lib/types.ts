@@ -105,7 +105,19 @@ export interface ChannelActivityInfo {
 export type ChannelHistoryPolicy =
   "off" | "last_ten" | "last_three_days" | "last_ten_within_three_days";
 
+export interface AccountGroupAccessInfo {
+  account_id: string;
+  role: "invited" | "member" | "owner" | "left" | "dissolved" | "unknown";
+  execution:
+    | { kind: "local" }
+    | { kind: "via_device"; device_id: string }
+    | { kind: "waiting_for_device" }
+    | { kind: "requires_upgrade" }
+    | { kind: "reconciling" };
+}
+
 export interface ChannelMembersInfo {
+  account_access?: AccountGroupAccessInfo | null;
   /** Native authorization for the current certified device/account. */
   can_manage?: boolean;
   owner_account_id?: string | null;
@@ -137,6 +149,9 @@ export interface ChannelRecovery {
   checked_at?: number | null;
 }
 export interface ChannelInfo {
+  account_access?: AccountGroupAccessInfo | null;
+  /** Historical local membership belonging to an account other than the active one. */
+  previous_account?: string | null;
   /** Informational account inventory; never grants membership or management. */
   shared_reference?: boolean;
   legacy_membership?: boolean;

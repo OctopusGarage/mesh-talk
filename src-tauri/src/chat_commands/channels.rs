@@ -6,6 +6,56 @@ use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::
 use serde::Serialize;
 use tauri::Manager;
 
+/// Account permission and physical execution availability have separate meanings.
+#[derive(Serialize)]
+pub struct AccountGroupAccessInfo {
+    account_id: String,
+    role: mesh_talk_core::node::AccountGroupRole,
+    execution: AccountGroupExecutionInfo,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AccountGroupExecutionInfo {
+    Local,
+    ViaDevice { device_id: String },
+    WaitingForDevice,
+    RequiresUpgrade,
+    Reconciling,
+}
+
+impl AccountGroupAccessInfo {
+    fn read(
+        node: &mesh_talk_core::node::Node,
+        group: mesh_talk_core::eventlog::ConversationId,
+    ) -> Self {
+        use mesh_talk_core::node::{AccountGroupExecution, AccountGroupRole};
+        let Ok(access) = node.account_group_access(group) else {
+            // A failed observation must not fall back to cached positive device
+            // authority. Other groups remain available while this one reconciles.
+            return Self {
+                account_id: node.account_id(),
+                role: AccountGroupRole::Unknown,
+                execution: AccountGroupExecutionInfo::Reconciling,
+            };
+        };
+        let execution = match access.execution {
+            AccountGroupExecution::Local => AccountGroupExecutionInfo::Local,
+            AccountGroupExecution::ViaDevice(device) => AccountGroupExecutionInfo::ViaDevice {
+                device_id: device.user_id(),
+            },
+            AccountGroupExecution::WaitingForDevice => AccountGroupExecutionInfo::WaitingForDevice,
+            AccountGroupExecution::RequiresUpgrade => AccountGroupExecutionInfo::RequiresUpgrade,
+            AccountGroupExecution::Reconciling => AccountGroupExecutionInfo::Reconciling,
+        };
+        Self {
+            account_id: access.account_id,
+            role: access.role,
+            execution,
+        }
+    }
+}
+
 /// A channel as shown in the chat UI.
 #[derive(Serialize)]
 pub struct ChannelInfo {
@@ -19,6 +69,10 @@ pub struct ChannelInfo {
     pub owner_account_id: Option<String>,
     /// Verified for this running device, rather than inferred from UI presence.
     pub can_manage: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_access: Option<AccountGroupAccessInfo>,
+    /// Retained local history whose modern membership belongs to another account.
+    pub previous_account: Option<String>,
     /// Account-private display reference without a local membership/key grant.
     pub shared_reference: bool,
     pub legacy_membership: bool,
@@ -54,6 +108,8 @@ pub async fn list_channels(
                             .and_then(|r| r.owner_account_id.clone())
                             .or_else(|| node.channel_owner_account_id(c.id)),
                         can_manage: reference.is_none() && node.channel_can_manage(c.id),
+                        account_access: Some(AccountGroupAccessInfo::read(&node, c.id)),
+                        previous_account: node.channel_previous_account(c.id),
                         shared_reference: reference.is_some(),
                         reference_members_complete: reference
                             .as_ref()
@@ -197,6 +253,7 @@ pub async fn channel_members(
                     .and_then(|r| r.owner_account_id.clone())
                     .or_else(|| node.channel_owner_account_id(channel)),
                 can_manage: reference.is_none() && node.channel_can_manage(channel),
+                account_access: Some(AccountGroupAccessInfo::read(&node, channel)),
                 members,
             })
         })

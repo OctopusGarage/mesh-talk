@@ -132,6 +132,8 @@ pub struct ChannelMembersInfo {
     pub owner: String,
     pub owner_account_id: Option<String>,
     pub can_manage: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_access: Option<super::channels::AccountGroupAccessInfo>,
     pub members: Vec<ChannelMemberInfo>,
 }
 
@@ -183,6 +185,7 @@ mod tests {
                 owner: "owner".into(),
                 owner_account_id: None,
                 can_manage: false,
+                account_access: None,
                 members: vec![],
                 history_policy: policy,
             })

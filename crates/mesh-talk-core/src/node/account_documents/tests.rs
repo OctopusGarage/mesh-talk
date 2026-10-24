@@ -58,7 +58,7 @@ fn signed_documents_survive_restart_and_enforce_cas_tombstones_and_account_scope
             .is_none()
     );
 }
-fn node(path: &std::path::Path, account: &Account) -> std::sync::Arc<Node> {
+pub(super) fn node(path: &std::path::Path, account: &Account) -> std::sync::Arc<Node> {
     node_with_identity(path, account, DeviceIdentity::generate())
 }
 fn node_with_identity(
@@ -1736,6 +1736,12 @@ fn private_control_request_versions_keep_legacy_domains_unchanged() {
         (AccountDocumentDomain::GroupInventory, 2, false),
         (AccountDocumentDomain::GroupInventory, 3, false),
         (AccountDocumentDomain::GroupInventory, 4, true),
+        (AccountDocumentDomain::GroupInventory, 5, false),
+        (AccountDocumentDomain::GroupControl, 1, false),
+        (AccountDocumentDomain::GroupControl, 2, false),
+        (AccountDocumentDomain::GroupControl, 3, false),
+        (AccountDocumentDomain::GroupControl, 4, false),
+        (AccountDocumentDomain::GroupControl, 5, true),
         (AccountDocumentDomain::Draft, 4, false),
     ] {
         let request = DocumentRequest {
@@ -2513,6 +2519,1827 @@ fn group_inventory_source_document(
         .unwrap()
         .unwrap()
 }
+
+fn copy_public_group(source: &Node, target: &Node, group: crate::eventlog::ConversationId) {
+    let events: Vec<_> = source
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .into_iter()
+        .cloned()
+        .collect();
+    for event in events {
+        target.log.lock().unwrap().append(event).unwrap();
+    }
+    target.process_channel(group);
+}
+
+fn group_control_source_document(
+    source: &Node,
+    group: crate::eventlog::ConversationId,
+) -> AccountDocument {
+    source.publish_account_group_access(&mut None);
+    source
+        .account_document(&AccountDocumentKey::GroupControl {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        })
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn group_control_signed_heads_and_metadata_reject_forged_or_malformed_records() {
+    use crate::node::account_group::wire::{GroupControlHead, MAX_HEAD_BYTES};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let member = node(&dir.path().join("member"), &account);
+    let group = group_inventory_legacy_fixture(&owner, &member, "Bound signed source");
+    copy_public_group(&member, &owner, group);
+    let document = group_control_source_document(&owner, group);
+    let head = GroupControlHead::decode(document.payload(), &account.public().ed25519_pub).unwrap();
+    let mut store = AccountDocumentStore::open(
+        &dir.path().join("store"),
+        "pw",
+        &account.public().ed25519_pub,
+    )
+    .unwrap();
+    assert!(
+        store
+            .merge(document.meta.clone(), document.payload())
+            .unwrap()
+    );
+    let original = serde_json::from_slice::<serde_json::Value>(document.payload()).unwrap();
+    for field in ["signature", "role", "source", "revision", "proof"] {
+        let mut forged = original.clone();
+        match field {
+            "signature" => {
+                forged["signature"][0] =
+                    serde_json::json!(forged["signature"][0].as_u64().unwrap() ^ 1)
+            }
+            "role" => forged["access"]["source"]["role"] = serde_json::json!("member"),
+            "source" => {
+                forged["access"]["source"]["device"]["x25519_pub"][0] = serde_json::json!(
+                    forged["access"]["source"]["device"]["x25519_pub"][0]
+                        .as_u64()
+                        .unwrap()
+                        ^ 1
+                )
+            }
+            "revision" => forged["revision"] = serde_json::json!(head.revision + 1),
+            "proof" => {
+                forged["proof"]["x25519_pub"][0] =
+                    serde_json::json!(forged["proof"]["x25519_pub"][0].as_u64().unwrap() ^ 1)
+            }
+            _ => unreachable!(),
+        }
+        let payload = serde_json::to_vec(&forged).unwrap();
+        let meta = AccountDocumentMeta::new(
+            &account,
+            owner.user_id(),
+            document.meta.key.clone(),
+            head.revision,
+            &payload,
+            false,
+        );
+        assert!(
+            store.merge(meta, &payload).is_err(),
+            "forged {field} must be rejected before installation"
+        );
+    }
+    let wrong_signer = GroupControlHead::new(
+        &member.identity,
+        group,
+        head.revision,
+        head.proof.clone(),
+        head.access.clone(),
+    )
+    .encode();
+    let wrong_signer_meta = AccountDocumentMeta::new(
+        &account,
+        owner.user_id(),
+        document.meta.key.clone(),
+        head.revision,
+        &wrong_signer,
+        false,
+    );
+    assert!(store.merge(wrong_signer_meta, &wrong_signer).is_err());
+    let wrong_keys = [
+        AccountDocumentKey::GroupControl {
+            channel: "f".repeat(64),
+            source_device: owner.user_id(),
+        },
+        AccountDocumentKey::GroupControl {
+            channel: hex::encode(group.as_bytes()),
+            source_device: member.user_id(),
+        },
+    ];
+    for key in wrong_keys {
+        let AccountDocumentKey::GroupControl { source_device, .. } = &key else {
+            unreachable!()
+        };
+        let meta = AccountDocumentMeta::new(
+            &account,
+            source_device.clone(),
+            key,
+            head.revision,
+            document.payload(),
+            false,
+        );
+        assert!(store.merge(meta, document.payload()).is_err());
+    }
+    let wrong_revision = AccountDocumentMeta::new(
+        &account,
+        owner.user_id(),
+        document.meta.key.clone(),
+        head.revision + 1,
+        document.payload(),
+        false,
+    );
+    assert!(store.merge(wrong_revision, document.payload()).is_err());
+    let wrong_account = AccountDocumentMeta::new(
+        &Account::generate(),
+        owner.user_id(),
+        document.meta.key.clone(),
+        head.revision,
+        document.payload(),
+        false,
+    );
+    assert!(store.merge(wrong_account, document.payload()).is_err());
+    let tombstone = AccountDocumentMeta::new(
+        &account,
+        owner.user_id(),
+        document.meta.key.clone(),
+        head.revision + 1,
+        &[],
+        true,
+    );
+    assert!(store.merge(tombstone, &[]).is_err());
+    for payload in [vec![b'{'], vec![0; MAX_HEAD_BYTES + 1]] {
+        let meta = AccountDocumentMeta::new(
+            &account,
+            owner.user_id(),
+            document.meta.key.clone(),
+            head.revision + 1,
+            &payload,
+            false,
+        );
+        assert!(store.merge(meta, &payload).is_err());
+    }
+    assert_eq!(
+        store.get(&document.meta.key).unwrap().unwrap().payload(),
+        document.payload()
+    );
+    assert!(
+        member
+            .put_account_document_if(
+                document.meta.key.clone(),
+                document.payload().to_vec(),
+                None,
+                |commit| commit()
+            )
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn group_control_terminal_sources_keep_other_members_but_dissolution_overrides_stale_roles() {
+    use crate::node::AccountGroupRole;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let member = node(&dir.path().join("member"), &account);
+    let reference = node(&dir.path().join("reference"), &account);
+    reference
+        .set_device_sync_category(SyncCategory::History, false)
+        .unwrap();
+    let group = group_inventory_legacy_fixture(&owner, &member, "Terminal observation");
+    copy_public_group(&member, &owner, group);
+    for source in [&owner, &member] {
+        let document = group_control_source_document(source, group);
+        reference
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(document.meta.clone(), document.payload())
+            .unwrap();
+    }
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Owner
+    );
+    owner.dissolve_channel(group).await.unwrap();
+    let terminal = group_control_source_document(&owner, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(terminal.meta.clone(), terminal.payload())
+        .unwrap();
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Dissolved,
+        "a stale Member head cannot resurrect a group with a signed terminal source observation"
+    );
+    assert!(reference.channel_members(group).is_empty());
+}
+
+#[tokio::test]
+async fn group_control_current_account_binding_replacement_revokes_old_owner_observation() {
+    use crate::node::AccountGroupRole;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let member = node(&dir.path().join("member"), &account);
+    let group = group_inventory_legacy_fixture(&owner, &member, "Binding replacement");
+    copy_public_group(&member, &owner, group);
+    let document = group_control_source_document(&owner, group);
+    member
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(document.meta.clone(), document.payload())
+        .unwrap();
+    let member_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let member_port = member_listener.local_addr().unwrap().port();
+    member
+        .configure_privacy(
+            &dir.path().join("member"),
+            "pw",
+            &member.signed_announce("Member", member_port),
+            std::sync::Arc::new(crate::discovery::DiscoveryVisibility::default()),
+        )
+        .unwrap();
+    let prior = owner.signed_announce("Owner", 1);
+    member
+        .roster
+        .lock()
+        .unwrap()
+        .update(&prior, "127.0.0.1".parse().unwrap(), &member.user_id());
+    member.cached_peer_snapshot().unwrap();
+    assert_eq!(
+        member.account_group_access(group).unwrap().role,
+        AccountGroupRole::Owner
+    );
+    let replacement = Account::generate();
+    let secret = owner.identity.secret_bytes();
+    let replacement_path = dir.path().join("replacement");
+    let current_owner = node_with_identity(
+        &replacement_path,
+        &replacement,
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+    );
+    copy_public_group(&owner, &current_owner, group);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let current = crate::discovery::Announce::new_with_account(
+        &current_owner.identity,
+        &replacement,
+        "Owner moved account",
+        port,
+    );
+    current_owner
+        .configure_privacy(
+            &replacement_path,
+            "pw",
+            &current,
+            std::sync::Arc::new(crate::discovery::DiscoveryVisibility::default()),
+        )
+        .unwrap();
+    let server = tokio::spawn(current_owner.clone().run_accept_loop(listener));
+    member
+        .roster
+        .lock()
+        .unwrap()
+        .update(&current, "127.0.0.1".parse().unwrap(), &member.user_id());
+    let change = member
+        .account_binding_changes(&account.account_id())
+        .pop()
+        .unwrap();
+    member
+        .accept_account_binding_change_guarded(&change, |commit| commit())
+        .await
+        .unwrap();
+    server.abort();
+    let _ = server.await;
+    assert_eq!(
+        member.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member
+    );
+    assert_eq!(
+        member.channel_owner(group),
+        owner.user_id(),
+        "public signer identity must remain unchanged"
+    );
+}
+
+#[test]
+fn group_control_old_head_replay_and_reopen_preserve_the_latest_signed_observation() {
+    use crate::eventlog::EventKind;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let member = node(&dir.path().join("member"), &Account::generate());
+    let group = group_inventory_legacy_fixture(&owner, &member, "Head replay");
+    copy_public_group(&member, &owner, group);
+    let old = group_control_source_document(&owner, group);
+    owner
+        .append_event(
+            group,
+            EventKind::ChannelOwnerTransfer,
+            member.user_id().into_bytes(),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    let current = group_control_source_document(&owner, group);
+    let store_path = dir.path().join("store");
+    let mut store =
+        AccountDocumentStore::open(&store_path, "pw", &account.public().ed25519_pub).unwrap();
+    assert!(store.merge(old.meta.clone(), old.payload()).unwrap());
+    assert!(
+        store
+            .merge(current.meta.clone(), current.payload())
+            .unwrap()
+    );
+    assert!(!store.merge(old.meta.clone(), old.payload()).unwrap());
+    drop(store);
+    let store =
+        AccountDocumentStore::open(&store_path, "pw", &account.public().ed25519_pub).unwrap();
+    assert_eq!(
+        store.get(&current.meta.key).unwrap().unwrap().payload(),
+        current.payload()
+    );
+    assert_eq!(
+        store
+            .list(AccountDocumentDomain::GroupControl, None, 64)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn group_control_restored_older_public_state_cannot_republish_a_newer_own_head_as_owner() {
+    use crate::{
+        eventlog::EventKind,
+        node::{AccountGroupExecution, AccountGroupRole},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let group = group_inventory_legacy_fixture(&owner, &external, "Restored public prefix");
+    copy_public_group(&external, &owner, group);
+    let secret = owner.identity.secret_bytes();
+    let restored = node_with_identity(
+        &dir.path().join("restored"),
+        &account,
+        DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+    );
+    copy_public_group(&owner, &restored, group);
+    owner
+        .append_event(
+            group,
+            EventKind::ChannelOwnerTransfer,
+            external.user_id().into_bytes(),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    let current = group_control_source_document(&owner, group);
+    restored
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(current.meta.clone(), current.payload())
+        .unwrap();
+    let access = restored.account_group_access(group).unwrap();
+    assert_eq!(access.role, AccountGroupRole::Member);
+    assert_eq!(access.execution, AccountGroupExecution::Reconciling);
+    restored.publish_account_group_access(&mut None);
+    let retained = restored
+        .account_document(&current.meta.key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.meta, current.meta);
+    assert_eq!(
+        retained.payload(),
+        current.payload(),
+        "stale public replay must not create a higher-revision Owner head"
+    );
+}
+
+#[test]
+fn group_control_rejected_parent_cannot_hide_a_later_applied_owner_transfer_on_restore() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        eventlog::{Event, EventKind},
+        node::AccountGroupRole,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let recipient = node(&dir.path().join("recipient"), &Account::generate());
+    let group = new_channel_id();
+    let genesis = Event::new(
+        &owner.identity,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Rejected parent causal knowledge".into(),
+            members: vec![
+                owner.identity.public(),
+                source.identity.public(),
+                recipient.identity.public(),
+            ],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    let first = (2..18)
+        .map(|clock| {
+            Event::new(
+                &owner.identity,
+                group,
+                2,
+                vec![genesis.id],
+                2,
+                clock,
+                EventKind::ChannelOwnerTransfer,
+                source.user_id().into_bytes(),
+            )
+        })
+        .min_by_key(|event| event.id)
+        .unwrap();
+    let rejected = (18..1042)
+        .map(|clock| {
+            Event::new(
+                &owner.identity,
+                group,
+                3,
+                vec![genesis.id],
+                2,
+                clock,
+                EventKind::ChannelOwnerTransfer,
+                recipient.user_id().into_bytes(),
+            )
+        })
+        .find(|event| event.id > first.id)
+        .expect("signed competing owner decision");
+    for event in [&genesis, &first, &rejected] {
+        source.log.lock().unwrap().append(event.clone()).unwrap();
+    }
+    source.process_channel(group);
+    assert_eq!(source.channel_owner(group), source.user_id());
+    let keys = source.identity.secret_bytes();
+    let restored = node_with_identity(
+        &dir.path().join("restored"),
+        &account,
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+    );
+    copy_public_group(&source, &restored, group);
+    let applied_seq = source
+        .append_event(
+            group,
+            EventKind::ChannelOwnerTransfer,
+            recipient.user_id().into_bytes(),
+        )
+        .unwrap();
+    let applied = source
+        .log
+        .lock()
+        .unwrap()
+        .authored_event(
+            group,
+            crate::eventlog::event::Author::from_ed25519(source.identity.public().ed25519_pub),
+            applied_seq,
+        )
+        .unwrap()
+        .id;
+    source.process_channel(group);
+    assert_eq!(
+        source.channel_owner(group),
+        recipient.user_id(),
+        "the existing full reducer applies the valid new owner's transfer"
+    );
+    assert!(
+        !source
+            .account_group_projection(group)
+            .authorized
+            .contains(&applied),
+        "the rejected competing parent means the historical authorized index omits this applied decision"
+    );
+    let latest = group_control_source_document(&source, group);
+    restored
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(latest.meta.clone(), latest.payload())
+        .unwrap();
+    restored.publish_account_group_access(&mut None);
+    assert!(
+        restored.account_document_meta(&latest.meta.key) == Some(latest.meta.clone()),
+        "knowledge of an applied role decision must survive its rejected parent; restored B must not republish Owner"
+    );
+    assert_eq!(
+        restored.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member
+    );
+}
+
+#[test]
+fn group_control_unreadable_latest_own_head_cannot_be_overwritten_by_a_restored_owner() {
+    use crate::{eventlog::EventKind, node::AccountGroupRole};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let group = group_inventory_legacy_fixture(&owner, &external, "Unreadable latest authority");
+    copy_public_group(&external, &owner, group);
+    let keys = owner.identity.secret_bytes();
+    let restored = node_with_identity(
+        &dir.path().join("restored"),
+        &account,
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+    );
+    copy_public_group(&owner, &restored, group);
+    owner
+        .append_event(
+            group,
+            EventKind::ChannelOwnerTransfer,
+            external.user_id().into_bytes(),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    let latest = group_control_source_document(&owner, group);
+    restored
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(latest.meta.clone(), latest.payload())
+        .unwrap();
+    restored
+        .account_documents
+        .lock()
+        .unwrap()
+        .remove_blob_for_test(latest.meta.content_hash);
+    restored.publish_account_group_access(&mut None);
+    assert!(
+        restored.account_document_meta(&latest.meta.key) == Some(latest.meta.clone()),
+        "an unreadable durable latest-source floor must not be replaced by an older local Owner projection"
+    );
+    assert_eq!(
+        restored.account_group_access(group).unwrap().role,
+        AccountGroupRole::Unknown
+    );
+}
+
+#[tokio::test]
+async fn group_control_source_leave_is_individual_and_all_known_left_sources_project_left() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        eventlog::{Event, EventKind},
+        node::AccountGroupRole,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let first = node(&dir.path().join("first"), &account);
+    let second = node(&dir.path().join("second"), &account);
+    let reference = node(&dir.path().join("reference"), &account);
+    let group = new_channel_id();
+    let genesis = Event::new(
+        &owner.identity,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Individual source departures".into(),
+            members: vec![
+                owner.identity.public(),
+                first.identity.public(),
+                second.identity.public(),
+            ],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    for node in [&owner, &first, &second] {
+        node.log.lock().unwrap().append(genesis.clone()).unwrap();
+        node.process_channel(group);
+    }
+    for source in [&first, &second] {
+        let document = group_control_source_document(source, group);
+        reference
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(document.meta.clone(), document.payload())
+            .unwrap();
+    }
+    first.leave_channel(group).await.unwrap();
+    let left = group_control_source_document(&first, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(left.meta.clone(), left.payload())
+        .unwrap();
+    let access = reference.account_group_access(group).unwrap();
+    assert_eq!(
+        access.role,
+        AccountGroupRole::Member,
+        "one source departure must retain another accepted sibling"
+    );
+    assert_eq!(access.sources.len(), 1);
+    assert_eq!(access.sources[0].device, second.identity.public());
+    second.leave_channel(group).await.unwrap();
+    let left = group_control_source_document(&second, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(left.meta.clone(), left.payload())
+        .unwrap();
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Left
+    );
+}
+
+#[tokio::test]
+async fn group_control_terminal_source_invalidates_other_cached_lifetimes_before_reinvite() {
+    group_control_terminal_source_case(true).await;
+}
+
+#[tokio::test]
+async fn group_control_unacknowledged_conflicting_sources_remain_reconciling() {
+    group_control_terminal_source_case(false).await;
+}
+
+async fn group_control_terminal_source_case(acknowledge: bool) {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        eventlog::{Event, EventKind},
+        node::AccountGroupRole,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let first = node(&dir.path().join("first"), &account);
+    let second = node(&dir.path().join("second"), &account);
+    let reference = node(&dir.path().join("reference"), &account);
+    let group = new_channel_id();
+    let genesis = Event::new(
+        &owner.identity,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Mixed source lifetime removal".into(),
+            members: vec![
+                owner.identity.public(),
+                first.identity.public(),
+                second.identity.public(),
+            ],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    owner.log.lock().unwrap().append(genesis).unwrap();
+    owner.process_channel(group);
+    for source in [&first, &second] {
+        copy_public_group(&owner, source, group);
+    }
+    let _first_prior = group_control_source_document(&first, group);
+    let stale = group_control_source_document(&second, group);
+    if acknowledge {
+        first
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(stale.meta.clone(), stale.payload())
+            .unwrap();
+    }
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(stale.meta.clone(), stale.payload())
+        .unwrap();
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member
+    );
+    owner
+        .append_event(
+            group,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "Mixed source lifetime removal".into(),
+                members: vec![owner.identity.public()],
+                epoch: 1,
+                owner: owner.user_id(),
+            }
+            .encode(),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    copy_public_group(&owner, &first, group);
+    let terminal = group_control_source_document(&first, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(terminal.meta.clone(), terminal.payload())
+        .unwrap();
+    let access = reference.account_group_access(group).unwrap();
+    if !acknowledge {
+        assert_eq!(
+            access.role,
+            AccountGroupRole::Unknown,
+            "reference cannot invent causal ordering between unacknowledged conflicting source observations"
+        );
+        assert_eq!(
+            access.execution,
+            crate::node::AccountGroupExecution::Reconciling
+        );
+        return;
+    }
+    assert_eq!(
+        access.role,
+        AccountGroupRole::Left,
+        "one source carries actual owner-signed removal of both sources; the other writer's cached Member must be invalidated"
+    );
+    assert!(access.sources.is_empty());
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(stale.meta.clone(), stale.payload())
+        .unwrap();
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Left
+    );
+    assert!(
+        reference.channel_members(group).is_empty(),
+        "reference must still have no installed public group"
+    );
+    second
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(terminal.meta.clone(), terminal.payload())
+        .unwrap();
+    owner
+        .append_event(
+            group,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "Mixed source lifetime removal".into(),
+                members: vec![owner.identity.public(), second.identity.public()],
+                epoch: 2,
+                owner: owner.user_id(),
+            }
+            .encode_invitation(),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    copy_public_group(&owner, &second, group);
+    let invited = group_control_source_document(&second, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(invited.meta.clone(), invited.payload())
+        .unwrap();
+    let access = reference.account_group_access(group).unwrap();
+    assert_eq!(access.role, AccountGroupRole::Invited);
+    let fresh = access.sources[0].lifetime.clone();
+    let old = crate::node::account_group::wire::GroupControlHead::decode(
+        stale.payload(),
+        &account.public().ed25519_pub,
+    )
+    .unwrap();
+    assert_ne!(fresh.membership, old.access.source.lifetime.membership);
+    assert!(fresh.acceptance.is_none());
+    second.accept_channel_invite(group).await.unwrap();
+    let accepted = group_control_source_document(&second, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(accepted.meta.clone(), accepted.payload())
+        .unwrap();
+    let access = reference.account_group_access(group).unwrap();
+    assert_eq!(access.role, AccountGroupRole::Member);
+    assert_eq!(access.sources[0].lifetime.membership, fresh.membership);
+    assert!(access.sources[0].lifetime.acceptance.is_some());
+    assert!(reference.channel_members(group).is_empty());
+}
+
+#[tokio::test]
+async fn group_control_fresh_reinvite_keeps_private_causal_ancestors_out_of_mandatory_metadata() {
+    use crate::{eventlog::EventKind, node::AccountGroupRole};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let source = node(&dir.path().join("source"), &account);
+    let reference = node(&dir.path().join("reference"), &account);
+    let group = group_inventory_legacy_fixture(&owner, &source, "Interleaved private ancestry");
+    copy_public_group(&source, &owner, group);
+    let _prior = group_control_source_document(&source, group);
+    source.leave_channel(group).await.unwrap();
+    copy_public_group(&source, &owner, group);
+    let left = group_control_source_document(&source, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(left.meta.clone(), left.payload())
+        .unwrap();
+    let private = b"private ancestry payload must never enter mandatory access metadata";
+    owner
+        .append_event(group, EventKind::Message, private.to_vec())
+        .unwrap();
+    owner
+        .add_channel_member(group, source.identity.public())
+        .await
+        .unwrap();
+    copy_public_group(&owner, &source, group);
+    source.accept_channel_invite(group).await.unwrap();
+    assert_eq!(
+        source.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member,
+        "the full actual DAG validates the fresh invitation through an intervening private event"
+    );
+    let fresh = group_control_source_document(&source, group);
+    assert!(
+        fresh.meta.revision > left.meta.revision,
+        "current accepted lifetime must publish despite private causal ancestors"
+    );
+    assert!(
+        !fresh
+            .payload()
+            .windows(private.len())
+            .any(|bytes| bytes == private)
+    );
+    let value: serde_json::Value = serde_json::from_slice(fresh.payload()).unwrap();
+    let exported = value["access"]["controls"].as_array().unwrap();
+    assert!(
+        exported
+            .iter()
+            .all(|event| event["kind"] != serde_json::json!("Message"))
+    );
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(fresh.meta.clone(), fresh.payload())
+        .unwrap();
+    let access = reference.account_group_access(group).unwrap();
+    assert_eq!(access.role, AccountGroupRole::Member);
+    assert!(access.sources[0].lifetime.acceptance.is_some());
+    assert!(reference.channel_members(group).is_empty());
+}
+
+#[test]
+fn group_control_equivalent_source_knowledge_reaches_a_publication_fixed_point() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        eventlog::{Event, EventKind},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let first = node(&dir.path().join("first"), &account);
+    let second = node(&dir.path().join("second"), &account);
+    let group = new_channel_id();
+    let genesis = Event::new(
+        &owner.identity,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Equivalent knowledge".into(),
+            members: vec![
+                owner.identity.public(),
+                first.identity.public(),
+                second.identity.public(),
+            ],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    for source in [&first, &second] {
+        source.log.lock().unwrap().append(genesis.clone()).unwrap();
+        source.process_channel(group);
+    }
+    let exchange = || {
+        let left = group_control_source_document(&first, group);
+        let right = group_control_source_document(&second, group);
+        second
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(left.meta.clone(), left.payload())
+            .unwrap();
+        first
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(right.meta.clone(), right.payload())
+            .unwrap();
+    };
+    for _ in 0..4 {
+        exchange();
+    }
+    let stable_first = group_control_source_document(&first, group);
+    let stable_second = group_control_source_document(&second, group);
+    for _ in 0..12 {
+        exchange();
+    }
+    assert_eq!(
+        group_control_source_document(&first, group).meta,
+        stable_first.meta,
+        "equivalent source views must not ACK each other's ACK-only revisions forever"
+    );
+    assert_eq!(
+        group_control_source_document(&second, group).meta,
+        stable_second.meta
+    );
+}
+
+#[test]
+fn group_control_resource_limit_publishes_a_small_invalidating_head_and_recovers() {
+    group_control_resource_limit_case(false, false);
+}
+
+#[test]
+fn group_control_multifrontier_resource_invalidation_recovers_after_merge_and_reopen() {
+    group_control_resource_limit_case(true, false);
+}
+
+#[test]
+fn group_control_role_control_forks_recover_after_invalidation_merge_and_reopen() {
+    group_control_resource_limit_case(true, true);
+}
+
+fn group_control_resource_limit_case(multifrontier: bool, role_forks: bool) {
+    use crate::{
+        channel::ChannelMeta,
+        discovery::Announce,
+        eventlog::EventKind,
+        node::{AccountGroupExecution, AccountGroupRole},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let reference = node(&dir.path().join("reference"), &account);
+    let group = group_inventory_legacy_fixture(&owner, &external, "Bounded account sources");
+    copy_public_group(&external, &owner, group);
+    let prior = group_control_source_document(&owner, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(prior.meta.clone(), prior.payload())
+        .unwrap();
+    let mut members = vec![owner.identity.public(), external.identity.public()];
+    for _ in 0..66 {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &account, "Actual synthetic member", 9);
+        owner
+            .roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.1".parse().unwrap(), &owner.user_id());
+        members.push(device.public());
+    }
+    owner
+        .append_event(
+            group,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "Bounded account sources".into(),
+                members: members.clone(),
+                epoch: 1,
+                owner: owner.user_id(),
+            }
+            .encode(),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    if multifrontier {
+        let parents = owner.log.lock().unwrap().heads(&group);
+        let first = crate::eventlog::Event::new(
+            &owner.identity,
+            group,
+            3,
+            parents.clone(),
+            3,
+            3,
+            if role_forks {
+                EventKind::MembershipChange
+            } else {
+                EventKind::Message
+            },
+            if role_forks {
+                ChannelMeta {
+                    name: "Concurrent authorized membership".into(),
+                    members: members.clone(),
+                    epoch: 2,
+                    owner: owner.user_id(),
+                }
+                .encode()
+            } else {
+                b"private first branch".to_vec()
+            },
+        );
+        let second = crate::eventlog::Event::new(
+            &external.identity,
+            group,
+            1,
+            parents,
+            3,
+            4,
+            if role_forks {
+                EventKind::ChannelLeave
+            } else {
+                EventKind::Message
+            },
+            if role_forks {
+                Vec::new()
+            } else {
+                b"private second branch".to_vec()
+            },
+        );
+        owner.log.lock().unwrap().append(first).unwrap();
+        owner.log.lock().unwrap().append(second).unwrap();
+        assert_eq!(owner.log.lock().unwrap().heads(&group).len(), 2);
+        owner.process_channel(group);
+    }
+    let unavailable = group_control_source_document(&owner, group);
+    assert!(unavailable.meta.revision > prior.meta.revision);
+    assert!(
+        unavailable.payload().len() < 32 * 1024,
+        "resource fallback reserves a small negative observation"
+    );
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(unavailable.meta.clone(), unavailable.payload())
+        .unwrap();
+    let access = reference.account_group_access(group).unwrap();
+    assert_eq!(access.role, AccountGroupRole::Unknown);
+    assert_eq!(access.execution, AccountGroupExecution::Reconciling);
+    assert_eq!(
+        group_control_source_document(&owner, group).meta,
+        unavailable.meta,
+        "unchanged resource failure must reach a publication fixed point"
+    );
+    if multifrontier {
+        let secrets = owner.identity.secret_bytes();
+        let restored = node_with_identity(
+            &dir.path().join("restored"),
+            &account,
+            DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+        );
+        let mut events: Vec<_> = owner
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .into_iter()
+            .cloned()
+            .collect();
+        events.retain(|event| event.parents.is_empty());
+        for event in events {
+            restored.log.lock().unwrap().append(event).unwrap();
+        }
+        restored
+            .append_event(
+                group,
+                EventKind::MembershipChange,
+                ChannelMeta {
+                    name: "Different authenticated branch".into(),
+                    members: vec![restored.identity.public(), external.identity.public()],
+                    epoch: 2,
+                    owner: restored.user_id(),
+                }
+                .encode(),
+            )
+            .unwrap();
+        restored
+            .append_event(group, EventKind::Message, b"different event one".to_vec())
+            .unwrap();
+        restored
+            .append_event(group, EventKind::Message, b"different event two".to_vec())
+            .unwrap();
+        restored.process_channel(group);
+        assert_eq!(
+            restored.log.lock().unwrap().fingerprint_and_len(&group).1,
+            owner.log.lock().unwrap().fingerprint_and_len(&group).1
+        );
+        restored
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(unavailable.meta.clone(), unavailable.payload())
+            .unwrap();
+        restored.publish_account_group_access(&mut None);
+        assert_eq!(
+            restored.account_document_meta(&unavailable.meta.key),
+            Some(unavailable.meta.clone()),
+            "a same-length restored prefix missing an original event cannot restore positive authority"
+        );
+        assert_eq!(
+            restored.account_group_access(group).unwrap().role,
+            AccountGroupRole::Unknown
+        );
+        owner
+            .append_event(
+                group,
+                EventKind::Message,
+                b"merge both complete original branches".to_vec(),
+            )
+            .unwrap();
+    }
+    members.truncate(3);
+    owner
+        .append_event(
+            group,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "Bounded account sources".into(),
+                members,
+                epoch: 3,
+                owner: owner.user_id(),
+            }
+            .encode(),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    let secrets = owner.identity.secret_bytes();
+    drop(owner);
+    let owner = node_with_identity(
+        &dir.path().join("owner"),
+        &account,
+        DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+    );
+    let recovered = group_control_source_document(&owner, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(recovered.meta.clone(), recovered.payload())
+        .unwrap();
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Owner
+    );
+}
+
+#[test]
+fn group_control_acknowledges_present_owner_decisions_that_lose_a_canonical_fork() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        discovery::Announce,
+        eventlog::{Event, EventKind},
+        node::AccountGroupRole,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let sibling = node(&dir.path().join("sibling"), &account);
+    let foreign = node(&dir.path().join("foreign"), &Account::generate());
+    let reference = node(&dir.path().join("reference"), &account);
+    let group = new_channel_id();
+    let genesis = Event::new(
+        &owner.identity,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Evaluated conflicting owner decisions".into(),
+            members: vec![
+                owner.identity.public(),
+                sibling.identity.public(),
+                foreign.identity.public(),
+            ],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    owner.log.lock().unwrap().append(genesis.clone()).unwrap();
+    let old = (2..18)
+        .map(|clock| {
+            Event::new(
+                &owner.identity,
+                group,
+                2,
+                vec![genesis.id],
+                2,
+                clock,
+                EventKind::ChannelOwnerTransfer,
+                sibling.user_id().into_bytes(),
+            )
+        })
+        .max_by_key(|event| event.id)
+        .unwrap();
+    owner.log.lock().unwrap().append(old.clone()).unwrap();
+    owner.process_channel(group);
+    owner.roster.lock().unwrap().update(
+        &Announce::new_with_account(&sibling.identity, &account, "Actual owner adoption", 9),
+        "127.0.0.1".parse().unwrap(),
+        &owner.user_id(),
+    );
+    let prior = group_control_source_document(&owner, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(prior.meta.clone(), prior.payload())
+        .unwrap();
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Owner
+    );
+    sibling
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(prior.meta.clone(), prior.payload())
+        .unwrap();
+    let winning = (3..1024)
+        .map(|clock| {
+            Event::new(
+                &owner.identity,
+                group,
+                3,
+                vec![genesis.id],
+                2,
+                clock,
+                EventKind::ChannelOwnerTransfer,
+                foreign.user_id().into_bytes(),
+            )
+        })
+        .find(|event| event.id < old.id)
+        .expect("deterministic signed competing decision");
+    owner.log.lock().unwrap().append(winning).unwrap();
+    owner.process_channel(group);
+    copy_public_group(&owner, &sibling, group);
+    assert!(
+        !sibling
+            .account_group_projection(group)
+            .authorized
+            .contains(&old.id)
+    );
+    assert!(sibling.log.lock().unwrap().get(&old.id).is_some());
+    sibling.roster.lock().unwrap().update(
+        &Announce::new_with_account(
+            &foreign.identity,
+            &foreign.account,
+            "Foreign owner adoption",
+            9,
+        ),
+        "127.0.0.1".parse().unwrap(),
+        &sibling.user_id(),
+    );
+    let current = group_control_source_document(&sibling, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(current.meta.clone(), current.payload())
+        .unwrap();
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member,
+        "the full reducer evaluated and rejected the old decision; it is not missing and must not block exact-head supersession"
+    );
+}
+
+#[test]
+fn group_control_private_messages_and_reactions_do_not_republish_role_metadata() {
+    use crate::eventlog::EventKind;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let member = node(&dir.path().join("member"), &Account::generate());
+    let group = group_inventory_legacy_fixture(&owner, &member, "No private message churn");
+    copy_public_group(&member, &owner, group);
+    let prior = group_control_source_document(&owner, group);
+    for kind in [EventKind::Message, EventKind::React, EventKind::Profile] {
+        owner
+            .append_event(group, kind, b"private payload".to_vec())
+            .unwrap();
+        owner.process_channel(group);
+        assert_eq!(
+            group_control_source_document(&owner, group).meta,
+            prior.meta
+        );
+    }
+}
+
+fn assert_incomplete_publication_index_atomicity(owner: &Node, document: &AccountDocument) {
+    use crate::node::account_group::wire::GroupControlHead;
+    let signed =
+        GroupControlHead::decode(document.payload(), &owner.account.public().ed25519_pub).unwrap();
+    let group = signed.group;
+    let frontier = owner
+        .group_control_heads(group)
+        .into_iter()
+        .find(|head| head.proof.public() == owner.identity.public())
+        .unwrap()
+        .access
+        .local_frontier;
+    assert!(frontier.len() > 4096);
+    let replacement = GroupControlHead::new(
+        &owner.identity,
+        group,
+        document.meta.revision + 1,
+        signed.proof.clone(),
+        signed.access.clone(),
+    );
+    let payload = replacement.encode();
+    let meta = AccountDocumentMeta::new(
+        &owner.account,
+        owner.user_id(),
+        document.meta.key.clone(),
+        replacement.revision,
+        &payload,
+        false,
+    );
+    {
+        let mut store = owner.account_documents.lock().unwrap();
+        store.publication_budget_for_test(0);
+        assert!(
+            store
+                .merge_local_group_control(meta.clone(), &payload, frontier.clone())
+                .is_err()
+        );
+        assert!(store.meta(&meta.key).as_ref() == Some(&document.meta));
+        assert!(
+            store
+                .local_publication_frontier(&document.meta, &owner.identity.public())
+                .as_ref()
+                == Some(&frontier)
+        );
+        store.publication_budget_for_test(32 * 1024 * 1024);
+        store.fail_index_for_test(true);
+        assert!(
+            store
+                .merge_local_group_control(meta.clone(), &payload, frontier.clone())
+                .is_err()
+        );
+        assert!(store.meta(&meta.key).as_ref() == Some(&document.meta));
+        assert!(
+            store
+                .local_publication_frontier(&document.meta, &owner.identity.public())
+                .as_ref()
+                == Some(&frontier)
+        );
+        store.fail_index_for_test(false);
+        store.compact_next_for_test();
+        assert!(
+            store
+                .merge_local_group_control(meta.clone(), &payload, frontier.clone())
+                .unwrap()
+        );
+        assert!(
+            store
+                .local_publication_frontier(&meta, &owner.identity.public())
+                .as_ref()
+                == Some(&frontier)
+        );
+        let mut wrong_source = owner.identity.public();
+        wrong_source.x25519_pub[0] ^= 1;
+        assert!(
+            store
+                .local_publication_frontier(&meta, &wrong_source)
+                .is_none()
+        );
+        assert!(
+            store
+                .local_publication_frontier(&document.meta, &owner.identity.public())
+                .is_none()
+        );
+    }
+    // The ordinary remote ingestion path receives only signed wire bytes; it
+    // cannot borrow the local source's receipt from this publication.
+    let dir = tempfile::tempdir().unwrap();
+    let mut remote =
+        store::AccountDocumentStore::open(dir.path(), "pw", &owner.account.public().ed25519_pub)
+            .unwrap();
+    remote.merge(meta.clone(), &payload).unwrap();
+    assert!(
+        remote
+            .local_publication_frontier(&meta, &owner.identity.public())
+            .is_none()
+    );
+    let wire_header = serde_json::to_vec(&meta).unwrap();
+    assert!(
+        !wire_header
+            .windows(b"_local_group_publication".len())
+            .any(|part| part == b"_local_group_publication")
+    );
+}
+
+#[test]
+fn group_control_more_than_4096_concurrent_authorization_controls_do_not_freeze_owner() {
+    use crate::{
+        eventlog::{Event, EventKind},
+        node::AccountGroupRole,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let reference = node(&dir.path().join("reference"), &account);
+    let group = group_inventory_legacy_fixture(&owner, &external, "Large authorization frontier");
+    copy_public_group(&external, &owner, group);
+    let parents = owner.log.lock().unwrap().heads(&group);
+    for seq in 2..=4098 {
+        let event = Event::new(
+            &owner.identity,
+            group,
+            seq,
+            parents.clone(),
+            2,
+            seq,
+            EventKind::ChannelOwnerTransfer,
+            owner.user_id().into_bytes(),
+        );
+        owner.log.lock().unwrap().append(event).unwrap();
+    }
+    owner.process_channel(group);
+    let prior = group_control_source_document(&owner, group);
+    let signed = crate::node::account_group::wire::GroupControlHead::decode(
+        prior.payload(),
+        &account.public().ed25519_pub,
+    )
+    .unwrap();
+    assert_eq!(
+        signed.reference().content_hash,
+        prior.meta.content_hash,
+        "exact-head references reuse the document owner's stored payload hash domain"
+    );
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(prior.meta.clone(), prior.payload())
+        .unwrap();
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Owner
+    );
+    assert_incomplete_publication_index_atomicity(&owner, &prior);
+    let secrets = owner.identity.secret_bytes();
+    drop(owner);
+    let owner = node_with_identity(
+        &dir.path().join("owner"),
+        &account,
+        DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+    );
+    owner
+        .account_documents
+        .lock()
+        .unwrap()
+        .publication_budget_for_test(0);
+    owner
+        .append_event(
+            group,
+            EventKind::ChannelOwnerTransfer,
+            external.user_id().into_bytes(),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    let current = group_control_source_document(&owner, group);
+    assert!(
+        current.meta.revision > prior.meta.revision,
+        "a bounded wire frontier must not freeze an obsolete Owner after a real transfer"
+    );
+    assert!(
+        owner
+            .account_documents
+            .lock()
+            .unwrap()
+            .local_publication_frontier(&current.meta, &owner.identity.public())
+            .is_none(),
+        "a complete replacement atomically releases the old required receipt even at zero spare budget"
+    );
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(current.meta.clone(), current.payload())
+        .unwrap();
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member
+    );
+}
+
+#[test]
+fn group_control_unavailable_obsolete_cache_cannot_orphan_a_large_negative_head() {
+    group_control_obsolete_cache_recovery_case(true);
+}
+
+#[test]
+fn group_control_broken_obsolete_cache_does_not_downgrade_a_large_current_view() {
+    group_control_obsolete_cache_recovery_case(false);
+}
+
+fn group_control_obsolete_cache_recovery_case(force_negative: bool) {
+    use crate::{
+        channel::ChannelMeta,
+        discovery::Announce,
+        eventlog::{Event, EventKind},
+        node::AccountGroupRole,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let secrets = owner.identity.secret_bytes();
+    drop(owner);
+    // A damaged obsolete cache must not prevent profile opening, nor become a
+    // second durability owner for the signed head's recovery requirements.
+    for entry in std::fs::read_dir(dir.path().join("owner")).unwrap() {
+        let entry = entry.unwrap();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("group-publications-")
+        {
+            std::fs::write(entry.path(), b"damaged obsolete publication cache").unwrap();
+        }
+    }
+    let owner = node_with_identity(
+        &dir.path().join("owner"),
+        &account,
+        DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+    );
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let group = group_inventory_legacy_fixture(&owner, &external, "Atomic negative recovery");
+    let mut members = vec![owner.identity.public(), external.identity.public()];
+    for _ in 0..(if force_negative { 66 } else { 0 }) {
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &account, "Synthetic certified member", 9);
+        owner
+            .roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.1".parse().unwrap(), &owner.user_id());
+        members.push(device.public());
+    }
+    owner
+        .append_event(
+            group,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "Atomic negative recovery".into(),
+                members,
+                epoch: 1,
+                owner: owner.user_id(),
+            }
+            .encode(),
+        )
+        .unwrap();
+    let parents = owner.log.lock().unwrap().heads(&group);
+    for seq in 3..=4099 {
+        owner
+            .log
+            .lock()
+            .unwrap()
+            .append(Event::new(
+                &owner.identity,
+                group,
+                seq,
+                parents.clone(),
+                3,
+                seq,
+                EventKind::ChannelOwnerTransfer,
+                owner.user_id().into_bytes(),
+            ))
+            .unwrap();
+    }
+    owner.process_channel(group);
+    let negative = group_control_source_document(&owner, group);
+    let head = crate::node::account_group::wire::GroupControlHead::decode(
+        negative.payload(),
+        &account.public().ed25519_pub,
+    )
+    .unwrap();
+    assert_eq!(head.access.unavailable, force_negative);
+    assert!(!head.access.complete_frontier);
+    // Both the resource pressure and the causal frontier change. Recovery must
+    // retain exact knowledge of every old branch, including across restart.
+    owner
+        .append_event(
+            group,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "Atomic negative recovery".into(),
+                members: vec![owner.identity.public(), external.identity.public()],
+                epoch: 2,
+                owner: owner.user_id(),
+            }
+            .encode(),
+        )
+        .unwrap();
+    owner
+        .append_event(
+            group,
+            EventKind::ChannelOwnerTransfer,
+            external.user_id().into_bytes(),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    let secrets = owner.identity.secret_bytes();
+    drop(owner);
+    let owner = node_with_identity(
+        &dir.path().join("owner"),
+        &account,
+        DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+    );
+    let current = group_control_source_document(&owner, group);
+    assert!(
+        current.meta.revision > negative.meta.revision,
+        "a current incomplete negative head must retain an atomic recovery receipt"
+    );
+    let head = crate::node::account_group::wire::GroupControlHead::decode(
+        current.payload(),
+        &account.public().ed25519_pub,
+    )
+    .unwrap();
+    assert!(!head.access.unavailable);
+    assert_eq!(head.access.observation.role, AccountGroupRole::Member);
+}
+
+#[test]
+fn group_control_normal_authorization_history_growth_keeps_bounded_current_heads() {
+    use crate::{channel::ChannelMeta, eventlog::EventKind, node::AccountGroupRole};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let reference = node(&dir.path().join("reference"), &account);
+    let group = group_inventory_legacy_fixture(&owner, &external, "Long lived authorization");
+    copy_public_group(&external, &owner, group);
+    let prior = group_control_source_document(&owner, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(prior.meta.clone(), prior.payload())
+        .unwrap();
+    for epoch in 1..=4096 {
+        owner
+            .append_event(
+                group,
+                EventKind::MembershipChange,
+                ChannelMeta {
+                    name: "Long lived authorization".into(),
+                    members: vec![owner.identity.public(), external.identity.public()],
+                    epoch,
+                    owner: owner.user_id(),
+                }
+                .encode(),
+            )
+            .unwrap();
+    }
+    owner
+        .append_event(
+            group,
+            EventKind::ChannelOwnerTransfer,
+            external.user_id().into_bytes(),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    assert_eq!(
+        owner.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member
+    );
+    let current = group_control_source_document(&owner, group);
+    assert!(
+        current.meta.revision > prior.meta.revision,
+        "ordinary authorization history growth must not freeze the previous Owner head"
+    );
+    assert!(
+        current.payload().len() < 128 * 1024,
+        "wire head remains bounded by current sources and anchors"
+    );
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(current.meta.clone(), current.payload())
+        .unwrap();
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member
+    );
+    assert_eq!(
+        owner
+            .account_documents(AccountDocumentDomain::GroupControl, None, 64)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn group_control_removal_and_reinvite_never_reuse_the_old_membership_lifetime() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let source = node(&dir.path().join("source"), &account);
+    let reference = node(&dir.path().join("reference"), &account);
+    let group = group_inventory_legacy_fixture(&owner, &source, "Fresh lifetime");
+    copy_public_group(&source, &owner, group);
+    copy_public_group(&source, &reference, group);
+    let original = group_control_source_document(&source, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(original.meta.clone(), original.payload())
+        .unwrap();
+    let prior = source.account_group_access(group).unwrap().sources[0]
+        .lifetime
+        .clone();
+    owner
+        .remove_channel_member(group, &source.user_id())
+        .await
+        .unwrap();
+    copy_public_group(&owner, &reference, group);
+    assert!(
+        reference
+            .account_group_access(group)
+            .unwrap()
+            .sources
+            .is_empty()
+    );
+    owner
+        .add_channel_member(group, source.identity.public())
+        .await
+        .unwrap();
+    copy_public_group(&owner, &source, group);
+    source.accept_channel_invite(group).await.unwrap();
+    copy_public_group(&source, &reference, group);
+    let current = source.account_group_access(group).unwrap().sources[0]
+        .lifetime
+        .clone();
+    assert_ne!(current.membership, prior.membership);
+    assert!(current.acceptance.is_some());
+    assert!(
+        reference
+            .account_group_access(group)
+            .unwrap()
+            .sources
+            .iter()
+            .all(|observation| observation.lifetime != prior)
+    );
+    let refreshed = group_control_source_document(&source, group);
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(refreshed.meta.clone(), refreshed.payload())
+        .unwrap();
+    assert_eq!(
+        reference.account_group_access(group).unwrap().sources[0].lifetime,
+        current
+    );
+}
 #[test]
 fn group_inventory_preserves_unchanged_revision_heals_blobs_and_rejects_forged_controls() {
     let dir = tempfile::tempdir().unwrap();
@@ -2730,6 +4557,22 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
         source.maintain_account_channels(&mut maintenance).await;
     }
     assert!(source.channel_owner_account_id(modern).is_some());
+    let current_sibling = node(&dir.path().join("current-sibling"), &current);
+    let invited_modern = source
+        .create_channel("Current account invited", vec![])
+        .await
+        .unwrap();
+    for _ in 0..source.list_channels().len() {
+        source.maintain_account_channels(&mut maintenance).await;
+    }
+    source
+        .try_account_channel_invite(
+            invited_modern,
+            &current_sibling.identity.public(),
+            &current_sibling.own_group_proof(),
+        )
+        .unwrap();
+    copy_public_group(&source, &current_sibling, invited_modern);
     let old_document = group_inventory_source_document(&source, legacy);
     source.prepare_account_transition(&current).unwrap();
     let secret = source.identity.secret_bytes();
@@ -2744,6 +4587,31 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
             .account_document_meta(&old_document.meta.key)
             .is_none(),
         "old root documents must not be copied on adoption"
+    );
+    assert_eq!(
+        adopted.channel_previous_account(modern),
+        Some(previous.account_id()),
+        "old modern grants remain a previous-account archive after device adoption"
+    );
+    assert_eq!(
+        adopted.channel_previous_account(legacy),
+        None,
+        "a real legacy device membership survives account adoption"
+    );
+    assert_eq!(
+        adopted.channel_previous_account(invited_modern),
+        None,
+        "a current-account invitation addressed to a certified sibling takes precedence"
+    );
+    current_sibling
+        .accept_channel_invite(invited_modern)
+        .await
+        .unwrap();
+    copy_public_group(&current_sibling, &adopted, invited_modern);
+    assert_eq!(
+        adopted.channel_previous_account(invited_modern),
+        None,
+        "an accepted current-account grant on a certified sibling takes precedence"
     );
     adopted.publish_group_inventory(&mut None);
     let new_document = adopted
@@ -2762,6 +4630,22 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
             })
             .is_none()
     );
+    let current_modern = adopted
+        .create_channel("Current root modern", vec![])
+        .await
+        .unwrap();
+    let mut current_maintenance =
+        crate::node::channel_account_maintenance::ChannelAccountMaintenance::default();
+    for _ in 0..adopted.list_channels().len() {
+        adopted
+            .maintain_account_channels(&mut current_maintenance)
+            .await;
+    }
+    assert_eq!(
+        adopted.channel_owner_account_id(current_modern),
+        Some(current.account_id())
+    );
+    assert_eq!(adopted.channel_previous_account(current_modern), None);
     let sibling = node(&dir.path().join("sibling"), &current);
     sibling
         .account_documents
@@ -2836,7 +4720,7 @@ async fn group_inventory_v4_cooldown_keeps_v1_v2_v3_and_never_probes_disabled_do
                         };
                         let request: wire::DocumentRequest = serde_json::from_slice(&body).unwrap();
                         observed.lock().unwrap().push(request.version);
-                        if request.version == 4 {
+                        if request.version >= 4 {
                             break;
                         }
                         if channel
@@ -2867,12 +4751,15 @@ async fn group_inventory_v4_cooldown_keeps_v1_v2_v3_and_never_probes_disabled_do
             routes: vec![],
         };
         let mut cursor = sync::DocumentSyncCursor::default();
-        assert!(
-            target
-                .pull_account_documents_page(&peer, &mut cursor)
-                .await
-                .is_err()
-        );
+        for expected in [5, 4] {
+            assert!(
+                target
+                    .pull_account_documents_page(&peer, &mut cursor)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(versions.lock().unwrap().last(), Some(&expected));
+        }
         assert!(cursor.status(target.device_sync_policy()).2);
         for _ in 0..16 {
             target
@@ -2886,10 +4773,15 @@ async fn group_inventory_v4_cooldown_keeps_v1_v2_v3_and_never_probes_disabled_do
             1,
             "optional rejection has its own negative cooldown"
         );
+        assert_eq!(
+            versions.iter().filter(|version| **version == 5).count(),
+            1,
+            "mandatory v5 rejection has its own negative cooldown"
+        );
         if optional_off {
             assert_eq!(
                 versions,
-                vec![4],
+                vec![5, 4],
                 "disabled optional domains cannot be attempted after selector wraps"
             );
             assert!(

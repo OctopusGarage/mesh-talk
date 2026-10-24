@@ -379,6 +379,7 @@ export function ConversationView() {
     ? channels.find((channel) => channel.channel_id === active.id)
     : undefined;
   const sharedReference = activeChannel?.shared_reference === true;
+  const previousAccount = activeChannel?.previous_account;
   const archived =
     isChannel &&
     channels.some(
@@ -400,7 +401,12 @@ export function ConversationView() {
       (channel) => channel.channel_id === active.id && channel.pending_invite,
     );
   const readOnly =
-    sharedReference || archived || dissolved || left || pendingInvite;
+    !!previousAccount ||
+    sharedReference ||
+    archived ||
+    dissolved ||
+    left ||
+    pendingInvite;
   // Reaction `who` is keyed by account id for account conversations, device user-id for channels.
   const selfReactionId = isChannel ? myId : myAccountId;
   // Alias (if set) overrides the conversation's announced name in the header + composer.
@@ -477,6 +483,7 @@ export function ConversationView() {
             name={headerName}
             memberCount={activeChannel?.member_count ?? members.length}
             sharedReference={sharedReference}
+            previousAccount={!!previousAccount}
             archived={archived}
             dissolved={dissolved}
             left={left}
@@ -493,7 +500,9 @@ export function ConversationView() {
         <ConversationHistoryDialog
           conversation={{ ...active, name: headerName }}
         />
-        {isChannel && (sharedReference || (!archived && !pendingInvite)) ? (
+        {isChannel &&
+        !previousAccount &&
+        (sharedReference || (!archived && !pendingInvite)) ? (
           <MembersDialog key={key} dissolved={dissolved} />
         ) : (
           active.kind === "account" &&
@@ -622,7 +631,13 @@ export function ConversationView() {
               aria-hidden="true"
               className="h-6 w-6 text-signal"
             />
-            <p>{t("redesign.emptyConversation")}</p>
+            <p>
+              {t(
+                previousAccount
+                  ? "conversation.previousAccountEmpty"
+                  : "redesign.emptyConversation",
+              )}
+            </p>
           </div>
         )}
         {messages.length > 0 && (
@@ -857,7 +872,12 @@ export function ConversationView() {
         </DialogContent>
       </Dialog>
 
-      {pendingInvite && !sharedReference ? (
+      {pendingInvite &&
+      !previousAccount &&
+      !sharedReference &&
+      !archived &&
+      !dissolved &&
+      !left ? (
         <PendingChannelInvite key={key} channelId={active.id} />
       ) : readOnly ? (
         <div
@@ -865,15 +885,17 @@ export function ConversationView() {
           role="status"
         >
           {t(
-            sharedReference
-              ? activeChannel?.legacy_membership
-                ? "conversation.legacySharedReferenceHint"
-                : "conversation.sharedReferenceHint"
-              : dissolved
-                ? "conversation.dissolvedChannelHint"
-                : left
-                  ? "conversation.leftChannelHint"
-                  : "conversation.archivedChannelHint",
+            previousAccount
+              ? "conversation.previousAccountChannelHint"
+              : sharedReference
+                ? activeChannel?.legacy_membership
+                  ? "conversation.legacySharedReferenceHint"
+                  : "conversation.sharedReferenceHint"
+                : dissolved
+                  ? "conversation.dissolvedChannelHint"
+                  : left
+                    ? "conversation.leftChannelHint"
+                    : "conversation.archivedChannelHint",
           )}
         </div>
       ) : !draftsLoaded ? (

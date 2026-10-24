@@ -1610,8 +1610,10 @@ impl Node {
         let mut revision = self.device_sync_policy_snapshot().1;
         let mut custody_migration = None;
         let mut inventory_publication = None;
+        let mut group_access_publication = None;
         loop {
             self.migrate_channel_custody(&mut custody_migration);
+            self.publish_account_group_access(&mut group_access_publication);
             self.publish_group_inventory(&mut inventory_publication);
             while active.len() < HISTORY_WORKERS {
                 let Some((id, peer)) = queue.pop_front() else {

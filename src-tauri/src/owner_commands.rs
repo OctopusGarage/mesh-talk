@@ -1023,6 +1023,143 @@ mod tests {
     }
 
     #[test]
+    fn registered_account_group_access_keeps_owner_role_when_its_source_is_offline() {
+        use mesh_talk_core::{
+            channel::{ChannelMeta, new_channel_id},
+            eventlog::{Event, EventKind, PersistentEventLog},
+            identity::{account::Account, account_keystore, device::DeviceIdentity, keystore},
+            node::{AccountDocumentDomain, AccountGroupRole, NodeRuntime},
+        };
+        let id = new_channel_id();
+        let source_device = DeviceIdentity::generate();
+        let external = DeviceIdentity::generate();
+        let account = Account::generate();
+        let fixture = Fixture::create_prepared(false, |root, owner| {
+            let source_root = tempfile::tempdir().unwrap();
+            let source_dir = source_root.path().join("accounts/source");
+            let target_dir = root.join("accounts").join(owner);
+            std::fs::create_dir_all(&source_dir).unwrap();
+            std::fs::create_dir_all(&target_dir).unwrap();
+            keystore::save(&source_dir.join("identity.keystore"), "pw", &source_device).unwrap();
+            account_keystore::save(&source_dir.join("account.keystore"), "pw", &account).unwrap();
+            account_keystore::save(&target_dir.join("account.keystore"), "pw", &account).unwrap();
+            let mut log = PersistentEventLog::open(&source_dir.join("messages.log"), "pw").unwrap();
+            log.append_durable(Event::new(
+                &source_device,
+                id,
+                1,
+                vec![],
+                1,
+                1,
+                EventKind::MembershipChange,
+                ChannelMeta {
+                    name: "Account owner fixture".into(),
+                    members: vec![source_device.public(), external.public()],
+                    epoch: 0,
+                    owner: source_device.public().user_id(),
+                }
+                .encode(),
+            ))
+            .unwrap();
+            drop(log);
+            let reservation = reserve_discovery_port();
+            let source = tauri::async_runtime::block_on(NodeRuntime::start(
+                source_root.path(),
+                "source",
+                "Source",
+                "pw",
+                reservation.local_addr().unwrap().port(),
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+            ))
+            .unwrap();
+            drop(reservation);
+            tauri::async_runtime::block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while source
+                        .handle()
+                        .account_documents(AccountDocumentDomain::GroupControl, None, 64)
+                        .unwrap()
+                        .items
+                        .is_empty()
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    source.handle().account_group_access(id).unwrap().role,
+                    AccountGroupRole::Owner
+                );
+                source.stop().await;
+            });
+            fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+                if from.is_dir() {
+                    std::fs::create_dir_all(to).unwrap();
+                    for entry in std::fs::read_dir(from).unwrap() {
+                        let entry = entry.unwrap();
+                        copy_tree(&entry.path(), &to.join(entry.file_name()));
+                    }
+                } else {
+                    std::fs::copy(from, to).unwrap();
+                }
+            }
+            for entry in std::fs::read_dir(&source_dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry
+                    .file_name()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("account-document")
+                {
+                    copy_tree(&entry.path(), &target_dir.join(entry.file_name()));
+                }
+            }
+        });
+        let rows = fixture
+            .invoke("list_channels", serde_json::json!({}))
+            .unwrap();
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["channel_id"] == hex::encode(id.as_bytes()))
+            .unwrap();
+        assert_eq!(row["owner"], source_device.public().user_id());
+        assert_eq!(row["shared_reference"], true);
+        assert_eq!(row["account_access"]["account_id"], account.account_id());
+        assert_eq!(row["account_access"]["role"], "owner");
+        assert_eq!(
+            row["account_access"]["execution"]["kind"],
+            "waiting_for_device"
+        );
+        let members = fixture
+            .invoke(
+                "channel_members",
+                serde_json::json!({"channelId": hex::encode(id.as_bytes())}),
+            )
+            .unwrap();
+        assert_eq!(members["account_access"], row["account_access"]);
+        // Observation projects account permission without inventing a public
+        // membership for this device or routing an action through an old API.
+        assert_eq!(row["can_manage"], false);
+        assert!(
+            fixture
+                .node
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .channel_members(id)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn registered_group_inventory_projects_reference_and_rejects_queued_retirement() {
         use mesh_talk_core::{
             channel::{ChannelMeta, new_channel_id},
@@ -1172,6 +1309,7 @@ mod tests {
             .unwrap();
         assert_eq!(reference["name"], "Account inventory fixture");
         assert_eq!(reference["shared_reference"], true);
+        assert!(reference.get("previous_account").unwrap().is_null());
         assert_eq!(reference["legacy_membership"], true);
         assert_eq!(reference["archived"], true);
         assert_eq!(reference["can_manage"], false);
@@ -1300,6 +1438,54 @@ mod tests {
                 .unwrap_err()["kind"],
             "authorization"
         );
+    }
+
+    #[test]
+    fn registered_group_control_requires_typed_access_for_every_generic_document_command() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let key = serde_json::json!({
+            "kind":"group_control",
+            "channel":"22".repeat(32),
+            "source_device":"44".repeat(16),
+        });
+        for command in [
+            "get_account_documents",
+            "get_account_document_meta",
+            "read_account_document",
+            "put_account_document",
+            "remove_account_document",
+        ] {
+            let result = fixture.invoke(
+                command,
+                serde_json::json!({
+                    "owner":"alice",
+                    "expectedAccount":account,
+                    "domain":"group_control",
+                    "key":key,
+                    "after":null,
+                    "limit":64,
+                    "payloadBase64":"e30=",
+                    "expected":{
+                        "revision":1,
+                        "writer_device":"44".repeat(16),
+                        "content_hash":vec![0u8;32],
+                    },
+                }),
+            );
+            assert_eq!(
+                result.unwrap_err()["kind"],
+                "authorization",
+                "private group controls require the typed facade: {command}",
+            );
+        }
     }
 
     #[test]

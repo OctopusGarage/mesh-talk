@@ -262,6 +262,8 @@ pub struct Node {
     pub(in crate::node) account_documents:
         Mutex<super::account_documents::store::AccountDocumentStore>,
     pub(in crate::node) account_document_updates: tokio::sync::watch::Sender<u64>,
+    pub(in crate::node) account_group_versions:
+        Mutex<HashMap<String, super::account_documents::sync::GroupProtocolSupport>>,
     pub(in crate::node) account_suppression: Mutex<super::account_suppression::AccountSuppression>,
     pub(in crate::node) favorites: Mutex<super::favorites::FavoriteStore>,
     pub(in crate::node) favorite_media: super::media_store::MediaStore,
@@ -816,6 +818,7 @@ impl Node {
             account_transitions: Mutex::new(account_transitions),
             account_documents: Mutex::new(account_documents),
             account_document_updates,
+            account_group_versions: Mutex::new(HashMap::new()),
             account_suppression: Mutex::new(account_suppression),
             favorites: Mutex::new(favorites),
             favorite_media,

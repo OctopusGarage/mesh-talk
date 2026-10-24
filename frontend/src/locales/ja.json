@@ -176,7 +176,8 @@
     "resize": "サイドバーをリサイズ",
     "strandedAlone": "誰も見つからない？Wi-Fiなしで接続",
     "strandedNoNetwork": "ネットワーク未接続 · 直接つなぐ",
-    "peopleOnLan": "このクライアントでオンライン確認：{{count}} 人"
+    "peopleOnLan": "このクライアントでオンライン確認：{{count}} 人",
+    "previousAccountGroups": "以前のアカウントのグループ（{{count}}）"
   },
   "recovery": {
     "mediaUnavailable": "このバックアップにはありません",
@@ -272,7 +273,10 @@
     "moreUnread": "他にも未読メッセージがあります",
     "sharedReference": "共有されたグループ情報",
     "sharedReferenceHint": "リンク済みデバイスから共有されたグループ情報です。メッセージ送信とメンバー管理には、このデバイスで検証済みのグループ状態が必要です。",
-    "legacySharedReferenceHint": "このグループは以前のメンバーシップ形式を使用しています。メッセージ送信にはグループ形式とアカウントのメンバーシップの更新が必要です。この情報だけではメンバーになりません。"
+    "legacySharedReferenceHint": "このグループは以前のメンバーシップ形式を使用しています。メッセージ送信にはグループ形式とアカウントのメンバーシップの更新が必要です。この情報だけではメンバーになりません。",
+    "previousAccountChannel": "以前のアカウント",
+    "previousAccountChannelHint": "このグループは以前のアカウントに属しています。この端末に保存された履歴は引き続き閲覧できます。",
+    "previousAccountEmpty": "このデバイスにはメッセージが保存されていません。"
   },
   "presence": {
     "onlineWeak": "オンライン · 低速接続",

@@ -9,9 +9,14 @@
 mod enrollment;
 pub use enrollment::{DeviceEnrollment, EnrolledDevice, EnrollmentSource};
 mod account_access;
+mod account_group;
 pub use account_access::{
     AccountAccessSnapshot, AccountAccessSyncFailure, AccountAccessSyncPhase,
     AccountAccessSyncStatus,
+};
+pub use account_group::{
+    AccountGroupAccess, AccountGroupExecution, AccountGroupRole, AccountGroupSource,
+    AuthorityExpectation, MembershipLifetime,
 };
 pub(crate) mod account_devices;
 mod account_documents;

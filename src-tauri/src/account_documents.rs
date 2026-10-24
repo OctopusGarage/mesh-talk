@@ -19,6 +19,7 @@ fn account(runtime: &NodeRuntime, expected: &str) -> Result<(), CommandError> {
 }
 
 fn editable(key: &AccountDocumentKey) -> Result<(), CommandError> {
+    generic_access(key.domain())?;
     if matches!(
         key,
         AccountDocumentKey::DmReaction { .. }
@@ -28,6 +29,18 @@ fn editable(key: &AccountDocumentKey) -> Result<(), CommandError> {
     ) {
         return Err(CommandError::Authorization(
             "account controls require verified event ingestion".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Group execution state is consumed through typed access/status adapters.
+/// Generic document responses must never expose private operation payloads or
+/// permit writes that bypass the core's signed control ingestion.
+fn generic_access(domain: AccountDocumentDomain) -> Result<(), CommandError> {
+    if domain == AccountDocumentDomain::GroupControl {
+        return Err(CommandError::Authorization(
+            "group controls require the typed account group interface".into(),
         ));
     }
     Ok(())
@@ -64,6 +77,7 @@ pub async fn get_account_documents(
     node: tauri::State<'_, NodeState>,
 ) -> Result<AccountDocumentPage, CommandError> {
     let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    generic_access(domain)?;
     admission
         .with_runtime(move |runtime| {
             account(runtime, &expected_account)?;
@@ -84,6 +98,7 @@ pub async fn get_account_document_meta(
     node: tauri::State<'_, NodeState>,
 ) -> Result<Option<AccountDocumentMeta>, CommandError> {
     let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    generic_access(key.domain())?;
     admission
         .with_runtime(move |runtime| {
             account(runtime, &expected_account)?;
@@ -102,6 +117,7 @@ pub async fn read_account_document(
     node: tauri::State<'_, NodeState>,
 ) -> Result<tauri::ipc::Response, CommandError> {
     let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    generic_access(key.domain())?;
     let read_account = expected_account.clone();
     let read_key = key.clone();
     let read_version = expected.clone();

@@ -306,6 +306,7 @@ pub(in crate::node) struct ChannelInfoProjection {
 
 pub(super) struct ChannelMembershipProjection {
     pub state: Option<ChannelState>,
+    pub ownership: Option<EventId>,
     pub departures: Vec<(String, EventId)>,
     pub authority: super::channel_account_authority::AccountAuthority,
     pub accepted: Vec<super::channel_account_authority::LegacyAccountMember>,
@@ -378,6 +379,7 @@ impl ChannelBook {
         let mut roots: HashMap<String, (PublicIdentity, EventId, Option<EventId>, bool)> =
             HashMap::new();
         let mut prior: Option<ChannelState> = None;
+        let mut ownership = None;
         let mut departures: Vec<(String, EventId)> = Vec::new();
         for event in events {
             if before == Some(event.id) {
@@ -457,6 +459,7 @@ impl ChannelBook {
                         && meta.is_member(&author)
                     {
                         valid = true;
+                        ownership = Some(event.id);
                         let invited = ChannelMeta::is_invitation(&event.ciphertext);
                         let mut state = ChannelState::from_meta(channel_id, meta);
                         if invited {
@@ -524,6 +527,9 @@ impl ChannelBook {
                         && let Ok(next) = std::str::from_utf8(&event.ciphertext)
                     {
                         valid = state.transfer_owner(next);
+                        if valid {
+                            ownership = Some(event.id);
+                        }
                     }
                 }
                 EventKind::ChannelLeave => {
@@ -703,6 +709,7 @@ impl ChannelBook {
             .collect();
         ChannelMembershipProjection {
             state: prior,
+            ownership: authority.current_event().or(ownership),
             departures,
             authority,
             accepted,

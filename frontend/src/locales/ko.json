@@ -176,7 +176,8 @@
     "resize": "사이드바 크기 조절",
     "strandedAlone": "아무도 보이지 않나요? Wi-Fi 없이 연결하기",
     "strandedNoNetwork": "네트워크에 연결되어 있지 않습니다. 직접 연결을 설정하세요",
-    "peopleOnLan": "이 클라이언트에서 온라인으로 확인한 사용자: {{count}}명"
+    "peopleOnLan": "이 클라이언트에서 온라인으로 확인한 사용자: {{count}}명",
+    "previousAccountGroups": "이전 계정의 그룹 ({{count}})"
   },
   "recovery": {
     "mediaUnavailable": "이 백업에 없음",
@@ -272,7 +273,10 @@
     "moreUnread": "읽지 않은 메시지 더 보기",
     "sharedReference": "공유된 그룹 정보",
     "sharedReferenceHint": "연결된 기기에서 공유한 그룹 정보입니다. 메시지 전송과 멤버십 관리에는 이 기기에서 검증된 그룹 상태가 필요합니다.",
-    "legacySharedReferenceHint": "이 그룹은 이전 멤버십 형식을 사용합니다. 메시지 전송에는 그룹 형식 및 계정 멤버십 업데이트가 필요하며 이 정보만으로는 멤버십이 부여되지 않습니다."
+    "legacySharedReferenceHint": "이 그룹은 이전 멤버십 형식을 사용합니다. 메시지 전송에는 그룹 형식 및 계정 멤버십 업데이트가 필요하며 이 정보만으로는 멤버십이 부여되지 않습니다.",
+    "previousAccountChannel": "이전 계정",
+    "previousAccountChannelHint": "이 그룹은 이전 계정에 속합니다. 이 기기에 보관된 대화 기록은 계속 볼 수 있습니다.",
+    "previousAccountEmpty": "이 기기에 보관된 메시지가 없습니다."
   },
   "presence": {
     "onlineWeak": "온라인 · 연결 느림",
