@@ -1,49 +1,35 @@
 # Mesh-Talk
 
-[![CI](https://github.com/OctopusGarage/mesh-talk/actions/workflows/ci.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/ci.yml)
-[![UI E2E](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml)
-[![Backend E2E](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-backend.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-backend.yml)
-[![Sanitizers](https://github.com/OctopusGarage/mesh-talk/actions/workflows/sanitizers.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/sanitizers.yml)
-[![Fuzz](https://github.com/OctopusGarage/mesh-talk/actions/workflows/fuzz.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/fuzz.yml)
-[![Mutation sample](https://github.com/OctopusGarage/mesh-talk/actions/workflows/mutants.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/mutants.yml)
+**Encrypted conversations across the networks you control.**
 
-[![Gitleaks](https://github.com/OctopusGarage/mesh-talk/actions/workflows/gitleaks.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/gitleaks.yml)
-[![Scorecard](https://github.com/OctopusGarage/mesh-talk/actions/workflows/scorecard.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/scorecard.yml)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/OctopusGarage/mesh-talk/badge)](https://scorecard.dev/viewer/?uri=github.com/OctopusGarage/mesh-talk)
-[![codecov](https://codecov.io/gh/OctopusGarage/mesh-talk/branch/main/graph/badge.svg)](https://codecov.io/gh/OctopusGarage/mesh-talk)
+Mesh-Talk is a local-first, decentralized desktop messenger for macOS, Windows and
+Linux. Discover peers on a LAN and exchange end-to-end-encrypted messages and files
+without a cloud account, internet connection or central messaging server. Connect
+other LANs and sites through existing routed networks or optional, trusted
+peer-operated post offices.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-287260.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
-[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
-[![platform: macOS | Windows | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000?logo=linux&logoColor=white)](#build-from-source)
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-docs-8A2BE2)](https://deepwiki.com/OctopusGarage/mesh-talk)
 [![Release](https://img.shields.io/github/v/release/OctopusGarage/mesh-talk?sort=semver)](https://github.com/OctopusGarage/mesh-talk/releases)
+[![CI](https://github.com/OctopusGarage/mesh-talk/actions/workflows/ci.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-287260.svg)](LICENSE)
+[![platform: macOS | Windows | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-000000?logo=linux&logoColor=white)](#build-from-source)
 
-**Encrypted conversations across the networks you control.** Mesh-Talk is a
-local-first, decentralized desktop messenger for macOS, Windows and Linux. Discover peers on a LAN
-and exchange end-to-end-encrypted messages and files without a cloud account,
-internet connection or central messaging server. Connect other LANs and sites
-through existing routed networks or optional, trusted peer-operated post offices.
-
-Conversation events synchronize across reachable, authorized peers. When a device
-reconnects, another group member can help it recover retained messages and eligible
-file contents—even when the original sender is unavailable. Recovery depends on
-permissions, connectivity and retained data; it is not an unlimited distributed archive.
-
-[Download](https://github.com/OctopusGarage/mesh-talk/releases) ·
 [Project site](https://octopusgarage.github.io/mesh-talk/) ·
-[User guide](docs/help/README.md) · [Technical documentation](docs/README.md)
+[Download](https://github.com/OctopusGarage/mesh-talk/releases) ·
+[User guide](docs/help/README.md) ·
+[Marketplace](https://octopusgarage.github.io/marketplace/) ·
+[Technical documentation](docs/README.md)
 
 <p align="center">
-  <img src="docs/screenshots/hero-barcelona.webp" width="860"
-       alt="Mesh-Talk desktop app showing a group conversation, contact list, and message composer">
+  <a href="site/screenshots/app-conversations@2x.webp">
+    <img src="site/screenshots/app-conversations@2x.webp" width="860"
+         alt="Mesh-Talk in its default dark appearance, showing a group conversation, contact list and message composer">
+  </a>
 </p>
-<p align="center"><sub>Desktop interface shown with deterministic demo identities and messages.</sub></p>
+<p align="center"><sub>Default desktop appearance · Demo data. Click the screenshot to view it at full resolution.</sub></p>
 
-Read the [user guide](docs/help/README.md) for task-based instructions, or open
-**Help** in the app for offline search. [AI documentation and MCP](tools/help/README.md)
-let your own assistant query the same public manual.
+Open **Help** in the app for offline search, or read the [user guide](docs/help/README.md).
+Your own assistant can query the same public manual through the
+[documentation MCP](tools/help/README.md).
 
 ## Communication without a central dependency
 
@@ -71,14 +57,85 @@ local permissions. These features share the same communication and trust boundar
 
 <table>
   <tr>
-    <td><img src="docs/screenshots/verify.webp" alt="Contact identity verification view" width="420"></td>
-    <td><img src="docs/screenshots/themes.webp" alt="Desktop theme selection" width="420"></td>
+    <td><a href="site/screenshots/app-verification@2x.webp"><img src="site/screenshots/app-verification@2x.webp" alt="Mesh-Talk contact verification dialog showing safety numbers" width="420"></a></td>
+    <td><a href="site/screenshots/themes@2x.webp"><img src="site/screenshots/themes@2x.webp" alt="Mesh-Talk appearance settings showing optional installed themes" width="420"></a></td>
   </tr>
   <tr>
-    <td align="center"><sub>Verify a contact's identity</sub></td>
-    <td align="center"><sub>Make the desktop app your own</sub></td>
+    <td align="center"><sub>Compare safety numbers with a contact.</sub></td>
+    <td align="center"><sub>Optional themes, installed separately.</sub></td>
   </tr>
 </table>
+
+## Marketplace
+
+Make the app your own with optional themes, avatar libraries and sticker packs from
+[Marketplace](https://octopusgarage.github.io/marketplace/), or import a local ZIP.
+The app starts without any packs; installed packs remain available offline.
+Sticker artwork appears when recipients have the same pack; otherwise they see its
+text fallback. See [customization packs](docs/CUSTOMIZATION_PACKS.md) for installation,
+Pack Studio and sharing your own creations.
+
+## Install and start talking
+
+1. Download the archive for your OS and CPU from
+   [GitHub Releases](https://github.com/OctopusGarage/mesh-talk/releases). The app starts
+   without optional visual packs or animated sticker assets. Install packs later
+   from the marketplace or a local ZIP.
+2. Unzip the archive and install the app using the platform package below.
+3. Create a local account on each person's device. On the same LAN, peers should appear
+   through automatic discovery. Verify a contact's safety number before relying on that
+   identity. If a peer does not appear, open **Connection → Diagnostics**.
+
+| Platform | Install                                                            |
+| -------- | ------------------------------------------------------------------ |
+| macOS    | Open the DMG and drag Mesh-Talk to Applications.                   |
+| Windows  | Run the EXE installer, or use the MSI for managed installation.    |
+| Linux    | Install the DEB or RPM for your distribution, or run the AppImage. |
+
+Release archives include checksums, signatures, and build provenance instructions on the
+release page. Current macOS and Windows installers do not carry commercial OS signing,
+so first launch may need the platform's usual downloaded-app confirmation. The app's
+**About → Check for updates** action checks only when requested; it downloads a verified
+archive but leaves installation to you. Stable is the default update channel; opt into Nightly
+in About to try recent main-branch builds without waiting for an official release. See the [install and update guide](docs/updates.md)
+for platform steps and the [troubleshooting guide](specifications/troubleshooting_guide.md)
+for connection issues.
+
+The interface supports English, Spanish, Portuguese, Japanese, Korean, Simplified
+Chinese, Traditional Chinese and Cantonese. Change it in
+**Settings → General → Language**; see [language preferences](docs/help/topics/language.md).
+The website offers the same choices. Help articles are currently written in English.
+
+### Build from source
+
+Install stable Rust, Node.js 22+, and the [Tauri prerequisites](specifications/deployment_guide.md)
+for your platform, then:
+
+```bash
+git clone https://github.com/OctopusGarage/mesh-talk.git
+cd mesh-talk
+make dev
+make tauri-dev
+```
+
+`make tauri-build` packages the desktop app. The UI-free Rust core also runs as a
+headless node, with a separate keystore for each instance:
+
+```bash
+cargo run -p mesh-talk-core --bin mesh-talk-node -- \
+  --keystore ./alice.keystore --password-file ./alice.password --name Alice
+```
+
+Protect the password file; on Unix, use mode `0600`. For post-office flags, service
+deployment, and release builds, follow the
+[deployment guide](specifications/deployment_guide.md).
+
+Source builds identify themselves as the next target's `-dev` build. Product versions have
+one Cargo owner; manual release preparation, immutable Nightlies and reviewed next-target updates
+follow the [version and release lifecycle](docs/updates.md#version-ownership-and-lifecycle).
+
+Bots and local AI agents can send through scoped credentials. See the
+[bot integration guide](docs/bot-integrations.md) for desktop and headless setup.
 
 ## Architecture at a glance
 
@@ -133,63 +190,6 @@ clients do not enforce the expiry frame. For the exact limits, see the
 [security posture](docs/ARCHITECTURE.md#8-security-posture-summary) and
 [post-office metadata guide](docs/post-office-metadata-privacy.md).
 
-## Install and start talking
-
-1. Download the archive for your OS and CPU from
-   [GitHub Releases](https://github.com/OctopusGarage/mesh-talk/releases). The app starts
-   without optional visual packs or animated sticker assets. Install packs later
-   from the marketplace or a local ZIP.
-2. Unzip the archive and install the app using the platform package below.
-3. Create a local account on each person's device. On the same LAN, peers should appear
-   through automatic discovery. Verify a contact's safety number before relying on that
-   identity. If a peer does not appear, open **Connection → Diagnostics**.
-
-| Platform | Install                                                            |
-| -------- | ------------------------------------------------------------------ |
-| macOS    | Open the DMG and drag Mesh-Talk to Applications.                   |
-| Windows  | Run the EXE installer, or use the MSI for managed installation.    |
-| Linux    | Install the DEB or RPM for your distribution, or run the AppImage. |
-
-Release archives include checksums, signatures, and build provenance instructions on the
-release page. Current macOS and Windows installers do not carry commercial OS signing,
-so first launch may need the platform's usual downloaded-app confirmation. The app's
-**About → Check for updates** action checks only when requested; it downloads a verified
-archive but leaves installation to you. Stable is the default update channel; opt into Nightly
-in About to try recent main-branch builds without waiting for an official release. See the [install and update guide](docs/updates.md)
-for platform steps and the [troubleshooting guide](specifications/troubleshooting_guide.md)
-for connection issues.
-
-### Build from source
-
-Install stable Rust, Node.js 22+, and the [Tauri prerequisites](specifications/deployment_guide.md)
-for your platform, then:
-
-```bash
-git clone https://github.com/OctopusGarage/mesh-talk.git
-cd mesh-talk
-make dev
-make tauri-dev
-```
-
-`make tauri-build` packages the desktop app. The UI-free Rust core also runs as a
-headless node, with a separate keystore for each instance:
-
-```bash
-cargo run -p mesh-talk-core --bin mesh-talk-node -- \
-  --keystore ./alice.keystore --password-file ./alice.password --name Alice
-```
-
-Protect the password file; on Unix, use mode `0600`. For post-office flags, service
-deployment, and release builds, follow the
-[deployment guide](specifications/deployment_guide.md).
-
-Source builds identify themselves as the next target's `-dev` build. Product versions have
-one Cargo owner; manual release preparation, immutable Nightlies and reviewed next-target updates
-follow the [version and release lifecycle](docs/updates.md#version-ownership-and-lifecycle).
-
-Bots and local AI agents can send through scoped credentials. See the
-[bot integration guide](docs/bot-integrations.md) for desktop and headless setup.
-
 ## Develop and contribute
 
 | Directory                        | What lives there                                                                    |
@@ -201,8 +201,10 @@ Bots and local AI agents can send through scoped credentials. See the
 | `frontend/`                      | React interface and Playwright UI tests.                                            |
 | `docs/` and `specifications/`    | Architecture, operation guides, test evidence, and conventions.                     |
 
-The core is independent of the desktop UI. Start with an affected test during development,
-then run the relevant end-to-end layer and the full gate before a PR:
+The core is independent of the desktop UI. Use affected tests during development;
+the commands below cover broader validation. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for PR requirements and the [testing feedback loop](docs/testing-feedback-loop.md)
+for focused test selection:
 
 ```bash
 make test                        # Rust workspace tests
@@ -211,9 +213,27 @@ make e2e                         # Multi-process backend scenarios
 ./scripts/check-health.sh        # CI-equivalent health gate
 ```
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow. The
-[documentation map](docs/README.md) points to deeper feature and operations guides;
-the [testing feedback loop](docs/testing-feedback-loop.md) helps select focused tests.
+The [documentation map](docs/README.md) points to feature and operations guides.
+For setup, ownership and review conventions, read [CONTRIBUTING.md](CONTRIBUTING.md).
+
+<details>
+<summary>Build, security and project checks</summary>
+
+[![UI E2E](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-ui.yml)
+[![Backend E2E](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-backend.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/e2e-backend.yml)
+[![Sanitizers](https://github.com/OctopusGarage/mesh-talk/actions/workflows/sanitizers.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/sanitizers.yml)
+[![Fuzz](https://github.com/OctopusGarage/mesh-talk/actions/workflows/fuzz.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/fuzz.yml)
+[![Mutation sample](https://github.com/OctopusGarage/mesh-talk/actions/workflows/mutants.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/mutants.yml)
+[![Gitleaks](https://github.com/OctopusGarage/mesh-talk/actions/workflows/gitleaks.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/gitleaks.yml)
+[![Scorecard](https://github.com/OctopusGarage/mesh-talk/actions/workflows/scorecard.yml/badge.svg)](https://github.com/OctopusGarage/mesh-talk/actions/workflows/scorecard.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/OctopusGarage/mesh-talk/badge)](https://scorecard.dev/viewer/?uri=github.com/OctopusGarage/mesh-talk)
+[![codecov](https://codecov.io/gh/OctopusGarage/mesh-talk/branch/main/graph/badge.svg)](https://codecov.io/gh/OctopusGarage/mesh-talk)
+[![Rust](https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![DeepWiki](https://img.shields.io/badge/DeepWiki-docs-8A2BE2)](https://deepwiki.com/OctopusGarage/mesh-talk)
+
+</details>
 
 ## Community
 

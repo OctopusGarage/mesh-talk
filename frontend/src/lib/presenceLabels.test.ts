@@ -8,6 +8,8 @@ const templates = {
   "zh-Hans": "当前客户端已知在线 {{count}} 人",
   "zh-Hant": "目前用戶端已知在線 {{count}} 人",
   yue: "呢個客戶端已知在線 {{count}} 人",
+  "pt-BR": "Pessoas observadas online por este cliente: {{count}}",
+  ko: "이 클라이언트에서 온라인으로 확인한 사용자: {{count}}명",
 };
 
 it.each(SUPPORTED_LANGUAGES)(
