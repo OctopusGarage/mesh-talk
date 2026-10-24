@@ -9,6 +9,7 @@ import { enterChat, BOB, CHANNEL } from "./helpers/session";
 
 test.use({
   viewport: { width: 1280, height: 800 },
+  deviceScaleFactor: 2,
   reducedMotion: "reduce",
 });
 
@@ -67,7 +68,7 @@ test("capture current desktop surfaces for the site and README", async ({
     "clubs",
   ]);
   await page.addInitScript(() =>
-    localStorage.setItem("mesh-talk-theme", "messi"),
+    localStorage.setItem("mesh-talk-theme", "dark"),
   );
   await enterChat(page, "Cesc Fàbregas", "/?data=site");
 
@@ -95,7 +96,35 @@ test("capture current desktop surfaces for the site and README", async ({
   });
   expect(avatarImages.count).toBeGreaterThan(0);
   expect(avatarImages.broken).toBe(0);
-  await page.screenshot({ path: resolve(output, "hero-messi.png") });
+  const neutral = await page.screenshot({
+    path: resolve(output, "app-conversations.png"),
+    scale: "device",
+  });
+  expect(neutral.readUInt32BE(16)).toBe(2560);
+  expect(neutral.readUInt32BE(20)).toBe(1600);
+  await page.getByTestId(`conversation-row-${BOB.account}`).click();
+  await page.getByTestId("verify-trigger").click();
+  await expect(page.getByTestId("verify-dialog")).toBeVisible();
+  await page.screenshot({
+    path: resolve(output, "app-verification.png"),
+    scale: "device",
+  });
+  await page.keyboard.press("Escape");
+  await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+  await expect(
+    page
+      .getByRole("log")
+      .getByText("I'll bring the match balls. See you there! ⚽"),
+  ).toBeVisible();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
+  await page.getByTestId("theme-messi").click();
+  await waitForThemePaint(page);
+  await page.keyboard.press("Escape");
+  await page.screenshot({
+    path: resolve(output, "hero-messi.png"),
+    scale: "device",
+  });
 
   await page.getByTestId("sidebar-overflow").click();
   await expect(page.getByTestId("sidebar-overflow-menu")).toBeVisible();

@@ -1,5 +1,13 @@
-import { describe, it, expect } from "vitest";
-import { shortId, formatTime, humanSize, formatHostPort } from "./format";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import {
+  shortId,
+  formatTime,
+  formatDay,
+  formatAgo,
+  humanSize,
+  formatHostPort,
+} from "./format";
+import i18n from "./i18n";
 
 describe("shortId", () => {
   it("truncates to the default 8 chars", () => {
@@ -37,4 +45,54 @@ describe("formatTime", () => {
     const millis = 1_700_000_000_000;
     expect(formatTime(secs)).toBe(formatTime(millis));
   });
+});
+
+describe("localized conversation dates", () => {
+  afterEach(async () => {
+    vi.useRealTimers();
+    await i18n.changeLanguage("en");
+  });
+
+  it.each([
+    ["pt-BR", "Hoje", "Ontem"],
+    ["ko", "오늘", "어제"],
+    ["en", "Today", "Yesterday"],
+  ])(
+    "uses %s for day separators and message times",
+    async (language, today, yesterday) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2026, 9, 24, 12));
+      await i18n.changeLanguage(language);
+      expect(formatDay(new Date(2026, 9, 24, 9).getTime())).toBe(today);
+      expect(formatDay(new Date(2026, 9, 23, 9).getTime())).toBe(yesterday);
+      const earlier = new Date(2026, 8, 12, 9);
+      expect(formatDay(earlier.getTime())).toBe(
+        earlier.toLocaleDateString(language, {
+          month: "short",
+          day: "numeric",
+        }),
+      );
+      expect(formatTime(earlier.getTime())).toBe(
+        earlier.toLocaleTimeString(language, {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      );
+    },
+  );
+
+  it.each(["pt-BR", "ko"])(
+    "uses %s for observed elapsed time",
+    async (language) => {
+      await i18n.changeLanguage(language);
+      const relative = new Intl.RelativeTimeFormat(language, {
+        numeric: "auto",
+        style: "narrow",
+      });
+      expect(formatAgo(0)).toBe(relative.format(0, "second"));
+      expect(formatAgo(8)).toBe(relative.format(-8, "second"));
+      expect(formatAgo(125)).toBe(relative.format(-2, "minute"));
+      expect(formatAgo(7300)).toBe(relative.format(-2, "hour"));
+    },
+  );
 });
