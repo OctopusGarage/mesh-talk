@@ -2,7 +2,7 @@ import { waitForChatShell } from "./helpers/session";
 import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
-import { seedMarketPacks } from "./helpers/packs";
+import { seedCustomizationPacks, seedMarketPacks } from "./helpers/packs";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { strToU8, unzipSync, zipSync } from "fflate";
@@ -399,20 +399,7 @@ test("each theme remembers its wallpaper and previews the applied image", async 
     }),
   );
   if (custom.kind !== "theme") throw new Error("Expected a theme pack");
-  await page.evaluate(async (pack) => {
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open("mesh-talk-customization", 2);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction("packs", "readwrite");
-      tx.objectStore("packs").put(pack);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-    db.close();
-  }, custom);
+  await seedCustomizationPacks(page, [custom]);
   await login(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");

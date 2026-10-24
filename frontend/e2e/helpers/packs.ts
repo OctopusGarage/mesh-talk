@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Page } from "@playwright/test";
-import { parsePack } from "../../src/lib/pack";
+import { parsePack, type CustomizationPack } from "../../src/lib/pack";
 import type { StoredPack } from "../../src/store/packs";
 
 /** Wait for the complete bundled import, not just the initial IndexedDB read. */
@@ -26,6 +26,15 @@ export async function seedMarketPacks(
   // Wait for the store's full load, including bundled seeding, before the
   // caller navigates again. Individual fetches may fail or be skipped.
   await waitForPackBootstrap(page);
+  await seedCustomizationPacks(page, packs, scope);
+}
+
+/** Seed parsed fixtures through the same account/legacy storage contract. */
+export async function seedCustomizationPacks(
+  page: Page,
+  packs: CustomizationPack[],
+  scope: "account" | "legacy" = "account",
+) {
   await page.evaluate(
     async ({ entries, scope }) => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
