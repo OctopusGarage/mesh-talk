@@ -558,6 +558,12 @@ Send preparation enters host authority before acquiring the delivery journal.
 Desktop biography saves reply after durable local acceptance while admitted fanout
 continues independently. The ordinary nickname and bio edit share the publication
 mutex, preventing a stale bio save from undoing a rename.
+Profile-store guards end before delivery preparation acquires channel, routing or
+event-log state. Group inventory first snapshots channel facts, releases the channel
+book, then resolves profile names and routing classifications. Neither side may
+retain one of these guards while waiting for the other. Deterministic lock-boundary
+regressions cover background publication, biography/avatar edits and inventory
+projection; keep them in both affected validation selections.
 `src-tauri/src/account_profile.rs` exposes reads and bio edits, with no caller-supplied
 names, timestamps or public proofs. `src-tauri/src/trust.rs` owns private observation
 history and manual verification. Frontend `store/accountProfiles.ts` shares

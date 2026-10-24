@@ -6,6 +6,10 @@ use crate::node::profile::ProfilePayload;
 
 impl Node {
     pub fn account_profile(&self, account_id: &str) -> Option<AccountProfile> {
+        #[cfg(test)]
+        if let Some(hook) = self.profile_read_hook.lock().unwrap().take() {
+            hook();
+        }
         self.profiles
             .lock()
             .expect("profiles mutex not poisoned")
@@ -42,8 +46,9 @@ impl Node {
         &self,
         peer: &PeerRecord,
     ) -> Option<crate::eventlog::event::ConversationId> {
-        let store = self.profiles.lock().expect("profiles mutex not poisoned");
-        if let Some(profile) = store.get(&self.account_id()) {
+        // Delivery acquires channel state; retain only an owned profile snapshot.
+        let profile = self.account_profile(&self.account_id());
+        if let Some(profile) = profile {
             return self.prepare_account_profile_delivery(peer, &profile);
         }
         self.prepare_profile_delivery(peer, &self.account_profiles.current()?.encode())
@@ -192,6 +197,7 @@ impl Node {
                     NodeError::InvalidInput("account profile is not initialized".into())
                 })?;
             let profile = self.save_profile_local(&mut store, name, bio.clone())?;
+            drop(store);
             for peer in self.profile_fanout_targets() {
                 if let Some(conversation) = self.prepare_account_profile_delivery(&peer, &profile) {
                     deliveries.push((peer, conversation));

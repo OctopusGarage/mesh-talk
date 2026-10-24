@@ -226,6 +226,10 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
     #[cfg(test)]
+    pub(in crate::node) profile_read_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(in crate::node) profile_prepare_hook: BlockingTestHook,
+    #[cfg(test)]
     pub(in crate::node) peer_snapshot_hook: BlockingTestHook,
     #[cfg(test)]
     pub(in crate::node) remember_peer_hook: BlockingTestHook,
@@ -789,6 +793,10 @@ impl Node {
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            profile_read_hook: Mutex::new(None),
+            #[cfg(test)]
+            profile_prepare_hook: Mutex::new(None),
             #[cfg(test)]
             peer_snapshot_hook: Mutex::new(None),
             #[cfg(test)]

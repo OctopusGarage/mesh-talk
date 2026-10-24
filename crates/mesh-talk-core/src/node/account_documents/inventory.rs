@@ -286,31 +286,12 @@ impl Node {
                             .member_account_id(&public.user_id())
                             .map(str::to_owned)
                     } else {
-                        self.account_id_for_device(&public)
+                        None
                     };
-                    let name = account_id
-                        .as_ref()
-                        .and_then(|account| self.account_profile(account))
-                        .map(|profile| profile.display_name)
-                        .or_else(|| {
-                            self.historical_author(&public.ed25519_pub)
-                                .filter(|proof| {
-                                    proof.public() == public
-                                        && proof.verify()
-                                        && (account_id.is_none()
-                                            || proof.account_id() == account_id)
-                                })
-                                .map(|proof| proof.name)
-                        })
-                        .filter(|name| {
-                            !name.is_empty()
-                                && name.len() <= 512
-                                && !name.chars().any(char::is_control)
-                        });
                     GroupInventoryMember {
-                        post_office: self.device_is_post_office(&public),
+                        post_office: false,
                         account_id,
-                        name,
+                        name: None,
                         pending: !state.is_accepted_member(&public.user_id()),
                         public,
                     }
@@ -336,6 +317,35 @@ impl Node {
             });
         }
         drop(book);
+        // Profile publication may need the channel book. Resolve external display
+        // facts only after releasing it, so inventory cannot invert that lock order.
+        for reference in &mut snapshots {
+            for member in &mut reference.members {
+                if reference.legacy_membership {
+                    member.account_id = self.account_id_for_device(&member.public);
+                }
+                member.post_office = self.device_is_post_office(&member.public);
+                let public = &member.public;
+                let account_id = &member.account_id;
+                member.name = account_id
+                    .as_ref()
+                    .and_then(|account| self.account_profile(account))
+                    .map(|profile| profile.display_name)
+                    .or_else(|| {
+                        self.historical_author(&public.ed25519_pub)
+                            .filter(|proof| {
+                                proof.public() == *public
+                                    && proof.verify()
+                                    && (account_id.is_none()
+                                        || proof.account_id().as_ref() == account_id.as_ref())
+                            })
+                            .map(|proof| proof.name)
+                    })
+                    .filter(|name| {
+                        !name.is_empty() && name.len() <= 512 && !name.chars().any(char::is_control)
+                    });
+            }
+        }
         if ids.len() < PUBLICATION_SLICE {
             *after = None;
         }
