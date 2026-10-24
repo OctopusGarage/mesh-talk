@@ -233,6 +233,7 @@ test("shared Cargo configuration selects every workspace crate via owning contra
     "node::account_profile::tests::",
     "node::account_profile_data::tests::",
     "node::account_profile_io::tests::",
+    "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback",
     "node::node::tests::account_profile_exhausted_avatar_revision_rejects_before_either_store_mutates",
     "node::node::tests::account_profile_linked_device_pair_preserves_metadata_and_requires_card_parent",
     "node::node::tests::account_profile_projection_retry_and_restart_preserve_avatar_and_identity_lifetime",
@@ -246,6 +247,9 @@ test("shared Cargo configuration selects every workspace crate via owning contra
     "node::opaque_relay::",
     "node::profile::tests::",
     "node::profile_store::tests::",
+    "node::runtime::tests::account_nickname_preserves_bio_and_wins_over_host_name_on_restart",
+    "node::runtime::tests::contact_nickname_survives_a_stale_signed_card_name_and_restart",
+    "node::runtime::tests::offline_account_names_survive_roster_expiry_and_restart_without_presence",
     "node::runtime::tests::profile_republish_targets_fires_on_first_sight_and_on_reconnect",
     "node::trust_card::tests::",
   ]);

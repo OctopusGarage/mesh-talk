@@ -608,6 +608,7 @@ mod tests {
         ));
         let user = crate::services::user::User {
             user_id: "bob".into(),
+            account_login_name: None,
             name: "bob".into(),
             display_name: "Bob".into(),
             address: "local".into(),

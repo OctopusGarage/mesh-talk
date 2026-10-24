@@ -291,6 +291,16 @@ impl Roster {
             .insert(id, (public.clone(), certificate.clone()));
     }
 
+    /// The protocol has validated an exact-device, old/new-root signed transition.
+    /// Discovery alone must never invoke this authority boundary.
+    pub(crate) fn authorize_verified_account_transition(
+        &mut self,
+        public: &PublicIdentity,
+        certificate: &crate::identity::account::DeviceCertificate,
+    ) {
+        self.authorize_linked_account(public, certificate);
+    }
+
     fn linked_binding_matches(&self, announce: &Announce) -> bool {
         self.linked_bindings
             .get(&announce.user_id)

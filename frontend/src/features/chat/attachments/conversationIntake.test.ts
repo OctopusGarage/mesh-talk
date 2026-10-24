@@ -1352,3 +1352,174 @@ it("keeps rejected protected text solely in its quoted composer draft before a s
     { text: "Private reply", replyTo: "quoted", protection: "authenticate" },
   ]);
 });
+
+it("rejects native drop acquisition and overlay for a shared reference with no other read-only flags", async () => {
+  let intake!: ReturnType<typeof useAttachmentIntake>;
+  function Probe() {
+    intake = useAttachmentIntake(i18n.t);
+    return null;
+  }
+  await act(async () => root.render(createElement(Probe)));
+  await act(async () =>
+    useChat.setState({
+      active: { kind: "channel", id: "team", name: "Team" },
+      channels: [
+        {
+          channel_id: "team",
+          name: "Team",
+          owner: "owner",
+          member_count: 1,
+          shared_reference: true,
+          archived: false,
+          dissolved: false,
+          left: false,
+          pending_invite: false,
+        },
+      ],
+    }),
+  );
+  await act(async () => native.drop!({ payload: { type: "over", paths: [] } }));
+  expect(intake.dragOver).toBe(false);
+  await act(async () =>
+    native.drop!({ payload: { type: "drop", paths: ["/native/file"] } }),
+  );
+  expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+});
+
+it("cleans up a staged attachment if the same group becomes a shared reference before handoff", async () => {
+  let intake!: ReturnType<typeof useAttachmentIntake>;
+  function Probe() {
+    intake = useAttachmentIntake(i18n.t);
+    return null;
+  }
+  await act(async () => root.render(createElement(Probe)));
+  const channel = {
+    channel_id: "team",
+    name: "Team",
+    owner: "owner",
+    member_count: 1,
+  };
+  await act(async () =>
+    useChat.setState({
+      active: { kind: "channel", id: "team", name: "Team" },
+      channels: [channel],
+    }),
+  );
+  const staged = deferred<string>();
+  native.invoke.mockImplementation((command: string) =>
+    command === "write_temp_file" ? staged.promise : Promise.resolve(),
+  );
+  let sending!: Promise<void>;
+  await act(async () => {
+    sending = intake.pasteFiles([file()]);
+  });
+  expect(native.invoke).toHaveBeenCalledWith(
+    "write_temp_file",
+    expect.any(Object),
+  );
+  await act(async () =>
+    useChat.setState({ channels: [{ ...channel, shared_reference: true }] }),
+  );
+  await act(async () => {
+    staged.resolve("/tmp/reference-photo.png");
+    await sending;
+  });
+  expect(native.invoke).toHaveBeenCalledWith("delete_temp_file", {
+    path: "/tmp/reference-photo.png",
+  });
+  expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+});
+
+it.each(["picker", "staging"] as const)(
+  "retires pending %s acquisition across same-group reference and restoration",
+  async (kind) => {
+    let intake!: ReturnType<typeof useAttachmentIntake>;
+    function Probe() {
+      intake = useAttachmentIntake(i18n.t);
+      return null;
+    }
+    await act(async () => root.render(createElement(Probe)));
+    const channel = {
+      channel_id: "team",
+      name: "Team",
+      owner: "owner",
+      member_count: 1,
+    };
+    await act(async () =>
+      useChat.setState({
+        active: { kind: "channel", id: "team", name: "Team" },
+        channels: [channel],
+      }),
+    );
+    const prepared = deferred<string>();
+    native.open.mockReturnValue(prepared.promise);
+    native.invoke.mockImplementation((command: string) =>
+      command === "write_temp_file" ? prepared.promise : Promise.resolve(),
+    );
+    let sending!: Promise<void>;
+    await act(async () => {
+      sending =
+        kind === "picker" ? intake.attachFile() : intake.pasteFiles([file()]);
+    });
+    await act(async () =>
+      useChat.setState({ channels: [{ ...channel, shared_reference: true }] }),
+    );
+    await act(async () => useChat.setState({ channels: [channel] }));
+    await act(async () => {
+      prepared.resolve("/tmp/retired-reference.png");
+      await sending;
+    });
+    expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+    if (kind === "staging")
+      expect(native.invoke).toHaveBeenCalledWith("delete_temp_file", {
+        path: "/tmp/retired-reference.png",
+      });
+  },
+);
+
+it.each([
+  "shared_reference",
+  "archived",
+  "dissolved",
+  "left",
+  "pending_invite",
+] as const)(
+  "clears screenshot and native drag state immediately when the active group becomes %s",
+  async (flag) => {
+    let intake!: ReturnType<typeof useAttachmentIntake>;
+    function Probe() {
+      intake = useAttachmentIntake(i18n.t);
+      return null;
+    }
+    await act(async () => root.render(createElement(Probe)));
+    const channel = {
+      channel_id: "team",
+      name: "Team",
+      owner: "owner",
+      member_count: 1,
+    };
+    await act(async () =>
+      useChat.setState({
+        active: { kind: "channel", id: "team", name: "Team" },
+        channels: [channel],
+      }),
+    );
+    native.invoke.mockImplementation((command: string) =>
+      Promise.resolve(command === "capture_screen" ? [1, 2] : false),
+    );
+    await act(async () => intake.captureScreenshot(false));
+    await act(async () =>
+      native.drop!({ payload: { type: "over", paths: [] } }),
+    );
+    expect(intake.screenshotBytes).not.toBeNull();
+    expect(intake.dragOver).toBe(true);
+    await act(async () =>
+      useChat.setState({ channels: [{ ...channel, [flag]: true }] }),
+    );
+    expect(intake.screenshotBytes).toBeNull();
+    expect(intake.dragOver).toBe(false);
+    await act(async () => useChat.setState({ channels: [channel] }));
+    expect(intake.screenshotBytes).toBeNull();
+    expect(intake.dragOver).toBe(false);
+  },
+);

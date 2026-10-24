@@ -1034,7 +1034,7 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !state.is_member(&self.user_id()) || state.pending_invite() {
+            if !self.channel_identity_is_current(state) {
                 return Err(NodeError::Channel("not an accepted channel member".into()));
             }
         }
@@ -1070,7 +1070,7 @@ impl Node {
             .lock()
             .expect("channels lock")
             .state(&channel)
-            .map(|state| state.members().to_vec());
+            .map(|state| state.recipient_members());
         let automatic_inline = self
             .files
             .lock()

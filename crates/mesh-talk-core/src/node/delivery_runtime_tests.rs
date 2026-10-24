@@ -384,6 +384,81 @@ async fn owner_invalidated_at_privacy_gate_cannot_grant_or_stage_file() {
 }
 
 #[tokio::test]
+async fn account_acceptance_does_not_keep_an_unbound_sibling_forgotten_at_privacy_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let remote = Account::generate();
+    let bob = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&bob, &remote, "Bob", 1);
+    let (node, _) = node(dir.path(), DeviceIdentity::generate(), account, &proof);
+    let sibling = DeviceIdentity::generate();
+    let sibling_proof = Announce::new_with_account(&sibling, &node.account, "Sibling", 2);
+    node.roster.lock().unwrap().update(
+        &sibling_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &node.user_id(),
+    );
+    node.configure_privacy(
+        dir.path(),
+        "pw",
+        &node.signed_announce("Alice", 3),
+        Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+    )
+    .unwrap();
+    assert!(
+        node.historical_author(&sibling.public().ed25519_pub)
+            .is_none()
+    );
+    let gate = node.privacy.gate.clone().write_owned().await;
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let worker = node.clone();
+    let target = remote.account_id();
+    let pending = tokio::spawn(async move {
+        let mut entered = Some(entered);
+        worker
+            .enqueue_to_account_if(
+                &target,
+                b"current bound destinations only",
+                None,
+                |commit| {
+                    let result = commit();
+                    if result.is_ok()
+                        && let Some(entered) = entered.take()
+                    {
+                        let _ = entered.send(());
+                    }
+                    result
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    node.roster.lock().unwrap().forget(&sibling.public());
+    drop(gate);
+    let id = pending.await.unwrap().unwrap();
+    let delivery = node.delivery.lock().unwrap();
+    let destinations = &delivery.message(id).unwrap().destinations;
+    assert_eq!(
+        destinations.len(),
+        1,
+        "forgotten uncached siblings must not become unbound accepted destinations"
+    );
+    assert_eq!(destinations[0].device, bob.public());
+    assert_eq!(
+        destinations[0].account.as_deref(),
+        Some(remote.account_id().as_str())
+    );
+    assert!(
+        node.historical_author(&sibling.public().ed25519_pub)
+            .is_none(),
+        "acceptance must not resurrect the forgotten discovery proof"
+    );
+}
+
+#[tokio::test]
 async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance() {
     let dir = tempfile::tempdir().unwrap();
     let alice = DeviceIdentity::generate();
@@ -7805,6 +7880,383 @@ async fn authenticated_silent_preferred_relay_does_not_block_upload_or_drain_fal
 }
 
 #[tokio::test]
+async fn healthy_relay_receive_cadence_is_independent_of_unrelated_silent_relay() {
+    relay_receive_cadence_fixture(false, false).await;
+}
+
+#[tokio::test]
+async fn healthy_relay_receive_cadence_preserves_slow_alternative_during_roster_churn() {
+    relay_receive_cadence_fixture(true, false).await;
+}
+
+#[tokio::test]
+async fn receive_worker_network_reset_cancels_active_exchange_and_recovers() {
+    relay_receive_cadence_fixture(false, true).await;
+}
+
+async fn relay_receive_cadence_fixture(progressing_alternative: bool, network_reset: bool) {
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let relay_dir = tempfile::tempdir().unwrap();
+    let alternative_dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let aa = Account::generate();
+    let bob_account = Account::generate();
+    let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", 9);
+    let (a, _) = node(source.path(), alice, aa, &bp);
+    let (b, mut inbox) = node(target.path(), bob, bob_account, &ap);
+    b.replace_verified_dm_pull_peers(vec![ap.user_id.clone()]);
+    let silent = DeviceIdentity::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent_proof =
+        Announce::new_post_office(&silent, "Silent", listener.local_addr().unwrap().port());
+    let keys = silent.secret_bytes();
+    let alternate_store = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(
+            &alternative_dir.path().join("relay"),
+            "pw",
+            DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        )
+        .unwrap(),
+    ));
+    let slow_recipient = b.identity.public();
+    let (authenticated, mut silent_ready) = mpsc::unbounded_channel();
+    let silent_task = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let keys = silent.secret_bytes();
+                    let authenticated = authenticated.clone();
+                    let alternate_store = alternate_store.clone();
+                    let slow_recipient = slow_recipient.clone();
+                    connections.spawn(async move {
+                        let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                        let channel = super::transport::secure_accept(stream, &identity).await.unwrap();
+                        if channel.peer_identity() == &slow_recipient {
+                            let _ = authenticated.send(());
+                            if progressing_alternative {
+                                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                        super::postbox::serve_relay_connection(channel, alternate_store).await;
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    let live = DeviceIdentity::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let live_proof =
+        Announce::new_post_office(&live, "Healthy", listener.local_addr().unwrap().port());
+    let keys = live.secret_bytes();
+    let relay = Arc::new(Mutex::new(
+        crate::postoffice::PostOffice::open(&relay_dir.path().join("relay"), "pw", live).unwrap(),
+    ));
+    let replacement_store = relay.clone();
+    let (completed, mut rounds) = mpsc::unbounded_channel();
+    let recipient = b.identity.public();
+    let live_task = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let relay = relay.clone();
+                    let completed = completed.clone();
+                    let recipient = recipient.clone();
+                    connections.spawn(async move {
+                        let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+                        let mut channel = super::transport::secure_accept(stream, &identity).await.unwrap();
+                        while let Ok(super::session::Served::Handled(_)) = super::session::serve_one(&mut channel, &relay).await {
+                            if channel.peer_identity() == &recipient {
+                                let _ = completed.send(());
+                            }
+                        }
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    for participant in [&a, &b] {
+        for proof in [&silent_proof, &live_proof] {
+            participant.roster.lock().unwrap().update(
+                proof,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &participant.user_id(),
+            );
+        }
+    }
+    b.set_bridge_hub_id(Some(&silent_proof.user_id)).unwrap();
+    let worker = tokio::spawn(b.clone().run_post_office_drains());
+    tokio::time::timeout(std::time::Duration::from_secs(2), silent_ready.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let slow_started = tokio::time::Instant::now();
+    tokio::time::timeout(std::time::Duration::from_secs(2), rounds.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    if network_reset {
+        // Deliberately avoid policy notification, generation changes and roster
+        // mutation: only the network event can cancel this still-active socket
+        // before the worker's normal three-second wake.
+        b.post_office_receive_enabled
+            .store(false, std::sync::atomic::Ordering::Release);
+        b.sessions.clear();
+        let capacity = || {
+            (0..super::session_pool::MAX_DIRECTION_CONNECTIONS)
+                .map(|_| b.sessions.try_outbound())
+                .collect::<Option<Vec<_>>>()
+        };
+        assert!(
+            capacity().is_none(),
+            "an authenticated silent exchange must still own TCP capacity before reset"
+        );
+        b.network_changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+        let released = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(permits) = capacity() {
+                    break permits;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("network reset must promptly drop the active exchange and all its permits");
+        drop(released);
+        while rounds.try_recv().is_ok() {}
+        b.post_office_receive_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+        b.network_changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+        tokio::time::timeout(std::time::Duration::from_secs(2), rounds.recv())
+            .await
+            .expect("network reset must resume healthy office pulls")
+            .unwrap();
+    }
+    if progressing_alternative {
+        // Neither a timestamp heartbeat nor an unrelated new relay may restart
+        // the valid four-second exchange already running on the alternative.
+        b.roster
+            .lock()
+            .unwrap()
+            .update(&live_proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+        let unrelated =
+            Announce::new_post_office(&DeviceIdentity::generate(), "New unrelated office", 9);
+        b.roster
+            .lock()
+            .unwrap()
+            .update(&unrelated, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    }
+    let delayed_churn = if progressing_alternative {
+        let recipient = b.clone();
+        Some(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let unrelated = Announce::new_post_office(
+                &DeviceIdentity::generate(),
+                "Another unrelated office",
+                10,
+            );
+            recipient.roster.lock().unwrap().update(
+                &unrelated,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &recipient.user_id(),
+            );
+        }))
+    } else {
+        None
+    };
+    // The healthy mailbox was empty when the receive worker last pulled it.
+    // Publish only now, while the unrelated authenticated relay stays silent.
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"arrived after the empty pull", None)
+        .await
+        .unwrap();
+    let destination = a.delivery.lock().unwrap().message(id).unwrap().destinations[0].clone();
+    let mut upload = a
+        .privacy_sync_dial(
+            std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), live_proof.tcp_port),
+            &live_proof.public(),
+        )
+        .await
+        .unwrap();
+    let uploaded = a
+        .opaque_relay_round(
+            &mut upload,
+            &b.identity.public(),
+            Some(destination.event.conversation_id),
+        )
+        .await
+        .unwrap();
+    assert!(
+        uploaded
+            .iter()
+            .any(|(inner, _)| *inner == destination.event.id),
+        "the synthetic DM must actually reach relay custody before measuring receive latency"
+    );
+    drop(upload);
+    let slow_id = if progressing_alternative {
+        let id = a
+            .enqueue_to_account(&b.account_id(), b"held only by the slow alternative", None)
+            .await
+            .unwrap();
+        let destination = a.delivery.lock().unwrap().message(id).unwrap().destinations[0].clone();
+        let mut channel = a
+            .privacy_sync_dial(
+                std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), silent_proof.tcp_port),
+                &silent_proof.public(),
+            )
+            .await
+            .unwrap();
+        let uploaded = a
+            .opaque_relay_round(
+                &mut channel,
+                &b.identity.public(),
+                Some(destination.event.conversation_id),
+            )
+            .await
+            .unwrap();
+        assert!(
+            uploaded
+                .iter()
+                .any(|(inner, _)| *inner == destination.event.id)
+        );
+        Some(id)
+    } else {
+        None
+    };
+    let received = tokio::time::timeout(std::time::Duration::from_secs(4), inbox.recv()).await;
+    let slow_received = if slow_id.is_some() {
+        Some(
+            tokio::time::timeout_at(
+                slow_started + std::time::Duration::from_secs(5),
+                inbox.recv(),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+
+    let replacement_task = if progressing_alternative {
+        // Move this same authenticated office to a new endpoint while receive
+        // permission is suspended, then prove the owned worker resumes there.
+        b.set_post_office_permissions(true, false);
+        let identity = DeviceIdentity::from_secret_bytes(keys.0, keys.1);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let replacement = Announce::new_post_office(
+            &identity,
+            "Moved healthy office",
+            listener.local_addr().unwrap().port(),
+        );
+        let task = tokio::spawn(super::postbox::run_relay_accept_loop(
+            identity,
+            listener,
+            replacement_store,
+        ));
+        for participant in [&a, &b] {
+            participant.roster.lock().unwrap().update(
+                &replacement,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &participant.user_id(),
+            );
+        }
+        let id = a
+            .enqueue_to_account(&b.account_id(), b"after endpoint and policy change", None)
+            .await
+            .unwrap();
+        let destination = a.delivery.lock().unwrap().message(id).unwrap().destinations[0].clone();
+        let mut channel = a
+            .privacy_sync_dial(
+                std::net::SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), replacement.tcp_port),
+                &replacement.public(),
+            )
+            .await
+            .unwrap();
+        let uploaded = a
+            .opaque_relay_round(
+                &mut channel,
+                &b.identity.public(),
+                Some(destination.event.conversation_id),
+            )
+            .await
+            .unwrap();
+        assert!(
+            uploaded
+                .iter()
+                .any(|(inner, _)| *inner == destination.event.id)
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(4), inbox.recv())
+                .await
+                .is_err(),
+            "suspended receive permission must prevent polling the newly populated office"
+        );
+        b.set_post_office_permissions(true, true);
+        let received = tokio::time::timeout(std::time::Duration::from_secs(4), inbox.recv())
+            .await
+            .expect("resuming receive permission must use the office's new endpoint")
+            .unwrap();
+        assert_eq!(received.message_id, Some(id));
+        assert_eq!(received.text, b"after endpoint and policy change");
+        Some(task)
+    } else {
+        None
+    };
+    worker.abort();
+    if let Some(task) = delayed_churn {
+        task.abort();
+        let _ = task.await;
+    }
+    silent_task.abort();
+    live_task.abort();
+    let _ = worker.await;
+    let _ = silent_task.await;
+    let _ = live_task.await;
+    if let Some(task) = replacement_task {
+        task.abort();
+        let _ = task.await;
+    }
+    assert!(
+        received.is_ok(),
+        "a healthy empty pull must be repeated on its own three-second cadence while another relay stalls"
+    );
+    let received = received.unwrap().unwrap();
+    assert_eq!(received.message_id, Some(id));
+    assert_eq!(received.text, b"arrived after the empty pull");
+    if let Some(id) = slow_id {
+        let received = slow_received.unwrap().expect("a valid slow alternative must finish despite healthy polls and unrelated roster churn").unwrap();
+        assert_eq!(received.message_id, Some(id));
+        assert_eq!(received.text, b"held only by the slow alternative");
+        assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
+    }
+    let capacity: Vec<_> = (0..super::session_pool::MAX_DIRECTION_CONNECTIONS)
+        .map(|_| {
+            b.sessions
+                .try_outbound()
+                .expect("retiring the receive worker releases every active socket")
+        })
+        .collect();
+    drop(capacity);
+    assert_eq!(
+        a.delivery_status(id),
+        Some(DeliveryStatus::Awaiting),
+        "upload custody alone cannot confirm recipient delivery"
+    );
+}
+
+#[tokio::test]
 async fn failed_media_persistence_remains_pending_until_storage_recovers() {
     let source = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
@@ -8712,4 +9164,160 @@ async fn delivery_observation_worker_reports_only_an_observed_exchange_timeout()
     server.abort();
     let _ = worker.await;
     let _ = server.await;
+}
+
+async fn external_recipient_delivery_after_sibling_archive(cached_prior_binding: bool) {
+    let ad = tempfile::tempdir().unwrap();
+    let bd = tempfile::tempdir().unwrap();
+    let cd = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let sibling = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let account = Account::generate();
+    let shared_secret = account.secret_bytes();
+    let bob_account = Account::generate();
+    let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let recipient_address = bl.local_addr().unwrap();
+    let cl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ap = Announce::new_with_account(&alice, &account, "Alice", al.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(&bob, &bob_account, "Bob", recipient_address.port());
+    let cp = Announce::new_with_account(
+        &sibling,
+        &account,
+        "Alice sibling",
+        cl.local_addr().unwrap().port(),
+    );
+    let prior_account = Account::generate();
+    let prior_sender =
+        Announce::new_with_account(&alice, &prior_account, "Before adoption", ap.tcp_port);
+    let (a, _) = node(ad.path(), alice, account, &bp);
+    a.roster
+        .lock()
+        .unwrap()
+        .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &a.user_id());
+    let (b, mut recipient_messages) = node(
+        bd.path(),
+        bob,
+        bob_account,
+        if cached_prior_binding {
+            &prior_sender
+        } else {
+            &ap
+        },
+    );
+    let (c, mut sibling_messages) = node(
+        cd.path(),
+        sibling,
+        Account::from_secret_bytes(shared_secret),
+        &ap,
+    );
+    if cached_prior_binding {
+        b.roster
+            .lock()
+            .unwrap()
+            .update(&cp, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    }
+    for (node, directory, own) in [
+        (&a, ad.path(), &ap),
+        (&b, bd.path(), &bp),
+        (&c, cd.path(), &cp),
+    ] {
+        node.configure_privacy(
+            directory,
+            "pw",
+            own,
+            Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    }
+    if cached_prior_binding {
+        b.cached_peer_snapshot_async().await.unwrap();
+        // Discovery now carries a valid certificate from the kept account, but
+        // this recipient has previously pinned the same sender device elsewhere.
+        b.roster
+            .lock()
+            .unwrap()
+            .update(&ap, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+    }
+    drop(bl); // The recipient is genuinely unreachable while the sibling mirrors.
+    let at = tokio::spawn(a.clone().run_accept_loop(al));
+    let ct = tokio::spawn(c.clone().run_accept_loop(cl));
+    let id = a
+        .enqueue_to_account(&b.account_id(), b"external recipient must receive", None)
+        .await
+        .unwrap();
+    let sibling_copy =
+        tokio::time::timeout(std::time::Duration::from_secs(10), sibling_messages.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        sibling_copy.text.as_slice(),
+        b"external recipient must receive"
+    );
+    assert!(recipient_messages.try_recv().is_err());
+    assert_ne!(
+        a.delivery_status(id),
+        Some(DeliveryStatus::Delivered),
+        "a sibling's archive is never recipient delivery"
+    );
+    let bl = TcpListener::bind(recipient_address).await.unwrap();
+    let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+    if cached_prior_binding {
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                recipient_messages.recv()
+            )
+            .await
+            .is_err(),
+            "a changed account certificate must not silently replace a pinned device binding"
+        );
+        assert_ne!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
+        // Explicitly accepting the kept account authorizes the new device
+        // membership. Preserve the original queued message and logical ID.
+        let change = b
+            .account_binding_changes(&a.account_id())
+            .into_iter()
+            .find(|change| change.device_id == a.user_id())
+            .expect("recipient can review the sender's verified account change");
+        b.accept_account_binding_change_guarded(&change, |commit| commit())
+            .await
+            .unwrap();
+        a.flush_delivery(id).await;
+    }
+    let delivered = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        recipient_messages.recv(),
+    )
+    .await
+    .expect("the external recipient must receive independently of sibling mirroring")
+    .unwrap();
+    assert_eq!(
+        delivered.text.as_slice(),
+        b"external recipient must receive"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while a.delivery_status(id) != Some(DeliveryStatus::Delivered) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("only the recipient's authenticated receipt confirms delivery");
+    for task in [at, bt, ct] {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+#[tokio::test]
+async fn own_sibling_archive_cannot_confirm_or_replace_external_recipient_delivery() {
+    external_recipient_delivery_after_sibling_archive(false).await;
+}
+
+#[tokio::test]
+async fn explicit_account_acceptance_restores_adopted_sender_delivery_without_false_sibling_receipt()
+ {
+    external_recipient_delivery_after_sibling_archive(true).await;
 }

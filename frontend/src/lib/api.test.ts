@@ -6,6 +6,7 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import { auth, avatars, chat, contactPolicy, favorites, settings } from "./api";
+import { createSettingsApi } from "./api/settings";
 import { useAuth } from "@/store/auth";
 
 beforeEach(() => {
@@ -56,6 +57,14 @@ it("uses the channel dissolution IPC command with its channel id", async () => {
   await chat.dissolveChannel("team");
   expect(invoke).toHaveBeenCalledWith("dissolve_channel", {
     channelId: "team",
+  });
+});
+
+it("removes channel account membership with explicit channel and account identities", async () => {
+  await chat.removeChannelAccountMembers("team", "peer-account");
+  expect(invoke).toHaveBeenCalledWith("remove_channel_account_members", {
+    channelId: "team",
+    accountId: "peer-account",
   });
 });
 
@@ -151,11 +160,10 @@ describe("settings updates", () => {
       user: { id: "bob", username: "bob", display_name: "Bob" },
     });
     release();
-    await pending;
-    expect(invoke).toHaveBeenCalledWith("set_app_settings", {
-      owner: "alice",
-      settings: { notifications: false },
-    });
+    await expect(pending).rejects.toThrow("Settings session changed");
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "set_app_settings"),
+    ).toHaveLength(0);
   });
   it("preserves both fields when two updates are requested before the first write finishes", async () => {
     const persisted = { calls_enabled: false, notifications: true };
@@ -367,12 +375,19 @@ it("carries the expected owner on all linked synchronization commands", async ()
     category: "appearance",
     owner: "owner-a",
   });
-  await chat.setAccountPreference("appearance", "theme", "dark", "owner-a");
+  await chat.setAccountPreference(
+    "appearance",
+    "theme",
+    "dark",
+    "owner-a",
+    "source-account",
+  );
   expect(invoke).toHaveBeenLastCalledWith("set_account_preference", {
     category: "appearance",
     key: "theme",
     value: "dark",
     owner: "owner-a",
+    expectedAccount: "source-account",
   });
 });
 
@@ -496,4 +511,131 @@ it("keeps protected image bytes behind the owner-scoped binary reveal command", 
     "owner_enqueue_file",
     expect.objectContaining({ protection: "click" }),
   );
+});
+
+it("binds linked contact imports to the captured cryptographic account as well as the local owner", async () => {
+  const rows = [
+    { id: "contact", pinned: false, custom_alias: "Ronaldo", hidden: false },
+  ];
+  await favorites.apply("local-owner", "captured-account", rows, {
+    contact: null,
+  });
+  expect(invoke).toHaveBeenLastCalledWith("set_favorite_records", {
+    owner: "local-owner",
+    expectedAccount: "captured-account",
+    records: rows,
+    expected: { contact: null },
+  });
+  const hidden = [{ account: "contact", hidden: true, name: "Peer" }];
+  await contactPolicy.apply("local-owner", "captured-account", hidden, {
+    contact: null,
+  });
+  expect(invoke).toHaveBeenLastCalledWith("set_contact_hidden_batch", {
+    owner: "local-owner",
+    expectedAccount: "captured-account",
+    records: hidden,
+    expected: { contact: null },
+  });
+});
+
+it("keeps unauthenticated device enrollment bound to its native attempt and verified source", async () => {
+  await auth.beginDeviceEnrollment();
+  expect(invoke).toHaveBeenLastCalledWith("begin_device_enrollment");
+  await auth.probeDeviceEnrollment("attempt", ["192.0.2.4:47475"]);
+  expect(invoke).toHaveBeenLastCalledWith("probe_device_enrollment", {
+    enrollmentId: "attempt",
+    targets: ["192.0.2.4:47475"],
+  });
+  await auth.completeDeviceEnrollment(
+    "attempt",
+    "source",
+    "a".repeat(32),
+    false,
+  );
+  expect(invoke).toHaveBeenLastCalledWith("complete_device_enrollment", {
+    enrollmentId: "attempt",
+    sourceId: "source",
+    code: "a".repeat(32),
+    includeHistory: false,
+  });
+  await auth.cancelDeviceEnrollment("attempt");
+  expect(invoke).toHaveBeenLastCalledWith("cancel_device_enrollment", {
+    enrollmentId: "attempt",
+  });
+});
+
+it("reads nonsecret shared-login progress under the explicit local owner", async () => {
+  await chat.getAccountLoginSyncStatus("owner");
+  expect(invoke).toHaveBeenLastCalledWith("get_account_login_sync_status", {
+    owner: "owner",
+  });
+});
+
+it("rejects a stale cryptographic account while a settings update is queued", async () => {
+  let account = "original-account";
+  const api = createSettingsApi(
+    () => "local-owner",
+    () => account,
+  );
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementation((command: string) =>
+    command === "get_app_settings"
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve(),
+  );
+  const pending = api.update({ notifications: false });
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  account = "replacement-account";
+  finish({ notifications: true });
+  await expect(pending).rejects.toThrow("Settings session changed");
+  expect(
+    invoke.mock.calls.filter(([command]) => command === "set_app_settings"),
+  ).toHaveLength(0);
+});
+
+it("rejects a same-owner same-account relogin before a queued settings write", async () => {
+  let generation = 1;
+  const api = createSettingsApi(
+    () => "owner",
+    () => "account",
+    () => generation,
+  );
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementation((command: string) =>
+    command === "get_app_settings"
+      ? new Promise((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve(),
+  );
+  const pending = api.update({ notifications: false });
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  generation++;
+  finish({ notifications: true });
+  await expect(pending).rejects.toThrow("Settings session changed");
+  expect(
+    invoke.mock.calls.filter(([command]) => command === "set_app_settings"),
+  ).toHaveLength(0);
+});
+
+it("binds settings reads and edits to the current cryptographic account", async () => {
+  const api = createSettingsApi(
+    () => "owner",
+    () => "account",
+    () => 1,
+  );
+  invoke.mockResolvedValue({ notifications: true });
+  await api.update({ notifications: false });
+  expect(invoke).toHaveBeenCalledWith("get_app_settings", {
+    owner: "owner",
+    expectedAccount: "account",
+  });
+  expect(invoke).toHaveBeenCalledWith("set_app_settings", {
+    owner: "owner",
+    expectedAccount: "account",
+    settings: { notifications: false },
+    patch: { notifications: false },
+  });
 });

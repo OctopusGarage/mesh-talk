@@ -28,8 +28,10 @@ opening the conversation restores the original text, including line breaks.
 Drafts are encrypted on this device and restore after restarting and signing in
 as the same local user. Saving happens after ten seconds without typing; continued typing restarts
 the idle timer. Switching conversations or leaving the
-window also requests a save. Quitting abruptly can lose recent edits. Drafts do
-not sync to other devices and do not include attachments or reply targets. Protected
+window also requests a save. Quitting abruptly can lose recent edits. Drafts synchronize with certified linked devices when history sync is enabled.
+Attachments and reply targets are not draft content. Concurrent edits retain
+the local unsaved text until the version conflict is resolved; clearing or sending
+a draft publishes a deletion record so an older device cannot restore it. Protected
 drafts restore their protection mode with their text and show a concealed sidebar
 preview. Protected text remains a draft until local durable acceptance; a rejected
 send keeps both its text and protection mode for retry.

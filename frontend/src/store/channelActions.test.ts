@@ -30,6 +30,9 @@ function session() {
     createChannel: vi.fn(async (_name: string, _ids: string[]) => "new"),
     addChannelMember: vi.fn(async (_id: string, _member: string) => {}),
     removeChannelMember: vi.fn(async (_id: string, _member: string) => {}),
+    removeChannelAccountMembers: vi.fn(
+      async (_id: string, _account: string) => {},
+    ),
     transferChannelOwner: vi.fn(async (_id: string, _member: string) => {}),
     channelMembers: vi.fn(async (_id: string) => ({
       history_policy: "off" as const,
@@ -80,6 +83,7 @@ function session() {
 it.each([
   ["addMember", "addChannelMember"],
   ["removeMember", "removeChannelMember"],
+  ["removeMemberAccount", "removeChannelAccountMembers"],
   ["transferChannelOwner", "transferChannelOwner"],
 ] as const)(
   "%s owns mutation and refreshed member projection",

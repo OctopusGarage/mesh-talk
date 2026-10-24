@@ -100,6 +100,7 @@ export async function refreshDeliveryStatuses(
             .map((m) => m.id!),
         ),
       ];
+      const requestedIds = new Set(ids);
       const replicas = new Map<
         string,
         { members: number; postOffices: number }
@@ -120,11 +121,11 @@ export async function refreshDeliveryStatuses(
           ? {
               ...s.messages,
               [key]: s.messages[key].map((m) =>
-                m.id && replicas.has(m.id)
+                m.fromMe && !m.file && m.id && requestedIds.has(m.id)
                   ? {
                       ...m,
-                      replicas: replicas.get(m.id)!.members,
-                      postOfficeCopies: replicas.get(m.id)!.postOffices,
+                      replicas: replicas.get(m.id)?.members,
+                      postOfficeCopies: replicas.get(m.id)?.postOffices,
                     }
                   : m,
               ),

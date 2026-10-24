@@ -100,6 +100,36 @@ npm run pack:check -- ../my-pack.zip
 
 The app rejects oversized archives, duplicate ZIP entries, unexpected files, unsafe paths, unsupported image types, bad image signatures, invalid manifest values, and images that its browser engine cannot decode or that exceed 4096 pixels on either side or 16 million pixels total. Marketplace downloads also need to match the catalog's SHA-256 and the selected listing's ID, name, version, type, and avatar category. These checks protect the app's pack format; a checksum proves download integrity relative to the catalog, not that a creator is trustworthy. They cannot guarantee that an image has no maliciously crafted decoder payload, and they do not identify offensive, copyrighted, or otherwise inappropriate artwork. Review previews and the source before importing an unfamiliar pack. A locally installed ZIP does not become public automatically.
 
+## Account-scoped startup appearance
+
+Installed private packs are cached under both the local user and the verified
+cryptographic account. Startup restores the selected theme from that cache before
+enumerating unrelated gallery assets. This does not require a network download or
+completion of account synchronization.
+
+The desktop can expose public account/device IDs after its existing keystore
+unlock, while durable stores are still opening. That observation is bound to the
+current desktop session and startup attempt; it does not grant messaging or
+runtime access. Private appearance cannot load from an unverified last-account
+identifier. A temporary readiness failure retains the same account's restored
+appearance. Logout, account adoption or session replacement revokes the old
+scope and its wallpaper CSS, including delayed cache reads.
+
+The application root owns authenticated runtime and appearance startup before the
+chat view is downloaded. Its startup canvas uses the same wallpaper composition
+as chat and renders private images only for the matching unlocked user, account
+and runtime session.
+
+Normal native launches keep the initial window hidden until that authorized
+surface and selected local wallpaper are ready for display. The pack owner
+records when the selected-theme lookup has settled for the current scope; this
+permits display while unrelated gallery enumeration continues. Storage without
+that lookup retains full-library completion as a fallback.
+Signed-out and locked launches prepare their public entry surfaces. A one-shot
+native fallback preserves startup liveness; hidden autostart and explicit user
+visibility choices remain authoritative. Full message-store readiness and remote
+account synchronization do not delay a locally prepared appearance.
+
 ## Marketplace publishing
 
 [OctopusGarage/marketplace](https://github.com/OctopusGarage/marketplace) owns the shared pack specification, validator, creator Studio, source artwork, catalog, and immutable versioned ZIPs. Its GitHub Pages site hosts the public catalog at `https://octopusgarage.github.io/marketplace/catalog.json`. A listing gives the app ID, version, type, supported apps, ZIP size and SHA-256. Mesh Talk checks the catalog path, size, hash, and manifest identity before installing. The catalog currently lists 15 packs; artwork rights review status is marked `pending` for migrated packs and must be checked before reuse elsewhere.

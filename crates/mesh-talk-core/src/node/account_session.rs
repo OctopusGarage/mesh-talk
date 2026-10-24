@@ -43,7 +43,7 @@ impl AccountExchange {
     }
 }
 fn transport(error: TransportError) -> NodeError {
-    NodeError::Channel(error.to_string())
+    NodeError::Session(super::session::SessionError::Transport(error))
 }
 async fn send(
     channel: &mut SecureChannel<TcpStream>,
@@ -97,6 +97,14 @@ impl Node {
         }
         let body = AccountSessionRequest::from_frame(&request)
             .ok_or_else(|| NodeError::Channel("invalid reusable account request".into()))?;
+        let optional_request = match &body {
+            AccountSessionRequest::AttachmentChecked { .. } => true,
+            AccountSessionRequest::Documents { body } => {
+                super::account_documents::wire::DocumentRequest::decode(body)
+                    .is_some_and(|request| request.version > 1)
+            }
+            _ => false,
+        };
         for fresh in [false, true] {
             let pooled = if fresh {
                 None
@@ -165,6 +173,11 @@ impl Node {
                     drop(channel);
                 }
                 Err(error) if retryable_transport_error(&error) => {
+                    if optional_request {
+                        // An unknown appended request says nothing about the
+                        // peer's support for the older reusable session owner.
+                        return Err(transport(error));
+                    }
                     // Old peers close on the appended optional tag. Only an
                     // authenticated pre-ack close permits legacy fallback.
                     drop(channel);
@@ -198,6 +211,15 @@ impl Node {
                 AccountHistoryFrame::Request { account_id, .. }
                 | AccountHistoryFrame::AttachmentRequest { account_id, .. }
                 | AccountHistoryFrame::Wake { account_id, .. } => account_id,
+                AccountHistoryFrame::AttachmentRequestChecked { account_id, .. } => account_id,
+                AccountHistoryFrame::DocumentsRequest { body } => {
+                    // The document owner repeats exact account authorization.
+                    if super::account_documents::wire::DocumentRequest::decode(body).is_none() {
+                        return;
+                    }
+                    // Own account is borrowed only until this admission block ends.
+                    &self.account_id()
+                }
                 _ => return,
             };
             {
@@ -225,6 +247,17 @@ impl Node {
                 return;
             }
             let complete = match frame {
+                AccountHistoryFrame::AttachmentRequestChecked {
+                    account_id,
+                    file_conv,
+                } => {
+                    self.serve_account_attachment_checked(
+                        &mut channel,
+                        &account_id,
+                        crate::eventlog::event::ConversationId::new(file_conv),
+                    )
+                    .await
+                }
                 AccountHistoryFrame::Request {
                     account_id,
                     cursor,
@@ -254,6 +287,14 @@ impl Node {
                         crate::eventlog::event::ConversationId::new(file_conv),
                     )
                     .await
+                }
+                AccountHistoryFrame::DocumentsRequest { body } => {
+                    let Some(request) =
+                        super::account_documents::wire::DocumentRequest::decode(&body)
+                    else {
+                        return;
+                    };
+                    self.serve_account_documents(&mut channel, request).await
                 }
                 AccountHistoryFrame::Wake {
                     account_id,

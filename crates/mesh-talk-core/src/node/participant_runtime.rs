@@ -15,7 +15,6 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
-const DRAIN_INTERVAL_SECS: u64 = 3;
 const FILE_PULL_INTERVAL_SECS: u64 = 3;
 
 /// Network inventory supplied by the host; identity and roster come from Node.
@@ -152,19 +151,7 @@ impl PreparedParticipant {
         }
         {
             let node = Arc::clone(&node);
-            tasks.push(tokio::spawn(async move {
-                let mut network = node.network_changes.subscribe();
-                loop {
-                    tokio::select! {
-                        _ = node.drain_from_post_office() => {},
-                        _ = network.changed() => continue,
-                    }
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(DRAIN_INTERVAL_SECS)) => {},
-                        _ = network.changed() => {},
-                    }
-                }
-            }));
+            tasks.push(tokio::spawn(node.run_post_office_drains()));
         }
         {
             let node = Arc::clone(&node);

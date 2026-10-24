@@ -2,6 +2,128 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createDraftStore } from "./drafts";
 
 afterEach(() => vi.useRealTimers());
+
+it("a refreshed protected policy retires an older media admission capture", async () => {
+  const { api, store } = fixture();
+  api.load.mockResolvedValueOnce({
+    session: "1",
+    drafts: { "account:a": "text" },
+    protections: { "account:a": "click" },
+  });
+  await store.getState().start("alice", 1, "account-one");
+  const captured = store.getState().captureProtection("alice", 1, "account:a");
+  api.load.mockResolvedValueOnce({
+    session: "1",
+    drafts: { "account:a": "text" },
+    protections: { "account:a": "authenticate" },
+  });
+  await store.getState().refresh();
+  expect(captured.accept()).toBe(false);
+  expect(store.getState().protections["account:a"]).toBe("authenticate");
+});
+
+it("an older refresh reply cannot replace a newer linked draft snapshot", async () => {
+  const { api, store } = fixture();
+  await store.getState().start("alice", 1, "account-one");
+  let finish!: (value: {
+    session: string;
+    drafts: Record<string, string>;
+  }) => void;
+  api.load.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const older = store.getState().refresh();
+  api.load.mockResolvedValueOnce({
+    session: "1",
+    drafts: { "account:a": "newer" },
+  });
+  await store.getState().refresh();
+  finish({ session: "1", drafts: { "account:a": "older" } });
+  await older;
+  expect(store.getState().texts["account:a"]).toBe("newer");
+});
+
+it("refreshes linked clean conversations while preserving dirty text and pending admission", async () => {
+  const { api, store } = fixture();
+  await store.getState().start("alice", 1, "account-one");
+  store.getState().edit("alice", 1, "account:a", "local typing");
+  api.load.mockResolvedValueOnce({
+    session: "1",
+    drafts: { "account:a": "remote", "channel:b": "other device" },
+  });
+  await store.getState().refresh();
+  expect(store.getState().texts).toEqual({
+    "account:a": "local typing",
+    "channel:b": "other device",
+  });
+  expect(api.save).not.toHaveBeenCalled();
+});
+
+it("remote refresh and retired account loads cannot republish or cross an account switch", async () => {
+  const { api, store } = fixture();
+  await store.getState().start("alice", 1, "account-one");
+  let resolve!: (value: {
+    session: string;
+    drafts: Record<string, string>;
+  }) => void;
+  api.load.mockImplementationOnce(
+    () =>
+      new Promise((yes) => {
+        resolve = yes;
+      }),
+  );
+  const refresh = store.getState().refresh();
+  await store.getState().start("alice", 1, "account-two");
+  resolve({ session: "1", drafts: { "account:secret": "old account" } });
+  await refresh;
+  expect(store.getState().texts).toEqual({ "account:a": "saved" });
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(api.save).not.toHaveBeenCalled();
+});
+
+it("saves only dirty conversation patches and retains a concurrent conflict for explicit retry", async () => {
+  const { api, store } = fixture();
+  const one = { revision: 1, writer_device: "other", content_hash: [1] };
+  const two = { revision: 2, writer_device: "other", content_hash: [2] };
+  api.load.mockResolvedValueOnce({
+    session: "1",
+    account_id: "account-one",
+    drafts: { "account:a": "initial" },
+    versions: { "account:a": one },
+  });
+  await store.getState().start("alice", 1, "account-one");
+  store.getState().edit("alice", 1, "account:a", "local dirty");
+  api.load.mockResolvedValueOnce({
+    session: "1",
+    account_id: "account-one",
+    drafts: { "account:a": "remote", "channel:b": "independent" },
+    versions: { "account:a": two },
+  });
+  await store.getState().refresh();
+  api.save.mockResolvedValueOnce({
+    session: "1",
+    drafts: { "account:a": "remote" },
+    versions: { "account:a": two },
+    conflicts: ["account:a"],
+  });
+  await store.getState().flush();
+  expect(api.save.mock.calls[0][5]).toEqual({
+    "account:a": { text: "local dirty", expected: one },
+  });
+  expect(store.getState().texts).toEqual({
+    "account:a": "local dirty",
+    "channel:b": "independent",
+  });
+  expect(store.getState().error).toBe("save");
+  await store.getState().flush();
+  expect(api.save.mock.lastCall?.[5]).toEqual({
+    "account:a": { text: "local dirty", expected: two },
+  });
+  expect(store.getState().error).toBeNull();
+});
 function fixture() {
   vi.useFakeTimers();
   const api = {

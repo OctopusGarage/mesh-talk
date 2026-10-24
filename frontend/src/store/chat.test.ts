@@ -85,7 +85,7 @@ it("refreshes imported history when the runtime projection changes", async () =>
 
 it("retries an imported-history refresh after history is temporarily unavailable", async () => {
   let historyCalls = 0;
-  invoke.mockImplementation((command: string) => {
+  invoke.mockImplementation((command: string, args?: { account?: string }) => {
     if (command === "owner_node_identity")
       return Promise.resolve({
         owner: "host",
@@ -93,7 +93,7 @@ it("retries an imported-history refresh after history is temporarily unavailable
         account_id: "myacct",
         history_revision: 7,
       });
-    if (command === "owner_account_history") {
+    if (command === "owner_account_history" && args?.account === "friend") {
       if (++historyCalls === 1)
         return Promise.reject(new Error("temporarily unavailable"));
       return Promise.resolve([
@@ -569,6 +569,7 @@ const reset = () =>
     historyRevision: null,
     bootBusy: false,
     bootRequest: 0,
+    startupId: null,
     intents: {},
     deleted: {},
     statusBusy: false,
@@ -2044,6 +2045,8 @@ describe("incoming events", () => {
     await vi.waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("publish_avatar", {
         avatar: "data:image/png;base64,AAAA",
+        owner: "host",
+        expectedAccount: "myacct",
       }),
     );
     stop();
@@ -2829,13 +2832,13 @@ it("bounds import scan work per poll and visits later conversations", async () =
     invoke.mock.calls.filter(
       ([command]) => command === "owner_account_history",
     ),
-  ).toHaveLength(20);
+  ).toHaveLength(21);
   await useChat.getState().refreshRoster();
   expect(
     invoke.mock.calls.filter(
       ([command]) => command === "owner_account_history",
     ),
-  ).toHaveLength(20);
+  ).toHaveLength(21);
 });
 
 it("continues later import scans after a failed snapshot and retries the failure", async () => {
@@ -2904,8 +2907,8 @@ it("does not restart initial baselines after the bounded identity ledger evicts 
     invoke.mock.calls.filter(
       ([command]) => command === "owner_account_history",
     ),
-  ).toHaveLength(70);
-  expect(useChat.getState().historyBaselines).toHaveLength(70);
+  ).toHaveLength(71);
+  expect(useChat.getState().historyBaselines).toHaveLength(71);
   expect(Object.keys(useChat.getState().ledger)).toHaveLength(64);
 });
 
@@ -4186,4 +4189,335 @@ it("refuses protected image admission before transfer when the intent queue is f
     invoke.mock.calls.filter(([command]) => command === "owner_enqueue_file"),
   ).toHaveLength(0);
   expect(useChat.getState().messages["account:target"]).toHaveLength(1);
+});
+
+it("projects a shared account nickname into auth and rejects retired profile events", async () => {
+  const stop = useChat.getState().start();
+  const user = {
+    id: "host",
+    username: "local-login",
+    display_name: "Shared nickname",
+  };
+  useChat.setState({ myAccountId: "myacct", myId: "me" });
+  useAuth.setState({ savedSession: "saved" });
+  captured.current?.onAccountProfile({
+    user,
+    account_id: "myacct",
+    device_id: "me",
+    saved_session: "failed",
+  });
+  expect(useAuth.getState().user?.display_name).toBe("Shared nickname");
+  expect(useAuth.getState().user?.username).toBe("local-login");
+  expect(useAuth.getState().savedSession).toBe("failed");
+  useAuth.setState((state) => ({ generation: state.generation + 1 }));
+  captured.current?.onAccountProfile({
+    user: { ...user, display_name: "Retired name" },
+    account_id: "myacct",
+    device_id: "me",
+    saved_session: "saved",
+  });
+  expect(useAuth.getState().user?.display_name).toBe("Shared nickname");
+  expect(useAuth.getState().savedSession).toBe("failed");
+  stop();
+});
+
+it("repairs a missed nickname event through the canonical runtime identity", async () => {
+  invoke.mockImplementation((command: string) =>
+    Promise.resolve(
+      command === "owner_node_identity"
+        ? {
+            owner: "host",
+            device_id: "me",
+            account_id: "myacct",
+            display_name: "Account nickname",
+          }
+        : [],
+    ),
+  );
+  await useChat.getState().refreshRoster();
+  expect(useAuth.getState().user?.display_name).toBe("Account nickname");
+});
+
+it("reconciles Saved Messages imports when the own account is absent from the contact directory", async () => {
+  let revision = 1;
+  let imported = false;
+  invoke.mockImplementation((command: string, args?: { account?: string }) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        history_revision: revision,
+      });
+    if (command === "owner_account_history")
+      return Promise.resolve(
+        args?.account === "myacct" && imported
+          ? [
+              {
+                id: "saved-on-sibling",
+                from_me: true,
+                who: "you",
+                text: "Saved on my laptop",
+                wall_clock: 1,
+              },
+            ]
+          : [],
+      );
+    return Promise.resolve([]);
+  });
+  await useChat.getState().refreshRoster();
+  expect(useChat.getState().historyBaselines).toContain("account:myacct");
+  imported = true;
+  revision++;
+  await useChat.getState().refreshRoster();
+  expect(
+    useChat.getState().ledger["account:myacct"]?.["saved-on-sibling"],
+  ).toBeDefined();
+  expect(useChat.getState().unread["account:myacct"] ?? 0).toBe(0);
+  useChat.setState({
+    active: { kind: "account", id: "myacct", name: "Saved Messages" },
+  });
+  revision++;
+  await useChat.getState().refreshRoster();
+  expect(
+    useChat.getState().messages["account:myacct"]?.map((row) => row.id),
+  ).toEqual(["saved-on-sibling"]);
+  expect(useChat.getState().messages["account:myacct"][0].fromMe).toBe(true);
+});
+it("linked read receipts reject another owner or account and clear on app lock", () => {
+  useChat.setState({
+    ...emptyReception(),
+    ready: true,
+    unreadOwner: "reader",
+    myAccountId: "account-one",
+  });
+  const apply = useChat.getState().applyAccountReadReceipts;
+  apply("other-owner", "account-one", "account:peer", ["wrong-owner"]);
+  apply("reader", "account-two", "account:peer", ["wrong-account"]);
+  expect(useChat.getState().ledger["account:peer"]).toBeUndefined();
+  apply("reader", "account-one", "account:peer", ["future"]);
+  expect(useChat.getState().accountSeen?.["account:peer"]).toEqual(["future"]);
+  expect(useChat.getState().ledger["account:peer"].future.seen).toBe(true);
+  useChat.getState().resetForLock();
+  expect(useChat.getState().accountSeen).toBeUndefined();
+});
+
+it("hydrates verified startup identity and persisted reception before full runtime readiness", async () => {
+  vi.useFakeTimers();
+  const storage = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+  });
+  const { saveUnread, saveReceptionLedger } =
+    await import("@/lib/unreadStorage");
+  saveUnread("host", "myacct", { "account:friend": 2 });
+  saveReceptionLedger("host", "myacct", {
+    "account:friend": { saved: { seen: false, late: false } },
+  });
+  let available = false;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return available
+        ? Promise.resolve({
+            owner: "host",
+            device_id: "me",
+            account_id: "myacct",
+          })
+        : Promise.reject(new Error("node not started"));
+    if (command === "owner_startup_identity")
+      return Promise.resolve({
+        owner: "host",
+        startup_id: "first",
+        phase: available ? "ready" : "identity",
+        device_id: "me",
+        account_id: "myacct",
+      });
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState()).toMatchObject({
+      ready: false,
+      myAccountId: "myacct",
+      unreadOwner: "host",
+      unread: { "account:friend": 2 },
+      ledger: { "account:friend": { saved: { seen: false } } },
+    });
+    expect(invoke).toHaveBeenCalledWith("owner_startup_identity", {
+      owner: "host",
+    });
+    const ledger = useChat.getState().ledger;
+    available = true;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(useChat.getState().ready).toBe(true);
+    expect(useChat.getState().ledger).toBe(ledger);
+    expect(useChat.getState().unread["account:friend"]).toBe(2);
+  } finally {
+    stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("revokes staged appearance identity on a new pending or failed startup ticket", async () => {
+  vi.useFakeTimers();
+  let snapshot = {
+    owner: "host",
+    startup_id: "first",
+    phase: "identity",
+    device_id: "me",
+    account_id: "myacct",
+  };
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.reject(new Error("node not started"));
+    if (command === "owner_startup_identity") return Promise.resolve(snapshot);
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().myAccountId).toBe("myacct");
+    const epoch = useChat.getState().identityEpoch;
+    snapshot = { ...snapshot, startup_id: "second", phase: "pending" };
+    await vi.advanceTimersByTimeAsync(500);
+    expect(useChat.getState()).toMatchObject({
+      myAccountId: "",
+      unreadOwner: "",
+      ready: false,
+    });
+    expect(useChat.getState().identityEpoch).toBeGreaterThan(epoch);
+    snapshot = { ...snapshot, phase: "identity" };
+    await vi.advanceTimersByTimeAsync(500);
+    expect(useChat.getState().myAccountId).toBe("myacct");
+    snapshot = { ...snapshot, phase: "failed" };
+    await vi.advanceTimersByTimeAsync(500);
+    expect(useChat.getState().myAccountId).toBe("");
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("ignores a staged identity response released after logout", async () => {
+  vi.useFakeTimers();
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.reject(new Error("node not started"));
+    if (command === "owner_startup_identity")
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(finish).toBeDefined();
+    useAuth.setState((state) => ({
+      user: null,
+      generation: state.generation + 1,
+    }));
+    finish({
+      owner: "host",
+      startup_id: "first",
+      phase: "identity",
+      device_id: "me",
+      account_id: "myacct",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().myAccountId).toBe("");
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("ignores a staged identity response after a newer account identity was adopted", async () => {
+  vi.useFakeTimers();
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.reject(new Error("node not started"));
+    if (command === "owner_startup_identity")
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    useChat.setState((state) => ({
+      myAccountId: "adopted",
+      identityEpoch: state.identityEpoch + 1,
+    }));
+    finish({
+      owner: "host",
+      startup_id: "retired",
+      phase: "identity",
+      device_id: "me",
+      account_id: "old",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().myAccountId).toBe("adopted");
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
+});
+
+it("revokes an old staged identity when a full reply races a newer pending startup", async () => {
+  vi.useFakeTimers();
+  let available = false;
+  let observations = 0;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return available
+        ? Promise.resolve({
+            owner: "host",
+            device_id: "me",
+            account_id: "myacct",
+          })
+        : Promise.reject(new Error("not started"));
+    if (command === "owner_startup_identity") {
+      observations++;
+      if (observations === 1)
+        return Promise.resolve({
+          owner: "host",
+          startup_id: "first",
+          phase: "identity",
+          device_id: "me",
+          account_id: "myacct",
+        });
+      if (observations === 2)
+        return Promise.resolve({
+          owner: "host",
+          startup_id: "replacement",
+          phase: "pending",
+        });
+      return Promise.reject(new Error("observation unavailable"));
+    }
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().myAccountId).toBe("myacct");
+    available = true;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(useChat.getState()).toMatchObject({
+      myAccountId: "",
+      unreadOwner: "",
+      ready: false,
+      startupId: "replacement",
+    });
+    expect(observations).toBe(2);
+  } finally {
+    stop();
+    vi.useRealTimers();
+  }
 });

@@ -84,6 +84,143 @@ enum HistoryControl {
     Release(Release),
 }
 
+// This separately tagged control is carried only by V4-gated EventKind18.
+// Legacy Offer/Release discriminants and bytes remain unchanged.
+#[derive(Serialize, Deserialize)]
+struct AccountRelease {
+    version: u8,
+    grant: super::channel_account_authority::AccountGrantId,
+    device_authorization: EventId,
+    recipient: PublicIdentity,
+    release: Release,
+}
+fn encode_account_release(value: &AccountRelease) -> Vec<u8> {
+    super::wire::frame(b"MTJHA1", value)
+}
+fn decode_account_release(bytes: &[u8]) -> Option<AccountRelease> {
+    if bytes.len() > WIRE_BYTES as usize {
+        return None;
+    }
+    let value: AccountRelease = super::wire::unframe(b"MTJHA1", bytes)?;
+    (value.version == 1
+        && !value.release.sealed_key.is_empty()
+        && value.release.sealed_key.len() <= SNAPSHOT_BYTES * 2)
+        .then_some(value)
+}
+fn valid_account_acceptance(
+    event: &Event,
+    grant: &super::channel_account_authority::AccountGrant,
+    authority: &super::channel_account_authority::AccountAuthority,
+    graph: &super::channel_account_authority::EventGraph<'_>,
+) -> bool {
+    if event.kind != EventKind::ChannelAccept
+        || !event.ciphertext.is_empty()
+        || !event.is_canonical()
+        || !event.verify_integrity()
+        || !event.verify_signature()
+    {
+        return false;
+    }
+    if grant.acceptance_event == Some(event.id)
+        && event.author.ed25519_pub() == &grant.original.ed25519_pub
+    {
+        return super::channel::descends_from(event, grant.membership_event, graph);
+    }
+    authority.original_device_proofs().into_iter().any(|proof| {
+        proof.ed25519_pub == *event.author.ed25519_pub()
+            && authority
+                .grant_for_device(&proof.public(), &proof)
+                .and_then(super::channel_account_authority::AccountGrant::id)
+                == grant.id()
+            && authority
+                .clone()
+                .accept_account(event, &proof, graph)
+                .is_ok()
+    })
+}
+/// Metadata admission is deliberately independent of View/ChannelBook replay.
+/// Full frozen-offer authorization and row bounds are checked before decryption.
+pub(super) fn account_release_admitted(
+    state: &crate::channel::ChannelState,
+    event: &Event,
+    authority: &super::channel_account_authority::AccountAuthority,
+    graph: &super::channel_account_authority::EventGraph<'_>,
+) -> bool {
+    let Some(value) = decode_account_release(&event.ciphertext) else {
+        return false;
+    };
+    if event.kind != EventKind::ChannelDeviceInheritance
+        || event.conversation_id != state.id()
+        || state.is_dissolved()
+        || !event.is_canonical()
+        || !event.verify_integrity()
+        || !event.verify_signature()
+    {
+        return false;
+    }
+    let Some(grant) = authority
+        .account_grant(&value.grant.account_pub)
+        .filter(|grant| grant.id() == Some(value.grant))
+    else {
+        return false;
+    };
+    let proofs = authority.original_device_proofs();
+    let Some(recipient) = proofs.iter().find(|proof| {
+        proof.public() == value.recipient
+            && authority
+                .grant_for_device(&proof.public(), proof)
+                .and_then(super::channel_account_authority::AccountGrant::id)
+                == Some(value.grant)
+    }) else {
+        return false;
+    };
+    if authority.device_authorization(&recipient.public(), recipient)
+        != Some(value.device_authorization)
+        || !super::channel::descends_from(event, value.device_authorization, graph)
+    {
+        return false;
+    }
+    let Some(sender) = proofs.iter().find(|proof| {
+        proof.ed25519_pub == *event.author.ed25519_pub() && state.is_accepted_member(&proof.user_id)
+    }) else {
+        return false;
+    };
+    if authority
+        .device_authorization(&sender.public(), sender)
+        .is_none_or(|binding| !super::channel::descends_from(event, binding, graph))
+    {
+        return false;
+    }
+    let Some(offer_event) = graph.get(&value.release.offer) else {
+        return false;
+    };
+    let Some(HistoryControl::Offer(offer)) = decode(&offer_event.ciphertext) else {
+        return false;
+    };
+    if offer_event.kind != EventKind::ChannelJoinHistory
+        || !offer_event.is_canonical()
+        || !offer_event.verify_integrity()
+        || !offer_event.verify_signature()
+        || offer_event.conversation_id != event.conversation_id
+        || offer.invitation != grant.membership_event
+        || offer.recipient != grant.original.user_id
+        || !offer
+            .keys
+            .entries
+            .iter()
+            .any(|source| source.user_id == sender.user_id)
+        || !super::channel::descends_from(event, offer_event.id, graph)
+    {
+        return false;
+    }
+    let Some(acceptance) = graph.get(&value.release.acceptance) else {
+        return false;
+    };
+    acceptance.conversation_id == event.conversation_id
+        && super::channel::descends_from(event, acceptance.id, graph)
+        && valid_account_acceptance(acceptance, grant, authority, graph)
+}
+
 struct View<'a> {
     events: Vec<&'a Event>,
     by_id: HashMap<EventId, &'a Event>,
@@ -126,6 +263,19 @@ impl<'a> View<'a> {
         )
         .0
     }
+    fn canonical_after(&self, event: &Event) -> Option<crate::channel::ChannelState> {
+        let position = self
+            .events
+            .iter()
+            .position(|candidate| candidate.id == event.id)?;
+        ChannelBook::membership_view(
+            event.conversation_id,
+            &self.events[..=position],
+            None,
+            &self.by_id,
+        )
+        .0
+    }
     fn owner_authorized(&self, event: &Event) -> bool {
         let author = event.author.user_id();
         let Some(current) = self.canonical_before(event) else {
@@ -134,9 +284,9 @@ impl<'a> View<'a> {
         let Some(causal) = self.before(event) else {
             return false;
         };
-        if current.owner() != author
+        if !current.can_admin(&author)
             || current.is_dissolved()
-            || causal.owner() != author
+            || !causal.can_admin(&author)
             || causal.is_dissolved()
         {
             return false;
@@ -152,22 +302,21 @@ impl<'a> View<'a> {
             return false;
         };
         !self.events[position + 1..].iter().any(|transfer| {
-            if transfer.kind != EventKind::ChannelOwnerTransfer
-                || transfer.author.user_id() != author
-                || super::channel::descends_from(transfer, event.id, &self.by_id)
+            if !matches!(
+                transfer.kind,
+                EventKind::ChannelOwnerTransfer | EventKind::ChannelAccountAuthority
+            ) || super::channel::descends_from(transfer, event.id, &self.by_id)
             {
                 return false;
             }
-            let Some(mut state) = self.canonical_before(transfer) else {
-                return false;
-            };
-            state.owner() == author
-                && !state.is_dissolved()
-                && std::str::from_utf8(&transfer.ciphertext)
-                    .ok()
-                    .is_some_and(|next| next != author && state.transfer_owner(next))
+            self.canonical_before(transfer)
+                .is_some_and(|before| before.can_admin(&author))
+                && self
+                    .canonical_after(transfer)
+                    .is_some_and(|after| !after.can_admin(&author))
         })
     }
+
     fn policy(&self, cutoff: Option<&Event>) -> HistoryPolicy {
         self.events
             .iter()
@@ -207,9 +356,9 @@ impl<'a> View<'a> {
             || !crate::channel::ChannelMeta::is_invitation(&invitation.ciphertext)
             || before.is_member(&offer.recipient)
             || !meta.is_member(&offer.recipient)
-            || invitation.author.user_id() != before.owner()
+            || !before.can_admin(&invitation.author.user_id())
             || event.author != invitation.author
-            || state.owner() != event.author.user_id()
+            || !state.can_admin(&event.author.user_id())
             || state.is_dissolved()
             || !super::channel::descends_from(event, invitation.id, &self.by_id)
             || offer.policy == HistoryPolicy::Off
@@ -266,7 +415,9 @@ impl<'a> View<'a> {
         self.events.iter().any(|change| {
             if !matches!(
                 change.kind,
-                EventKind::MembershipChange | EventKind::ChannelLeave
+                EventKind::MembershipChange
+                    | EventKind::ChannelLeave
+                    | EventKind::ChannelAccountAuthority
             ) || !super::channel::descends_from(change, offer.invitation, &self.by_id)
                 || cutoff.is_some_and(|event| {
                     !super::channel::descends_from(event, change.id, &self.by_id)
@@ -274,22 +425,11 @@ impl<'a> View<'a> {
             {
                 return false;
             }
-            let Some(mut state) = self.canonical_before(change) else {
-                return false;
-            };
-            if change.kind == EventKind::ChannelLeave {
-                return change.ciphertext.is_empty()
-                    && change.author.user_id() == offer.recipient
-                    && state.leave_member(&offer.recipient);
-            }
-            if state.owner() != change.author.user_id() {
-                return false;
-            }
-            let Some(meta) = crate::channel::ChannelMeta::decode(&change.ciphertext) else {
-                return false;
-            };
-            state.apply_meta(meta);
-            !state.is_member(&offer.recipient)
+            self.canonical_before(change)
+                .is_some_and(|before| before.is_member(&offer.recipient))
+                && self
+                    .canonical_after(change)
+                    .is_some_and(|after| !after.is_member(&offer.recipient))
         })
     }
     fn release(&self, event: &Event, offer_event: &Event, offer: &Offer) -> Option<Release> {
@@ -337,26 +477,63 @@ pub(super) fn valid_invitation_transaction(events: &[Event]) -> bool {
     let Some(invitation) = events.first() else {
         return false;
     };
+    let Some(meta) = crate::channel::ChannelMeta::decode(&invitation.ciphertext) else {
+        return false;
+    };
     if invitation.kind != EventKind::MembershipChange
         || !crate::channel::ChannelMeta::is_invitation(&invitation.ciphertext)
-        || !crate::channel::ChannelMeta::decode(&invitation.ciphertext).is_some_and(|meta| {
-            meta.owner == invitation.author.user_id() && meta.is_member(&meta.owner)
-        })
+        || !meta.is_member(&meta.owner)
     {
         return false;
     }
-    match events {
-        [_] => true,
-        [_, event] => {
-            event.kind == EventKind::ChannelJoinHistory
-                && event.conversation_id == invitation.conversation_id
-                && event.author == invitation.author
-                && event.seq == invitation.seq.saturating_add(1)
-                && event.parents == [invitation.id]
-                && matches!(decode::<HistoryControl>(&event.ciphertext), Some(HistoryControl::Offer(offer)) if offer.invitation == invitation.id)
+    let mut offset = 1;
+    if let Some(authority) = events
+        .get(1)
+        .filter(|event| event.kind == EventKind::ChannelAccountAuthority)
+    {
+        let Some(control) = super::channel_account_authority::AccountAuthorityControl::decode(
+            &authority.ciphertext,
+        ) else {
+            return false;
+        };
+        let Some(cert) = control.issuer.account_cert.as_ref() else {
+            return false;
+        };
+        if control.previous.is_none()
+            || !control.legacy_bindings.is_empty()
+            || !control.issuer.valid_presence()
+            || control.owner_account != cert.account_ed25519_pub
+            || control.issuer.ed25519_pub != *invitation.author.ed25519_pub()
+            || !control
+                .verify_account_signature(invitation.conversation_id, &cert.account_ed25519_pub)
+            || !control
+                .grants
+                .iter()
+                .any(|grant| grant.pending && grant.membership_event == invitation.id)
+            || authority.conversation_id != invitation.conversation_id
+            || authority.author != invitation.author
+            || authority.seq != invitation.seq.saturating_add(1)
+            || authority.parents != [invitation.id]
+        {
+            return false;
         }
-        _ => false,
+        offset += 1;
+    } else if meta.owner != invitation.author.user_id() {
+        return false;
     }
+    if events.len() == offset {
+        return true;
+    }
+    let Some(event) = events.get(offset) else {
+        return false;
+    };
+    events.len() == offset + 1
+        && event.kind == EventKind::ChannelJoinHistory
+        && event.conversation_id == invitation.conversation_id
+        && event.author == invitation.author
+        && event.seq == invitation.seq.saturating_add(offset as u64)
+        && event.parents == [events[offset - 1].id]
+        && matches!(decode::<HistoryControl>(&event.ciphertext), Some(HistoryControl::Offer(offer)) if offer.invitation == invitation.id)
 }
 
 pub(super) fn encode_policy(policy: HistoryPolicy) -> Vec<u8> {
@@ -423,12 +600,16 @@ impl Node {
     ) -> Result<(), NodeError> {
         let mut members = Vec::new();
         authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
             {
                 let book = self.channels.lock().expect("channels lock");
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-                if state.owner() != self.user_id()
+                if !self.channel_identity_can_manage(state)
                     || !state.is_accepted_member(&self.user_id())
                     || state.is_dissolved()
                 {
@@ -540,6 +721,23 @@ impl Node {
         selected: Vec<HistoryEntry>,
         policy: HistoryPolicy,
     ) -> Result<(), NodeError> {
+        self.append_invitation_with_history_and_control(
+            channel,
+            meta,
+            recipient,
+            (selected, policy),
+            |_| Ok(None),
+        )
+    }
+    pub(super) fn append_invitation_with_history_and_control(
+        &self,
+        channel: ConversationId,
+        meta: &crate::channel::ChannelMeta,
+        recipient: &PublicIdentity,
+        history: (Vec<HistoryEntry>, HistoryPolicy),
+        additional: impl FnOnce(EventId) -> Result<Option<(EventKind, Vec<u8>)>, NodeError>,
+    ) -> Result<(), NodeError> {
+        let (selected, policy) = history;
         let now = super::node::now_millis();
         let selected = select_history(selected, policy, now);
         let mut offer = self.prepare_join_history(channel, recipient, selected, policy)?;
@@ -550,7 +748,7 @@ impl Node {
         let state = book
             .state(&channel)
             .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-        if state.owner() != self.user_id()
+        if !self.channel_identity_can_manage(state)
             || state.is_dissolved()
             || !state.is_accepted_member(&self.user_id())
             || state.epoch().checked_add(1) != Some(meta.epoch)
@@ -580,14 +778,26 @@ impl Node {
             meta.encode_invitation(),
         );
         let mut events = vec![invitation];
-        if let Some(mut offer) = offer.take() {
-            offer.invitation = events[0].id;
+        if let Some((kind, payload)) = additional(events[0].id)? {
             events.push(Event::new(
                 &self.identity,
                 channel,
                 seq + 1,
                 vec![events[0].id],
                 lamport + 1,
+                now,
+                kind,
+                payload,
+            ));
+        }
+        if let Some(mut offer) = offer.take() {
+            offer.invitation = events[0].id;
+            events.push(Event::new(
+                &self.identity,
+                channel,
+                seq + events.len() as u64,
+                vec![events.last().expect("invitation exists").id],
+                lamport + events.len() as u64,
                 now,
                 EventKind::ChannelJoinHistory,
                 encode(&HistoryControl::Offer(offer)),
@@ -626,6 +836,10 @@ impl Node {
     /// At most eight ready invitations are released per control tick. All bytes
     /// remain in the durable event log, so an offline source can retry on restart.
     pub(super) fn retry_join_history(&self) -> Result<Vec<ConversationId>, NodeError> {
+        let _membership = self
+            .channel_membership_commit
+            .lock()
+            .expect("channel membership commit lock");
         let mut channels = self.channels.lock().expect("channels lock").channel_ids();
         channels.sort_by_key(|channel| *channel.as_bytes());
         if !channels.is_empty() {
@@ -653,7 +867,7 @@ impl Node {
             let Some(current) = ChannelBook::projected_metadata(channel, &refs) else {
                 continue;
             };
-            if !current.is_accepted_member(&self.user_id()) || current.is_dissolved() {
+            if !self.channel_identity_is_current(&current) || current.is_dissolved() {
                 continue;
             }
             for (event, offer) in view.offers() {
@@ -666,35 +880,99 @@ impl Node {
                 if !current.is_accepted_member(&offer.recipient) {
                     continue;
                 }
-                let releases: Vec<_> = view
-                    .events
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.kind == EventKind::ChannelJoinHistory
-                            && view.release(candidate, event, &offer).is_some()
-                    })
-                    .collect();
-                if !releases.is_empty() {
-                    if releases
-                        .iter()
-                        .any(|release| release.author.user_id() == self.user_id())
-                    {
-                        ready.insert(channel);
+                let projection = self.account_group_projection(channel);
+                let authority = &projection.authority;
+                let account_grant = authority.grants().into_iter().find(|grant| {
+                    grant.membership_event == offer.invitation
+                        && grant.original.user_id == offer.recipient
+                });
+                let mut recipients = Vec::new();
+                if let Some(grant) = account_grant {
+                    let Some(id) = grant.id() else {
+                        continue;
+                    };
+                    let Some(acceptance) = view.events.iter().find(|candidate| {
+                        valid_account_acceptance(candidate, &grant, authority, &view.by_id)
+                    }) else {
+                        continue;
+                    };
+                    for proof in authority.original_device_proofs() {
+                        if authority
+                            .grant_for_device(&proof.public(), &proof)
+                            .and_then(super::channel_account_authority::AccountGrant::id)
+                            != Some(id)
+                        {
+                            continue;
+                        }
+                        let Some(binding) = authority.device_authorization(&proof.public(), &proof)
+                        else {
+                            continue;
+                        };
+                        let released = view.events.iter().any(|prior| {
+                            decode_account_release(&prior.ciphertext).is_some_and(|release| {
+                                release.release.offer == event.id
+                                    && release.recipient == proof.public()
+                                    && account_release_admitted(
+                                        &current,
+                                        prior,
+                                        authority,
+                                        &view.by_id,
+                                    )
+                            }) || (proof.user_id == offer.recipient
+                                && view.release(prior, event, &offer).is_some())
+                        });
+                        if released {
+                            ready.insert(channel);
+                            continue;
+                        }
+                        recipients.push((proof.public(), acceptance.id, Some((id, binding))));
                     }
+                } else {
+                    let releases: Vec<_> = view
+                        .events
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.kind == EventKind::ChannelJoinHistory
+                                && view.release(candidate, event, &offer).is_some()
+                        })
+                        .collect();
+                    if !releases.is_empty() {
+                        if releases
+                            .iter()
+                            .any(|release| release.author.user_id() == self.user_id())
+                        {
+                            ready.insert(channel);
+                        }
+                        continue;
+                    }
+                    let Some(acceptance) = view.events.iter().find(|candidate| {
+                        candidate.kind == EventKind::ChannelAccept
+                            && candidate.author.user_id() == offer.recipient
+                            && candidate.ciphertext.is_empty()
+                            && view.before(candidate).is_some_and(|state| {
+                                state.is_member(&offer.recipient)
+                                    && !state.is_accepted_member(&offer.recipient)
+                            })
+                            && super::channel::descends_from(
+                                candidate,
+                                offer.invitation,
+                                &view.by_id,
+                            )
+                    }) else {
+                        continue;
+                    };
+                    let Some(recipient) = current
+                        .members()
+                        .iter()
+                        .find(|member| member.user_id() == offer.recipient)
+                    else {
+                        continue;
+                    };
+                    recipients.push((recipient.clone(), acceptance.id, None));
+                }
+                if recipients.is_empty() {
                     continue;
                 }
-                let Some(acceptance) = view.events.iter().find(|candidate| {
-                    candidate.kind == EventKind::ChannelAccept
-                        && candidate.author.user_id() == offer.recipient
-                        && candidate.ciphertext.is_empty()
-                        && view.before(candidate).is_some_and(|state| {
-                            state.is_member(&offer.recipient)
-                                && !state.is_accepted_member(&offer.recipient)
-                        })
-                        && super::channel::descends_from(candidate, offer.invitation, &view.by_id)
-                }) else {
-                    continue;
-                };
                 let Some(author) = view.author(event) else {
                     continue;
                 };
@@ -732,27 +1010,36 @@ impl Node {
                     })
                     .collect();
                 let key_bytes = zeroize::Zeroizing::new(encode(&keys));
-                let Some(recipient) = current
-                    .members()
-                    .iter()
-                    .find(|member| member.user_id() == offer.recipient)
-                else {
-                    continue;
-                };
-                let sealed_key = crate::dm::seal(&self.identity, &recipient.x25519_pub, &key_bytes)
-                    .map_err(|e| NodeError::Channel(e.to_string()))?;
-                self.append_event(
-                    channel,
-                    EventKind::ChannelJoinHistory,
-                    encode(&HistoryControl::Release(Release {
+                for (recipient, acceptance, account) in recipients.into_iter().take(remaining) {
+                    let sealed_key =
+                        crate::dm::seal(&self.identity, &recipient.x25519_pub, &key_bytes)
+                            .map_err(|error| NodeError::Channel(error.to_string()))?;
+                    let release = Release {
                         offer: event.id,
-                        acceptance: acceptance.id,
+                        acceptance,
                         sealed_key,
-                    })),
-                )?;
-                self.schedule_channel_recovery(channel);
-                ready.insert(channel);
-                remaining -= 1;
+                    };
+                    let (kind, payload) = if let Some((grant, device_authorization)) = account {
+                        (
+                            EventKind::ChannelDeviceInheritance,
+                            encode_account_release(&AccountRelease {
+                                version: 1,
+                                grant,
+                                device_authorization,
+                                recipient,
+                                release,
+                            }),
+                        )
+                    } else {
+                        (
+                            EventKind::ChannelJoinHistory,
+                            encode(&HistoryControl::Release(release)),
+                        )
+                    };
+                    self.append_event(channel, kind, payload)?;
+                    remaining -= 1;
+                    ready.insert(channel);
+                }
             }
         }
         Ok(ready.into_iter().collect())
@@ -775,7 +1062,8 @@ pub(super) fn received(
     channel: ConversationId,
     events: &[&Event],
 ) -> Vec<ReceivedChannelMessage> {
-    let Some(current) = ChannelBook::projected_metadata(channel, events) else {
+    let projection = ChannelBook::project_membership(channel, events);
+    let Some(current) = projection.state.as_ref() else {
         return Vec::new();
     };
     let uid = me.user_id();
@@ -791,19 +1079,33 @@ pub(super) fn received(
     let mut out = Vec::new();
     let mut emitted = HashSet::new();
     for event in &view.events {
-        if event.kind != EventKind::ChannelJoinHistory {
-            continue;
-        }
-        let Some(HistoryControl::Release(release)) = decode(&event.ciphertext) else {
+        let (release, account_release) = if event.kind == EventKind::ChannelDeviceInheritance {
+            let Some(value) = decode_account_release(&event.ciphertext)
+                .filter(|value| value.recipient == me.public())
+            else {
+                continue;
+            };
+            if !account_release_admitted(current, event, &projection.authority, &view.by_id) {
+                continue;
+            }
+            (value.release, true)
+        } else if event.kind == EventKind::ChannelJoinHistory {
+            let Some(HistoryControl::Release(release)) = decode(&event.ciphertext) else {
+                continue;
+            };
+            (release, false)
+        } else {
             continue;
         };
         let Some((offer_event, offer)) = offers
             .get(&release.offer)
-            .filter(|(_, offer)| offer.recipient == uid)
+            .filter(|(_, offer)| account_release || offer.recipient == uid)
         else {
             continue;
         };
-        if view.release(event, offer_event, offer).is_none() {
+        if (account_release && view.lifetime_closed(offer, Some(event)))
+            || (!account_release && view.release(event, offer_event, offer).is_none())
+        {
             continue;
         }
         let Some(author) = view.author(event) else {

@@ -385,3 +385,28 @@ it.each([false, true])(
     expect(state.unreadIds[key]).toEqual([]);
   },
 );
+import { applyAccountSeen } from "./reception";
+
+it("retains exact linked seen identities before future history and ledger eviction", () => {
+  let state = applyAccountSeen(emptyReception(), "account:peer", ["future-id"]);
+  state = viewIdentities(
+    state,
+    "account:peer",
+    Array.from({ length: 1100 }, (_, index) => `other-${index}`),
+  );
+  expect(state.ledger["account:peer"]["future-id"]).toBeUndefined();
+  state = receiveIdentity(state, "account:peer", {
+    event_id: "future-id",
+    arrival_kind: "catch_up",
+  });
+  expect(state.ledger["account:peer"]["future-id"].seen).toBe(true);
+  expect(state.unreadIds["account:peer"]).not.toContain("future-id");
+  const history = reconcileHistory(
+    state,
+    "account:peer",
+    [{ id: "history-future", fromMe: false }],
+    true,
+  );
+  const known = applyAccountSeen(history, "account:peer", ["history-future"]);
+  expect(known.unreadIds["account:peer"]).not.toContain("history-future");
+});

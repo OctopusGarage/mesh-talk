@@ -432,6 +432,7 @@ mod tests {
         let user = crate::services::user::User {
             user_id: "agent-owner".into(),
             name: "Owner".into(),
+            account_login_name: None,
             display_name: "Owner".into(),
             address: "local".into(),
             created_at: 0,

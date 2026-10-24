@@ -63,11 +63,25 @@ pub(super) enum AccountSessionRequest {
         epoch: [u8; 16],
         revision: u64,
     },
+    Documents {
+        body: Vec<u8>,
+    },
+    AttachmentChecked {
+        account_id: String,
+        file_conv: [u8; 32],
+    },
 }
 
 impl AccountSessionRequest {
     pub(super) fn from_frame(frame: &AccountHistoryFrame) -> Option<Self> {
         match frame {
+            AccountHistoryFrame::AttachmentRequestChecked {
+                account_id,
+                file_conv,
+            } => Some(Self::AttachmentChecked {
+                account_id: account_id.clone(),
+                file_conv: *file_conv,
+            }),
             AccountHistoryFrame::Request {
                 version,
                 account_id,
@@ -99,12 +113,23 @@ impl AccountSessionRequest {
                 epoch: *epoch,
                 revision: *revision,
             }),
+            AccountHistoryFrame::DocumentsRequest { body } => {
+                Some(Self::Documents { body: body.clone() })
+            }
             _ => None,
         }
     }
 
     pub(super) fn into_frame(self) -> AccountHistoryFrame {
         match self {
+            Self::AttachmentChecked {
+                account_id,
+                file_conv,
+            } => AccountHistoryFrame::AttachmentRequestChecked {
+                account_id,
+                file_conv,
+            },
+            Self::Documents { body } => AccountHistoryFrame::DocumentsRequest { body },
             Self::History {
                 version,
                 account_id,
@@ -241,6 +266,28 @@ pub(super) enum AccountHistoryFrame {
         account_id: String,
         file_conv: [u8; 32],
     },
+    // Optional document protocol; existing tags and history encodings stay frozen.
+    DocumentsRequest {
+        body: Vec<u8>,
+    },
+    DocumentHeader {
+        body: Vec<u8>,
+    },
+    DocumentChunk {
+        bytes: Vec<u8>,
+    },
+    DocumentsComplete {
+        body: Vec<u8>,
+    },
+    /// Optional checked attachment request. Legacy requests never receive these terminals.
+    AttachmentRequestChecked {
+        account_id: String,
+        file_conv: [u8; 32],
+    },
+    AttachmentUnavailable {
+        file_conv: [u8; 32],
+        source_disabled: bool,
+    },
 }
 
 impl AccountHistoryFrame {
@@ -282,7 +329,13 @@ impl AccountHistoryFrame {
 
     fn valid_for(&self, codec: AccountSyncVersion) -> bool {
         match self {
-            Self::FavoritesRequest { .. }
+            Self::AttachmentRequestChecked { .. }
+            | Self::AttachmentUnavailable { .. }
+            | Self::DocumentsRequest { .. }
+            | Self::DocumentHeader { .. }
+            | Self::DocumentChunk { .. }
+            | Self::DocumentsComplete { .. }
+            | Self::FavoritesRequest { .. }
             | Self::FavoriteHeader { .. }
             | Self::FavoriteChunk { .. }
             | Self::FavoritesComplete { .. }
@@ -313,6 +366,16 @@ impl AccountHistoryFrame {
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         }
         match self {
+            Self::AttachmentRequestChecked { account_id: id, .. } => account_id(id),
+            Self::AttachmentUnavailable { .. } => true,
+            Self::DocumentsRequest { body } => {
+                super::account_documents::wire::DocumentRequest::decode(body).is_some()
+            }
+            Self::DocumentHeader { body } => super::account_documents::wire::valid_header(body),
+            Self::DocumentChunk { bytes } => !bytes.is_empty() && bytes.len() <= MAX_CHUNK,
+            Self::DocumentsComplete { body } => {
+                super::account_documents::wire::valid_complete(body)
+            }
             Self::FavoritesRequest {
                 version,
                 account_id: id,
@@ -411,6 +474,36 @@ impl AccountHistoryFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_attachment_extension_appends_tags_and_cannot_encode_legacy_terminals() {
+        let request = AccountHistoryFrame::AttachmentRequestChecked {
+            account_id: "a".repeat(32),
+            file_conv: [8; 32],
+        };
+        let terminal = AccountHistoryFrame::AttachmentUnavailable {
+            file_conv: [8; 32],
+            source_disabled: false,
+        };
+        for (tag, frame) in [(25u32, request.clone()), (26u32, terminal)] {
+            let encoded = frame.encode_version(AccountSyncVersion::V2).unwrap();
+            assert_eq!(&encoded[6..10], &tag.to_le_bytes());
+            assert_eq!(
+                AccountHistoryFrame::decode_versioned(&encoded),
+                Some((AccountSyncVersion::V2, frame.clone()))
+            );
+            assert!(frame.encode_version(AccountSyncVersion::V1).is_none());
+            let mut legacy = encoded;
+            legacy[..6].copy_from_slice(MAGIC);
+            assert!(AccountHistoryFrame::decode_versioned(&legacy).is_none());
+        }
+        let nested = AccountSessionRequest::from_frame(&request).unwrap();
+        assert_eq!(
+            &bincode::serialize(&nested).unwrap()[..4],
+            &4u32.to_le_bytes()
+        );
+        assert_eq!(nested.into_frame(), request);
+    }
 
     #[test]
     fn session_extension_accepts_appended_v2_tags_and_rejects_v1_envelopes() {

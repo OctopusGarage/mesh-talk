@@ -129,6 +129,24 @@ describe("automatic delivery footer", () => {
       else expect(markup).toContain("No member copy confirmed");
     }
   });
+  it("explains what a confirmed copy means without claiming one for known zero", async () => {
+    await i18n.changeLanguage("en");
+    const html = render({ ...base, replicas: 0, postOfficeCopies: 0 }, true);
+    expect(html).toContain("No member copy confirmed");
+    expect(html).toContain("A confirmed copy means");
+    expect(html).not.toContain("An external member reported durable storage;");
+  });
+  it("does not turn missing linked-device copy status into a zero-copy claim", async () => {
+    await i18n.changeLanguage("en");
+    const html = render({ ...base, replicas: undefined }, true);
+    expect(html).not.toContain("No member copy confirmed");
+    expect(html).not.toContain('data-custody="0"');
+    expect(html).toContain('data-custody="unknown"');
+    expect(html).toContain("Copy status unavailable");
+    expect(html).toContain("Another linked device may have newer information.");
+    expect(html).not.toContain("✓");
+    expect(html).not.toContain("data-delivery=");
+  });
   it("has explicit automatic-receipt wording in all six locales and hides guessed file metadata", async () => {
     for (const language of ["en", "es", "ja", "yue", "zh-Hans", "zh-Hant"]) {
       for (const key of [
@@ -148,6 +166,10 @@ describe("automatic delivery footer", () => {
       ])
         expect(
           i18n.getResource(language, "translation", `message.delivery.${key}`),
+        ).toBeTruthy();
+      for (const key of ["unknown", "unknownHelp", "help"])
+        expect(
+          i18n.getResource(language, "translation", `message.custody.${key}`),
         ).toBeTruthy();
       await i18n.changeLanguage(language);
       const markup = render({

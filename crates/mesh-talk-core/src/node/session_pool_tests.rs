@@ -151,7 +151,7 @@ async fn outbound_handshakes_are_bounded_and_cancellation_releases_capacity() {
     let mut callers = tokio::task::JoinSet::new();
     for _ in 0..12 {
         let alice = alice.clone();
-        let expected = expected.clone();
+        let expected = DeviceIdentity::generate().public();
         callers.spawn(async move { alice.privacy_dial(addr, &expected).await });
     }
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -172,6 +172,70 @@ async fn outbound_handshakes_are_bounded_and_cancellation_releases_capacity() {
     .unwrap();
     attempt.abort();
     server.abort();
+}
+
+#[tokio::test]
+async fn duplicate_hung_endpoint_handshakes_do_not_starve_healthy_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let expected = DeviceIdentity::generate().public();
+    let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = stalled.local_addr().unwrap();
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = accepted.clone();
+    let stalled_server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            held.push(stalled.accept().await.unwrap().0);
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let mut duplicates = tokio::task::JoinSet::new();
+    for _ in 0..7 {
+        let alice = alice.clone();
+        let expected = expected.clone();
+        duplicates.spawn(async move { alice.privacy_dial(target, &expected).await });
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while accepted.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // Let every spawned producer reach authentication admission. The remote
+    // holds real sockets open without responding to their Noise handshakes.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (healthy, _, healthy_server) = counted_sync_peer(bob.clone()).await;
+    let result = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut channel = alice
+            .privacy_sync_dial(healthy, &bob.identity.public())
+            .await
+            .map_err(|error| error.to_string())?;
+        super::session::request_round(
+            &mut channel,
+            &alice.sync_store(&bob.identity.public()),
+            crate::eventlog::ConversationId::new([229; 32]),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok::<_, String>(())
+    })
+    .await;
+    duplicates.abort_all();
+    while duplicates.join_next().await.is_some() {}
+    stalled_server.abort();
+    healthy_server.abort();
+    assert!(
+        result.is_ok_and(|round| round.is_ok()),
+        "duplicate stalled authentication must leave capacity for a real healthy sync round"
+    );
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "only one unauthenticated socket per exact endpoint may consume capacity"
+    );
 }
 
 async fn counted_sync_peer(
@@ -199,6 +263,36 @@ async fn counted_sync_peer(
         }
     });
     (addr, count, task)
+}
+
+#[tokio::test]
+async fn concurrent_live_endpoint_dials_keep_independent_authenticated_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let expected = bob.identity.public();
+    let (address, accepted, server) = counted_sync_peer(bob).await;
+    let mut dials = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let alice = alice.clone();
+        let expected = expected.clone();
+        dials.spawn(async move { alice.privacy_dial(address, &expected).await });
+    }
+    let mut channels = Vec::new();
+    while let Some(result) = dials.join_next().await {
+        channels.push(result.unwrap().unwrap());
+    }
+    assert_eq!(accepted.load(Ordering::SeqCst), 4);
+    for channel in &mut channels {
+        super::session::request_round(
+            channel,
+            &alice.sync_store(&expected),
+            crate::eventlog::ConversationId::new([230; 32]),
+        )
+        .await
+        .unwrap();
+    }
+    server.abort();
 }
 
 #[tokio::test]

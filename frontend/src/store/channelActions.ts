@@ -22,6 +22,10 @@ interface ChannelCommands {
   createChannel(name: string, memberIds: string[]): Promise<string>;
   addChannelMember(channelId: string, memberId: string): Promise<void>;
   removeChannelMember(channelId: string, memberId: string): Promise<void>;
+  removeChannelAccountMembers(
+    channelId: string,
+    accountId: string,
+  ): Promise<void>;
   transferChannelOwner(channelId: string, memberId: string): Promise<void>;
   channelMembers(channelId: string): Promise<ChannelMembersInfo>;
   leaveChannel(channelId: string): Promise<void>;
@@ -48,6 +52,7 @@ export interface ChannelActions {
   createChannel(name: string, memberIds: string[]): Promise<boolean>;
   addMember(memberId: string): Promise<boolean>;
   removeMember(memberId: string): Promise<boolean>;
+  removeMemberAccount(accountId: string): Promise<boolean>;
   transferChannelOwner(memberId: string): Promise<boolean>;
   leaveChannel(): Promise<boolean>;
   acceptChannelInvite(): Promise<boolean>;
@@ -119,6 +124,12 @@ export function createChannelActions(
       mutateMember(
         memberId,
         commands.removeChannelMember,
+        "Couldn't remove member",
+      ),
+    removeMemberAccount: (accountId) =>
+      mutateMember(
+        accountId,
+        commands.removeChannelAccountMembers,
         "Couldn't remove member",
       ),
     transferChannelOwner: (memberId) =>

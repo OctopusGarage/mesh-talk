@@ -50,6 +50,28 @@ Schemas 1–3 remain readable without inventing a creation timestamp.
 | Device changes | This installation observed different certified devices for the account; multi-device use can be legitimate. |
 | Verified contact | You explicitly compared the device safety number through an independent trusted channel. |
 
+An account has one signed nickname, avatar and bio (personal signature) across its
+linked devices. Own-account rows use the signed profile. Other contacts retain
+their verified announced nickname; a stale legacy profile label must not replace it. Nickname edits preserve the bio, avatar and established creation metadata;
+they do not create a new identity. Joining a kept account adopts its signed
+profile rather than publishing the joining local profile's old nickname. Desktop
+linking also adopts the source account's login name and password through the
+[private account access boundary](network-design-reference.md#g-linking-and-ongoing-account-synchronization).
+Login names remain distinct from public nicknames; passwords never appear in public cards.
+
+An explicit biography save also repairs a missing ordinary profile after an old
+linked-account upgrade. It initializes only the missing nickname from the current
+account runtime, retains the account avatar and immutable creation metadata, and
+uses any signed nickname received before the authorized commit. Startup does not
+use this edit fallback to publish a joining device's previous nickname. Invalid
+input or retired session authority creates no profile.
+
+Publishing finishes once the signed profile and its outgoing events are committed
+locally. Peer and post-office fanout continues independently; an unavailable
+contact must not hold the profile dialog busy or block unrelated chat commands.
+Local send commits acquire host session authority before the delivery journal so
+concurrent card/legacy-avatar publication cannot reverse that lock order.
+
 A valid profile signature never establishes a person's identity, honesty or
 verification status. Profiles never grant verified-contact message pulls.
 First-observed time, device history, aliases and verification flags remain private
@@ -61,6 +83,36 @@ snapshot tags remain readable for compatibility; they do not restore those user
 capabilities or convert private observations into public statements.
 
 ## Storage and delivery
+
+### Recover a device that changed accounts
+
+A device that joins another account keeps its device keys but presents a new
+account certificate. A recipient with a saved binding may block that change;
+passive discovery alone must not relabel a previously pinned device. Its own
+account siblings receiving a sent copy does not establish recipient delivery.
+
+Updated clients automatically repair an exact saved device binding when the
+linked device supplies a valid, durable transition signed by its previous account,
+current account and unchanged device keys. The proof is bound to the authenticated
+connection and survives reconnects. This repairs device attribution and legacy
+group counts; it does not merge whole accounts, change established group grants,
+transfer old conversations or mark new safety numbers verified. Private account
+information is not broadcast to contacts. See the
+[transition contract](network-design-reference.md#g-linking-and-ongoing-account-synchronization).
+
+For early links without a retained transition proof, manual recovery remains:
+On the receiving device, open the affected contact's member profile or
+verification dialog. The account-change section shows the previously saved
+account, currently presented account and complete device fingerprint. After
+checking the change with the contact, **Accept this account change** authorizes
+only that exact device and reviewed old/new account pair. Opening the dialog
+changes nothing; a stale proposal must be refreshed and reviewed again.
+Other pending changes for the same account remain unaccepted. Safety-number
+verification and old conversation history remain separate. An existing queued
+message can retry after acceptance; it does not need a new logical message ID.
+
+## Implementation ownership
+
 
 `identity/account.rs` and `identity/account_keystore.rs` own creation metadata.
 `node/account_profile_data.rs` owns bounded `MTP3` profile signatures and encrypted

@@ -250,6 +250,7 @@ impl MediaStore {
 
     /// Recover from a crash between local card erasure and managed-file removal.
     pub fn prune_unreferenced(&self, live: &HashSet<ConversationId>) -> std::io::Result<()> {
+        let mut removed_path = None;
         for entry in std::fs::read_dir(&self.dir)? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
@@ -267,8 +268,17 @@ impl MediaStore {
             };
             let conv = ConversationId::new(bytes);
             if !live.contains(&conv) {
-                self.remove(conv)?;
+                // The directory entry already identifies the exact managed file.
+                // Rescanning the whole directory for each orphan is quadratic.
+                std::fs::remove_file(&path)?;
+                removed_path = Some(path);
+                if let Ok(mut legacy) = self.legacy_unmigrated.lock() {
+                    legacy.remove(&conv);
+                }
             }
+        }
+        if let Some(path) = removed_path {
+            sync_parent(&path)?;
         }
         Ok(())
     }
@@ -802,9 +812,27 @@ mod tests {
         let store = MediaStore::open(dir.path(), "password", "device").unwrap();
         store.store_bytes(conv(7), "keep.png", b"keep").unwrap();
         store.store_bytes(conv(8), "erase.png", b"erase").unwrap();
+        store
+            .store_bytes(conv(8), "erase.jpg", b"erase duplicate")
+            .unwrap();
+        let unknown = store.dir.join("unmanaged.txt");
+        std::fs::write(&unknown, b"preserve").unwrap();
+        store.legacy_unmigrated.lock().unwrap().insert(conv(8));
+        #[cfg(unix)]
+        let link = {
+            let link = store
+                .dir
+                .join(format!("{}.png", hex::encode(conv(9).as_bytes())));
+            std::os::unix::fs::symlink(&unknown, &link).unwrap();
+            link
+        };
         store.prune_unreferenced(&HashSet::from([conv(7)])).unwrap();
         assert_eq!(store.read(conv(7)).unwrap(), b"keep");
         assert!(!store.contains(conv(8)));
+        assert!(!store.legacy_unmigrated.lock().unwrap().contains(&conv(8)));
+        assert_eq!(std::fs::read(unknown).unwrap(), b"preserve");
+        #[cfg(unix)]
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
     }
 
     #[cfg(unix)]

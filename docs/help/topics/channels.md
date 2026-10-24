@@ -13,7 +13,45 @@ Start a group conversation and review its members from the conversation header.
 
 Open the channel's members control in the conversation header. Member profiles show known account and device identities. A known endpoint can belong to a relay; it is not proof of the person's physical location.
 
-Membership and cryptographic access are not interchangeable with merely knowing a channel name. After restoring a backup onto a new device, old channel messages may be readable as an archive while future channel messages require a new invitation from the owner.
+Membership belongs to your account. Linking another device does not require the
+group owner to invite or approve that device again. An accepted, reachable device
+on your account can provide the verified group state and fresh receiving keys;
+the owner can be offline. Your devices keep independent sending keys.
+
+Older device-only groups require a compatible client update and an automatic
+owner-signed migration before this inheritance is available. No manual approval
+is required for each device. Knowing a group name or restoring an archive alone
+does not grant access, and historical messages still require an authorized
+retained copy.
+
+## Groups across your devices
+
+Your linked devices share the group directory and known member details even
+when a legacy group has not completed its format upgrade. Group names are labels:
+two groups with similar names remain separate when their IDs differ.
+
+A shared reference makes the group visible while its verified group state is
+being obtained. It does not grant membership or copy sending keys. The app keeps
+that reference read-only and explains the group-format requirement; it must not
+describe it as a restored backup or request separate approval for every linked
+device. The original device keeps its existing group access.
+
+Group-directory metadata is account topology. Turning off optional message
+history does not hide the groups already held by your account's devices. It also
+does not enable message-history transfer or change any other synchronization choice.
+
+## Understand message copy status
+
+A group message's check marks report confirmed stored copies held by other
+member accounts. They do not mean everyone received or read the message. Copies
+on your own linked devices do not count as another member's confirmation.
+
+Your linked devices synchronize these historical confirmations with message
+history enabled. **Copy status unavailable** means this device has not obtained
+the status yet; **No member copy confirmed** means no eligible member copy is
+currently confirmed in the available evidence. A post-office copy has a separate
+label. A holder can later delete a copy, so an old confirmation is not a permanent
+availability guarantee.
 
 ## History for new members
 
@@ -31,6 +69,11 @@ New invitation-based groups default to **Last 10 messages within 3 days**. Exist
 channels without a signed policy remain **Off**. The policy and selection are frozen
 when the owner invites a device, using that invitation's timestamp. Changes apply
 to future invitations; they cannot retract copies already received.
+
+In account-authorized groups, an invitation belongs to the account. Another
+certified device can accept it while the originally invited device is offline;
+an eligible reachable holder can release the same selected history to that device.
+The owner does not approve each device separately.
 
 An invitee receives earlier content only after accepting. The owner shares a
 separate encrypted copy; old sender-chain keys are never distributed. The copy

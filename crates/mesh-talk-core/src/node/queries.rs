@@ -70,10 +70,11 @@ impl Node {
         use std::collections::{HashMap, HashSet};
 
         let is_channel = account.is_none()
-            && (self
-                .archived_channels
-                .iter()
-                .any(|ch| ch.id == conversation)
+            && (self.channel_shared_reference(conversation).is_some()
+                || self
+                    .archived_channels
+                    .iter()
+                    .any(|ch| ch.id == conversation)
                 || self
                     .channels
                     .lock()

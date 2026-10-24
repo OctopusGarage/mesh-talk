@@ -137,6 +137,14 @@ impl Default for RuntimeNetworkOptions {
     }
 }
 
+/// Public identifiers authenticated by the startup keystore unlocks.
+/// This observation does not grant access to a prepared or running node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeIdentity {
+    pub device_id: String,
+    pub account_id: String,
+}
+
 /// Inbound events forwarded to the host from independent runtime tasks.
 pub struct RuntimeEvents {
     pub on_dm: Box<dyn Fn(ReceivedDm) + Send + 'static>,
@@ -309,6 +317,27 @@ impl NodeRuntime {
             &mut dyn FnMut(&str) -> NodeRuntime,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
+        Self::start_configured_guarded_with_network_observed(
+            config,
+            events,
+            network,
+            |_| Ok(()),
+            authorize_launch,
+        )
+        .await
+    }
+
+    /// Observe authenticated public identifiers before preparing durable stores.
+    /// Rejecting the observation stops startup before any listener or store opens.
+    pub async fn start_configured_guarded_with_network_observed(
+        config: RuntimeConfig<'_>,
+        events: RuntimeEvents,
+        network: RuntimeNetworkOptions,
+        observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> NodeRuntime,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
         let RuntimeConfig {
             base_dir,
             account_id,
@@ -347,6 +376,10 @@ impl NodeRuntime {
         };
         let self_uid = identity.public().user_id();
         let account_id = account.account_id();
+        observe_identity(RuntimeIdentity {
+            device_id: self_uid.clone(),
+            account_id: account_id.clone(),
+        })?;
 
         // Dual-stack TCP listener (IPv6 + IPv4-mapped, falling back to IPv4) so the node is
         // reachable over IPv6/link-local too; OS-assigned port (0).
@@ -399,8 +432,12 @@ impl NodeRuntime {
                 )?;
                 // The keystore already durably records creation metadata. Repeating
                 // initialization after a failed launch cannot invent or lose a date.
-                node.set_profile_display_name(&initial_display_name)
-                    .map_err(|e| LogError::Io(std::io::Error::other(e.to_string())))?;
+                if node.account_profile(&node.account_id()).is_none()
+                    && node.linked_devices().len() == 1
+                {
+                    node.set_profile_display_name(&initial_display_name)
+                        .map_err(|e| LogError::Io(std::io::Error::other(e.to_string())))?;
+                }
                 Ok::<_, LogError>(node)
             })
             .await
@@ -452,6 +489,19 @@ impl NodeRuntime {
         )?;
 
         let mut launch = Some(move |current_name: &str| {
+            // A persisted account claim survives host-local nicknames and adoption.
+            // A rename committed while startup prepared still takes precedence.
+            let canonical_name = node
+                .account_profile(&node.account_id())
+                .map(|card| card.display_name)
+                .filter(|name| {
+                    crate::identity::user::User::validate_display_name(name).as_ref() == Some(name)
+                });
+            let current_name = if current_name == display_name {
+                canonical_name.as_deref().unwrap_or(current_name)
+            } else {
+                current_name
+            };
             let mut participant = prepared.launch(current_name);
             let mut tasks: Vec<JoinHandle<()>> = Vec::new();
             tasks.push(tokio::spawn(async move {
@@ -469,6 +519,12 @@ impl NodeRuntime {
                     on_file(f);
                 }
             }));
+            {
+                let node = node.clone();
+                tasks.push(tokio::spawn(async move {
+                    node.run_account_access_loop().await;
+                }));
+            }
             // Forward received peer profiles (avatar updates) to the host app.
             if let Some(mut profile_rx) = node.take_profile_receiver() {
                 tasks.push(tokio::spawn(async move {
@@ -575,9 +631,12 @@ impl NodeRuntime {
             launch.take().expect("runtime launch is single-use")(name)
         })?;
         // Authorization may supply a name changed while stores were opening.
-        if let Err(error) = runtime
-            .node
-            .set_profile_display_name(&runtime.display_name())
+        if (runtime.node.account_profile(runtime.account_id()).is_some()
+            || runtime.node.linked_devices().len() == 1
+            || runtime.display_name() != display_name)
+            && let Err(error) = runtime
+                .node
+                .set_profile_display_name(&runtime.display_name())
         {
             runtime.stop().await;
             return Err(RuntimeError::Open(LogError::Io(std::io::Error::other(
@@ -739,6 +798,15 @@ impl NodeRuntime {
             .expect("roster mutex not poisoned")
             .peers();
         live.sort_by_key(|peer| peer.last_seen);
+        let live_bindings: std::collections::HashMap<_, _> = live
+            .iter()
+            .map(|peer| {
+                (
+                    peer.public.user_id(),
+                    (peer.public.clone(), peer.account_id.clone()),
+                )
+            })
+            .collect();
         {
             let mut directory = self.names.lock().expect("names mutex not poisoned");
             for peer in live {
@@ -759,12 +827,26 @@ impl NodeRuntime {
             let Some(account) = proof.account_id() else {
                 continue;
             };
-            let name = self.display_name_for(&proof.user_id).unwrap_or(proof.name);
+            // A retained physical device may now announce a different account.
+            // Its current nickname cannot rename the immutable historical principal.
+            let same_account =
+                live_bindings
+                    .get(&proof.user_id)
+                    .is_some_and(|(public, binding)| {
+                        *public == proof.public() && binding.as_deref() == Some(account.as_str())
+                    });
+            let name = if same_account {
+                self.display_name_for(&proof.user_id).unwrap_or(proof.name)
+            } else {
+                proof.name
+            };
             if !name.is_empty() {
-                devices
-                    .entry(account.clone())
-                    .or_default()
-                    .push(proof.user_id);
+                if same_account {
+                    devices
+                        .entry(account.clone())
+                        .or_default()
+                        .push(proof.user_id);
+                }
                 names.entry(account).or_default().push(name);
             }
         }
@@ -779,6 +861,31 @@ impl NodeRuntime {
             }) {
                 values.retain(|name| *name != latest);
                 values.insert(0, latest);
+            }
+        }
+        // This account's shared profile owns its nickname across its devices.
+        // For contacts, retain the verified announced nickname above: legacy
+        // public cards may still contain an old login/display label from before
+        // nickname edits updated those claims. A stale card must not rename a
+        // contact. Its name is a fallback only if no nickname is known.
+        for card in self
+            .node
+            .profiles
+            .lock()
+            .expect("profiles mutex not poisoned")
+            .all()
+        {
+            if crate::identity::user::User::validate_display_name(&card.display_name).as_ref()
+                == Some(&card.display_name)
+            {
+                let account = card.account_id();
+                let values = names.entry(account.clone()).or_default();
+                if account == self.account_id() {
+                    values.retain(|name| *name != card.display_name);
+                    values.insert(0, card.display_name);
+                } else if values.is_empty() {
+                    values.push(card.display_name);
+                }
             }
         }
         names
@@ -920,6 +1027,37 @@ impl NodeRuntime {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<String, NodeError> {
+        self.link_device_version_if(peer_user_id, code, false, |_| Ok(()), &mut authorize)
+            .await
+    }
+    pub async fn link_device_with_account_access_if(
+        &self,
+        peer_user_id: &str,
+        code: &str,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<String, NodeError> {
+        self.link_device_with_account_access_checked_if(peer_user_id, code, |_| Ok(()), authorize)
+            .await
+    }
+    pub async fn link_device_with_account_access_checked_if(
+        &self,
+        peer_user_id: &str,
+        code: &str,
+        preflight: impl FnMut(&super::AccountAccessSnapshot) -> Result<(), NodeError> + Send,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<String, NodeError> {
+        self.link_device_version_if(peer_user_id, code, true, preflight, authorize)
+            .await
+    }
+    async fn link_device_version_if(
+        &self,
+        peer_user_id: &str,
+        code: &str,
+        access_required: bool,
+        preflight: impl FnMut(&super::AccountAccessSnapshot) -> Result<(), NodeError> + Send,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<String, NodeError> {
         let peer = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
             roster
@@ -927,10 +1065,25 @@ impl NodeRuntime {
                 .cloned()
                 .ok_or_else(|| NodeError::UnknownPeer(peer_user_id.to_string()))?
         };
-        let linked = self
-            .node
-            .link_to_device_if(peer.addr, &peer.public, code, &mut authorize)
-            .await?;
+        let linked = if access_required {
+            self.node
+                .link_to_device_with_account_access_checked_if(
+                    peer.addr,
+                    &peer.public,
+                    code,
+                    preflight,
+                    &mut authorize,
+                )
+                .await?
+        } else {
+            self.node
+                .link_to_device_if(peer.addr, &peer.public, code, &mut authorize)
+                .await?
+        };
+        if access_required && peer.account_id.as_deref() != Some(linked.account_id.as_str()) {
+            return Err(NodeError::Linking(super::LinkingError::InvalidResponse));
+        }
+        let mut adopted = false;
         authorize(&mut || {
             let account = crate::identity::account::Account::from_secret_bytes_with_created_at(
                 linked.secret,
@@ -955,6 +1108,7 @@ impl NodeRuntime {
                     })
                     .map_err(NodeError::Log)?;
             }
+            self.node.prepare_account_transition(&account)?;
             self.node
                 .persist_account_adoption(&account.account_id(), || {
                     crate::identity::account_keystore::save(
@@ -964,8 +1118,14 @@ impl NodeRuntime {
                     )
                     .map_err(|e| NodeError::Channel(format!("persist linked account: {e}")))
                 })?;
+            adopted = true;
             Ok(())
         })?;
+        if !adopted {
+            return Err(NodeError::Authorization(
+                "account adoption was not authorized".into(),
+            ));
+        }
         Ok(linked.account_id)
     }
 
@@ -981,6 +1141,28 @@ impl NodeRuntime {
     /// Channels this node is a member of.
     pub fn list_channels(&self) -> Vec<crate::node::ChannelSummary> {
         self.node.list_channels()
+    }
+
+    pub fn channel_owner_account_id(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+    ) -> Option<String> {
+        self.node.channel_owner_account_id(channel)
+    }
+    pub fn channel_can_manage(&self, channel: crate::eventlog::event::ConversationId) -> bool {
+        self.node.channel_can_manage(channel)
+    }
+
+    pub fn channel_can_send(&self, channel: crate::eventlog::event::ConversationId) -> bool {
+        self.node.channel_can_send(channel)
+    }
+
+    pub fn channel_member_account_binding(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+        member: &PublicIdentity,
+    ) -> Option<String> {
+        self.node.channel_member_account_binding(channel, member)
     }
 
     /// The current members of a channel (empty if unknown).

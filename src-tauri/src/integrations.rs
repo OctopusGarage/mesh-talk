@@ -414,6 +414,7 @@ mod tests {
         ));
         let user = crate::services::user::User {
             user_id: "integration-owner".into(),
+            account_login_name: None,
             name: "integration".into(),
             display_name: "Integration".into(),
             address: "local".into(),

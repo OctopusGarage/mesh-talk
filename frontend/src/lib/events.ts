@@ -1,5 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  SavedSessionStatus,
+  UserInfo,
   CallSignalEvent,
   NodeStateChangedEvent,
   ChannelMessageEvent,
@@ -20,6 +22,12 @@ export function subscribeNodeEvents(handlers: {
   onChannelMessage?: (e: ChannelMessageEvent) => void;
   onFile?: (e: FileReceivedEvent) => void;
   onFileProgress?: (e: FileProgressEvent) => void;
+  onAccountProfile?: (event: {
+    user: UserInfo;
+    account_id: string;
+    device_id: string;
+    saved_session?: SavedSessionStatus | null;
+  }) => void;
   onProfile?: (e: ProfileReceivedEvent) => void;
   onCallSignal?: (e: CallSignalEvent) => void;
 }): () => void {
@@ -69,6 +77,18 @@ export function subscribeNodeEvents(handlers: {
     unlisteners.push(
       listen<FileProgressEvent>("file-progress", (e) =>
         handlers.onFileProgress!(e.payload),
+      ),
+    );
+  }
+  if (handlers.onAccountProfile) {
+    unlisteners.push(
+      listen<{
+        user: UserInfo;
+        account_id: string;
+        device_id: string;
+        saved_session?: SavedSessionStatus | null;
+      }>("account-profile-changed", (e) =>
+        handlers.onAccountProfile!(e.payload),
       ),
     );
   }

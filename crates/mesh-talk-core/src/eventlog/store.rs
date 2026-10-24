@@ -32,6 +32,7 @@ pub struct EventLog {
     /// Channels containing a wire kind that older peers cannot decode.
     replica_v2: HashSet<ConversationId>,
     history_v3: HashSet<ConversationId>,
+    account_v4: HashSet<ConversationId>,
     /// Per-conversation frontier: events not (yet) referenced as a parent.
     heads: HashMap<ConversationId, HashSet<EventId>>,
     /// Per-conversation version vector: author → highest seq seen.
@@ -156,6 +157,12 @@ impl EventLog {
         ) {
             self.history_v3.insert(conv);
         }
+        if matches!(
+            event.kind,
+            EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
+        ) {
+            self.account_v4.insert(conv);
+        }
         self.events.insert(id, event);
     }
 
@@ -178,6 +185,10 @@ impl EventLog {
 
     pub fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
         self.history_v3.contains(conversation)
+    }
+
+    pub fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
+        self.account_v4.contains(conversation)
     }
 
     /// All event ids currently held, in arbitrary order.

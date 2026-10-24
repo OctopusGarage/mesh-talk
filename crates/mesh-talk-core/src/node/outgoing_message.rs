@@ -268,6 +268,10 @@ impl Node {
         let mut wrapped = Some(wrapped);
         let mut request = request;
         authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
             let mut store = self.delivery.lock().expect("delivery lock");
             let wrapped = wrapped
                 .take()
@@ -278,7 +282,10 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-            if !state.is_member(&self.user_id()) || state.pending_invite() || state.is_dissolved() {
+            if !self.channel_identity_is_current(state)
+                || state.pending_invite()
+                || state.is_dissolved()
+            {
                 return Err(NodeError::Channel("not an active channel member".into()));
             }
             let (payload, rotation, senders) = state
@@ -295,7 +302,7 @@ impl Node {
             if let Some(distribution) = rotation {
                 let sealed = super::channel::seal_keys_for(
                     &self.identity,
-                    state.members(),
+                    &state.recipient_members(),
                     &distribution,
                     state.epoch(),
                 )
