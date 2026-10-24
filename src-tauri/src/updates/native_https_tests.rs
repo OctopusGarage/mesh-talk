@@ -22,8 +22,28 @@ struct HttpsRelease {
 
 impl HttpsRelease {
     async fn new() -> Self {
-        let rcgen::CertifiedKey { cert, signing_key } =
-            rcgen::generate_simple_self_signed(vec!["github.com".into()]).unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Mesh Talk HTTPS fixture CA");
+        ca_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::DigitalSignature,
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let issuer = rcgen::Issuer::new(ca_params, ca_key);
+        let mut leaf_params = rcgen::CertificateParams::new(vec!["github.com".into()]).unwrap();
+        leaf_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "github.com");
+        leaf_params.use_authority_key_identifier_extension = true;
+        leaf_params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        let signing_key = rcgen::KeyPair::generate().unwrap();
+        let cert = leaf_params.signed_by(&signing_key, &issuer).unwrap();
         let tls = tokio_rustls::rustls::ServerConfig::builder_with_provider(Arc::new(
             tokio_rustls::rustls::crypto::ring::default_provider(),
         ))
@@ -31,6 +51,7 @@ impl HttpsRelease {
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
+            // Root trust belongs to the client, not the transmitted server chain.
             vec![cert.der().clone()],
             tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der())
                 .into(),
@@ -39,10 +60,11 @@ impl HttpsRelease {
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         // Keep canonical HTTPS URLs and hostname verification. Only DNS and the
-        // explicitly trusted, throwaway certificate differ from the real host.
+        // explicitly trusted, throwaway CA differ from the real host. A CA-signed
+        // server leaf also works with Windows' native certificate-chain verifier.
         let http = reqwest::Client::builder()
             .no_proxy()
-            .add_root_certificate(reqwest::Certificate::from_der(cert.der().as_ref()).unwrap())
+            .add_root_certificate(reqwest::Certificate::from_der(ca.der().as_ref()).unwrap())
             .resolve("github.com", listener.local_addr().unwrap())
             .timeout(Duration::from_secs(5))
             .build()
