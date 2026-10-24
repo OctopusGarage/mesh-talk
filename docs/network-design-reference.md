@@ -1690,6 +1690,7 @@ A deleted local record or recalled event does not recall already copied data fro
 | Routed discovery requests            | At most 256 pending IP/nonce pairs, expiring after five seconds; desktop inventories interleave both standard service ports within 256 endpoints.             | Colocated services cannot overwrite one another's nonce; inventory presence still requires signed discovery and pinned transport authentication.                                                          |
 | Durable delivery control scheduling  | At most two destination retries, one receipt retry and one peer reconciliation; adaptive 15–60 second exchange windows; concurrent direct/relay alternatives. | Independent lanes retain retirement admission and existing TCP limits. Alternatives share a bounded wall-clock window rather than accumulating serial deadlines.                                          |
 | Delivery retry pacing                | At most 256 runtime-local device/lane cooldowns; failed attempts back off from one to fifteen seconds with up to 250 ms jitter.                               | Timer wakes do not slide or reset cooldown. Changed exact routes, restored public reachability and local network changes permit prompt recovery. Successful transport work is not recipient confirmation. |
+| Client mailbox receive scheduling    | At most two active relay exchanges; a successful primary retains its slot and its own completion-plus-three-second cadence, with one rotating alternative. Due metadata is capped at 256 exact relay keys. | A different relay's timeout cannot postpone the primary's next pull. Valid slow alternatives keep their own work; full identity/endpoint changes retire only affected work, while network/privacy generations cancel the owned batch. |
 | Roster and routes                    | Up to 1,024 known peers and eight route observations per peer.                                                                                                | Identity deduplication and route expiry are independent of the managed connection budget.                                                                                                                 |
 | Modern directory snapshot            | Up to 1,024 entries.                                                                                                                                          | Only eligible fresh registrations; not a guarantee of all Internet users or a 1,024-member group benchmark.                                                                                               |
 | Legacy directory/federation snapshot | 128 entries.                                                                                                                                                  | Explicit version negotiation/fallback retains legacy limits on compatible fresh sessions.                                                                                                                 |
@@ -1702,7 +1703,7 @@ A deleted local record or recalled event does not recall already copied data fro
 | Group recovery                       | Three peers per channel recovery step; coalesced wakes visit up to eight joined channels; jittered recovery fallback grows from three to sixty seconds, with independent three-second custody work.                      | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                        |
 | Group control fanout                 | At most four concurrent contacts.                                                                                                                             | A stalled peer must not serialize every healthy member's control delivery.                                                                                                                                |
 
-The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
+The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
 
 ### Session reuse contract
 
@@ -1781,6 +1782,25 @@ leave bounded capacity for other authenticated peers and relay exchanges.
 One-shot call, pairing and directory protocols keep their first-frame semantics by dialing fresh. A managed permit follows the connection lifetime. The accept loop reserves capacity before accepting and retains inbound handshake bounds. Opposite-direction progress must remain possible.
 
 **There is no “exactly one connection per relay” guarantee.** Seeing 100 people does not require 100 simultaneous TCP connections; the shared budget remains eight. Different conversations can reconcile sequentially through retained relay connections, but parallel operations can use multiple slots for the same relay. Introducing true multiplexing would require explicit stream IDs, fairness, cancellation, backpressure and compatibility design rather than silently reusing the current sequential wire.
+
+Mailbox receiving remains one participant-owned producer. Its bounded relay
+exchanges have independent due times; it does not wait for every relay to finish
+before scheduling another turn at a healthy source. The first successful source
+becomes the local primary, leaving one slot reserved even during its three-second
+idle interval. A rotating alternative retains the other slot so slow or recovered
+sources can deliver copies held only there. Primary success does not cancel a
+valid alternative. A failed or removed primary yields; due records are bounded
+at 256 full-identity/endpoint/privacy-generation keys.
+
+Roster timestamps, ordering and unrelated office churn do not restart valid
+in-flight exchanges. Only retired exact keys are canceled individually; a network
+or privacy-generation change cancels the producer's owned futures before a new
+batch starts. Every relay and mailbox still rechecks current receive authority.
+The public one-shot drain API retains its existing four-candidate/two-concurrent
+behavior and shares the same one-office exchange implementation. Three seconds
+is a scheduling interval after that office completes its own bounded exchange,
+not a promise about end-to-end delivery. Relay custody remains distinct from
+recipient confirmation.
 
 ### Performance interpretation
 

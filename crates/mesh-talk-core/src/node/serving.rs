@@ -35,6 +35,112 @@ pub(in crate::node) struct PendingChannelPlaintext {
     terminal: Option<super::channel::ReceivedChannelMessage>,
 }
 
+const POST_OFFICE_DRAIN_INTERVAL: Duration = Duration::from_secs(3);
+const MAX_DRAIN_DUE_ENTRIES: usize = 256;
+type DrainKey = super::session_pool::PeerEndpointKey;
+
+#[derive(Default)]
+struct PostOfficeDrainSchedule {
+    primary: Option<DrainKey>,
+    due: std::collections::VecDeque<(DrainKey, tokio::time::Instant)>,
+    alternative_cursor: usize,
+}
+
+impl PostOfficeDrainSchedule {
+    fn due_at(&self, key: &DrainKey, now: tokio::time::Instant) -> tokio::time::Instant {
+        self.due
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map_or(now, |(_, at)| *at)
+    }
+
+    fn select(
+        &mut self,
+        candidates: &[(DrainKey, PeerRecord)],
+        active: &[DrainKey],
+        now: tokio::time::Instant,
+    ) -> Option<usize> {
+        self.due.retain(|(_, at)| *at > now);
+        // Reserve one bounded due entry for every active exchange. Never evict
+        // an unexpired deadline merely because many other relays finish quickly.
+        if active.len() >= 2 || self.due.len() + active.len() >= MAX_DRAIN_DUE_ENTRIES {
+            return None;
+        }
+        let ready = |key: &DrainKey| !active.contains(key) && self.due_at(key, now) <= now;
+        if let Some(primary) = self.primary.as_ref() {
+            if let Some(index) = candidates
+                .iter()
+                .position(|(key, _)| key == primary && ready(key))
+            {
+                return Some(index);
+            }
+            // Reserve the primary's idle slot instead of filling both slots
+            // with slower alternatives before its next scheduled pull.
+            if active.iter().any(|key| key != primary) {
+                return None;
+            }
+        } else if active.is_empty() {
+            return candidates.iter().position(|(key, _)| ready(key));
+        }
+        for offset in 0..candidates.len() {
+            let index = self.alternative_cursor.wrapping_add(offset) % candidates.len();
+            let key = &candidates[index].0;
+            if self.primary.as_ref() != Some(key) && ready(key) {
+                self.alternative_cursor = index.wrapping_add(1);
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    fn completed(&mut self, key: DrainKey, result: Option<bool>, now: tokio::time::Instant) {
+        if result == Some(true) && self.primary.is_none() {
+            self.primary = Some(key.clone());
+        } else if result != Some(true) && self.primary.as_ref() == Some(&key) {
+            self.primary = None;
+        }
+        self.due.retain(|(candidate, _)| candidate != &key);
+        if self.due.len() >= MAX_DRAIN_DUE_ENTRIES {
+            self.due.pop_front();
+        }
+        self.due.push_back((key, now + POST_OFFICE_DRAIN_INTERVAL));
+    }
+
+    fn next_wake(
+        &self,
+        candidates: &[(DrainKey, PeerRecord)],
+        active: &[DrainKey],
+        now: tokio::time::Instant,
+    ) -> tokio::time::Instant {
+        candidates
+            .iter()
+            .filter(|(key, _)| {
+                !active.contains(key)
+                    && active.len() < 2
+                    && (self.primary.as_ref() == Some(key)
+                        || self
+                            .primary
+                            .as_ref()
+                            .is_none_or(|primary| !active.iter().any(|key| key != primary)))
+            })
+            .map(|(key, _)| {
+                let due = self.due_at(key, now);
+                if due <= now && self.due.len() + active.len() >= MAX_DRAIN_DUE_ENTRIES {
+                    self.due
+                        .iter()
+                        .map(|(_, at)| *at)
+                        .min()
+                        .unwrap_or(now + POST_OFFICE_DRAIN_INTERVAL)
+                } else {
+                    due
+                }
+            })
+            .min()
+            .unwrap_or(now + POST_OFFICE_DRAIN_INTERVAL)
+            .min(now + POST_OFFICE_DRAIN_INTERVAL)
+    }
+}
+
 impl Node {
     /// Dial `peer` directly and run one sync round for `conv`. Best-effort: the
     /// peer may be offline, in which case the dial fails.
@@ -1210,6 +1316,125 @@ impl Node {
         }
     }
 
+    /// Receive producer owned by the participant runtime task set. A healthy
+    /// relay keeps its own cadence while one alternative makes bounded progress.
+    pub(in crate::node) async fn run_post_office_drains(self: Arc<Self>) {
+        use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
+        let mut network = self.network_changes.subscribe();
+        let mut roster = self
+            .roster
+            .lock()
+            .expect("roster mutex not poisoned")
+            .subscribe_changes();
+        loop {
+            let mut candidates = self.post_office_drain_candidates();
+            let generation = self
+                .privacy
+                .generation
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let mut schedule = PostOfficeDrainSchedule::default();
+            let mut active = Vec::new();
+            let mut cancellation = Vec::new();
+            let mut attempts = FuturesUnordered::new();
+            loop {
+                let eligible = candidates
+                    .iter()
+                    .filter(|po| {
+                        self.relay_receive_allowed(&po.public) && self.relay_retry_due(&po.public)
+                    })
+                    .map(|po| (self.peer_endpoint_key(po.addr, &po.public), po.clone()))
+                    .collect::<Vec<_>>();
+                while let Some(index) =
+                    schedule.select(&eligible, &active, tokio::time::Instant::now())
+                {
+                    let (key, po) = eligible[index].clone();
+                    active.push(key.clone());
+                    let (abort, registration) = futures_util::future::AbortHandle::new_pair();
+                    cancellation.push((key.clone(), abort));
+                    let node = &self;
+                    attempts.push(
+                        async move {
+                            let result = futures_util::future::Abortable::new(
+                                async {
+                                    if node.cached_peer_snapshot_async().await.is_err() {
+                                        log::warn!("verified discovery cache update failed");
+                                    }
+                                    let peers = node.post_office_drain_peers();
+                                    if peers.is_empty() {
+                                        None
+                                    } else {
+                                        Some(node.drain_one_post_office(&po, &peers).await)
+                                    }
+                                },
+                                registration,
+                            )
+                            .await;
+                            (key, result)
+                        }
+                        .boxed(),
+                    );
+                }
+                let wake = schedule.next_wake(&eligible, &active, tokio::time::Instant::now());
+                tokio::select! {
+                    result = attempts.next(), if !attempts.is_empty() => {
+                        if let Some((key, result)) = result {
+                            active.retain(|candidate| candidate != &key);
+                            cancellation.retain(|(candidate, _)| candidate != &key);
+                            if let Ok(result) = result {
+                                schedule.completed(key, result, tokio::time::Instant::now());
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep_until(wake) => {},
+                    _ = network.changed() => break,
+                    _ = roster.changed() => {},
+                }
+                // Roster churn must not repeatedly cancel a valid slow relay.
+                // Retire only the exact identities/endpoints that lost authority;
+                // network and policy generations retire the whole owned work set.
+                if generation
+                    != self
+                        .privacy
+                        .generation
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    break;
+                }
+                candidates = self.post_office_drain_candidates();
+                let current = candidates
+                    .iter()
+                    .map(|po| self.peer_endpoint_key(po.addr, &po.public))
+                    .collect::<Vec<_>>();
+                for (key, abort) in &cancellation {
+                    if !current.contains(key) {
+                        abort.abort();
+                    }
+                }
+                schedule.due.retain(|(key, _)| current.contains(key));
+                if schedule
+                    .primary
+                    .as_ref()
+                    .is_some_and(|key| !current.contains(key))
+                {
+                    schedule.primary = None;
+                }
+            }
+            // Futures are owned here: cancellation/reset drops every socket and
+            // in-flight exchange before the next generation starts.
+        }
+    }
+
+    fn post_office_drain_candidates(&self) -> Vec<PeerRecord> {
+        let candidates = {
+            let roster = self.roster.lock().expect("roster mutex not poisoned");
+            self.post_office_candidates(&roster)
+        };
+        candidates
+            .into_iter()
+            .filter(|po| self.relay_receive_allowed(&po.public))
+            .collect()
+    }
+
     /// Pull from every known post office. Mailboxes are relay-specific, so a
     /// message accepted during failover may remain on the fallback relay after
     /// the preferred one returns.
@@ -1222,12 +1447,7 @@ impl Node {
             self.post_office_candidates(&roster)
         };
         use futures_util::stream::{self, StreamExt};
-        let mut peers = self
-            .historical_dm_peers()
-            .into_iter()
-            .filter(|peer| self.verified_dm_pull_peer(&peer.public().user_id()))
-            .collect::<Vec<_>>();
-        peers.sort_unstable_by_key(|peer| peer.public().user_id());
+        let peers = self.post_office_drain_peers();
         if peers.is_empty() {
             return;
         }
@@ -1236,76 +1456,91 @@ impl Node {
             .for_each_concurrent(2, |po| {
                 let peers = &peers;
                 async move {
-                    if !self.relay_receive_allowed(&po.public) || !self.relay_retry_due(&po.public)
-                    {
-                        return;
-                    }
-                    let relay_id = po.public.user_id();
-                    let start = self
-                        .relay_drain_cursor
-                        .lock()
-                        .expect("relay cursor lock not poisoned")
-                        .get(&relay_id)
-                        .copied()
-                        .unwrap_or(0);
-                    let mut channel = None;
-                    let mut success = true;
-                    for offset in 0..peers.len().min(8) {
-                        let index = start.wrapping_add(offset) % peers.len();
-                        // Record the turn before awaiting. Neither a huge mailbox
-                        // nor a silent relay can pin all later mailbox scopes.
-                        {
-                            let mut cursors = self
-                                .relay_drain_cursor
-                                .lock()
-                                .expect("relay cursor lock not poisoned");
-                            if cursors.len() >= 256
-                                && !cursors.contains_key(&relay_id)
-                                && let Some(key) = cursors.keys().next().cloned()
-                            {
-                                cursors.remove(&key);
-                            }
-                            cursors.insert(relay_id.clone(), index.wrapping_add(1));
-                        }
-                        let peer = &peers[index];
-                        if !self.verified_dm_pull_peer(&peer.public().user_id()) {
-                            continue;
-                        }
-                        let attempt = async {
-                            if channel.is_none() {
-                                channel = Some(
-                                    self.privacy_sync_dial(po.addr, &po.public)
-                                        .await
-                                        .map_err(super::session::SessionError::Transport)?,
-                                );
-                            }
-                            if !self.relay_receive_allowed(&po.public) {
-                                return Err(super::session::SessionError::UnexpectedMessage);
-                            }
-                            self.opaque_relay_round(channel.as_mut().unwrap(), &peer.public(), None)
-                                .await
-                                .map(|_| ())
-                        };
-                        if !matches!(
-                            tokio::time::timeout(
-                                super::delivery_runtime::RELAY_EXCHANGE_TIMEOUT,
-                                attempt
-                            )
-                            .await,
-                            Ok(Ok(()))
-                        ) {
-                            success = false;
-                            channel = None;
-                            break;
-                        }
-                    }
-                    if let Some(channel) = channel {
-                        self.recycle_sync_channel(channel);
-                    }
-                    self.record_relay_attempt(&po.public, success);
+                    self.drain_one_post_office(&po, peers).await;
                 }
             })
             .await;
+    }
+
+    fn post_office_drain_peers(&self) -> Vec<crate::discovery::Announce> {
+        let mut peers = self
+            .historical_dm_peers()
+            .into_iter()
+            .filter(|peer| self.verified_dm_pull_peer(&peer.public().user_id()))
+            .collect::<Vec<_>>();
+        peers.sort_unstable_by_key(|peer| peer.public().user_id());
+        peers
+    }
+
+    async fn drain_one_post_office(
+        &self,
+        po: &PeerRecord,
+        peers: &[crate::discovery::Announce],
+    ) -> bool {
+        if !self.relay_receive_allowed(&po.public) || !self.relay_retry_due(&po.public) {
+            return false;
+        }
+        let relay_id = po.public.user_id();
+        let start = self
+            .relay_drain_cursor
+            .lock()
+            .expect("relay cursor lock not poisoned")
+            .get(&relay_id)
+            .copied()
+            .unwrap_or(0);
+        let mut channel = None;
+        let mut success = true;
+        for offset in 0..peers.len().min(8) {
+            let index = start.wrapping_add(offset) % peers.len();
+            // Record the turn before awaiting. Neither a huge mailbox
+            // nor a silent relay can pin all later mailbox scopes.
+            {
+                let mut cursors = self
+                    .relay_drain_cursor
+                    .lock()
+                    .expect("relay cursor lock not poisoned");
+                if cursors.len() >= 256
+                    && !cursors.contains_key(&relay_id)
+                    && let Some(key) = cursors.keys().next().cloned()
+                {
+                    cursors.remove(&key);
+                }
+                cursors.insert(relay_id.clone(), index.wrapping_add(1));
+            }
+            let peer = &peers[index];
+            if !self.verified_dm_pull_peer(&peer.public().user_id()) {
+                continue;
+            }
+            let attempt = async {
+                if channel.is_none() {
+                    channel = Some(
+                        self.privacy_sync_dial(po.addr, &po.public)
+                            .await
+                            .map_err(super::session::SessionError::Transport)?,
+                    );
+                }
+                if !self.relay_receive_allowed(&po.public) {
+                    return Err(super::session::SessionError::UnexpectedMessage);
+                }
+                self.opaque_relay_round(channel.as_mut().unwrap(), &peer.public(), None)
+                    .await
+                    .map(|_| ())
+            };
+            if !matches!(
+                tokio::time::timeout(super::delivery_runtime::RELAY_EXCHANGE_TIMEOUT, attempt)
+                    .await,
+                Ok(Ok(()))
+            ) {
+                success = false;
+                channel = None;
+                break;
+            }
+        }
+        if let Some(channel) = channel {
+            self.recycle_sync_channel(channel);
+        }
+        self.record_relay_attempt(&po.public, success);
+        success
     }
 
     /// Decrypt (via the Double Ratchet) and emit any not-yet-emitted, non-self
@@ -1380,6 +1615,106 @@ impl Node {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod post_office_drain_schedule_tests {
+    use super::*;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+
+    fn candidates(node: &Node, count: u16) -> Vec<(DrainKey, PeerRecord)> {
+        (1..=count)
+            .map(|port| {
+                let identity = DeviceIdentity::generate();
+                let proof = crate::discovery::Announce::new_post_office(&identity, "Relay", port);
+                let mut roster = crate::discovery::Roster::default();
+                roster.update(&proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+                let peer = roster.peers().into_iter().next().unwrap();
+                (node.peer_endpoint_key(peer.addr, &peer.public), peer)
+            })
+            .collect()
+    }
+
+    fn node(dir: &std::path::Path) -> Arc<Node> {
+        let peer = crate::discovery::Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Peer",
+            9,
+        );
+        super::super::test_support::node_with_files(
+            dir,
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        )
+        .0
+    }
+
+    #[test]
+    fn primary_reserves_capacity_while_alternatives_rotate_without_duplicate_exchanges() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = node(dir.path());
+        let candidates = candidates(&node, 4);
+        let now = tokio::time::Instant::now();
+        let mut schedule = PostOfficeDrainSchedule::default();
+        assert_eq!(schedule.select(&candidates, &[], now), Some(0));
+        let mut active = vec![candidates[0].0.clone()];
+        assert_eq!(schedule.select(&candidates, &active, now), Some(1));
+        active.push(candidates[1].0.clone());
+        assert_eq!(schedule.select(&candidates, &active, now), None);
+        active.pop();
+        schedule.completed(candidates[1].0.clone(), Some(true), now);
+        assert_eq!(
+            schedule.select(&candidates, &active, now),
+            None,
+            "a third office cannot take the idle healthy office's slot"
+        );
+        assert_eq!(
+            schedule.next_wake(&candidates, &active, now),
+            now + POST_OFFICE_DRAIN_INTERVAL
+        );
+        let next = now + POST_OFFICE_DRAIN_INTERVAL;
+        assert_eq!(schedule.select(&candidates, &active, next), Some(1));
+        active.clear();
+        schedule.completed(candidates[0].0.clone(), Some(true), next);
+        schedule.completed(candidates[1].0.clone(), Some(true), next);
+        assert_eq!(schedule.select(&candidates, &active, next), Some(2));
+        schedule.completed(candidates[2].0.clone(), Some(true), next);
+        assert_eq!(schedule.select(&candidates, &active, next), Some(3));
+        schedule.completed(candidates[1].0.clone(), Some(false), next);
+        assert!(
+            schedule.primary.is_none(),
+            "an actual failure yields the primary role"
+        );
+    }
+
+    #[test]
+    fn bounded_due_metadata_never_discards_a_live_cadence_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = node(dir.path());
+        let candidates = candidates(&node, MAX_DRAIN_DUE_ENTRIES as u16 + 1);
+        let now = tokio::time::Instant::now();
+        let mut schedule = PostOfficeDrainSchedule::default();
+        for (key, _) in &candidates[..MAX_DRAIN_DUE_ENTRIES] {
+            schedule.completed(key.clone(), None, now);
+        }
+        assert_eq!(schedule.due.len(), MAX_DRAIN_DUE_ENTRIES);
+        assert_eq!(schedule.select(&candidates, &[], now), None);
+        assert_eq!(
+            schedule.next_wake(&candidates, &[], now),
+            now + POST_OFFICE_DRAIN_INTERVAL
+        );
+        assert!(
+            schedule
+                .select(&candidates, &[], now + POST_OFFICE_DRAIN_INTERVAL)
+                .is_some()
+        );
+        assert!(
+            schedule.due.is_empty(),
+            "expired cadence hints require no background cleanup"
+        );
     }
 }
 

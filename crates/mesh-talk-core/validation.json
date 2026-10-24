@@ -846,6 +846,10 @@
           {
             "name": "Duplicate unfinished handshakes for the same full identity, candidate endpoint and privacy generation share bounded admission without retaining TCP permits while waiting; unrelated healthy sync retains progress",
             "reference": "docs/network-design-reference.md#session-reuse-contract"
+          },
+          {
+            "name": "Healthy relay receiving keeps its own cadence while a valid slow alternative retains bounded progress; unrelated roster churn cannot cancel eligible work and current policy/network changes retire owned requests",
+            "reference": "docs/network-design-reference.md#session-reuse-contract"
           }
         ],
         "guide": "docs/ARCHITECTURE.md"
