@@ -7881,20 +7881,38 @@ async fn authenticated_silent_preferred_relay_does_not_block_upload_or_drain_fal
 
 #[tokio::test]
 async fn healthy_relay_receive_cadence_is_independent_of_unrelated_silent_relay() {
-    relay_receive_cadence_fixture(false, false).await;
+    relay_receive_cadence_fixture(false, RelayReceiveReset::None).await;
 }
 
 #[tokio::test]
 async fn healthy_relay_receive_cadence_preserves_slow_alternative_during_roster_churn() {
-    relay_receive_cadence_fixture(true, false).await;
+    relay_receive_cadence_fixture(true, RelayReceiveReset::None).await;
 }
 
 #[tokio::test]
 async fn receive_worker_network_reset_cancels_active_exchange_and_recovers() {
-    relay_receive_cadence_fixture(false, true).await;
+    relay_receive_cadence_fixture(false, RelayReceiveReset::Network).await;
 }
 
-async fn relay_receive_cadence_fixture(progressing_alternative: bool, network_reset: bool) {
+#[tokio::test]
+async fn receive_worker_permission_change_cancels_active_exchange_and_recovers() {
+    relay_receive_cadence_fixture(false, RelayReceiveReset::Permission).await;
+}
+
+#[tokio::test]
+async fn receive_worker_master_change_cancels_active_exchange_and_recovers() {
+    relay_receive_cadence_fixture(false, RelayReceiveReset::Master).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelayReceiveReset {
+    None,
+    Network,
+    Permission,
+    Master,
+}
+
+async fn relay_receive_cadence_fixture(progressing_alternative: bool, reset: RelayReceiveReset) {
     let source = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     let relay_dir = tempfile::tempdir().unwrap();
@@ -8006,13 +8024,14 @@ async fn relay_receive_cadence_fixture(progressing_alternative: bool, network_re
         .unwrap()
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    if network_reset {
-        // Deliberately avoid policy notification, generation changes and roster
-        // mutation: only the network event can cancel this still-active socket
-        // before the worker's normal three-second wake.
-        b.post_office_receive_enabled
-            .store(false, std::sync::atomic::Ordering::Release);
-        b.sessions.clear();
+    if reset != RelayReceiveReset::None {
+        if reset == RelayReceiveReset::Network {
+            // Only the network event can cancel this still-active socket;
+            // deliberately avoid policy notification and generation changes.
+            b.post_office_receive_enabled
+                .store(false, std::sync::atomic::Ordering::Release);
+            b.sessions.clear();
+        }
         let capacity = || {
             (0..super::session_pool::MAX_DIRECTION_CONNECTIONS)
                 .map(|_| b.sessions.try_outbound())
@@ -8022,8 +8041,14 @@ async fn relay_receive_cadence_fixture(progressing_alternative: bool, network_re
             capacity().is_none(),
             "an authenticated silent exchange must still own TCP capacity before reset"
         );
-        b.network_changes
-            .send_modify(|revision| *revision = revision.wrapping_add(1));
+        match reset {
+            RelayReceiveReset::Network => b
+                .network_changes
+                .send_modify(|revision| *revision = revision.wrapping_add(1)),
+            RelayReceiveReset::Permission => b.set_post_office_permissions(true, false),
+            RelayReceiveReset::Master => b.set_post_office_enabled(false),
+            RelayReceiveReset::None => unreachable!(),
+        }
         let released = tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
                 if let Some(permits) = capacity() {
@@ -8033,16 +8058,23 @@ async fn relay_receive_cadence_fixture(progressing_alternative: bool, network_re
             }
         })
         .await
-        .expect("network reset must promptly drop the active exchange and all its permits");
+        .expect("receive reset must promptly drop the active exchange and all its permits");
         drop(released);
         while rounds.try_recv().is_ok() {}
-        b.post_office_receive_enabled
-            .store(true, std::sync::atomic::Ordering::Release);
-        b.network_changes
-            .send_modify(|revision| *revision = revision.wrapping_add(1));
+        match reset {
+            RelayReceiveReset::Network => {
+                b.post_office_receive_enabled
+                    .store(true, std::sync::atomic::Ordering::Release);
+                b.network_changes
+                    .send_modify(|revision| *revision = revision.wrapping_add(1));
+            }
+            RelayReceiveReset::Permission => b.set_post_office_permissions(true, true),
+            RelayReceiveReset::Master => b.set_post_office_enabled(true),
+            RelayReceiveReset::None => unreachable!(),
+        }
         tokio::time::timeout(std::time::Duration::from_secs(2), rounds.recv())
             .await
-            .expect("network reset must resume healthy office pulls")
+            .expect("receive reset must resume healthy office pulls")
             .unwrap();
     }
     if progressing_alternative {
