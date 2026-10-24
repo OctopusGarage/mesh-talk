@@ -26,8 +26,10 @@ export async function prepareNativeDownloadFixture({ fixture, owner, invoke }) {
   assert.ok(owner, "native download setup requires the signed-in fixture owner");
   const directory = join(fixture, "downloads");
   await mkdir(directory, { recursive: true });
+  const expectedAccount = await invoke("account_id", {});
+  assert.match(typeof expectedAccount === "string" ? expectedAccount : "", /^[0-9a-f]{32}$/, "native download setup requires the current account");
   const settings = await invoke("get_app_settings", { owner });
-  await invoke("set_app_settings", { owner, settings: { ...settings, download_dir: directory } });
+  await invoke("set_app_settings", { owner, expectedAccount, settings: { ...settings, download_dir: directory }, patch: { download_dir: directory } });
   assert.equal((await invoke("get_app_settings", { owner })).download_dir, directory, "production settings retain the owned download directory");
   return directory;
 }
