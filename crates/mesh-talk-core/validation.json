@@ -842,6 +842,10 @@
           {
             "name": "Passive certificates never replace a pinned device account; explicit recipient recovery revalidates the reviewed exact full-key old/new binding without accepting other changes or merging verification/history",
             "reference": "docs/peer-trust.md#recover-a-device-that-changed-accounts"
+          },
+          {
+            "name": "Duplicate unfinished handshakes for the same full identity, candidate endpoint and privacy generation share bounded admission without retaining TCP permits while waiting; unrelated healthy sync retains progress",
+            "reference": "docs/network-design-reference.md#session-reuse-contract"
           }
         ],
         "guide": "docs/ARCHITECTURE.md"

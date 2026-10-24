@@ -1247,7 +1247,6 @@ impl Node {
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
-        let permits = self.sessions.outbound().await?;
         let mut addr = addr;
         addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
         #[cfg(test)]
@@ -1275,48 +1274,57 @@ impl Node {
         // 200ms instead of serially spending a whole handshake deadline there.
         // Futures are owned here: returning/cancellation drops every loser.
         use futures_util::{StreamExt, stream::FuturesUnordered};
-        let attempt = |candidate, permits| {
+        let attempt = |candidate| {
             let own = own.as_ref();
             let transitions = transitions.as_slice();
             async move {
-                let started = std::time::Instant::now();
-                let result = tokio::time::timeout(
-                    self.sessions.authentication_timeout(expected, candidate),
-                    async {
-                        let stream = TcpStream::connect(candidate).await?;
-                        stream.set_nodelay(true)?;
-                        crate::transport::net::set_tcp_keepalive(&stream);
-                        let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
-                        SecureChannel::connect_with_transitions(
-                            stream,
-                            &self.identity,
-                            Some(expected),
-                            own,
-                            publicly_visible,
-                            transitions,
-                        )
-                        .await
-                    },
-                )
-                .await
-                .unwrap_or_else(|_| {
-                    self.sessions.authentication_timed_out(expected, candidate);
-                    Err(TransportError::Noise("dial timed out".into()))
-                });
-                if started.elapsed() >= Duration::from_secs(2) {
-                    log::warn!(
-                        target: "mesh_talk::delivery",
-                        "slow peer authentication endpoint={} elapsed_ms={} authenticated={}",
-                        candidate, started.elapsed().as_millis(), result.is_ok(),
-                    );
+                let result = async {
+                    let _authentication = self
+                        .sessions
+                        .authentication_admission(self.peer_endpoint_key(candidate, expected))
+                        .await?;
+                    let permits = self.sessions.outbound().await?;
+                    let started = std::time::Instant::now();
+                    let result = tokio::time::timeout(
+                        self.sessions.authentication_timeout(expected, candidate),
+                        async {
+                            let stream = TcpStream::connect(candidate).await?;
+                            stream.set_nodelay(true)?;
+                            crate::transport::net::set_tcp_keepalive(&stream);
+                            let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
+                            SecureChannel::connect_with_transitions(
+                                stream,
+                                &self.identity,
+                                Some(expected),
+                                own,
+                                publicly_visible,
+                                transitions,
+                            )
+                            .await
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        self.sessions.authentication_timed_out(expected, candidate);
+                        Err(TransportError::Noise("dial timed out".into()))
+                    });
+                    if started.elapsed() >= Duration::from_secs(2) {
+                        log::warn!(
+                            target: "mesh_talk::delivery",
+                            "slow peer authentication endpoint={} elapsed_ms={} authenticated={}",
+                            candidate, started.elapsed().as_millis(), result.is_ok(),
+                        );
+                    }
+                    result.map(|channel| (channel, permits, started.elapsed()))
                 }
-                (candidate, permits, result, started.elapsed())
+                .await;
+                (candidate, result)
             }
         };
         let mut candidates = candidates.into_iter().peekable();
         let mut attempts = FuturesUnordered::new();
         if let Some(candidate) = candidates.next() {
-            attempts.push(attempt(candidate, permits));
+            attempts.push(attempt(candidate));
         }
         let mut stagger = tokio::time::interval(Duration::from_millis(200));
         stagger.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1326,24 +1334,22 @@ impl Node {
         while !attempts.is_empty() {
             tokio::select! {
                 result = attempts.next() => {
-                    let Some((candidate, permits, result, elapsed)) = result else { break };
+                    let Some((candidate, result)) = result else { break };
                     match result {
-                        Ok(channel) => {
+                        Ok((channel, permits, elapsed)) => {
                             successful = Some((candidate, channel, permits, elapsed));
                             break;
                         }
                         Err(error) => {
                             last_error = error;
                             if let Some(candidate) = candidates.next() {
-                                attempts.push(attempt(candidate, permits));
+                                attempts.push(attempt(candidate));
                             }
                         }
                     }
                 }
                 _ = stagger.tick(), if attempts.len() < 2 && candidates.peek().is_some() => {
-                    if let Some(permits) = self.sessions.try_outbound() {
-                        attempts.push(attempt(candidates.next().expect("candidate available"), permits));
-                    }
+                    attempts.push(attempt(candidates.next().expect("candidate available")));
                 }
             }
         }

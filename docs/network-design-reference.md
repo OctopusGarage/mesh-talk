@@ -1760,6 +1760,24 @@ consumed channel to the pool. Production inbound and
 outbound sockets use `TCP_NODELAY` and best-effort TCP keepalive; application
 deadlines remain authoritative for liveness.
 
+Authentication admission is separate from reusable sessions. Concurrent fresh
+handshakes for the same full peer identity, canonical candidate endpoint and
+privacy generation share a bounded admission gate. Waiting callers acquire no
+TCP permits; at most one unfinished handshake for that exact key consumes the
+shared connection budget. The gate covers authentication only: every successful
+channel still performs its own identity-pinned Noise handshake and retains its
+own connection permits. A different candidate, identity or privacy generation
+has independent admission.
+
+The gate registry retains at most 256 live keys, prunes only expired weak entries
+and never evicts an active owner into a duplicate gate. Gate acquisition uses
+the existing two-second capacity wait; the actual handshake retains its adaptive
+route deadline. Dropping a waiter, race loser or caller releases its owned state.
+Network/session clearing cannot discard an active gate; old work must retire or
+cancel before another request for that same key begins. These hints authorize
+neither peer identity nor recipient delivery. Repeated unreachable probes must
+leave bounded capacity for other authenticated peers and relay exchanges.
+
 One-shot call, pairing and directory protocols keep their first-frame semantics by dialing fresh. A managed permit follows the connection lifetime. The accept loop reserves capacity before accepting and retains inbound handshake bounds. Opposite-direction progress must remain possible.
 
 **There is no “exactly one connection per relay” guarantee.** Seeing 100 people does not require 100 simultaneous TCP connections; the shared budget remains eight. Different conversations can reconcile sequentially through retained relay connections, but parallel operations can use multiple slots for the same relay. Introducing true multiplexing would require explicit stream IDs, fairness, cancellation, backpressure and compatibility design rather than silently reusing the current sequential wire.
