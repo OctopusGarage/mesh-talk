@@ -30,6 +30,7 @@ env:
 jobs:
   preflight:
     runs-on: ubuntu-latest
+    timeout-minutes: 250
     permissions:
       contents: read
       checks: read
@@ -51,11 +52,11 @@ jobs:
           RELEASE_NIGHTLY: ${{ github.event_name == 'schedule' || inputs.publish_nightly }}
           RELEASE_PUBLICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
         run: node scripts/release/preflight.mjs
-      - name: Require successful exact-source CI before Nightly compilation
+      - name: Wait for successful exact-source CI before Nightly compilation
         if: steps.inputs.outputs.nightly == 'true' && steps.inputs.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/release/check-source-checks.mjs "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+        run: node scripts/release/check-source-checks.mjs "$GITHUB_REPOSITORY" "$GITHUB_SHA" --wait
 
   build-release:
     needs: preflight
