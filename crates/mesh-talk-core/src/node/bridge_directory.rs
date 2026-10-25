@@ -2,8 +2,9 @@
 //! only short-lived, self-authored identity proofs; it never speaks for a peer or
 //! learns the peer's LAN address from the directory protocol.
 
+use super::discovery_origin::{ORIGIN_LEASE_SECS, OriginConsent, RegistrationOrigin};
 use crate::discovery::Announce;
-use crate::identity::device::PublicIdentity;
+use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::postoffice::gateway::GatewayProof;
 use crate::transport::MAX_PLAINTEXT;
 use bincode::Options;
@@ -12,6 +13,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+const REQUEST_V6: &[u8] = b"MTBD6Q";
+const RESPONSE_V6: &[u8] = b"MTBD6R";
 const REQUEST_V1: &[u8] = b"MTBD1Q";
 const REQUEST_V2: &[u8] = b"MTBD2Q";
 const REQUEST_V3: &[u8] = b"MTBD3Q";
@@ -49,11 +52,42 @@ pub struct FederatedPresenceSource {
     pub origin_hops: Option<u8>,
 }
 
+/// Additive envelope; legacy FederatedPresence layouts remain unchanged.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct FederatedPresenceWithOrigin {
+    pub presence: FederatedPresence,
+    pub origin: Option<RegistrationOrigin>,
+    pub origin_hops: Option<u8>,
+}
+
+pub(crate) fn origin_request_header() -> &'static [u8] {
+    REQUEST_V6
+}
+
+/// Default-off registration consent, carried only inside the existing encrypted channel.
+pub(crate) fn origin_request(
+    identity: &DeviceIdentity,
+    office: &PublicIdentity,
+    share: bool,
+) -> Vec<u8> {
+    let consent = share.then(|| {
+        OriginConsent::new(
+            identity,
+            office,
+            unix_seconds_now().saturating_add(ORIGIN_LEASE_SECS),
+        )
+    });
+    let mut bytes = REQUEST_V6.to_vec();
+    bytes.extend(bincode::serialize(&consent).expect("bounded origin request"));
+    bytes
+}
+
 /// Both clocks are needed: monotonic aging and exact origin identity across re-queries.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct PresenceDeadline {
     pub expires_at: Instant,
     pub origin_secs: u64,
+    pub origin: Option<RegistrationOrigin>,
     pub origin_hops: Option<u8>,
 }
 
@@ -73,6 +107,9 @@ fn valid_gateway_route(proofs: &[Announce], gateway: &(String, u16)) -> bool {
 
 pub struct BridgeDirectory {
     members: HashMap<String, (Announce, Instant)>,
+    origins: HashMap<String, RegistrationOrigin>,
+    office_name: Option<String>,
+    office_public: Option<PublicIdentity>,
     remote_members: HashMap<String, FederatedPresence>,
     remote_hops: HashMap<String, u8>,
     gateway: Option<Arc<Mutex<Option<GatewayProof>>>>,
@@ -83,6 +120,9 @@ impl Default for BridgeDirectory {
     fn default() -> Self {
         Self {
             members: HashMap::new(),
+            origins: HashMap::new(),
+            office_name: None,
+            office_public: None,
             remote_members: HashMap::new(),
             remote_hops: HashMap::new(),
             gateway: None,
@@ -95,11 +135,161 @@ impl BridgeDirectory {
     pub fn with_gateway(gateway: Arc<Mutex<Option<GatewayProof>>>) -> Self {
         Self {
             members: HashMap::new(),
+            origins: HashMap::new(),
+            office_name: None,
+            office_public: None,
             remote_members: HashMap::new(),
             remote_hops: HashMap::new(),
             gateway: Some(gateway),
             changes: tokio::sync::watch::channel(0).0,
         }
+    }
+
+    pub(crate) fn set_office_public(&mut self, public: PublicIdentity) {
+        self.office_public = Some(public);
+    }
+
+    pub(crate) fn set_office_name(&mut self, name: &str) {
+        self.office_name = super::discovery_origin::valid_name(name).then(|| name.to_owned());
+    }
+
+    pub(crate) fn apply_origin_request(
+        &mut self,
+        request: &[u8],
+        participant: &PublicIdentity,
+        office: Option<&DeviceIdentity>,
+        unix_now: u64,
+    ) -> bool {
+        if let Some(office) = office {
+            self.set_office_public(office.public());
+        }
+        // A local opt-out can withdraw only this office's own attestation.
+        // An unsigned omission cannot revoke another office's signed proof.
+        let id = participant.user_id();
+        if office.is_some_and(|office| {
+            self.origins
+                .get(&id)
+                .is_some_and(|origin| origin.is_from(&office.public()))
+        }) {
+            self.origins.remove(&id);
+        }
+        let Some(body) = request.strip_prefix(REQUEST_V6) else {
+            return true;
+        };
+        let Ok(consent) = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(MAX_PLAINTEXT as u64)
+            .reject_trailing_bytes()
+            .deserialize::<Option<OriginConsent>>(body)
+        else {
+            return false;
+        };
+        if let Some(consent) = consent {
+            let (Some(office), Some(name)) = (office, self.office_name.as_deref()) else {
+                return true;
+            };
+            if !self.members.contains_key(&participant.user_id()) {
+                return false;
+            }
+            let Some(origin) = RegistrationOrigin::new(office, name, consent) else {
+                return false;
+            };
+            if !origin.valid_for(participant, unix_now) {
+                return false;
+            }
+            self.origins.insert(participant.user_id(), origin);
+        }
+        true
+    }
+
+    pub(crate) fn export_with_origins(
+        &self,
+        now: Instant,
+        unix_now: u64,
+    ) -> Vec<FederatedPresenceWithOrigin> {
+        self.export_presence_sources(now, unix_now)
+            .into_iter()
+            .map(|routed| {
+                let presence = routed.presence;
+                let origin_hops = routed.origin_hops;
+                let origin = self
+                    .origins
+                    .get(&presence.announce.user_id)
+                    .filter(|origin| origin.valid_for(&presence.announce.public(), unix_now))
+                    .cloned();
+                FederatedPresenceWithOrigin {
+                    presence,
+                    origin_hops,
+                    origin,
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn import_with_origins(
+        &mut self,
+        entries: &[FederatedPresenceWithOrigin],
+        unix_now: u64,
+    ) {
+        let presence: Vec<_> = entries
+            .iter()
+            .take(MAX_MEMBERS)
+            .map(|entry| FederatedPresenceSource {
+                presence: entry.presence.clone(),
+                origin_hops: entry.origin_hops,
+            })
+            .collect();
+        self.import_presence_sources(&presence, unix_now);
+        for entry in entries.iter().take(MAX_MEMBERS) {
+            let id = &entry.presence.announce.user_id;
+            let valid_presence = valid_directory_proof(&entry.presence.announce)
+                && !entry.presence.announce.post_office
+                && entry.presence.expires_at_secs > unix_now
+                && entry.presence.expires_at_secs
+                    <= unix_now.saturating_add(MAX_WIRE_TTL.as_secs());
+            let known_participant = self
+                .members
+                .get(id)
+                .is_some_and(|(local, _)| local.public() == entry.presence.announce.public())
+                || self.remote_members.get(id).is_some_and(|stored| {
+                    stored.expires_at_secs == entry.presence.expires_at_secs
+                        && stored.announce.public() == entry.presence.announce.public()
+                });
+            if !valid_presence || !known_participant {
+                continue;
+            }
+            let Some(origin) = entry
+                .origin
+                .as_ref()
+                .filter(|origin| origin.valid_for(&entry.presence.announce.public(), unix_now))
+            else {
+                continue;
+            };
+            // Our own attestations are created only by the live consent path,
+            // never resurrected from a federation loop after local withdrawal.
+            if self
+                .office_public
+                .as_ref()
+                .is_some_and(|office| origin.is_from(office))
+            {
+                continue;
+            }
+            // Preserve valid independent evidence through locally refreshed routes
+            // and unsigned omissions. Only an original fixed lease bounds copies.
+            let replace = self.origins.get(id).is_none_or(|old| {
+                !old.valid_for(&entry.presence.announce.public(), unix_now)
+                    || origin.expires_at_secs() > old.expires_at_secs()
+                    || (origin.expires_at_secs() == old.expires_at_secs()
+                        && origin.office_user_id() <= old.office_user_id())
+            });
+            if replace && self.origins.get(id) != Some(origin) {
+                self.origins.insert(id.clone(), origin.clone());
+                self.changes
+                    .send_modify(|generation| *generation = generation.wrapping_add(1));
+            }
+        }
+        self.origins
+            .retain(|_, origin| origin.expires_at_secs() > unix_now);
     }
 
     pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -128,6 +318,8 @@ impl BridgeDirectory {
         if self.members.len() >= MAX_MEMBERS && !self.members.contains_key(&proof.user_id) {
             return None;
         }
+        self.origins
+            .retain(|_, origin| origin.expires_at_secs() > unix_seconds_now());
         self.members
             .insert(proof.user_id.clone(), (proof.clone(), now));
         // A fresh origin registration renews its lease and must reach other relays.
@@ -299,6 +491,7 @@ pub fn is_request(bytes: &[u8]) -> bool {
         || bytes == REQUEST_V3
         || bytes == REQUEST_V4
         || bytes == REQUEST_V5
+        || (bytes.starts_with(REQUEST_V6) && bytes.len() <= MAX_PLAINTEXT)
 }
 
 pub fn provenance_request() -> &'static [u8] {
@@ -316,6 +509,39 @@ impl BridgeDirectory {
         request: &[u8],
         proofs: &[Announce],
     ) -> Option<Vec<Vec<u8>>> {
+        if request.starts_with(REQUEST_V6) {
+            let now = unix_seconds_now();
+            let entries: HashMap<_, _> = self
+                .export_with_origins(Instant::now(), now)
+                .into_iter()
+                .map(|entry| (entry.presence.announce.user_id.clone(), entry))
+                .collect();
+            let gateway = self.gateway_route();
+            return encode_pages(proofs, |selected, last| {
+                let entries: Vec<_> = selected
+                    .iter()
+                    .map(|proof| {
+                        entries.get(&proof.user_id).cloned().unwrap_or_else(|| {
+                            FederatedPresenceWithOrigin {
+                                presence: FederatedPresence {
+                                    announce: proof.clone(),
+                                    expires_at_secs: now,
+                                },
+                                origin: None,
+                                origin_hops: None,
+                            }
+                        })
+                    })
+                    .collect();
+                let mut bytes = RESPONSE_V6.to_vec();
+                bytes.push(u8::from(last));
+                bytes.extend(
+                    bincode::serialize(&(entries, gateway_on_page(selected, gateway.as_ref())))
+                        .ok()?,
+                );
+                (bytes.len() <= MAX_PLAINTEXT).then_some(bytes)
+            });
+        }
         if request == REQUEST_V5 {
             let now = unix_seconds_now();
             let metadata: HashMap<_, _> = self
@@ -561,12 +787,14 @@ impl DirectoryResponse {
         if self.finished {
             return None;
         }
-        let version = if bytes.starts_with(RESPONSE_V5) {
+        let version = if bytes.starts_with(RESPONSE_V6) {
+            6
+        } else if bytes.starts_with(RESPONSE_V5) {
             5
         } else if bytes.starts_with(RESPONSE_V4) {
             4
         } else {
-            0
+            1
         };
         let fresh = version >= 4;
         if self.freshness_version.is_some_and(|old| old != version) {
@@ -574,7 +802,9 @@ impl DirectoryResponse {
         }
         self.freshness_version = Some(version);
         let decoded = if fresh {
-            let body = bytes.strip_prefix(if version == 5 {
+            let body = bytes.strip_prefix(if version == 6 {
+                RESPONSE_V6
+            } else if version == 5 {
                 RESPONSE_V5
             } else {
                 RESPONSE_V4
@@ -582,21 +812,38 @@ impl DirectoryResponse {
             if bytes.len() > MAX_PLAINTEXT || body.is_empty() || body[0] > 1 {
                 return None;
             }
-            let options = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .with_limit(MAX_PLAINTEXT as u64)
-                .reject_trailing_bytes();
-            let (entries, route): (Vec<FederatedPresenceSource>, Option<GatewayRoute>) =
-                if version == 5 {
-                    options.deserialize(&body[1..]).ok()?
-                } else {
-                    let (entries, route): (Vec<FederatedPresence>, Option<GatewayRoute>) =
-                        options.deserialize(&body[1..]).ok()?;
+            let codec = || {
+                bincode::DefaultOptions::new()
+                    .with_fixint_encoding()
+                    .with_limit(MAX_PLAINTEXT as u64)
+                    .reject_trailing_bytes()
+            };
+            let (entries, route): (Vec<FederatedPresenceWithOrigin>, Option<GatewayRoute>) =
+                if version == 6 {
+                    codec().deserialize(&body[1..]).ok()?
+                } else if version == 5 {
+                    let (entries, route): (Vec<FederatedPresenceSource>, Option<GatewayRoute>) =
+                        codec().deserialize(&body[1..]).ok()?;
                     (
                         entries
                             .into_iter()
-                            .map(|presence| FederatedPresenceSource {
+                            .map(|entry| FederatedPresenceWithOrigin {
+                                presence: entry.presence,
+                                origin_hops: entry.origin_hops,
+                                origin: None,
+                            })
+                            .collect(),
+                        route,
+                    )
+                } else {
+                    let (entries, route): (Vec<FederatedPresence>, Option<GatewayRoute>) =
+                        codec().deserialize(&body[1..]).ok()?;
+                    (
+                        entries
+                            .into_iter()
+                            .map(|presence| FederatedPresenceWithOrigin {
                                 presence,
+                                origin: None,
                                 origin_hops: None,
                             })
                             .collect(),
@@ -613,8 +860,12 @@ impl DirectoryResponse {
             }
             let now = unix_seconds_now();
             let mut page = Vec::new();
-            for routed in entries {
-                let entry = routed.presence;
+            for wrapped in entries {
+                let entry = wrapped.presence;
+                // Optional origin cannot invalidate independently signed presence.
+                let origin = wrapped
+                    .origin
+                    .filter(|origin| origin.valid_for(&entry.announce.public(), now));
                 if !entry.announce.post_office
                     && entry.expires_at_secs > now
                     && entry.expires_at_secs <= now.saturating_add(MAX_WIRE_TTL.as_secs())
@@ -625,7 +876,8 @@ impl DirectoryResponse {
                             expires_at: Instant::now()
                                 + Duration::from_secs(entry.expires_at_secs - now),
                             origin_secs: entry.expires_at_secs,
-                            origin_hops: routed.origin_hops,
+                            origin,
+                            origin_hops: wrapped.origin_hops,
                         },
                     );
                 }
@@ -677,6 +929,279 @@ mod tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[tokio::test]
+    async fn encrypted_directory_keeps_valid_presence_when_optional_origin_expires() {
+        let user = DeviceIdentity::generate();
+        let office = DeviceIdentity::generate();
+        let viewer = DeviceIdentity::generate();
+        let now = unix_seconds_now();
+        let consent = OriginConsent::new(&user, &office.public(), now - 1);
+        let origin = RegistrationOrigin::new(&office, "Windows 10 office", consent).unwrap();
+        let proof = Announce::new_with_account(&user, &Account::generate(), "Duncan", 47474);
+        let entries = vec![FederatedPresenceWithOrigin {
+            presence: FederatedPresence {
+                announce: proof.clone(),
+                expires_at_secs: now + 10,
+            },
+            origin: Some(origin),
+            origin_hops: None,
+        }];
+        let mut frame = RESPONSE_V6.to_vec();
+        frame.push(1);
+        frame.extend(bincode::serialize(&(entries, None::<GatewayRoute>)).unwrap());
+        let (outgoing, incoming) = tokio::io::duplex(MAX_PLAINTEXT * 2);
+        let office_public = office.public();
+        let (client, server) = tokio::join!(
+            crate::transport::SecureChannel::connect(outgoing, &viewer, Some(&office_public)),
+            crate::transport::SecureChannel::accept(incoming, &office)
+        );
+        let mut client = client.unwrap();
+        let mut server = server.unwrap();
+        let (sent, bytes) = tokio::join!(server.send(&frame), client.recv());
+        sent.unwrap();
+        let mut response = DirectoryResponse::new(office_public);
+        assert!(response.add_page(&bytes.unwrap()).is_some());
+        assert!(response.expiries[&proof.user_id].origin.is_none());
+    }
+
+    #[test]
+    fn changed_participant_key_replaces_ineligible_origin_even_with_shorter_expiry() {
+        let office = DeviceIdentity::generate();
+        let original = DeviceIdentity::generate();
+        let (signing, _) = original.secret_bytes();
+        let changed = DeviceIdentity::from_secret_bytes(signing, [7; 32]);
+        let account = Account::generate();
+        let now = Instant::now();
+        let unix = unix_seconds_now();
+        let old_proof = Announce::new_with_account(&original, &account, "Duncan", 47474);
+        let new_proof = Announce::new_with_account(&changed, &account, "Duncan", 47474);
+        let old_origin = RegistrationOrigin::new(
+            &office,
+            "Windows 10 office",
+            OriginConsent::new(&original, &office.public(), unix + 14),
+        )
+        .unwrap();
+        let new_origin = RegistrationOrigin::new(
+            &office,
+            "Windows 10 office",
+            OriginConsent::new(&changed, &office.public(), unix + 10),
+        )
+        .unwrap();
+        let mut target = BridgeDirectory::default();
+        target
+            .register(&original.public(), Some(&old_proof), true, now)
+            .unwrap();
+        target.import_with_origins(
+            &[FederatedPresenceWithOrigin {
+                presence: FederatedPresence {
+                    announce: old_proof,
+                    expires_at_secs: unix + 15,
+                },
+                origin: Some(old_origin),
+                origin_hops: None,
+            }],
+            unix,
+        );
+        target
+            .register(&changed.public(), Some(&new_proof), true, now)
+            .unwrap();
+        target.import_with_origins(
+            &[FederatedPresenceWithOrigin {
+                presence: FederatedPresence {
+                    announce: new_proof,
+                    expires_at_secs: unix + 15,
+                },
+                origin: Some(new_origin),
+                origin_hops: None,
+            }],
+            unix,
+        );
+        assert!(
+            target.export_with_origins(now, unix)[0]
+                .origin
+                .as_ref()
+                .unwrap()
+                .valid_for(&changed.public(), unix)
+        );
+    }
+
+    #[test]
+    fn foreign_origin_survives_local_registration_and_unsigned_omission() {
+        let now = Instant::now();
+        let unix = unix_seconds_now();
+        let user = DeviceIdentity::generate();
+        let office = DeviceIdentity::generate();
+        let forwarder = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&user, &Account::generate(), "Duncan", 47474);
+        let mut source = BridgeDirectory::default();
+        source.set_office_name("Windows 10 office");
+        source
+            .register(&user.public(), Some(&proof), true, now)
+            .unwrap();
+        source.apply_origin_request(
+            &origin_request(&user, &office.public(), true),
+            &user.public(),
+            Some(&office),
+            unix,
+        );
+        let exported = source.export_with_origins(now, unix);
+        let mut target = BridgeDirectory::default();
+        target.set_office_name("Mac office");
+        target
+            .register(&user.public(), Some(&proof), true, now)
+            .unwrap();
+        target.apply_origin_request(
+            &origin_request(&user, &forwarder.public(), false),
+            &user.public(),
+            Some(&forwarder),
+            unix,
+        );
+        target.import_with_origins(&exported, unix);
+        assert_eq!(
+            target.export_with_origins(now, unix)[0]
+                .origin
+                .as_ref()
+                .unwrap()
+                .office_user_id(),
+            office.user_id()
+        );
+        target
+            .register(&user.public(), Some(&proof), true, now)
+            .unwrap();
+        target.apply_origin_request(
+            &origin_request(&user, &forwarder.public(), false),
+            &user.public(),
+            Some(&forwarder),
+            unix,
+        );
+        let omission = vec![FederatedPresenceWithOrigin {
+            presence: exported[0].presence.clone(),
+            origin: None,
+            origin_hops: None,
+        }];
+        target.import_with_origins(&omission, unix);
+        assert_eq!(
+            target.export_with_origins(now, unix)[0]
+                .origin
+                .as_ref()
+                .unwrap()
+                .office_user_id(),
+            office.user_id()
+        );
+    }
+
+    #[test]
+    fn origin_survives_forwarding_and_opt_out_removes_the_local_binding() {
+        let now = Instant::now();
+        let unix = unix_seconds_now();
+        let user = DeviceIdentity::generate();
+        let office = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&user, &Account::generate(), "Duncan", 47474);
+        let mut directory = BridgeDirectory::default();
+        directory.set_office_name("Windows 10 office");
+        let request = origin_request(&user, &office.public(), true);
+        directory
+            .register(&user.public(), Some(&proof), true, now)
+            .unwrap();
+        assert!(directory.apply_origin_request(&request, &user.public(), Some(&office), unix));
+        let exported = directory.export_with_origins(now, unix);
+        let origin = exported[0].origin.as_ref().unwrap();
+        assert_eq!(origin.office_name(), "Windows 10 office");
+        assert!(origin.valid_for(&user.public(), unix));
+        let deadline = origin.expires_at_secs();
+        let mut forwarding = BridgeDirectory::default();
+        forwarding.import_with_origins(&exported, unix);
+        let mut next = BridgeDirectory::default();
+        next.import_with_origins(&forwarding.export_with_origins(now, unix), unix);
+        assert_eq!(
+            next.export_with_origins(now, unix)[0]
+                .origin
+                .as_ref()
+                .unwrap()
+                .expires_at_secs(),
+            deadline
+        );
+        directory
+            .register(&user.public(), Some(&proof), true, now)
+            .unwrap();
+        assert!(directory.apply_origin_request(
+            &origin_request(&user, &office.public(), false),
+            &user.public(),
+            Some(&office),
+            unix
+        ));
+        assert!(directory.export_with_origins(now, unix)[0].origin.is_none());
+        directory.import_with_origins(&exported, unix);
+        assert!(
+            directory.export_with_origins(now, unix)[0].origin.is_none(),
+            "a federation loop cannot resurrect this office's withdrawn proof"
+        );
+        assert!(
+            next.export_with_origins(now, deadline)
+                .iter()
+                .all(|entry| entry.origin.is_none())
+        );
+    }
+
+    #[test]
+    fn legacy_queries_cannot_receive_optional_origin_metadata() {
+        let user = DeviceIdentity::generate();
+        let office = DeviceIdentity::generate();
+        let viewer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&user, &Account::generate(), "Duncan", 47474);
+        let viewer_proof =
+            Announce::new_with_account(&viewer, &Account::generate(), "Viewer", 47475);
+        let mut directory = BridgeDirectory::default();
+        directory.set_office_name("Windows 10 office");
+        directory
+            .register(&user.public(), Some(&proof), true, Instant::now())
+            .unwrap();
+        directory.apply_origin_request(
+            &origin_request(&user, &office.public(), true),
+            &user.public(),
+            Some(&office),
+            unix_seconds_now(),
+        );
+        let peers = directory
+            .register(&viewer.public(), Some(&viewer_proof), true, Instant::now())
+            .unwrap();
+        for request in [
+            freshness_request().to_vec(),
+            provenance_request().to_vec(),
+            origin_request(&viewer, &office.public(), false),
+        ] {
+            let pages = directory.encode_snapshot(&request, &peers).unwrap();
+            let mut response = DirectoryResponse::new(office.public());
+            for page in pages {
+                assert!(response.add_page(&page).is_some());
+            }
+            assert_eq!(
+                response.expiries[&proof.user_id].origin.is_some(),
+                request.starts_with(REQUEST_V6)
+            );
+            assert_eq!(
+                response.expiries[&proof.user_id].origin_hops,
+                if request == freshness_request() {
+                    None
+                } else {
+                    Some(0)
+                }
+            );
+            if request == provenance_request() {
+                let pages = directory.encode_snapshot(&request, &peers).unwrap();
+                let body = pages[0].strip_prefix(RESPONSE_V5).unwrap();
+                let (entries, _): (Vec<FederatedPresenceSource>, Option<GatewayRoute>) =
+                    bincode::deserialize(&body[1..]).unwrap();
+                assert!(
+                    entries
+                        .iter()
+                        .any(|entry| entry.presence.announce.user_id == proof.user_id
+                            && entry.origin_hops == Some(0))
+                );
+            }
+        }
+    }
 
     #[test]
     fn provenance_pages_reject_invalid_distances_and_mixed_versions() {

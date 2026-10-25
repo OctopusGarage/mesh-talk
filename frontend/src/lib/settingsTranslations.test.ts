@@ -11,13 +11,14 @@ const categoryKeys = [
   "notifications",
   "connection",
   "privacy",
+  "integrations",
   "files",
   "history",
 ];
 
 describe("settings translations", () => {
   for (const [path, locale] of Object.entries(locales)) {
-    it(`provides all seven categories in ${path}`, async () => {
+    it(`provides all settings categories in ${path}`, async () => {
       const i18n = createInstance();
       await i18n.init({
         lng: "test",

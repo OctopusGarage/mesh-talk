@@ -1,6 +1,7 @@
 //! User-triggered Google Drive backup. OAuth and cloud I/O belong to the desktop host.
 mod client;
 mod oauth;
+mod remembered;
 use crate::{
     chat_commands::NodeState,
     commands::CommandError,
@@ -26,15 +27,22 @@ pub(crate) struct DriveState {
     connections: Mutex<HashMap<String, Arc<Connection>>>,
     #[cfg(test)]
     client_override: Mutex<Option<DriveClient>>,
+    #[cfg(test)]
+    refresh_override: Mutex<Option<String>>,
 }
 struct Connection {
     generation: u64,
-    created: Instant,
     session: SessionState,
     app_lock: crate::app_lock::AppLock,
+    lock_revision: Option<u64>,
     cancelled: watch::Sender<bool>,
     busy: AtomicBool,
     token: tokio::sync::Mutex<Option<String>>,
+    refresh_token: tokio::sync::Mutex<Option<String>>,
+    token_expires: Mutex<Option<Instant>>,
+    remembered_owner: Mutex<Option<remembered::Owner>>,
+    #[cfg(test)]
+    refresh_endpoint: Mutex<Option<String>>,
     archive: tokio::sync::Mutex<Option<Arc<tempfile::NamedTempFile>>>,
     progress: Mutex<DriveProgress>,
 }
@@ -50,11 +58,16 @@ impl Connection {
         Self {
             generation: session.generation(),
             session,
+            lock_revision: app_lock.authorization_revision().ok(),
             app_lock,
-            created: Instant::now(),
             cancelled,
             busy: AtomicBool::new(false),
             token: Default::default(),
+            refresh_token: Default::default(),
+            token_expires: Default::default(),
+            remembered_owner: Default::default(),
+            #[cfg(test)]
+            refresh_endpoint: Default::default(),
             archive: Default::default(),
             progress: Mutex::new(DriveProgress {
                 phase: "connecting".into(),
@@ -64,10 +77,14 @@ impl Connection {
         }
     }
     fn current(&self) -> Result<(), CommandError> {
-        if self.app_lock.is_locked() {
+        if self.lock_revision.is_none_or(|revision| {
+            self.app_lock
+                .with_unchanged_revision(revision, || Ok(()))
+                .is_err()
+        }) {
             self.cancelled.send_replace(true);
         }
-        if *self.cancelled.borrow() || self.created.elapsed() > Duration::from_secs(1800) {
+        if *self.cancelled.borrow() {
             return Err(CommandError::Authorization(
                 "Google Drive operation cancelled or expired. Reconnect Google Drive.".into(),
             ));
@@ -126,8 +143,49 @@ impl Connection {
             }
         }
     }
-    async fn access_token(&self) -> Result<String, CommandError> {
+    async fn refresh(&self, refresh_token: &str) -> Result<oauth::TokenResponse, CommandError> {
+        #[cfg(test)]
+        {
+            let endpoint = self.refresh_endpoint.lock().unwrap().clone();
+            if let Some(endpoint) = endpoint {
+                return oauth::refresh_for_test(&endpoint, refresh_token).await;
+            }
+        }
+        oauth::refresh(refresh_token).await
+    }
+    async fn install_token(
+        self: &Arc<Self>,
+        tokens: oauth::TokenResponse,
+    ) -> Result<(), CommandError> {
         self.current()?;
+        if let Some(refresh_token) = tokens.refresh_token {
+            let owner = self.remembered_owner.lock().unwrap().clone();
+            if let Some(owner) = owner {
+                owner.save(refresh_token.clone(), self.clone()).await?;
+            }
+            *self.refresh_token.lock().await = Some(refresh_token);
+        }
+        self.current()?;
+        *self.token.lock().await = Some(tokens.access_token);
+        *self.token_expires.lock().unwrap() =
+            Some(Instant::now() + Duration::from_secs(tokens.expires_in.saturating_sub(30)));
+        Ok(())
+    }
+    async fn access_token(self: &Arc<Self>) -> Result<String, CommandError> {
+        self.current()?;
+        let expired = self
+            .token_expires
+            .lock()
+            .unwrap()
+            .is_some_and(|expiry| Instant::now() >= expiry);
+        if expired {
+            let refresh_token =
+                self.refresh_token.lock().await.clone().ok_or_else(|| {
+                    CommandError::Authentication("Connect Google Drive again".into())
+                })?;
+            let tokens = self.run(self.refresh(&refresh_token)).await?;
+            self.install_token(tokens).await?;
+        }
         self.token
             .lock()
             .await
@@ -142,6 +200,53 @@ impl Drop for Job {
     }
 }
 impl DriveState {
+    fn insert(
+        &self,
+        id: &str,
+        app: &AppState,
+        node: &NodeState,
+    ) -> Result<Arc<Connection>, CommandError> {
+        if id.len() < 20
+            || id.len() > 128
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(CommandError::InvalidInput(
+                "Invalid Google Drive connection".into(),
+            ));
+        }
+        let connection = Arc::new(Connection::new(
+            app.session().clone(),
+            app.app_lock().clone(),
+        ));
+        connection.current()?;
+        let owner = remembered::Owner::capture(app, node);
+        if owner
+            .as_ref()
+            .is_some_and(|owner| owner.generation() != connection.generation)
+        {
+            return Err(CommandError::Authorization(
+                "Google Drive session was replaced".into(),
+            ));
+        }
+        *connection.remembered_owner.lock().unwrap() = owner;
+        #[cfg(test)]
+        {
+            *connection.refresh_endpoint.lock().unwrap() =
+                self.refresh_override.lock().unwrap().clone();
+        }
+        let mut map = self
+            .connections
+            .lock()
+            .map_err(|_| CommandError::Internal("Google Drive state unavailable".into()))?;
+        map.retain(|_, item| item.current().is_ok());
+        if map.contains_key(id) || map.len() >= 4 {
+            return Err(CommandError::InvalidInput(
+                "Close the existing Google Drive connection first".into(),
+            ));
+        }
+        map.insert(id.into(), connection.clone());
+        Ok(connection)
+    }
     fn client(&self) -> Result<DriveClient, CommandError> {
         #[cfg(test)]
         if let Some(client) = self.client_override.lock().unwrap().as_ref() {
@@ -189,54 +294,98 @@ pub(crate) async fn google_drive_connect<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: tauri::State<'_, DriveState>,
     app_state: tauri::State<'_, AppState>,
+    node_state: tauri::State<'_, NodeState>,
     connection_id: String,
 ) -> Result<(), CommandError> {
-    if connection_id.len() < 20
-        || connection_id.len() > 128
-        || !connection_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    {
-        return Err(CommandError::InvalidInput(
-            "Invalid Google Drive connection".into(),
-        ));
+    let connection = state.insert(&connection_id, &app_state, &node_state)?;
+    let _job = connection.begin()?;
+    let result = async {
+        let tokens = connection.run(oauth::authorize(&app)).await?;
+        if connection.remembered_owner.lock().unwrap().is_some() && tokens.refresh_token.is_none() {
+            return Err(CommandError::Authentication("Google did not return a remembered connection. Connect Google Drive again and allow access.".into()));
+        }
+        connection.install_token(tokens).await?;
+        connection.phase("connected", 0, 0);
+        Ok(())
+    }.await;
+    if result.is_err() {
+        state.remove_attempt(&connection_id, &connection);
     }
-    let connection = Arc::new(Connection::new(
-        app_state.session().clone(),
-        app_state.app_lock().clone(),
-    ));
+    result
+}
+
+/// Reopen only the signed-in local user's saved grant; never opens a browser.
+#[tauri::command]
+pub(crate) async fn google_drive_resume(
+    state: tauri::State<'_, DriveState>,
+    app_state: tauri::State<'_, AppState>,
+    node_state: tauri::State<'_, NodeState>,
+    connection_id: String,
+) -> Result<bool, CommandError> {
+    let Some(owner) = remembered::Owner::capture(&app_state, &node_state) else {
+        return Ok(false);
+    };
+    let connection = state.insert(&connection_id, &app_state, &node_state)?;
+    let _job = connection.begin()?;
+    let result = async {
+        let Some(refresh_token) = owner.load().await? else {
+            return Ok(false);
+        };
+        connection.current()?;
+        let tokens = match connection.run(connection.refresh(&refresh_token)).await {
+            Ok(tokens) => tokens,
+            Err(CommandError::Auth(_)) => {
+                owner
+                    .forget_rejected(refresh_token.clone(), connection.clone())
+                    .await?;
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        *connection.refresh_token.lock().await = Some(refresh_token);
+        connection.install_token(tokens).await?;
+        connection.phase("connected", 0, 0);
+        Ok(true)
+    }
+    .await;
+    if !matches!(result, Ok(true)) {
+        state.remove_attempt(&connection_id, &connection);
+    }
+    result
+}
+
+/// Explicitly forget remembered access. View cleanup uses disconnect instead.
+#[tauri::command]
+pub(crate) async fn google_drive_forget(
+    state: tauri::State<'_, DriveState>,
+    app_state: tauri::State<'_, AppState>,
+    node_state: tauri::State<'_, NodeState>,
+    connection_id: String,
+) -> Result<(), CommandError> {
+    let owner = remembered::Owner::capture(&app_state, &node_state);
+    let generation = owner.as_ref().map_or_else(
+        || app_state.session().generation(),
+        remembered::Owner::generation,
+    );
     {
         let mut map = state
             .connections
             .lock()
             .map_err(|_| CommandError::Internal("Google Drive state unavailable".into()))?;
-        map.retain(|_, item| {
-            let keep = item.current().is_ok();
+        map.retain(|id, connection| {
+            let keep = connection.generation != generation && id != &connection_id;
             if !keep {
-                item.cancelled.send_replace(true);
+                connection.cancelled.send_replace(true);
             }
             keep
         });
-        if map.contains_key(&connection_id) || map.len() >= 4 {
-            return Err(CommandError::InvalidInput(
-                "Close the existing Google Drive connection first".into(),
-            ));
-        }
-        map.insert(connection_id.clone(), connection.clone());
     }
-    let _job = connection.begin()?;
-    match connection.run(oauth::authorize(&app)).await {
-        Ok(token) => {
-            *connection.token.lock().await = Some(token);
-            connection.phase("connected", 0, 0);
-            Ok(())
-        }
-        Err(error) => {
-            state.remove_attempt(&connection_id, &connection);
-            Err(error)
-        }
+    if let Some(owner) = owner {
+        owner.forget().await?;
     }
+    Ok(())
 }
+
 #[tauri::command]
 pub(crate) fn google_drive_disconnect(state: tauri::State<'_, DriveState>, connection_id: String) {
     state.remove(&connection_id);
@@ -270,15 +419,25 @@ pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, NodeState>,
     connection_id: String,
-    recovery_key: String,
+    recovery_key: Option<String>,
+    password: Option<String>,
 ) -> Result<BackupCreated, CommandError> {
     let connection = state.get(&connection_id)?;
     let job = connection.begin()?;
-    let token = connection.access_token().await?;
+    connection.access_token().await?;
     let lease = app_state
         .session()
         .capture()
         .map_err(CommandError::Authentication)?;
+    if lease.generation() != connection.generation {
+        return Err(CommandError::Authorization(
+            "Google Drive session was replaced".into(),
+        ));
+    }
+    let recovery_key = match recovery_key {
+        Some(key) => key,
+        None => recovery::setup::saved_key(&app_state, &node_state, lease.generation()).await?,
+    };
     let auth = app_state.inner().clone();
     let node = node_state.inner().clone();
     let client = state.client()?;
@@ -300,10 +459,12 @@ pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
                 recovery_key,
                 false,
                 Some(connection.generation),
+                password,
             ))
             .await?;
         connection.current()?;
         let name = format!("mesh-talk-{}.mtbackup", backup.preview.created_at_ms);
+        let token = connection.access_token().await?;
         let archive = connection
             .run(client.upload(&token, &path, &name, |sent, total| {
                 connection.phase("uploading", sent, total)
@@ -419,6 +580,19 @@ pub(crate) async fn google_drive_restore(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unsampled_lock_revision_change_retires_an_idle_connection() {
+        let app_lock = crate::app_lock::AppLock::default();
+        let connection = Connection::new(SessionState::default(), app_lock.clone());
+        assert!(connection.current().is_ok());
+        // A completed lock/unlock cycle advances this authorization revision,
+        // even when no cloud operation observed the intermediate locked state.
+        app_lock.clear();
+        assert!(!app_lock.is_locked());
+        assert!(connection.current().is_err());
+        let fresh = Connection::new(SessionState::default(), app_lock);
+        assert!(fresh.current().is_ok());
+    }
     #[tokio::test]
     async fn session_replacement_retires_pending_cloud_work() {
         let session = SessionState::default();
@@ -489,6 +663,16 @@ mod tests {
         finished.send(()).unwrap();
         assert!(task.await.unwrap().is_err());
     }
+    #[test]
+    fn drive_connection_rejects_authorization_revision_changes() {
+        let lock = crate::app_lock::AppLock::default();
+        let connection = Connection::new(SessionState::default(), lock.clone());
+        assert!(connection.current().is_ok());
+        lock.clear();
+        assert!(!lock.is_locked());
+        assert!(connection.current().is_err());
+    }
+
     #[test]
     fn registered_drive_commands_return_structured_errors_and_release_state() {
         let app = tauri::test::mock_builder()

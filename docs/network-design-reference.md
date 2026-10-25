@@ -375,6 +375,47 @@ withdrawals take effect immediately. Up to 1,024 actually observed historical
 account/device entries remain Offline within the session, without inventing times
 for never-observed people. Lock/logout/replacement clears this history.
 
+### Optional registration-origin disclosure
+
+Registration origin is separate from the immediate directory introducer. A
+participant can opt in to sharing the identity and display name of the post
+office with which that device registered. The device-local setting defaults off,
+including after upgrading an installation that has no saved choice. Ordinary
+bridge discovery and messaging do not require this optional disclosure.
+
+The registering device signs a consent bound to its full device identity, the
+exact office identity and a fixed expiry. The office signs that registration
+relationship and its bounded display name. Versioned directory and federation
+envelopes preserve the proof unchanged across forwarding hops. Receivers verify
+both signatures and the participant binding before projecting it; hop counts,
+preferred routes, office names and address prefixes cannot establish origin.
+The client consents to one eligible registration office: a locally discovered
+office first, otherwise the first office in the established candidate order
+(including an explicit preference). Refreshes through other offices do not
+authorize them to claim origin. Different devices may register with different
+offices. The profile distinguishes these offices from immediate introducers.
+
+Origin proofs have a fixed maximum 15-second lease. Forwarding, re-querying and
+Online presentation tolerance never extend that lease. Missing metadata means
+unavailable; it does not prove that the participant explicitly withheld it.
+Older protocol versions continue ordinary discovery without optional origin
+metadata, using their existing wire layouts. No origin binding is added to
+public UDP multicast announcements or durable route hints.
+
+Changing the sharing choice uses the existing privacy send gate and generation
+checks. Disabling waits for already admitted sends, invalidates prepared work,
+stops signing new consent and wakes directory refresh. A fresh registration
+without consent clears the source office's optional proof. Already forwarded
+proofs can remain on disconnected peers until their original lease expires;
+information another party has already read cannot be recalled. This setting
+does not conceal socket addresses from connected peers or the registering office.
+
+Origin metadata uses the existing authenticated encrypted channels. Participating
+post offices can read it; it has no additional recipient encryption. Office
+names may reveal a network or site, so sharing requires the participant's own
+choice. The payload contains no participant IP, subnet, coordinates or full
+relay path. It authenticates a registration relationship, never physical location.
+
 ### Protocol surfaces and durable ownership
 
 | Surface                   | Transport and validation                                                                                                       | Persistence / compatibility boundary                                                                               |
@@ -772,6 +813,61 @@ recipient wrapper or a connection timeout cannot retract another wrapper's
 confirmed copy at the same office. Unsupported custody exchange is exposed as
 requiring an upgrade, even while the older supported domains continue.
 
+### Cost-aware group attachment sharing
+
+The desktop starts with unknown network cost before participant producers run.
+Unknown or restricted cost pauses export of other devices' retained group file
+chunks. Group text, controls and file offers remain available; the original
+author can still send its own file chunks. Certified same-account synchronization
+keeps its independent category policy. Receive consent is unchanged. The saved
+signed **Share a copy** preference and local retention/expiry rules never change
+because of this temporary restriction. The members dialog exposes only this
+device's cost status, with an authenticated temporary exception for all its groups.
+The exception expires when the observed cost class changes or the runtime ends;
+refreshing an unchanged class does not revoke it. It cannot enable sharing that
+the member has explicitly disabled or override conversation authority.
+
+This policy applies to attachment copies of every size rather than an arbitrary
+large-file threshold. It defines no daily byte allowance or upload-rate limit.
+A later optional cumulative budget must define its traffic and local-user/device
+scope, persist usage, reserve concurrent sends, and keep network exceptions
+independent from budget exceptions. Storage budgets never stand in for uploaded
+bytes; limited payload export must preserve actual possession inventories.
+
+`node/network_cost.rs` owns effective file-serving policy; the desktop
+`network_cost/` adapter supplies observations. macOS uses Network.framework path
+updates for expensive/Low Data Mode flags. Windows re-queries connection cost,
+roaming, limits and background restrictions; Linux reads NetworkManager's Metered
+property, including guessed states. Windows/Linux refresh every two seconds,
+with Linux queries bounded to one second. An unavailable provider yields unknown.
+The runtime owns cancellation and drops native observers at retirement. SDK,
+CLI and integration hosts preserve unrestricted compatibility defaults unless
+they supply an initial/current observation. The additive
+`start_configured_guarded_with_network_cost_observed` constructor applies initial
+cost before launch; existing constructor signatures and `RuntimeNetworkOptions`
+fields remain compatible.
+
+Cost is a conservative default-path observation, not universal hotspot detection
+or a carrier billing guarantee. A hotspot can also carry local-only traffic.
+This implementation has no physical-route exemption: automatic assistance can
+pause even on a local hotspot, and the user can explicitly allow it temporarily.
+VPNs, multiple interfaces and unrecognized hotspots still require native route
+evidence before stronger guarantees. No SSID inference or network-name logging
+is used. Existing peers may continue selecting a paused sharing member; normal
+bounded recovery/source rotation still applies without changing wire formats.
+
+Both sync directions recheck file export projections at each bounded page,
+including existing sessions. Possession inventories and fingerprints remain
+accurate while serving is paused, preventing peers from sending retained chunks
+back to the metered holder. Already selected/buffered bytes may finish, and
+native observation latency precedes enforcement; a switch does not promise zero
+additional bytes. This policy neither deletes cached chunks nor treats a pause
+as recipient completion. It limits optional group attachment assistance, not
+original fanout, downloads, updates, backups or opaque post-office service traffic.
+Focused loopback tests cover pause/resume, existing stores, ordinary receive
+consent, inline media and retained bytes. Platform hotspot/VPN/sleep-wake and
+active-transfer acceptance remain separate from simulated policy assertions.
+
 ### E. Files, folders, consent and completion
 
 ```mermaid
@@ -848,6 +944,20 @@ read receipts and DM controls; appearance consent gates
 libraries/photos. Shared settings retain the existing per-key preference owner.
 The native account adapter rejects stale owner/runtime/account admissions, releases
 blob bytes only for the requested current version, and uses compare-and-set writes.
+
+Device hostnames are private account-directory metadata, separate from public
+nicknames, discovery announcements, certificates and ordinary peer profiles.
+The desktop reads its OS hostname at startup and publishes a bounded (255-byte,
+nonblank, control-free UTF-8) source-device document through the existing encrypted
+certified-sibling session. Hostnames persist encrypted for offline display and
+remain independent of optional history and appearance synchronization. Only the
+local device and certified roster entries appear in the device-list projection.
+Generic document writes cannot forge hostname metadata; its device key must match
+its writer. Native reads require the current desktop owner, runtime and expected
+cryptographic account. Other accounts cannot request hostname documents even if
+they know the account ID and establish a Noise connection. The version-5 document
+domain has an independent legacy-peer cooldown; older peers keep ordinary sync
+and existing device labels. Unavailable hostnames fall back to the existing labels.
 
 Each domain compares a deterministic digest of signed metadata. Mismatches exchange
 paged manifests, then only needed verified content; a patch carries a complete

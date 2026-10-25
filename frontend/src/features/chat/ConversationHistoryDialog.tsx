@@ -367,7 +367,11 @@ export function ConversationHistoryDialog({
                           <span className="inline-flex items-center gap-1.5">
                             {fileGlyph(m.file.name, m.file.mime)}
                             <HighlightedText
-                              text={attachmentLabel(m.file.name, m.file.mime)}
+                              text={attachmentLabel(
+                                m.file.name,
+                                m.file.mime,
+                                m.file,
+                              )}
                               term={query}
                             />
                           </span>
@@ -396,7 +400,11 @@ export function ConversationHistoryDialog({
                             key={m.id ?? i}
                             data-testid="history-media-item"
                             className="aspect-square overflow-hidden rounded-lg border bg-muted/40 [&_img]:h-full [&_img]:rounded-none [&_img]:object-cover [&_video]:h-full"
-                            title={m.file.name}
+                            title={attachmentLabel(
+                              m.file.name,
+                              m.file.mime,
+                              m.file,
+                            )}
                           >
                             <MediaPreview
                               readOnly
@@ -431,7 +439,11 @@ export function ConversationHistoryDialog({
                           {fileGlyph(m.file.name, m.file.mime)}
                           <div className="min-w-0 flex-1">
                             <div className="truncate text-sm">
-                              {attachmentLabel(m.file.name, m.file.mime)}
+                              {attachmentLabel(
+                                m.file.name,
+                                m.file.mime,
+                                m.file,
+                              )}
                             </div>
                             <div className="flex items-center gap-2 text-xs text-muted-foreground">
                               <span className="font-mono">

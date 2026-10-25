@@ -21,6 +21,7 @@ import {
 import type { MemberProfileTarget } from "./memberProfileDetails";
 import {
   memberDiscoverySources,
+  memberRegistrationOrigins,
   memberProfileDevices,
 } from "./memberProfileDetails";
 
@@ -82,6 +83,7 @@ function MemberProfileContent({
     peers,
   );
   const discoverySources = memberDiscoverySources(presence);
+  const registrationOrigins = memberRegistrationOrigins(presence);
   const name = identity.name;
   const accountId = identity.accountId;
 
@@ -114,6 +116,35 @@ function MemberProfileContent({
         {accountId && (
           <AccountProfilePanel key={accountId} accountId={accountId} />
         )}
+
+        <section
+          aria-label={t("memberProfile.registrationOrigin")}
+          data-testid="member-registration-origins"
+          className="min-w-0 space-y-2"
+        >
+          <h3 className="text-sm font-medium">
+            {t("memberProfile.registrationOrigin")}
+          </h3>
+          {registrationOrigins.length ? (
+            <ul className="space-y-2 text-sm">
+              {registrationOrigins.map((office) => (
+                <li key={office.user_id} className="[overflow-wrap:anywhere]">
+                  {office.name}
+                  <code className="block select-text text-xs text-muted-foreground">
+                    {office.user_id}
+                  </code>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {t("memberProfile.registrationOriginUnavailable")}
+            </p>
+          )}
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("memberProfile.registrationOriginHint")}
+          </p>
+        </section>
 
         <section
           aria-label={t("memberProfile.discoveredVia")}

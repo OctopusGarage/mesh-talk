@@ -114,7 +114,7 @@ export function FavoriteAttachment({
         {fileGlyph(file.name, file.mime)}
         <div className="min-w-0 flex-1">
           <p className="break-words text-sm font-medium">
-            {attachmentLabel(file.name, file.mime)}
+            {attachmentLabel(file.name, file.mime, file)}
           </p>
           <p className="text-xs text-muted-foreground">
             {humanSize(file.size)} ·{" "}

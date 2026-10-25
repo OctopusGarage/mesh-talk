@@ -15,3 +15,17 @@ it("carries the explicit settings owner and exact selected conversation identiti
     destinations,
   });
 });
+
+it("only passes renewal and duration when explicitly requested", async () => {
+  await localAgentAccess.set("alice", true, [], {
+    lifetime: "one_hour",
+    renew: true,
+  });
+  expect(invoke).toHaveBeenLastCalledWith("set_local_agent_access", {
+    owner: "alice",
+    enabled: true,
+    destinations: [],
+    lifetime: "one_hour",
+    renew: true,
+  });
+});

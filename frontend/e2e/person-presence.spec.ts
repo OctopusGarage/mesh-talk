@@ -5,6 +5,62 @@ import type { PresenceMap } from "../src/lib/types";
 const BOB = "acc_bob_bbbb2222";
 const GROUP = "chan_team_dddd4444";
 
+test("registration office survives a different introducer and expires during IPC failure", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 760, height: 520 });
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate((account) => {
+    (
+      window as unknown as { __mockSetPresence: (map: PresenceMap) => void }
+    ).__mockSetPresence({
+      [account]: {
+        online: true,
+        last_seen_secs: 0,
+        devices: [
+          {
+            user_id: "device_bob_2222",
+            evidence: [
+              {
+                source: "directory",
+                last_seen_secs: 0,
+                expires_in_secs: 30,
+                post_office: {
+                  user_id: "office-mac",
+                  name: "Mac forwarding office",
+                  endpoint: "100.64.0.2:47479",
+                },
+                registration_origin: {
+                  user_id: "office-windows",
+                  name: "Windows 10 office",
+                  expires_in_secs: 6,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+  }, BOB);
+  await page.getByTestId("conversation-member-profile").click();
+  const origin = page.getByTestId("member-registration-origins");
+  const source = page.getByTestId("member-discovery-sources");
+  await expect(origin).toContainText("Windows 10 office");
+  await expect(source).toContainText("Mac forwarding office");
+  await expect(origin).not.toContainText("Mac forwarding office");
+  await origin.scrollIntoViewIfNeeded();
+  await page.evaluate(() => {
+    (
+      window as unknown as { __mockPresenceFailure: (value: boolean) => void }
+    ).__mockPresenceFailure(true);
+  });
+  await expect(origin).toContainText("No shared registration information", {
+    timeout: 12000,
+  });
+  await expect(source).toContainText("Mac forwarding office");
+});
+
 test("group header counts accepted people and each row has its own state", async ({
   page,
 }) => {
@@ -161,7 +217,7 @@ test("profile deduplicates a device with overlapping discovery sources", async (
   );
 });
 
-test("profile selects the closest visible office to origin and expires sources during refresh failure", async ({
+test("profile separates immediate introducers from unshared registration origin and expires sources during refresh failure", async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 760, height: 520 });
@@ -209,10 +265,20 @@ test("profile selects the closest visible office to origin and expires sources d
   }, BOB);
   await page.getByTestId("conversation-member-profile").click();
   const sources = page.getByTestId("member-discovery-sources");
+  const origin = page.getByTestId("member-registration-origins");
   await expect(sources).toContainText("Local LAN · UDP multicast");
   await expect(sources).toContainText("Post office · mac-mini-post-office");
-  await expect(sources).not.toContainText("Post office · mac2015-post-office");
-  await expect(sources.getByRole("listitem")).toHaveCount(2);
+  await expect(sources).toContainText("Post office · mac2015-post-office");
+  await expect(sources).toContainText(
+    "How this client discovered the member; message routes may differ.",
+  );
+  await expect(sources).toContainText("100.109.255.49:47479");
+  await expect(sources).toContainText("192.168.3.72:47479");
+  await expect(sources.getByRole("listitem")).toHaveCount(3);
+  // Legacy hop distances cannot substitute for a participant-consented origin.
+  await expect(origin).toContainText("No shared registration information");
+  await expect(origin).not.toContainText("mac-mini-post-office");
+  await expect(origin).not.toContainText("mac2015-post-office");
   await sources.scrollIntoViewIfNeeded();
   await page.screenshot({
     path: testInfo.outputPath("member-discovery-sources.png"),
@@ -225,8 +291,10 @@ test("profile selects the closest visible office to origin and expires sources d
   await expect(sources).not.toContainText("Local LAN · UDP multicast", {
     timeout: 10000,
   });
-  await expect(sources.getByRole("listitem")).toHaveCount(1);
+  await expect(sources.getByRole("listitem")).toHaveCount(2);
   await expect(sources).toContainText("mac-mini-post-office");
+  await expect(sources).toContainText("mac2015-post-office");
+  await expect(origin).toContainText("No shared registration information");
 });
 
 test("failed refresh announces unavailability, expires evidence, and recovers", async ({

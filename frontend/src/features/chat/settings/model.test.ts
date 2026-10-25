@@ -12,6 +12,7 @@ it("provides one unique destination for every approved settings task", () => {
     "notifications",
     "connection",
     "privacy",
+    "integrations",
     "files",
     "history",
   ]);

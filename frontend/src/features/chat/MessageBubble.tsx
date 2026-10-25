@@ -55,6 +55,8 @@ import {
   refreshFileAvailability,
   markUnavailableFileError,
 } from "@/store/fileAvailability";
+import { decodeStickerMedia } from "@/lib/stickerMedia";
+import { MediaSticker } from "./MediaSticker";
 import { MediaPreview } from "./MediaPreview";
 import { DeliveryFooter } from "./DeliveryFooter";
 import { fileGlyph, withinInlineCap } from "./mediaFile";
@@ -187,7 +189,7 @@ function FileBubble({
         {fileGlyph(file.name, file.mime)}
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm">
-            {attachmentLabel(file.name, file.mime)}
+            {attachmentLabel(file.name, file.mime, file)}
           </div>
           <div className="font-mono text-[11px] tabular-nums opacity-70">
             {metadataPending
@@ -378,10 +380,12 @@ export function MessageBubble({
   const isFile = !!m.file;
   // Sticker messages render bubble-less (Telegram-style): just the animation. Fall back to
   // the big emoji char when this build doesn't bundle that sticker (version skew).
-  const sticker = m.sticker
-    ? stickerById(m.sticker, installedPacks)
-    : undefined;
-  const isSticker = !!m.sticker;
+  const mediaSticker = m.file ? decodeStickerMedia(m.file) : null;
+  const sticker =
+    !mediaSticker && m.sticker
+      ? stickerById(m.sticker, installedPacks)
+      : undefined;
+  const isSticker = !!mediaSticker || !!m.sticker;
   const [pickerOpen, setPickerOpen] = useState(false);
   // Copy the message text to the clipboard. File messages have no text → no-op.
   const copyText = async () => {
@@ -408,9 +412,11 @@ export function MessageBubble({
       : "";
   const body = m.protection
     ? displayedText
-    : isFile
-      ? t("files.sentFile", { name: m.file!.name })
-      : displayedText;
+    : mediaSticker
+      ? mediaSticker.fallback
+      : isFile
+        ? t("files.sentFile", { name: m.file!.name })
+        : displayedText;
   const ariaLabel = `${speaker}: ${body} · ${formatTime(m.wallClock)}${
     status ? ` · ${status}` : ""
   }`;
@@ -625,6 +631,14 @@ export function MessageBubble({
                     protection={m.protection}
                     image={!!m.file}
                     mime={m.file?.mime}
+                  />
+                ) : mediaSticker ? (
+                  <MediaSticker
+                    key={m.file!.fileConv || m.clientId}
+                    fileConv={m.file!.fileConv}
+                    mime={m.file!.mime}
+                    fallback={mediaSticker.fallback}
+                    readOnly={readOnly}
                   />
                 ) : isSticker ? (
                   sticker ? (

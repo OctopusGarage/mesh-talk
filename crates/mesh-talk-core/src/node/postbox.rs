@@ -204,7 +204,7 @@ pub(super) async fn serve_relay_or_bridge_connection<IO>(
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    serve_relay_or_bridge_connection_with_trust(channel, store, directory, None).await;
+    serve_relay_or_bridge_connection_with_trust(channel, store, directory, None, None).await;
 }
 
 #[derive(Clone)]
@@ -218,6 +218,7 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
     store: Arc<Mutex<PostOffice>>,
     directory: Option<Arc<Mutex<BridgeDirectory>>>,
     federation_trust: Option<RelayTrust>,
+    origin_signer: Option<&DeviceIdentity>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
@@ -251,7 +252,17 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
                     channel.peer_publicly_visible(),
                     std::time::Instant::now(),
                 );
-                peers.and_then(|peers| directory.encode_snapshot(&first, &peers))
+                peers.and_then(|peers| {
+                    if !directory.apply_origin_request(
+                        &first,
+                        channel.peer_identity(),
+                        origin_signer,
+                        crate::node::discovery_origin::unix_now(),
+                    ) {
+                        return None;
+                    }
+                    directory.encode_snapshot(&first, &peers)
+                })
             };
             if let Some(response) = response {
                 for page in response {
@@ -365,6 +376,27 @@ pub async fn run_bridge_relay_accept_loop(
     .await;
 }
 
+/// Named opt-in bridge; the name is disclosed only with participant consent.
+pub async fn run_named_bridge_relay_accept_loop(
+    identity: DeviceIdentity,
+    listener: TcpListener,
+    store: Arc<Mutex<PostOffice>>,
+    gateway: Option<Arc<Mutex<Option<GatewayProof>>>>,
+    name: &str,
+) {
+    let mut directory = gateway
+        .map(BridgeDirectory::with_gateway)
+        .unwrap_or_default();
+    directory.set_office_name(name);
+    run_relay_accept_loop_inner(
+        identity,
+        listener,
+        store,
+        Some(Arc::new(Mutex::new(directory))),
+    )
+    .await;
+}
+
 /// Bridge relay with one pinned remote post-office gateway. Only clients that
 /// explicitly register with this directory receive the remote relay proof.
 pub async fn run_bridge_relay_accept_loop_with_gateway(
@@ -457,6 +489,12 @@ async fn run_relay_accept_loop_inner_with_trust(
         .lock()
         .expect("relay store lock not poisoned")
         .require_opaque_envelopes();
+    if let Some(directory) = &directory {
+        directory
+            .lock()
+            .expect("bridge directory lock not poisoned")
+            .set_office_public(identity.public());
+    }
     let conns = Arc::new(Semaphore::new(MAX_CONCURRENT_RELAY_CONNS));
     let identity = Arc::new(identity);
     loop {
@@ -489,6 +527,7 @@ async fn run_relay_accept_loop_inner_with_trust(
                     store,
                     directory,
                     federation_trust,
+                    Some(&identity),
                 )
                 .await;
             }
@@ -852,6 +891,183 @@ mod tests {
         .unwrap();
         assert!(first_store.lock().unwrap().has(&reply_outer.id));
         second_server.abort();
+    }
+
+    #[tokio::test]
+    async fn origin_registration_crosses_encrypted_federation_with_bounded_opt_out() {
+        let root = tempfile::tempdir().unwrap();
+        let office = DeviceIdentity::generate();
+        let forwarder = DeviceIdentity::generate();
+        let office_keys = office.secret_bytes();
+        let forwarder_keys = forwarder.secret_bytes();
+        let office_public = office.public();
+        let forwarder_public = forwarder.public();
+        let office_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("office"), "pw", office).unwrap(),
+        ));
+        let forwarding_store = Arc::new(Mutex::new(
+            PostOffice::open(&root.path().join("forwarder"), "pw", forwarder).unwrap(),
+        ));
+        let source = federation::FederationDirectory::new();
+        source.set_office_name("Windows 10 office");
+        let forwarded = federation::FederationDirectory::new();
+        forwarded.set_office_name("Another office");
+        let office_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let office_addr = office_listener.local_addr().unwrap();
+        let forwarding_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let forwarding_addr = forwarding_listener.local_addr().unwrap();
+        let office_server = tokio::spawn(run_federated_relay_accept_loop_with_directory(
+            DeviceIdentity::from_secret_bytes(office_keys.0, office_keys.1),
+            office_listener,
+            office_store.clone(),
+            Arc::new(HashSet::from([forwarder_public.user_id()])),
+            source.clone(),
+        ));
+        let forwarding_server = tokio::spawn(run_federated_relay_accept_loop_with_directory(
+            DeviceIdentity::from_secret_bytes(forwarder_keys.0, forwarder_keys.1),
+            forwarding_listener,
+            forwarding_store,
+            Arc::new(HashSet::from([office_public.user_id()])),
+            forwarded.clone(),
+        ));
+        let user = DeviceIdentity::generate();
+        let viewer = DeviceIdentity::generate();
+        let account = Account::generate();
+        let user_proof = Announce::new_with_account(&user, &account, "Duncan", 47474);
+        let viewer_proof = Announce::new_with_account(&viewer, &account, "Viewer", 47475);
+
+        for share in [true, false] {
+            let mut registration = SecureChannel::connect_with_presence(
+                tokio::net::TcpStream::connect(office_addr).await.unwrap(),
+                &user,
+                Some(&office_public),
+                Some(&user_proof),
+            )
+            .await
+            .unwrap();
+            registration
+                .send(&bridge_directory::origin_request(
+                    &user,
+                    &office_public,
+                    share,
+                ))
+                .await
+                .unwrap();
+            let mut response = bridge_directory::DirectoryResponse::new(office_public.clone());
+            loop {
+                let page = registration.recv().await.unwrap();
+                if matches!(
+                    response.add_page(&page).unwrap(),
+                    bridge_directory::DirectoryProgress::Complete(_)
+                ) {
+                    break;
+                }
+            }
+            // The participant also refreshes the forwarding office without
+            // consenting to that office being labeled as the origin.
+            let mut forwarding_registration = SecureChannel::connect_with_presence(
+                tokio::net::TcpStream::connect(forwarding_addr)
+                    .await
+                    .unwrap(),
+                &user,
+                Some(&forwarder_public),
+                Some(&user_proof),
+            )
+            .await
+            .unwrap();
+            forwarding_registration
+                .send(&bridge_directory::origin_request(
+                    &user,
+                    &forwarder_public,
+                    false,
+                ))
+                .await
+                .unwrap();
+            let mut registration_response =
+                bridge_directory::DirectoryResponse::new(forwarder_public.clone());
+            loop {
+                let page = forwarding_registration.recv().await.unwrap();
+                if matches!(
+                    registration_response.add_page(&page).unwrap(),
+                    bridge_directory::DirectoryProgress::Complete(_)
+                ) {
+                    break;
+                }
+            }
+            let local = source.shared().lock().unwrap().export_with_origins(
+                std::time::Instant::now(),
+                crate::node::discovery_origin::unix_now(),
+            );
+            assert_eq!(
+                local
+                    .iter()
+                    .find(|entry| entry.presence.announce.user_id == user.user_id())
+                    .unwrap()
+                    .origin
+                    .is_some(),
+                share
+            );
+            source
+                .sync_with_relay(
+                    forwarding_addr,
+                    &DeviceIdentity::from_secret_bytes(office_keys.0, office_keys.1),
+                    &forwarder_public,
+                    &office_store,
+                )
+                .await
+                .unwrap();
+            let mut query = SecureChannel::connect_with_presence(
+                tokio::net::TcpStream::connect(forwarding_addr)
+                    .await
+                    .unwrap(),
+                &viewer,
+                Some(&forwarder_public),
+                Some(&viewer_proof),
+            )
+            .await
+            .unwrap();
+            query
+                .send(&bridge_directory::origin_request(
+                    &viewer,
+                    &forwarder_public,
+                    false,
+                ))
+                .await
+                .unwrap();
+            let mut response = bridge_directory::DirectoryResponse::new(forwarder_public.clone());
+            loop {
+                let page = query.recv().await.unwrap();
+                if matches!(
+                    response.add_page(&page).unwrap(),
+                    bridge_directory::DirectoryProgress::Complete(_)
+                ) {
+                    break;
+                }
+            }
+            let origin = response.expiries[&user.user_id()].origin.as_ref();
+            // Forwarded copies expire at their original deadline. An unsigned
+            // omission alone cannot revoke a different office's signed evidence.
+            assert!(origin.is_some());
+            if let Some(origin) = origin {
+                assert_eq!(origin.office_user_id(), office_public.user_id());
+                assert_eq!(origin.office_name(), "Windows 10 office");
+                assert!(
+                    origin.valid_for(&user.public(), crate::node::discovery_origin::unix_now())
+                );
+                assert_ne!(origin.office_user_id(), forwarder_public.user_id());
+                assert!(
+                    forwarded
+                        .shared()
+                        .lock()
+                        .unwrap()
+                        .export_with_origins(std::time::Instant::now(), origin.expires_at_secs())
+                        .iter()
+                        .all(|entry| entry.origin.is_none())
+                );
+            }
+        }
+        office_server.abort();
+        forwarding_server.abort();
     }
 
     #[tokio::test]

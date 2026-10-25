@@ -24,6 +24,7 @@ pub(crate) struct RuntimeAdmission {
     app: AppState,
     node: NodeState,
     lease: SessionLease,
+    sensitive: Option<crate::app_lock::SensitiveAction>,
 }
 
 impl RuntimeAdmission {
@@ -62,6 +63,7 @@ impl RuntimeAdmission {
                     app: app.clone(),
                     node: node.clone(),
                     lease: lease.clone(),
+                    sensitive: None,
                 })
             })
             .map_err(CommandError::Authorization)?
@@ -90,7 +92,30 @@ impl RuntimeAdmission {
             app: app.clone(),
             node: node.clone(),
             lease,
+            sensitive: None,
         })
+    }
+
+    pub(crate) async fn verify_identity(
+        mut self,
+        password: Option<String>,
+        reason: &'static str,
+    ) -> Result<Self, CommandError> {
+        self.sensitive = Some(
+            crate::app_lock::SensitiveAction::verify(&self.app, &self.lease, password, reason)
+                .await?,
+        );
+        Ok(self)
+    }
+
+    pub(crate) fn sensitive_commit<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        match &self.sensitive {
+            Some(proof) => proof.commit(operation),
+            None => operation(),
+        }
     }
 
     pub(crate) fn lease(&self) -> &SessionLease {
@@ -114,7 +139,7 @@ impl RuntimeAdmission {
                         "runtime session unavailable".into(),
                     ));
                 }
-                operation(info)
+                self.sensitive_commit(|| operation(info))
             })
             .map_err(CommandError::Authorization)?
     }
@@ -130,7 +155,10 @@ impl RuntimeAdmission {
                 if self.app.app_lock().is_locked() {
                     return Err(CommandError::Authorization("app locked".into()));
                 }
-                operation()
+                match &self.sensitive {
+                    Some(proof) => proof.commit(operation),
+                    None => operation(),
+                }
             })
     }
 

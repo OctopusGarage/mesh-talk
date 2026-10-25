@@ -2836,7 +2836,7 @@ async fn group_inventory_v4_cooldown_keeps_v1_v2_v3_and_never_probes_disabled_do
                         };
                         let request: wire::DocumentRequest = serde_json::from_slice(&body).unwrap();
                         observed.lock().unwrap().push(request.version);
-                        if request.version == 4 {
+                        if request.version >= 4 {
                             break;
                         }
                         if channel
@@ -2874,22 +2874,35 @@ async fn group_inventory_v4_cooldown_keeps_v1_v2_v3_and_never_probes_disabled_do
                 .is_err()
         );
         assert!(cursor.status(target.device_sync_policy()).2);
+        let mut hostname_rejections = 0;
         for _ in 0..16 {
-            target
+            if target
                 .pull_account_documents_page(&peer, &mut cursor)
                 .await
-                .unwrap();
+                .is_err()
+            {
+                hostname_rejections += 1;
+            }
         }
+        assert_eq!(
+            hostname_rejections, 1,
+            "unsupported hostname metadata has its own cooldown"
+        );
         let versions = versions.lock().unwrap().clone();
         assert_eq!(
             versions.iter().filter(|version| **version == 4).count(),
             1,
             "optional rejection has its own negative cooldown"
         );
+        assert_eq!(
+            versions.iter().filter(|version| **version == 5).count(),
+            if optional_off { 1 } else { 2 },
+            "a closed pooled session permits one fresh negotiation before the domain cooldown"
+        );
         if optional_off {
             assert_eq!(
                 versions,
-                vec![4],
+                vec![4, 5],
                 "disabled optional domains cannot be attempted after selector wraps"
             );
             assert!(
@@ -3411,4 +3424,243 @@ async fn group_inventory_display_labels_cover_real_create_and_rename_without_cha
         group_inventory_source_document(&source, id).meta,
         controlled.meta
     );
+}
+
+#[test]
+fn device_hostnames_are_account_private_bounded_persistent_and_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let target = node(&dir.path().join("target"), &account);
+    let outsider = node(&dir.path().join("outsider"), &Account::generate());
+    source.set_device_hostname(Some("Kingson-MacBook")).unwrap();
+    let key = AccountDocumentKey::DeviceHostname {
+        device_id: source.user_id(),
+    };
+    let first = source.account_document(&key).unwrap().unwrap();
+    source.set_device_hostname(Some("Kingson-MacBook")).unwrap();
+    assert_eq!(source.account_document_meta(&key), Some(first.meta.clone()));
+    assert!(
+        target
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(first.meta.clone(), first.payload())
+            .unwrap()
+    );
+    assert!(
+        outsider
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(first.meta.clone(), first.payload())
+            .is_err()
+    );
+    // Unknown device labels never enter the roster or its presentation projection.
+    assert!(
+        !target
+            .device_hostnames()
+            .unwrap()
+            .contains_key(&source.user_id())
+    );
+    target
+        .account_devices
+        .lock()
+        .unwrap()
+        .insert(crate::node::account_devices::AccountDevice {
+            public: source.identity.public(),
+            certificate: account.certify(&source.identity.public().ed25519_pub),
+        })
+        .unwrap();
+    assert_eq!(
+        target.device_hostnames().unwrap()[&source.user_id()],
+        "Kingson-MacBook"
+    );
+    assert!(source.set_device_hostname(Some("bad\nhost")).is_err());
+    assert!(source.set_device_hostname(Some(&"a".repeat(256))).is_err());
+    assert!(
+        source
+            .put_account_document_if(
+                key.clone(),
+                b"spoof".to_vec(),
+                Some(first.meta.version()),
+                |commit| commit()
+            )
+            .is_err()
+    );
+    let forged = AccountDocumentMeta::new(
+        &account,
+        target.user_id(),
+        key.clone(),
+        first.meta.revision + 1,
+        b"spoof",
+        false,
+    );
+    assert!(!forged.valid(&account.public().ed25519_pub));
+    let reopened = AccountDocumentStore::open(
+        &dir.path().join("target"),
+        "pw",
+        &account.public().ed25519_pub,
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.get(&key).unwrap().unwrap().payload(),
+        b"Kingson-MacBook"
+    );
+    source.set_device_hostname(None).unwrap();
+    assert!(
+        !source
+            .device_hostnames()
+            .unwrap()
+            .contains_key(&source.user_id())
+    );
+}
+
+#[tokio::test]
+async fn unrelated_noise_peer_cannot_fetch_device_hostnames() {
+    use crate::{
+        node::account_sync_wire::{AccountHistoryFrame, AccountSyncVersion},
+        transport::SecureChannel,
+    };
+    use tokio::net::{TcpListener, TcpStream};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    source
+        .set_device_hostname(Some("Private-Office-PC"))
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = source.clone();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let channel = serving.privacy_accept(stream).await.unwrap();
+        serving.serve_connection(channel).await;
+    });
+    let stranger = DeviceIdentity::generate();
+    let mut channel = SecureChannel::connect(
+        TcpStream::connect(address).await.unwrap(),
+        &stranger,
+        Some(&source.identity.public()),
+    )
+    .await
+    .unwrap();
+    let request = wire::DocumentRequest {
+        version: 5,
+        account_id: account.account_id(),
+        domain: AccountDocumentDomain::DeviceHostname,
+        after: None,
+        known_digest: [0; 32],
+    };
+    channel
+        .send(
+            &AccountHistoryFrame::DocumentsRequest {
+                body: request.encode(),
+            }
+            .encode_version(AccountSyncVersion::V2)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), channel.recv())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn device_hostnames_use_encrypted_sibling_sync_with_optional_categories_off() {
+    use crate::{
+        discovery::{Announce, roster::PeerRecord},
+        node::account_devices::AccountDevice,
+    };
+    use std::time::Instant;
+    use tokio::net::TcpListener;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let target = node(&dir.path().join("target"), &account);
+    for (a, b) in [(&source, &target), (&target, &source)] {
+        a.account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: b.identity.public(),
+                certificate: account.certify(&b.identity.public().ed25519_pub),
+            })
+            .unwrap();
+        for category in [
+            SyncCategory::History,
+            SyncCategory::Attachments,
+            SyncCategory::Profile,
+            SyncCategory::Appearance,
+            SyncCategory::Contacts,
+        ] {
+            a.set_device_sync_category(category, false).unwrap();
+        }
+    }
+    source
+        .set_device_hostname(Some("Private-Office-PC"))
+        .unwrap();
+    let announce = Announce::new_with_account(&source.identity, &account, "Public nickname", 4242);
+    assert!(!format!("{announce:?}").contains("Private-Office-PC"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerRecord {
+        public: source.identity.public(),
+        addr: listener.local_addr().unwrap(),
+        name: "Public nickname".into(),
+        account_id: Some(account.account_id()),
+        last_seen: Instant::now(),
+        post_office: false,
+        routes: vec![],
+    };
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::DeviceHostname);
+    target
+        .pull_account_documents_page(&peer, &mut cursor)
+        .await
+        .unwrap();
+    assert_eq!(
+        target.device_hostnames().unwrap()[&source.user_id()],
+        "Private-Office-PC"
+    );
+    let bytes = std::fs::read(
+        dir.path()
+            .join("target")
+            .join(format!("account-documents-{}.log", account.account_id())),
+    )
+    .unwrap();
+    assert!(
+        !bytes
+            .windows(b"Private-Office-PC".len())
+            .any(|w| w == b"Private-Office-PC")
+    );
+    source
+        .set_device_hostname(Some("Renamed-Office-PC"))
+        .unwrap();
+    cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::DeviceHostname);
+    target
+        .pull_account_documents_page(&peer, &mut cursor)
+        .await
+        .unwrap();
+    assert_eq!(
+        target.device_hostnames().unwrap()[&source.user_id()],
+        "Renamed-Office-PC"
+    );
+    source.set_device_hostname(None).unwrap();
+    cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::DeviceHostname);
+    target
+        .pull_account_documents_page(&peer, &mut cursor)
+        .await
+        .unwrap();
+    assert!(
+        !target
+            .device_hostnames()
+            .unwrap()
+            .contains_key(&source.user_id())
+    );
+    server.abort();
 }

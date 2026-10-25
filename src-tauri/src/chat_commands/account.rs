@@ -78,13 +78,43 @@ pub async fn peer_avatars(
         .collect())
 }
 
+async fn prepare_linking_sync(
+    admission: &RuntimeAdmission,
+    sync_all: Option<bool>,
+) -> Result<(), CommandError> {
+    if sync_all == Some(true) {
+        admission
+            .with_runtime(|runtime| {
+                use mesh_talk_core::node::SyncCategory;
+                let node = runtime.handle();
+                for category in [
+                    SyncCategory::History,
+                    SyncCategory::Attachments,
+                    SyncCategory::Profile,
+                    SyncCategory::Appearance,
+                    SyncCategory::Contacts,
+                ] {
+                    node.set_device_sync_category(category, true)?;
+                }
+                Ok(())
+            })
+            .await?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn start_linking<R: tauri::Runtime>(
     handle: tauri::AppHandle<R>,
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
+    password: Option<String>,
+    sync_all: Option<bool>,
 ) -> Result<String, CommandError> {
-    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let admission = RuntimeAdmission::capture_current(&app, &state)?
+        .verify_identity(password, "link a Mesh-Talk device")
+        .await?;
+    prepare_linking_sync(&admission, sync_all).await?;
     let source_app = app.inner().clone();
     admission
         .clone()
@@ -130,8 +160,13 @@ pub async fn link_device(
     state: tauri::State<'_, NodeState>,
     peer: String,
     code: String,
+    password: Option<String>,
+    sync_all: Option<bool>,
 ) -> Result<String, CommandError> {
-    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let admission = RuntimeAdmission::capture_current(&app, &state)?
+        .verify_identity(password, "link a Mesh-Talk device")
+        .await?;
+    prepare_linking_sync(&admission, sync_all).await?;
     let app = app.inner().clone();
     admission
         .detached(move |runtime, admission| {
@@ -294,6 +329,7 @@ mod recovery_accounts_tests {
                 last_authenticated: None,
                 presence_expires_at: None,
                 presence_origin_expires_at: None,
+                registration_origin: None,
                 origin_hops: None,
             }],
             name: "Alice".into(),

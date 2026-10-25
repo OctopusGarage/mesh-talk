@@ -36,6 +36,7 @@ mod integrations;
 mod linked_account;
 pub mod logger;
 pub mod message_favorites;
+mod network_cost;
 mod notifications;
 pub mod owner_commands;
 pub mod perf;
@@ -374,6 +375,8 @@ pub fn run_tauri_configured(
                 commands::adopt_linked_account,
                 google_drive::google_drive_available,
                 google_drive::google_drive_connect,
+                google_drive::google_drive_resume,
+                google_drive::google_drive_forget,
                 google_drive::google_drive_disconnect,
                 google_drive::google_drive_progress,
                 google_drive::google_drive_list,
@@ -383,6 +386,9 @@ pub fn run_tauri_configured(
                 google_drive::google_drive_restore,
                 recovery::create_backup,
                 recovery::prepare_backup_key,
+                recovery::setup::backup_setup,
+                recovery::setup::confirm_backup_key,
+                recovery::setup::set_backup_destination,
                 recovery::backup_status,
                 recovery::inspect_backup,
                 recovery::restore_backup,
@@ -401,6 +407,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::link_device,
                 crate::chat_commands::get_device_sync_policy,
                 crate::chat_commands::get_device_sync_status,
+                crate::chat_commands::get_device_hostnames,
                 crate::chat_commands::get_account_login_sync_status,
                 crate::chat_commands::set_device_sync_category,
                 crate::chat_commands::get_account_preferences,
@@ -423,6 +430,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::dissolve_channel,
                 crate::chat_commands::channel_members,
                 crate::chat_commands::set_channel_replica_enabled,
+                crate::chat_commands::set_group_file_sharing_override,
                 crate::chat_commands::set_channel_history_policy,
                 crate::chat_commands::channel_custody_statuses,
                 crate::chat_commands::channel_activity,

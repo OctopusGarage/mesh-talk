@@ -77,6 +77,8 @@ export type SendPayload =
       kind: "file";
       path: string;
       media: boolean;
+      /** Selected sticker bytes retain their display metadata before manifest hydration. */
+      stickerMedia?: { name: string; size: number; mime: string };
       expiresAtMs?: number | null;
       protection?: import("@/lib/types").MessageProtection | null;
     };

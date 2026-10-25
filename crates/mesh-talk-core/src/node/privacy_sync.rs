@@ -990,6 +990,16 @@ impl GuardedSyncStore<'_> {
             return Vec::new();
         }
         let mut events = self.visible_projection(conversation, payloads);
+        // Recheck each payload page in either direction, including pooled sessions.
+        // Preserve the actual possession inventory/fingerprint: hiding retained IDs
+        // would make peers push these same chunks back to a metered holder.
+        if self
+            .node
+            .restricts_group_file_replica(conversation, &self.peer)
+        {
+            let own = self.node.identity.public().ed25519_pub;
+            events.retain(|event| event.author.ed25519_pub() == &own);
+        }
         if self.node.certified_sibling(&self.peer)
             && *conversation
                 == super::conversation::dm_conversation_id(&self.node.identity.public(), &self.peer)

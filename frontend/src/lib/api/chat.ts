@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { invokeSensitive } from "./sensitiveInvoke";
 
 /** Local scheduling facts only; absence means unknown. */
 export interface DeliveryObservation {
@@ -155,6 +156,11 @@ export const chat = {
     invoke<AccountLoginSyncStatus>("get_account_login_sync_status", { owner }),
   getDeviceSyncPolicy: (owner: string) =>
     invoke<DeviceSyncPolicy>("get_device_sync_policy", { owner }),
+  getDeviceHostnames: (owner: string, expectedAccount: string) =>
+    invoke<Record<string, string>>("get_device_hostnames", {
+      owner,
+      expectedAccount,
+    }),
   getDeviceSyncStatus: (owner: string) =>
     invoke<DeviceSyncStatus[]>("get_device_sync_status", { owner }),
   setDeviceSyncCategory: (
@@ -412,6 +418,16 @@ export const chat = {
     invoke<void>("set_channel_history_policy", { channelId, policy }),
   setChannelReplicaEnabled: (channelId: string, enabled: boolean) =>
     invoke<void>("set_channel_replica_enabled", { channelId, enabled }),
+  setGroupFileSharingOverride: (
+    owner: string,
+    networkCost: "unknown" | "unrestricted" | "restricted",
+    enabled: boolean,
+  ) =>
+    invoke<void>("set_group_file_sharing_override", {
+      owner,
+      networkCost,
+      enabled,
+    }),
   channelCustodyStatuses: (channelId: string, ids: string[]) =>
     invoke<Array<{ id: string; replicas: number; post_offices?: number }>>(
       "channel_custody_statuses",
@@ -537,9 +553,10 @@ export const chat = {
   searchContext: (owner: string, reference: SearchReference) =>
     invoke<SearchContext>("owner_search_context", { owner, reference }),
   search: (query: string) => invoke<SearchHitInfo[]>("search", { query }),
-  startLinking: () => invoke<string>("start_linking"),
+  startLinking: (syncAll = false) =>
+    invokeSensitive<string>("start_linking", { syncAll }),
   stopLinking: () => invoke<void>("stop_linking"),
-  linkDevice: (peer: string, code: string) =>
-    invoke<string>("link_device", { peer, code }),
+  linkDevice: (peer: string, code: string, syncAll = false) =>
+    invokeSensitive<string>("link_device", { peer, code, syncAll }),
   rekeyAccount: () => invoke<string>("rekey_account"),
 };

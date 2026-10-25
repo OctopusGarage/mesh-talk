@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Loader2, LockKeyhole } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LoginScreen } from "@/features/auth/LoginScreen";
+import { SensitiveVerificationDialog } from "@/features/auth/SensitiveVerificationDialog";
 import { WindowControls } from "@/components/WindowControls";
 import { isMacOverlay } from "@/lib/platform";
 import { useAuth } from "@/store/auth";
@@ -290,6 +291,13 @@ export default function App() {
       )}
       {/* Custom min/max/close for the frameless window (Windows/Linux); null on macOS/web. */}
       <WindowControls />
+      {owner && !locked && (
+        <SensitiveVerificationDialog
+          key={`${owner}:${generation}`}
+          owner={owner}
+          generation={generation}
+        />
+      )}
       <div
         className="contents"
         data-appearance-ready={appearanceReady ? "" : undefined}
