@@ -15,7 +15,9 @@
         "scripts/e2e-network-handoff.py",
         "scripts/README.md"
       ],
-      "node": ["scripts/diagnostics/post-office-installer.test.mjs"],
+      "node": [
+        "scripts/diagnostics/post-office-installer.test.mjs"
+      ],
       "escalation": [
         "Network membership mode validates public policy/certificate before installation mutation and persists public files without authority private keys. Policy changes/renewal require restart; startup must bind the certificate to the existing device identity. Windows installer changes require native PowerShell execution in addition to macOS fixtures. Managed services must use main TCP 47479. Managed service discovery must use dedicated UDP 47478 and shared LAN UDP 47474 on all hosts; reject other installer values before mutation. Preserve mesh identity, credentials, custody data and service configuration during updates. macOS local-build updates must retain the installed code-signing identifier and verify the staged signature before replacement; publisher-issued signatures remain intact. See docs/post-office-macos-service.md. Validate real service restart, LAN multicast and routed discovery on the affected host; fixture tests and listener checks do not establish local-network access. Interface handoff changes require the opt-in Docker network-namespace harness: queued and new messages must converge with authenticated receipts without process restart or manual rescan; namespace evidence is separate from physical Wi-Fi hardware."
       ]
@@ -271,7 +273,8 @@
         ".github/workflows/dependency-review.yml",
         "scripts/ci/collect-ui-coverage.mjs",
         "scripts/ci/unit-coverage-artifact.mjs",
-        "scripts/diagnostics/health-workflow.test.mjs"
+        "scripts/diagnostics/health-workflow.test.mjs",
+        ".gitleaks.toml"
       ],
       "node": [
         "scripts/diagnostics/ci-latency.test.mjs",
@@ -286,7 +289,10 @@
     },
     {
       "id": "public-help",
-      "paths": ["tools/help/", "docs/help/"],
+      "paths": [
+        "tools/help/",
+        "docs/help/"
+      ],
       "node": [
         "tools/help/corpus.test.mjs",
         "tools/help/help.test.mjs",
@@ -312,7 +318,9 @@
         "scripts/test-ai-eval.mjs",
         "docs/evals/desktop-updates-ai-eval-suite.json"
       ],
-      "node": ["scripts/test-ai-eval.mjs"],
+      "node": [
+        "scripts/test-ai-eval.mjs"
+      ],
       "escalation": [
         "Context selection integrity checks validate rubric inputs; they do not execute the evaluated capabilities or establish native evidence."
       ]
@@ -334,7 +342,9 @@
         "scripts/evals/portable-runner.mjs",
         "scripts/diagnostics/browser-eval-report.test.mjs"
       ],
-      "node": ["scripts/diagnostics/browser-eval-report.test.mjs"],
+      "node": [
+        "scripts/diagnostics/browser-eval-report.test.mjs"
+      ],
       "escalation": [
         "Portable browser reporting requires exact scenario identities, unique trace and screenshot evidence, and zero skipped or flaky cases from the configured browser matrix. Diagnostic tests do not establish browser acceptance; see docs/testing-feedback-loop.md."
       ]
