@@ -33,7 +33,7 @@ fn reopen(path: &Path, account: &Account, identity: DeviceIdentity) -> Arc<Node>
     .unwrap()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network_fanout() {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();

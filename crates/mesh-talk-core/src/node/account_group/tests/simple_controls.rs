@@ -486,11 +486,11 @@ async fn assert_reference_controls(modern: bool) {
     while servers.join_next().await.is_some() {}
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_reference_owner_policy_and_dissolve_commit_real_source_effects_over_noise() {
     assert_reference_controls(false).await;
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn modern_reference_owner_policy_and_dissolve_commit_real_source_effects_over_noise() {
     assert_reference_controls(true).await;
 }
@@ -760,7 +760,7 @@ async fn an_awaiting_control_cannot_use_transferred_owner_authority() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn consecutive_account_controls_progress_while_public_fanout_is_stalled() {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();

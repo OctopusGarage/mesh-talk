@@ -5,7 +5,7 @@ use crate::node::{AccountDocumentKey, DocumentConversation};
 use std::time::Duration;
 use tokio::sync::{Semaphore, oneshot};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reference_owner_rename_overtakes_blocked_optional_document_page_over_noise() {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();

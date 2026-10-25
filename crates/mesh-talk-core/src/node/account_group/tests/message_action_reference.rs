@@ -5,14 +5,21 @@ use crate::node::AccountGroupTextInput;
 #[path = "reaction_account_reduction.rs"]
 mod reaction_account_reduction;
 
-async fn wait_action_fixture(mut ready: impl FnMut() -> bool, message: &str) {
+async fn wait_action_fixture(ready: impl FnMut() -> bool, message: &'static str) {
+    wait_action_fixture_diagnosed(ready, || message).await;
+}
+
+async fn wait_action_fixture_diagnosed(
+    mut ready: impl FnMut() -> bool,
+    diagnosis: impl Fn() -> &'static str,
+) {
     tokio::time::timeout(std::time::Duration::from_secs(8), async {
         while !ready() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect(message);
+    .unwrap_or_else(|_| panic!("{}", diagnosis()));
 }
 
 /// Role-page publication can invalidate the authenticated page mid-transfer.
@@ -359,7 +366,7 @@ async fn reference_message_action(recall: bool) {
             },
             "React must switch to capable D; Recall must retain original author A"
         );
-        wait_action_fixture(
+        wait_action_fixture_diagnosed(
             || {
                 reference
                     .account_group_operation_status(&account.account_id(), id)
@@ -371,7 +378,19 @@ async fn reference_message_action(recall: bool) {
                             })
                     })
             },
-            "the delegated action must commit once and reach the external member over Noise",
+            || {
+                super::messages::account_send_timeout_stage(
+                    if recall || turn == 0 {
+                        &source
+                    } else {
+                        &sibling
+                    },
+                    &reference,
+                    &external,
+                    &account,
+                    id,
+                )
+            },
         )
         .await;
         let status = reference
@@ -537,12 +556,12 @@ async fn reference_message_action(recall: bool) {
     tasks.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reference_member_reacts_over_noise_with_private_projection_and_history_off() {
     reference_message_action(false).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reference_member_recall_pins_original_author_over_ready_sibling_with_history_off() {
     reference_message_action(true).await;
 }
