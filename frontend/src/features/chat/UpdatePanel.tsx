@@ -55,12 +55,21 @@ export function UpdatePanel() {
 
   const installing = phase === "installing" || phase === "restarting";
   const busy = phase === "checking" || phase === "downloading" || installing;
-  const percent = progress?.total
-    ? Math.min(
-        100,
-        Math.max(0, Math.floor((progress.downloaded / progress.total) * 100)),
-      )
-    : null;
+  const preparing = progress?.phase === "preparing";
+  const progressLabel = t(
+    preparing
+      ? "about.updates.preparing"
+      : progress?.phase === "fallback"
+        ? "about.updates.fallback"
+        : "about.updates.downloading",
+  );
+  const percent =
+    !preparing && progress?.total
+      ? Math.min(
+          100,
+          Math.max(0, Math.floor((progress.downloaded / progress.total) * 100)),
+        )
+      : null;
   const installKey = release?.package_name?.includes("_macos_")
     ? "mac"
     : release?.package_name?.includes("_windows_")
@@ -178,19 +187,21 @@ export function UpdatePanel() {
                   {phase === "downloading" && progress && (
                     <div role="status" aria-live="polite">
                       <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-                        <span>{t("about.updates.downloading")}</span>
+                        <span>{progressLabel}</span>
                         <span>
                           {percent !== null
                             ? `${percent}%`
-                            : readableSize(progress.downloaded)}
+                            : preparing
+                              ? ""
+                              : readableSize(progress.downloaded)}
                         </span>
                       </div>
                       <progress
                         className="h-2 w-full accent-primary"
-                        aria-label={t("about.updates.downloading")}
+                        aria-label={progressLabel}
                         max={progress.total || 1}
                         value={
-                          progress.total
+                          !preparing && progress.total
                             ? Math.min(progress.downloaded, progress.total)
                             : undefined
                         }

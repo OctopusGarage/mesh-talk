@@ -51,7 +51,11 @@
         "scripts/diagnostics/version-automation.test.mjs",
         "site/index.html",
         "docs/updates.md",
-        "scripts/diagnostics/release-updater.test.mjs"
+        "scripts/diagnostics/release-updater.test.mjs",
+        "scripts/release/delta.mjs",
+        "scripts/release/delta_assets.py",
+        "scripts/diagnostics/release-delta.test.mjs",
+        "src-tauri/examples/delta-artifact.rs"
       ],
       "node": [
         "scripts/diagnostics/release-assets.test.mjs",
@@ -65,10 +69,12 @@
         "scripts/diagnostics/release-workflow.test.mjs",
         "scripts/diagnostics/version-contract.test.mjs",
         "scripts/diagnostics/version-automation.test.mjs",
-        "scripts/diagnostics/release-updater.test.mjs"
+        "scripts/diagnostics/release-updater.test.mjs",
+        "scripts/diagnostics/release-delta.test.mjs"
       ],
       "escalation": [
-        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Every desktop and relay platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Manual draft/maintenance changes require hosted evidence for explicit main-only preparation, unpublished draft-only creation, exact tagged build dispatch and reviewed next-target PR creation; local mocks do not prove those settings and actual preparation/publication requires explicit release intent. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate."
+        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Every desktop and relay platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Manual draft/maintenance changes require hosted evidence for explicit main-only preparation, unpublished draft-only creation, exact tagged build dispatch and reviewed next-target PR creation; local mocks do not prove those settings and actual preparation/publication requires explicit release intent. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate.",
+        "Optional macOS/Windows delta publication requires SDK full-version authentication of prior canonical payloads, exact native representation equivalence, production Rust decoder round-trip, complete signed metadata savings of at least 25 percent and 1 MiB, and ZIP/standalone digest and provenance acceptance. Actual Windows complete NSIS installation/restart and transferred delta bytes require native hosted evidence; executable-only patches and fixture success do not establish acceptance. Linux remains canonical full update only."
       ],
       "capability": {
         "summary": "Maintain one Cargo product target, curated version notes and reviewed version/next-target PRs, publishing complete exact-source verified Stable releases and immutable automatic main-branch Nightlies.",
@@ -101,6 +107,10 @@
           {
             "name": "Optional free updater signing binds the full logical build version; standalone native payloads and signatures must match the verified ZIP and form a complete platform matrix. Missing keys keep the manual path; partial signing configuration fails closed.",
             "reference": "docs/updates.md#free-updater-signing-setup"
+          },
+          {
+            "name": "Optional macOS/Windows delta assets preserve the canonical full updater, authenticate at most two eligible installed-executable bases with the existing SDK full-version signature, round-trip exact native targets through the production decoder, and pass complete signed metadata savings, installer equivalence and standalone provenance checks before publication.",
+            "reference": "docs/updates.md#incremental-download-preparation"
           }
         ]
       }

@@ -451,5 +451,85 @@ class ReleaseAssetsTests(unittest.TestCase):
                     verify_directory(self.root, "v0.1.5", "0.1.5")
 
 
+    def add_delta_assets(self):
+        self.add_updater_assets()
+        platform = "macos_arm64"
+        full = "mesh-talk-update_v0.1.5_macos_arm64.app.tar.gz"
+        payload = b"full" * (1024 * 1024)
+        self.entries[platform]["release/" + full] = payload
+        (self.root / full).write_bytes(payload)
+        raw = full.replace("mesh-talk-update_", "mesh-talk-update-raw_")
+        patch = "mesh-talk-patch_v0.1.5_macos_arm64_from-v0.1.4.zst"
+        def artifact(name, data):
+            return {"name": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        catalog = {"schema": 1, "role": "mesh-talk-delta", "algorithm": "zstd-prefix-v1", "tag": "v0.1.5", "release_kind": "stable", "os": "macos", "arch": "aarch64", "fallback": artifact(full, payload), "target": artifact(raw, b"raw native"), "bases": [{"tag": "v0.1.4", "size": 123, "sha256": "a" * 64, "patch": artifact(patch, b"patch")}]}
+        for name, data in ((raw, b"raw native"), (raw + ".sig", b"signature"), (full + ".delta.json", json.dumps(catalog).encode()), (full + ".delta.json.sig", b"signature"), (patch, b"patch")):
+            (self.root / name).write_bytes(data)
+            self.entries[platform]["release/" + name] = data
+        self.write_archive(platform)
+        return catalog
+
+    def test_complete_optional_delta_set_is_verified_and_bound_to_zip(self):
+        self.add_delta_assets()
+        self.assertEqual(len(self.verify()), 12)
+        next(self.root.glob("mesh-talk-patch_*")).write_bytes(b"other")
+        with self.assertRaisesRegex(ValueError, "(updater|delta).*match"):
+            self.verify()
+
+    def test_optional_delta_set_rejects_partial_extra_and_identity_contradictions(self):
+        self.add_delta_assets()
+        raw_sig = next(self.root.glob("mesh-talk-update-raw_*.sig"))
+        raw_sig.unlink()
+        with self.assertRaisesRegex(ValueError, "(asset set|delta)"):
+            self.verify()
+
+    def test_optional_delta_catalog_rejects_wrong_target_hash_and_unworthwhile_patch(self):
+        catalog = self.add_delta_assets()
+        path = next(self.root.glob("*.delta.json"))
+        for mutate in (lambda c: c.update(os="windows"), lambda c: c["target"].update(sha256="b" * 64), lambda c: c["fallback"].update(size=100)):
+            candidate = json.loads(json.dumps(catalog))
+            mutate(candidate)
+            data = json.dumps(candidate).encode()
+            path.write_bytes(data)
+            self.entries["macos_arm64"]["release/" + path.name] = data
+            self.write_archive("macos_arm64")
+            with self.assertRaisesRegex(ValueError, "delta"):
+                self.verify()
+
+
+    def test_delta_native_equivalence_binds_tar_bytes_and_all_windows_resources(self):
+        import gzip
+        from delta_assets import equivalent
+        from unittest.mock import patch
+        canonical, raw = self.root / "canonical", self.root / "raw"
+        canonical.write_bytes(gzip.compress(b"exact tar bytes", compresslevel=9))
+        raw.write_bytes(gzip.compress(b"exact tar bytes", compresslevel=0))
+        equivalent(canonical, raw, "macos")
+        raw.write_bytes(gzip.compress(b"changed tar bytes", compresslevel=0))
+        with self.assertRaisesRegex(ValueError, "exact canonical tar"):
+            equivalent(canonical, raw, "macos")
+        members = {"mesh-talk.exe": b"MZ__TAURI_BUNDLE_TYPE_VAR_NSS", "resources/config.json": b"resource", "$PLUGINSDIR/StartMenu.dll": b"plugin"}
+        listing = "Type = Nsis\n\n" + "\n\n".join(f"Path = {name}\nSize = {len(data) + (5 if name.startswith('$PLUGINSDIR/') else 0)}" for name, data in members.items()) + "\n\nPath = uninstall.exe\nSize = \
+"
+        changed = None
+        def command(args, **kwargs):
+            if args[1] == "l":
+                return listing
+            data = members[args[-1]]
+            return b"mutated!" if args[3] == str(raw) and args[-1] == changed else data
+        with patch("delta_assets.shutil.which", return_value="7zz"), patch("delta_assets.subprocess.check_output", side_effect=command):
+            equivalent(canonical, raw, "windows")
+            changed = "resources/config.json"
+            with self.assertRaisesRegex(ValueError, "application files differ"):
+                equivalent(canonical, raw, "windows")
+            changed = "$PLUGINSDIR/StartMenu.dll"
+            with self.assertRaisesRegex(ValueError, "application files differ"):
+                equivalent(canonical, raw, "windows")
+            members["mesh-talk.exe"] = b"MZ__TAURI_BUNDLE_TYPE_VAR_MSI"
+            changed = None
+            with self.assertRaisesRegex(ValueError, "bundle marker"):
+                equivalent(canonical, raw, "windows")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -142,6 +142,25 @@ it("keeps channel selection disabled during checks and verified downloads, then 
   expect(host.querySelector("progress")?.value).toBe(5242880);
   expect(host.textContent).toContain("50%");
   await act(async () =>
+    progress({
+      downloaded: 0,
+      total: 0,
+      phase: "preparing",
+    } as DownloadProgress),
+  );
+  expect(host.textContent).toContain("Preparing update");
+  expect(host.querySelector("progress")?.hasAttribute("value")).toBe(false);
+  expect(select().disabled).toBe(true);
+  await act(async () =>
+    progress({
+      downloaded: 0,
+      total: 10485760,
+      phase: "fallback",
+    } as DownloadProgress),
+  );
+  expect(host.textContent).toContain("Downloading full update");
+  expect(host.querySelector("progress")?.value).toBe(0);
+  await act(async () =>
     downloaded({
       path: "/Downloads/nightly.zip",
       file_name: "nightly.zip",
