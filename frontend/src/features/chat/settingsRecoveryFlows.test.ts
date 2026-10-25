@@ -3,6 +3,9 @@ import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
+  driveCreate: vi.fn(),
+  driveDisconnect: vi.fn(),
+  driveConnections: [] as string[],
   policy: vi.fn(),
   global: vi.fn(),
   contact: vi.fn(),
@@ -35,6 +38,32 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: mocks.save }));
+vi.mock("@/lib/api/googleDrive", () => ({
+  googleDrive: { create: mocks.driveCreate, disconnect: mocks.driveDisconnect },
+}));
+vi.mock("@/features/recovery/GoogleDriveProgress", () => ({
+  GoogleDriveProgress: () => null,
+}));
+vi.mock("@/features/recovery/GoogleDriveConnection", () => ({
+  GoogleDriveConnection: ({
+    connectionId,
+    onConnected,
+    onDisconnected,
+  }: {
+    connectionId: string;
+    onConnected: () => void;
+    onDisconnected: () => void;
+  }) => {
+    if (!mocks.driveConnections.includes(connectionId))
+      mocks.driveConnections.push(connectionId);
+    return createElement(
+      "div",
+      null,
+      createElement("button", { onClick: onConnected }, "connect-drive"),
+      createElement("button", { onClick: onDisconnected }, "disconnect-drive"),
+    );
+  },
+}));
 vi.mock("@/store/auth", () => ({
   useAuth: (select: (state: typeof mocks.state) => unknown) =>
     select(mocks.state),
@@ -112,6 +141,8 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.resetAllMocks();
   mocks.state = { generation: 0, runEpoch: 0, identityEpoch: 0, ready: true };
+  mocks.driveConnections = [];
+  mocks.driveDisconnect.mockResolvedValue(undefined);
   mocks.policy.mockResolvedValue({ global_auto: false, contact_auto: null });
   mocks.prepare.mockResolvedValue("aaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh");
   mocks.setup.mockResolvedValue({
@@ -442,5 +473,212 @@ it("retains the previous destination when saving a destination fails", async () 
   });
   expect(select().value).toBe("local");
   expect(host.textContent).toContain("Could not save destination");
+  expect(exportButton().disabled).toBe(false);
+});
+
+const button = (label: string) =>
+  Array.from(host.querySelectorAll("button")).find(
+    (item) => item.textContent === label,
+  )!;
+const click = (label: string) => act(async () => button(label).click());
+async function chooseDrive() {
+  await act(async () => {
+    select().value = "drive";
+    select().dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await click("connect-drive");
+}
+it("exports to Drive with the native saved key and reports completion to history", async () => {
+  const onBackupCreated = vi.fn();
+  mocks.setup.mockResolvedValue({
+    recovery_key: "saved-key",
+    confirmed: true,
+    destination: "drive",
+  });
+  mocks.driveCreate.mockResolvedValue({
+    archive_bytes: 2048,
+    preview: { messages: 4 },
+  });
+  await render(
+    createElement(DataRecoverySettings, { open: true, onBackupCreated }),
+  );
+  expect(exportButton().disabled).toBe(true);
+  await click("connect-drive");
+  await act(async () => exportButton().click());
+  expect(mocks.driveCreate).toHaveBeenCalledWith(expect.any(String));
+  expect(mocks.confirmKey).not.toHaveBeenCalled();
+  expect(mocks.save).not.toHaveBeenCalled();
+  expect(host.textContent).toContain("drive.complete");
+  expect(onBackupCreated).toHaveBeenCalledOnce();
+  await click("common.done");
+});
+it("retries a failed key acknowledgement before allowing Drive upload", async () => {
+  mocks.confirmKey.mockRejectedValueOnce(new Error("setup unavailable"));
+  mocks.driveCreate.mockResolvedValue({
+    archive_bytes: 2048,
+    preview: { messages: 4 },
+  });
+  await openBackup();
+  await chooseDrive();
+  await act(async () => exportButton().click());
+  expect(host.textContent).toContain("setup unavailable");
+  expect(mocks.driveCreate).not.toHaveBeenCalled();
+  expect(mocks.save).not.toHaveBeenCalled();
+  await act(async () => exportButton().click());
+  expect(mocks.confirmKey).toHaveBeenCalledTimes(2);
+  expect(mocks.driveCreate).toHaveBeenCalledOnce();
+});
+it("rolls back a failed destination save and allows selecting Drive again", async () => {
+  await openBackup();
+  mocks.setDestination.mockRejectedValueOnce(
+    new Error("destination unavailable"),
+  );
+  await act(async () => {
+    select().value = "drive";
+    select().dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(select().value).toBe("local");
+  expect(host.textContent).toContain("destination unavailable");
+  await chooseDrive();
+  expect(select().value).toBe("drive");
+  expect(exportButton().disabled).toBe(false);
+});
+it("waits for a cancelled Drive snapshot to settle before creating a reconnect view", async () => {
+  const pending = deferred<unknown>();
+  mocks.driveCreate.mockReturnValueOnce(pending.promise);
+  await openBackup();
+  await chooseDrive();
+  const connection = mocks.driveConnections[mocks.driveConnections.length - 1];
+  await act(async () => exportButton().click());
+  await click("drive.cancel");
+  expect(mocks.driveDisconnect).toHaveBeenCalledWith(connection);
+  expect(exportButton().disabled).toBe(true);
+  expect(mocks.driveConnections[mocks.driveConnections.length - 1]).toBe(
+    connection,
+  );
+  await act(async () => pending.reject(new Error("cancelled")));
+  expect(mocks.driveConnections[mocks.driveConnections.length - 1]).not.toBe(
+    connection,
+  );
+  expect(exportButton().disabled).toBe(true);
+  await click("connect-drive");
+  expect(exportButton().disabled).toBe(false);
+});
+it("reports cancellation failure while keeping the snapshot owned until completion", async () => {
+  const pending = deferred<unknown>();
+  mocks.driveCreate.mockReturnValueOnce(pending.promise);
+  mocks.driveDisconnect.mockRejectedValueOnce(new Error("disconnect failed"));
+  await openBackup();
+  await chooseDrive();
+  await act(async () => exportButton().click());
+  await click("drive.cancel");
+  expect(host.textContent).toContain("disconnect failed");
+  expect(exportButton().disabled).toBe(true);
+  await act(async () => pending.reject(new Error("snapshot stopped")));
+  expect(host.textContent).toContain("snapshot stopped");
+});
+it("does not apply a destination save after its dialog closes and reopens", async () => {
+  const pending = deferred<void>();
+  await render(createElement(DataRecoverySettings, { open: true }));
+  mocks.setDestination.mockReturnValueOnce(pending.promise);
+  await act(async () => {
+    select().value = "drive";
+    select().dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await render(createElement(DataRecoverySettings, { open: false }));
+  await render(createElement(DataRecoverySettings, { open: true }));
+  await act(async () => pending.resolve());
+  expect(select().value).toBe("local");
+  expect(button("connect-drive")).toBeUndefined();
+});
+it("retries setup loading without generating or replacing a key", async () => {
+  mocks.setup.mockRejectedValueOnce(new Error("setup unavailable"));
+  await render(createElement(DataRecoverySettings, { open: true }));
+  expect(host.textContent).toContain("setup unavailable");
+  expect(exportButton().disabled).toBe(true);
+  await click("contactVisibility.retry");
+  expect(host.textContent).toContain("aaaa-bbbb");
+  expect(mocks.prepare).not.toHaveBeenCalled();
+});
+it("allows viewing, copying and hiding a confirmed key", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  mocks.setup.mockResolvedValue({
+    recovery_key: "saved-private-key",
+    confirmed: true,
+    destination: "local",
+  });
+  await render(createElement(DataRecoverySettings, { open: true }));
+  expect(host.textContent).not.toContain("saved-private-key");
+  await click("recovery.viewKey");
+  expect(host.textContent).toContain("saved-private-key");
+  await click("recovery.copyKey");
+  expect(writeText).toHaveBeenCalledWith("saved-private-key");
+  expect(host.textContent).toContain("recovery.keyCopied");
+  await click("recovery.hideKey");
+  expect(host.textContent).not.toContain("saved-private-key");
+  Reflect.deleteProperty(navigator, "clipboard");
+});
+it("signals the controlling history page when a completed backup is dismissed", async () => {
+  const onOpenChange = vi.fn();
+  mocks.setup.mockResolvedValue({
+    recovery_key: "saved",
+    confirmed: true,
+    destination: "local",
+  });
+  mocks.save.mockResolvedValue("/tmp/current.mtbackup");
+  mocks.create.mockResolvedValue({
+    archive_bytes: 1,
+    preview: { messages: 1 },
+  });
+  await render(
+    createElement(DataRecoverySettings, { open: true, onOpenChange }),
+  );
+  await act(async () => exportButton().click());
+  await click("common.done");
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+});
+it.each(["resolve", "reject"] as const)(
+  "does not publish a Drive backup %s after its owner is replaced",
+  async (outcome) => {
+    const pending = deferred<unknown>();
+    const onBackupCreated = vi.fn();
+    mocks.driveCreate.mockReturnValueOnce(pending.promise);
+    mocks.setup.mockResolvedValue({
+      recovery_key: "saved",
+      confirmed: true,
+      destination: "drive",
+    });
+    await render(
+      createElement(DataRecoverySettings, { open: true, onBackupCreated }),
+    );
+    await click("connect-drive");
+    await act(async () => exportButton().click());
+    mocks.state.generation++;
+    await render(
+      createElement(DataRecoverySettings, { open: true, onBackupCreated }),
+    );
+    await act(async () =>
+      outcome === "resolve"
+        ? pending.resolve({ archive_bytes: 1, preview: { messages: 1 } })
+        : pending.reject(new Error("old upload failed")),
+    );
+    expect(onBackupCreated).not.toHaveBeenCalled();
+    expect(host.textContent).not.toContain("old upload failed");
+    expect(host.textContent).not.toContain("drive.complete");
+  },
+);
+
+it("requires reconnection after explicitly disconnecting the backup destination", async () => {
+  await openBackup();
+  await chooseDrive();
+  expect(exportButton().disabled).toBe(false);
+  await click("disconnect-drive");
+  expect(exportButton().disabled).toBe(true);
+  expect(mocks.driveCreate).not.toHaveBeenCalled();
+  await click("connect-drive");
   expect(exportButton().disabled).toBe(false);
 });

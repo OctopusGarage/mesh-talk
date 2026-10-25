@@ -274,3 +274,194 @@ it("retries remembered authorization after a network error without opening Googl
   expect(api.connect).not.toHaveBeenCalled();
   expect(onConnected).toHaveBeenCalledOnce();
 });
+
+it("keeps the grant connected after forgetting fails and allows retry", async () => {
+  api.resume.mockResolvedValue(true);
+  api.forget.mockRejectedValueOnce(new Error("Could not forget account"));
+  const onDisconnected = vi.fn();
+  await act(async () =>
+    root.render(
+      createElement(GoogleDriveConnection, {
+        connectionId: "forget-retry",
+        onConnected: vi.fn(),
+        onDisconnected,
+      }),
+    ),
+  );
+  await click("Disconnect / change Google account");
+  expect(host.textContent).toContain("Could not forget account");
+  expect(host.textContent).toContain("Google Drive connected");
+  expect(onDisconnected).not.toHaveBeenCalled();
+  await click("Disconnect / change Google account");
+  expect(onDisconnected).toHaveBeenCalledOnce();
+});
+it("reports a failed authorization cancellation and releases the sign-in controls", async () => {
+  api.connect.mockImplementationOnce(() => new Promise<void>(() => {}));
+  api.disconnect.mockRejectedValueOnce(new Error("Cancellation failed"));
+  await act(async () =>
+    root.render(
+      createElement(GoogleDriveConnection, {
+        connectionId: "cancel-failure",
+        onConnected: vi.fn(),
+      }),
+    ),
+  );
+  await click("Connect Google Drive");
+  await click("Cancel");
+  expect(host.textContent).toContain("Cancellation failed");
+  expect(
+    [...host.querySelectorAll("button")].find(
+      (item) => item.textContent === "Connect Google Drive",
+    )?.disabled,
+  ).toBe(false);
+});
+it("disables authorization and account removal while the parent owns a transfer", async () => {
+  await act(async () =>
+    root.render(
+      createElement(GoogleDriveConnection, {
+        connectionId: "disabled",
+        onConnected: vi.fn(),
+        disabled: true,
+      }),
+    ),
+  );
+  await click("Connect Google Drive");
+  expect(api.connect).not.toHaveBeenCalled();
+  api.resume.mockResolvedValue(true);
+  await act(async () =>
+    root.render(
+      createElement(GoogleDriveConnection, {
+        connectionId: "disabled-connected",
+        onConnected: vi.fn(),
+        disabled: true,
+      }),
+    ),
+  );
+  await click("Disconnect / change Google account");
+  expect(api.forget).not.toHaveBeenCalled();
+});
+it("ignores late availability after the connection view is replaced", async () => {
+  let finish!: (value: boolean) => void;
+  api.available.mockReturnValueOnce(
+    new Promise<boolean>((resolve) => {
+      finish = resolve;
+    }),
+  );
+  const onConnected = vi.fn();
+  await act(async () =>
+    root.render(
+      createElement(GoogleDriveConnection, {
+        connectionId: "old-view",
+        onConnected,
+      }),
+    ),
+  );
+  await act(async () =>
+    root.render(
+      createElement(GoogleDriveConnection, {
+        connectionId: "new-view",
+        onConnected,
+      }),
+    ),
+  );
+  await act(async () => finish(true));
+  expect(api.resume).toHaveBeenCalledExactlyOnceWith("new-view");
+  expect(onConnected).not.toHaveBeenCalled();
+});
+it.each(["resolve", "reject"] as const)(
+  "retires a pending forget %s when its connection view is replaced",
+  async (outcome) => {
+    let finish!: () => void;
+    let fail!: (error: Error) => void;
+    api.resume.mockResolvedValue(true);
+    api.forget.mockReturnValueOnce(
+      new Promise<void>((resolve, reject) => {
+        finish = resolve;
+        fail = reject;
+      }),
+    );
+    const onDisconnected = vi.fn();
+    const onConnected = vi.fn();
+    await act(async () =>
+      root.render(
+        createElement(GoogleDriveConnection, {
+          connectionId: "old",
+          onConnected,
+          onDisconnected,
+        }),
+      ),
+    );
+    const disconnect = [...host.querySelectorAll("button")].find(
+      (item) => item.textContent === "Disconnect / change Google account",
+    )!;
+    await act(async () => {
+      disconnect.click();
+      disconnect.click();
+    });
+    expect(api.forget).toHaveBeenCalledOnce();
+    await act(async () =>
+      root.render(
+        createElement(GoogleDriveConnection, {
+          connectionId: "new",
+          onConnected,
+          onDisconnected,
+        }),
+      ),
+    );
+    await act(async () =>
+      outcome === "resolve" ? finish() : fail(new Error("old forget failed")),
+    );
+    expect(onDisconnected).not.toHaveBeenCalled();
+    expect(host.textContent).not.toContain("old forget failed");
+    expect(host.textContent).toContain("Google Drive connected");
+  },
+);
+it("admits one authorization request before React commits the busy state", async () => {
+  api.connect.mockResolvedValue(undefined);
+  const onConnected = vi.fn();
+  await act(async () =>
+    root.render(
+      createElement(GoogleDriveConnection, {
+        connectionId: "double-click",
+        onConnected,
+      }),
+    ),
+  );
+  const connect = [...host.querySelectorAll("button")].find(
+    (item) => item.textContent === "Connect Google Drive",
+  )!;
+  await act(async () => {
+    connect.click();
+    connect.click();
+  });
+  expect(api.connect).toHaveBeenCalledOnce();
+  expect(onConnected).toHaveBeenCalledOnce();
+});
+it("ignores a late availability failure after its connection view is replaced", async () => {
+  let fail!: (error: Error) => void;
+  api.available.mockReturnValueOnce(
+    new Promise<boolean>((_resolve, reject) => {
+      fail = reject;
+    }),
+  );
+  const onConnected = vi.fn();
+  await act(async () =>
+    root.render(
+      createElement(GoogleDriveConnection, {
+        connectionId: "old-availability",
+        onConnected,
+      }),
+    ),
+  );
+  await act(async () =>
+    root.render(
+      createElement(GoogleDriveConnection, {
+        connectionId: "new-availability",
+        onConnected,
+      }),
+    ),
+  );
+  await act(async () => fail(new Error("old availability failed")));
+  expect(host.textContent).not.toContain("old availability failed");
+  expect(host.textContent).toContain("Connect Google Drive");
+});

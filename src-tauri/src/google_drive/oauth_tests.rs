@@ -551,3 +551,67 @@ async fn refresh_rejects_invalid_token_expiry_scope_and_type() {
         assert!(result.is_err());
     }
 }
+
+#[tokio::test]
+async fn refresh_configuration_and_malformed_responses_are_retryable_without_secret_leaks() {
+    for (status, body, kind) in [
+        (
+            "400 Bad Request",
+            r#"{"error":"invalid_client","error_description":"private-provider-details"}"#,
+            "invalid-input",
+        ),
+        (
+            "400 Bad Request",
+            r#"{"error_description":"private-provider-details"}"#,
+            "invalid-input",
+        ),
+        ("200 OK", "private-provider-malformed-json", "io"),
+        (
+            "200 OK",
+            r#"{"access_token":"private-access-token","token_type":"Bearer","expires_in":0}"#,
+            "io",
+        ),
+        ("429 Too Many Requests", r#"{"error":"rate_limited"}"#, "io"),
+        ("408 Request Timeout", r#"{"error":"timeout"}"#, "io"),
+        ("401 Unauthorized", r#"{"error":"invalid_client"}"#, "io"),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let (result, request) = tokio::join!(
+            refresh_with(
+                test_client().unwrap(),
+                &endpoint,
+                CLIENT_ID,
+                Some(""),
+                "private-refresh-token"
+            ),
+            token_reply(listener, status, body)
+        );
+        let error = result.unwrap_err();
+        assert_eq!(serde_json::to_value(&error).unwrap()["kind"], kind);
+        assert!(!format!("{error:?}").contains("private-"));
+        assert!(!request.form.contains_key("client_secret"));
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/closed", listener.local_addr().unwrap());
+    drop(listener);
+    assert!(matches!(
+        refresh_with(
+            test_client().unwrap(),
+            &endpoint,
+            CLIENT_ID,
+            None,
+            "private-refresh-token"
+        )
+        .await,
+        Err(CommandError::Io(_))
+    ));
+}
+
+#[test]
+fn token_debug_output_never_discloses_access_or_refresh_credentials() {
+    let tokens: TokenResponse = serde_json::from_value(serde_json::json!({"access_token":"private-access-token", "refresh_token":"private-refresh-token", "token_type":"Bearer", "expires_in":3600})).unwrap();
+    let rendered = format!("{tokens:?}");
+    assert!(rendered.contains("redacted"));
+    assert!(!rendered.contains("private-"));
+}

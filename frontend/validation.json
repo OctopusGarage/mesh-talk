@@ -963,11 +963,15 @@
         "frontend/src/features/auth/RestoreBackup.tsx",
         "frontend/e2e/google-drive-backup.spec.ts",
         "frontend/src/lib/api/recovery.ts",
-        "frontend/e2e/recovery.spec.ts"
+        "frontend/e2e/recovery.spec.ts",
+        "frontend/src/features/auth/RestoreBackup.test.ts",
+        "frontend/src/lib/api/recovery.test.ts"
       ],
       "frontend": [
         "src/features/recovery/GoogleDriveConnection.test.ts",
-        "src/features/chat/settingsRecoveryFlows.test.ts"
+        "src/features/chat/settingsRecoveryFlows.test.ts",
+        "src/features/auth/RestoreBackup.test.ts",
+        "src/lib/api/recovery.test.ts"
       ],
       "capability": {
         "summary": "Connect Google Drive and save a recovery key once, then manually back up with native retained setup and restore through a single download-and-verify action.",
