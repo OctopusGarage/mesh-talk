@@ -5360,7 +5360,8 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
     assert!(b.read_file(file).is_err());
     b.pull_pending_files().await;
     assert_eq!(b.read_media(file).unwrap(), bytes);
-    assert_eq!(b.file_progress(file).unwrap().done, 0);
+    let progress = b.file_progress(file).unwrap();
+    assert!(progress.total > 0 && progress.done == progress.total);
     assert!(b.file_ready_to_save(file));
     assert!(b.log.lock().unwrap().events(&file).is_empty());
     assert!(
@@ -5962,7 +5963,8 @@ async fn untracked_channel_media_local_export_verifies_retained_row_and_managed_
         .unwrap();
     assert!(a.persist_media_if_complete(file));
     assert!(a.log.lock().unwrap().events(&file).is_empty());
-    assert_eq!(a.file_progress(file).unwrap().done, 0);
+    let progress = a.file_progress(file).unwrap();
+    assert!(progress.total > 0 && progress.done == progress.total);
     assert!(a.file_ready_to_save(file));
     assert!(!a.has_verified_file_completion(file));
     let exported = a.save_file_into_dir(file, dir.path()).unwrap();

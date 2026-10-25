@@ -5271,7 +5271,9 @@ async fn media_lands_in_durable_store_survives_prune_and_restart() {
 
     // The transient chunks were pruned once the media was stored — but the durable copy
     // still reads back (the whole point: display no longer depends on the chunks).
-    assert_eq!(bob_node.file_progress(file_conv).map(|p| p.done), Some(0));
+    assert!(bob_node.log.lock().unwrap().events(&file_conv).is_empty());
+    let progress = bob_node.file_progress(file_conv).unwrap();
+    assert!(progress.total > 0 && progress.done == progress.total);
     assert_eq!(
         bob_node.read_media(file_conv).as_deref(),
         Some(&payload[..])
