@@ -640,6 +640,7 @@ export const test = base.extend({
         post_office_receive_enabled: true,
         physical_lan_only: false,
         bridge_discovery_enabled: false,
+        origin_sharing_enabled: false,
         ringtone: "classic",
         privacy_level: "balanced",
         notification_preview: true,

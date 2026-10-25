@@ -372,6 +372,7 @@ pub struct Node {
     pub(in crate::node) bridge_dm_pull_peers: Mutex<HashMap<UserId, std::time::Instant>>,
     pub(in crate::node) physical_lan_only: std::sync::atomic::AtomicBool,
     pub(in crate::node) bridge_discovery_enabled: std::sync::atomic::AtomicBool,
+    pub(in crate::node) origin_sharing_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) bridge_hub_id: Mutex<Option<String>>,
     pub(in crate::node) bridge_notify: tokio::sync::Notify,
     pub(in crate::node) bridge_refresh:
@@ -892,6 +893,7 @@ impl Node {
             bridge_dm_pull_peers: Mutex::new(HashMap::new()),
             physical_lan_only: std::sync::atomic::AtomicBool::new(false),
             bridge_discovery_enabled: std::sync::atomic::AtomicBool::new(false),
+            origin_sharing_enabled: std::sync::atomic::AtomicBool::new(false),
             bridge_hub_id: Mutex::new(None),
             bridge_notify: tokio::sync::Notify::new(),
             bridge_refresh: tokio::sync::Mutex::new(Default::default()),

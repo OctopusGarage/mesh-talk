@@ -2,6 +2,41 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-discovery-origin",
+      "paths": [
+        "frontend/src/features/chat/memberProfileDetails.ts",
+        "frontend/src/features/chat/MemberProfileDialog.tsx",
+        "frontend/src/store/presence.ts",
+        "frontend/src/features/chat/settings/NetworkSettings.tsx",
+        "frontend/e2e/person-presence.spec.ts",
+        "frontend/e2e/settings-recovery.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/memberProfileDetails.test.ts",
+        "src/features/chat/MemberProfileDialog.test.ts",
+        "src/store/presence.test.ts",
+        "src/features/chat/settings/NetworkSettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts"
+      ],
+      "capability": {
+        "summary": "Expose only verified, independently expiring registration origins and keep participant-controlled disclosure off by default.",
+        "guide": "docs/network-design-reference.md#optional-registration-origin-disclosure",
+        "invariants": [
+          {
+            "name": "Original office and immediate introducer remain distinct; IPC silence cannot renew origin disclosure",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          },
+          {
+            "name": "Sharing belongs to the active participant and stale owners or missing legacy settings cannot enable it",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          }
+        ]
+      },
+      "escalation": [
+        "Run encrypted multi-hop core scenarios and a native settings/profile smoke check; mocked IPC alone does not prove Windows office deployment."
+      ]
+    },
+    {
       "id": "frontend-account-group-inventory",
       "paths": [
         "frontend/src/lib/types.ts",

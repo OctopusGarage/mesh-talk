@@ -52,6 +52,7 @@ mod delivery_runtime;
 #[cfg(test)]
 mod delivery_runtime_tests;
 pub(crate) mod delivery_store;
+pub(crate) mod discovery_origin;
 pub(crate) mod dm;
 pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
@@ -130,6 +131,7 @@ pub use delivery_observation::{
     DeliveryObservation, DeliveryObservationKind, DeliveryRecoveryReason,
 };
 pub use delivery_store::DeliveryStatus;
+pub use discovery_origin::{OriginConsent, RegistrationOrigin};
 pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;
 pub use filebook::{FileBook, ReceivedFile};
@@ -146,8 +148,8 @@ pub use participant_runtime::{
 };
 pub use postbox::{
     elected_post_office, run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway,
-    run_federated_relay_accept_loop_with_directory, run_network_relay_accept_loop_with_directory,
-    run_relay_accept_loop,
+    run_federated_relay_accept_loop_with_directory, run_named_bridge_relay_accept_loop,
+    run_network_relay_accept_loop_with_directory, run_relay_accept_loop,
 };
 pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapshot};
 pub use privacy_runtime::AccountBindingChange;

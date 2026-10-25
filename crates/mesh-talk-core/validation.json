@@ -2,6 +2,55 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-discovery-origin",
+      "paths": [
+        "crates/mesh-talk-core/src/node/discovery_origin.rs",
+        "crates/mesh-talk-core/src/discovery/roster.rs",
+        "crates/mesh-talk-core/src/node/bridge_directory.rs",
+        "crates/mesh-talk-core/src/node/bridge_client.rs",
+        "crates/mesh-talk-core/src/node/postbox.rs",
+        "crates/mesh-talk-core/src/postoffice/federation.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::discovery_origin::tests::",
+            "node::bridge_directory::tests::",
+            "node::bridge_client::tests::",
+            "node::postbox::tests::",
+            "postoffice::federation::tests::",
+            "discovery::roster::"
+          ]
+        }
+      ],
+      "consumers": [
+        "desktop-chat",
+        "desktop-settings"
+      ],
+      "capability": {
+        "summary": "Preserve a participant-consented original registration office across encrypted directory and federation hops without disclosing it by default.",
+        "guide": "docs/network-design-reference.md#optional-registration-origin-disclosure",
+        "invariants": [
+          {
+            "name": "Both signatures bind the exact participant and office; optional origin never establishes physical location or transport authority",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          },
+          {
+            "name": "Opt-out serializes with active sends and invalidates prepared work; original 15-second consent leases cannot be renewed by forwarding or presentation tolerance",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          },
+          {
+            "name": "Legacy discovery and mailbox wire layouts stay compatible and carry no optional origin disclosure",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          }
+        ]
+      },
+      "escalation": [
+        "Run encrypted loopback registration/federation/viewer and opt-out scenarios, host settings/session and presence projection tests, and frontend independent metadata-expiry tests. Physical Windows/macOS office topology still needs native acceptance; loopback does not certify deployment."
+      ]
+    },
+    {
       "id": "core-account-group-inventory",
       "paths": [
         "crates/mesh-talk-core/src/node/account_documents/inventory.rs",

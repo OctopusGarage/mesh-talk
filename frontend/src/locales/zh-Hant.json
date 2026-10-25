@@ -442,6 +442,8 @@
     "send": "傳送截圖"
   },
   "settings": {
+    "originSharing": "分享我的來源郵局",
+    "originSharingDesc": "允許探索到此裝置的人查看其來源郵局。郵局名稱可能透露你的網路或位置。參與轉送的郵局可透過加密連線讀取此資訊。預設關閉；關閉後停止新增分享，已有副本將在短時間內過期。",
     "title": "設定",
     "description": "管理隱私、外觀、訊息、檔案和應用程式行為。",
     "scrollMore": "捲動查看更多設定",
@@ -1077,12 +1079,15 @@
     "idConflict": "其他類型的資源庫已使用這個資源包 ID。"
   },
   "memberProfile": {
+    "registrationOrigin": "註冊郵局",
+    "registrationOriginHint": "僅在對方共享註冊資訊時顯示。註冊郵局不代表其實際位置或訊息傳輸路徑。",
+    "registrationOriginUnavailable": "暫無共享的註冊資訊",
     "discoveredVia": "上線來源",
     "discoveryLocal": "本地區域網路 · UDP 群播",
     "discoveryPostOffice": "郵局 · {{name}}",
-    "discoveryUnnamedOffice": "郵局 · 來源未知",
+    "discoveryUnnamedOffice": "郵局 · 名稱未知",
     "discoveryUnavailable": "暫無有效的發現來源資訊",
-    "discoveryHint": "顯示本機可識別且最接近成員原始上線公告的郵局。通訊路徑由系統自動選擇。",
+    "discoveryHint": "此用戶端發現成員的途徑；訊息的實際傳輸路徑可能不同。",
     "originalName": "原始名稱",
     "remark": "備註",
     "title": "成員資料",

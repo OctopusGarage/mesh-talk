@@ -442,6 +442,8 @@
     "send": "스크린샷 보내기"
   },
   "settings": {
+    "originSharing": "내 등록 우체국 공유",
+    "originSharingDesc": "이 기기를 발견한 사람이 등록 우체국을 볼 수 있도록 합니다. 우체국 이름으로 네트워크나 위치가 드러날 수 있습니다. 중계에 참여하는 우체국도 암호화된 연결에서 이 정보를 읽을 수 있습니다. 기본적으로 꺼져 있습니다. 끄면 새 공유가 중단되고 기존 사본은 잠시 후 만료됩니다.",
     "title": "설정",
     "description": "개인정보 보호, 화면 모양, 메시지, 파일 및 앱 동작을 관리합니다.",
     "scrollMore": "스크롤하여 더 많은 설정 보기",
@@ -1077,12 +1079,15 @@
     "idConflict": "다른 종류의 라이브러리에서 이 팩 ID를 이미 사용하고 있습니다."
   },
   "memberProfile": {
+    "registrationOrigin": "등록 우체국",
+    "registrationOriginHint": "사용자가 등록 정보를 공유할 때만 표시됩니다. 우체국은 실제 위치나 메시지 전달 경로를 나타내지 않습니다.",
+    "registrationOriginUnavailable": "공유된 등록 정보가 없습니다",
     "discoveredVia": "발견 출처",
     "discoveryLocal": "로컬 네트워크 · UDP 멀티캐스트",
     "discoveryPostOffice": "우체국 · {{name}}",
-    "discoveryUnnamedOffice": "우체국 · 출처를 알 수 없음",
+    "discoveryUnnamedOffice": "우체국 · 이름을 확인할 수 없음",
     "discoveryUnavailable": "현재 검색 정보 없음",
-    "discoveryHint": "멤버의 최초 온라인 상태 알림에 가장 가까운 것으로 알려진 우체국을 표시합니다. 통신 경로는 자동으로 선택됩니다.",
+    "discoveryHint": "이 클라이언트에서 멤버를 발견한 경로입니다. 메시지 전달 경로는 다를 수 있습니다.",
     "originalName": "원래 이름",
     "remark": "메모",
     "title": "멤버 프로필",

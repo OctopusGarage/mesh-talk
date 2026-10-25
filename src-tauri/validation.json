@@ -2,6 +2,42 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-discovery-origin",
+      "paths": [
+        "src-tauri/src/chat_commands/presence.rs",
+        "src-tauri/src/settings.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "chat_commands::presence::tests::",
+            "settings::tests::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Expose only verified, independently expiring registration origins and keep participant-controlled disclosure off by default.",
+        "guide": "docs/network-design-reference.md#optional-registration-origin-disclosure",
+        "invariants": [
+          {
+            "name": "Original office and immediate introducer remain distinct; IPC silence cannot renew origin disclosure",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          },
+          {
+            "name": "Sharing belongs to the active participant and stale owners or missing legacy settings cannot enable it",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          }
+        ]
+      },
+      "escalation": [
+        "Run encrypted multi-hop core scenarios and a native settings/profile smoke check; mocked IPC alone does not prove Windows office deployment."
+      ],
+      "consumers": [
+        "frontend-discovery-origin"
+      ]
+    },
+    {
       "id": "desktop-account-group-inventory",
       "paths": [
         "src-tauri/src/chat_commands/channels.rs",

@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import type { PeerInfo } from "@/lib/types";
 import {
   memberDiscoverySources,
+  memberRegistrationOrigins,
   memberProfileDevices,
 } from "./memberProfileDetails";
 
@@ -29,7 +30,83 @@ const peers: PeerInfo[] = [
   },
 ];
 
-it("keeps local discovery and selects one origin per device, deduplicating expired evidence", () => {
+it("preserves the Windows origin separately from its Mac introducer and deduplicates devices", () => {
+  const origin = {
+    user_id: "windows-office",
+    name: "Windows 10 office",
+    expires_in_secs: 5,
+  };
+  const evidence = {
+    source: "directory" as const,
+    last_seen_secs: 0,
+    expires_in_secs: 10,
+    post_office: {
+      user_id: "mac-office",
+      name: "Mac office",
+      endpoint: "10.0.0.1:47479",
+    },
+    registration_origin: origin,
+  };
+  const presence = {
+    online: true,
+    last_seen_secs: 0,
+    devices: [
+      { user_id: "duncan-a", evidence: [evidence] },
+      { user_id: "duncan-b", evidence: [evidence] },
+    ],
+  };
+  expect(memberRegistrationOrigins(presence)).toEqual([origin]);
+  expect(memberDiscoverySources(presence)).toEqual([
+    { source: "directory", postOffice: evidence.post_office },
+  ]);
+});
+
+it("never infers registration origin from a legacy introducer or an expired proof", () => {
+  const origin = {
+    user_id: "windows-office",
+    name: "Windows 10 office",
+    expires_in_secs: 0,
+  };
+  expect(
+    memberRegistrationOrigins({
+      online: true,
+      last_seen_secs: 0,
+      devices: [
+        {
+          user_id: "duncan",
+          evidence: [
+            {
+              source: "directory",
+              last_seen_secs: 0,
+              expires_in_secs: 10,
+              post_office: { name: "Mac office", endpoint: "10.0.0.1:47479" },
+            },
+            {
+              source: "directory",
+              last_seen_secs: 0,
+              expires_in_secs: 10,
+              registration_origin: origin,
+            },
+            {
+              source: "directory",
+              last_seen_secs: 0,
+              expires_in_secs: 0,
+              registration_origin: { ...origin, expires_in_secs: 5 },
+            },
+            {
+              source: "local",
+              last_seen_secs: 0,
+              expires_in_secs: 10,
+              registration_origin: { ...origin, expires_in_secs: 5 },
+            },
+          ],
+        },
+      ],
+    }),
+  ).toEqual([]);
+});
+
+it("keeps local discovery and distinct introducing offices, deduplicating devices and expired evidence", () => {
   const office = {
     user_id: "office-a",
     name: "mac-mini-post-office",
@@ -41,14 +118,12 @@ it("keeps local discovery and selects one origin per device, deduplicating expir
       source: "directory" as const,
       last_seen_secs: 0,
       expires_in_secs: 10,
-      origin_hops: 0,
       post_office: office,
     },
     {
       source: "directory" as const,
       last_seen_secs: 0,
       expires_in_secs: 10,
-      origin_hops: 1,
       post_office: {
         ...office,
         user_id: "office-b",
@@ -66,10 +141,21 @@ it("keeps local discovery and selects one origin per device, deduplicating expir
         { user_id: "device-b", evidence },
       ],
     }),
-  ).toEqual([{ source: "local" }, { source: "directory", postOffice: office }]);
+  ).toEqual([
+    { source: "local" },
+    { source: "directory", postOffice: office },
+    {
+      source: "directory",
+      postOffice: {
+        ...office,
+        user_id: "office-b",
+        name: "mac2015-post-office",
+      },
+    },
+  ]);
 });
 
-it("leaves the origin unknown when no visible office can be identified", () => {
+it("preserves unnamed introducing endpoints without borrowing another peer's name", () => {
   const post_office = { endpoint: "192.168.1.4:47479" };
   expect(
     memberDiscoverySources({
@@ -89,7 +175,7 @@ it("leaves the origin unknown when no visible office can be identified", () => {
         },
       ],
     }),
-  ).toEqual([{ source: "directory" }]);
+  ).toEqual([{ source: "directory", postOffice: post_office }]);
   expect(memberDiscoverySources({ online: false, last_seen_secs: 20 })).toEqual(
     [],
   );
@@ -140,73 +226,4 @@ it("does not attach a changed device identity's endpoint to an older account", (
     { id: "device-b", endpoint: "100.101.1.2:47474", postOffice: false },
     { id: "relay", endpoint: null, postOffice: false },
   ]);
-});
-
-it("selects the closest visible office to the origin, independent of response order", () => {
-  const office = (id: string, hops: number, expires = 8) => ({
-    source: "directory" as const,
-    last_seen_secs: 0,
-    expires_in_secs: expires,
-    origin_hops: hops,
-    post_office: { endpoint: `${id}:47479`, user_id: id, name: id },
-  });
-  const project = (evidence: ReturnType<typeof office>[]) =>
-    memberDiscoverySources({
-      online: true,
-      last_seen_secs: 0,
-      devices: [{ user_id: "stella", evidence }],
-    });
-  const mini = office("mac-mini", 0);
-  const mac = office("mac2015", 1);
-  const win = office("windows10", 2);
-  expect(project([win, mac, mini])).toEqual([
-    { source: "directory", postOffice: mini.post_office },
-  ]);
-  expect(project([win, mac])).toEqual([
-    { source: "directory", postOffice: mac.post_office },
-  ]);
-  expect(project([win, { ...mac, expires_in_secs: 0 }])).toEqual([
-    { source: "directory", postOffice: win.post_office },
-  ]);
-});
-
-it("keeps independent device origins and resolves equal distances stably", () => {
-  const entry = (
-    id: string,
-    hops?: number,
-  ): import("@/lib/types").PresenceEvidence => ({
-    source: "directory",
-    last_seen_secs: 0,
-    expires_in_secs: 10,
-    origin_hops: hops,
-    post_office: { user_id: id, name: id, endpoint: `${id}:1` },
-  });
-  const project = (evidence: import("@/lib/types").PresenceEvidence[]) =>
-    memberDiscoverySources({
-      online: true,
-      last_seen_secs: 0,
-      devices: [{ user_id: "a", evidence }],
-    });
-  expect(project([entry("z", 1), entry("a", 1)])[0].postOffice?.user_id).toBe(
-    "a",
-  );
-  expect(project([entry("a", 1), entry("z", 1)])[0].postOffice?.user_id).toBe(
-    "a",
-  );
-  expect(project([entry("unknown"), entry("bad", -1)])).toEqual([
-    { source: "directory" },
-  ]);
-  expect(
-    project([entry("unknown"), entry("known", 2)])[0].postOffice?.user_id,
-  ).toBe("known");
-  expect(
-    memberDiscoverySources({
-      online: true,
-      last_seen_secs: 0,
-      devices: [
-        { user_id: "a", evidence: [entry("mini", 0)] },
-        { user_id: "b", evidence: [entry("windows", 0)] },
-      ],
-    }).map((source) => source.postOffice?.user_id),
-  ).toEqual(["mini", "windows"]);
 });

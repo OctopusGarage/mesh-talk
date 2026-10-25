@@ -442,6 +442,8 @@
     "send": "Enviar captura de tela"
   },
   "settings": {
+    "originSharing": "Compartilhar meu posto de correio de origem",
+    "originSharingDesc": "Permitir que quem descobrir este dispositivo veja seu posto de correio de origem. O nome pode revelar sua rede ou localização. Os postos participantes podem ler esses dados pela conexão criptografada. Desativado por padrão; desativar interrompe novos compartilhamentos e as cópias existentes expiram em pouco tempo.",
     "title": "Configurações",
     "description": "Gerencie a privacidade, a aparência, as mensagens, os arquivos e o comportamento do aplicativo.",
     "scrollMore": "Role para ver mais configurações",
@@ -1077,12 +1079,15 @@
     "idConflict": "Outro tipo de biblioteca já usa o ID deste pacote."
   },
   "memberProfile": {
+    "registrationOrigin": "Posto de registro",
+    "registrationOriginHint": "Exibido apenas quando o membro compartilha informações de registro. Um posto não indica sua localização física nem a rota de uma mensagem.",
+    "registrationOriginUnavailable": "Nenhuma informação de registro compartilhada",
     "discoveredVia": "Origem da descoberta",
     "discoveryLocal": "Rede local · multicast UDP",
     "discoveryPostOffice": "Posto de correio · {{name}}",
-    "discoveryUnnamedOffice": "Posto de correio · origem desconhecida",
+    "discoveryUnnamedOffice": "Posto de correio · nome indisponível",
     "discoveryUnavailable": "Nenhuma informação atual de descoberta",
-    "discoveryHint": "Mostra o posto de correio conhecido mais próximo do anúncio original de presença do membro. A comunicação escolhe o caminho automaticamente.",
+    "discoveryHint": "Como este cliente descobriu o membro; as rotas das mensagens podem ser diferentes.",
     "originalName": "Nome original",
     "remark": "Nome personalizado",
     "title": "Perfil do membro",

@@ -193,6 +193,14 @@ The source of a learned route, such as local discovery, a routed query or a
 post-office introduction. An address prefix is not provenance.
 _Avoid_: physical location inferred from an IP address.
 
+**Registration origin**:
+An explicitly shared, short-lived relationship between a participant device and
+the post office with which it registered. Both parties authenticate the binding;
+forwarding preserves its original expiry. It is distinct from the immediate
+directory introducer and does not establish physical location. Sharing defaults
+off and is controlled by the registering participant device.
+_Avoid_: geographic origin, home network, delivery route, inferred location.
+
 **Post office**:
 A peer-operated participant that temporarily retains opaque encrypted events.
 “Relay” is an accepted role label here; custody does not confer channel membership.

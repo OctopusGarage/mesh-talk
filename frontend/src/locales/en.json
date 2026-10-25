@@ -442,6 +442,8 @@
     "send": "Send screenshot"
   },
   "settings": {
+    "originSharing": "Share my originating post office",
+    "originSharingDesc": "Allow people who discover this device to see its originating post office. The office name may reveal your network or location. Participating post offices can read this information through the encrypted connection. Off by default; turning it off stops new sharing, while existing copies expire shortly.",
     "title": "Settings",
     "description": "Manage privacy, appearance, messages, files, and app behavior.",
     "scrollMore": "Scroll for more settings",
@@ -1077,12 +1079,15 @@
     "idConflict": "A different library type already uses this pack ID."
   },
   "memberProfile": {
+    "registrationOrigin": "Registration office",
+    "registrationOriginHint": "Shown only when the member shares registration information. An office does not establish physical location or the route of a message.",
+    "registrationOriginUnavailable": "No shared registration information",
     "discoveredVia": "Discovery source",
     "discoveryLocal": "Local LAN · UDP multicast",
     "discoveryPostOffice": "Post office · {{name}}",
-    "discoveryUnnamedOffice": "Post office · origin unknown",
+    "discoveryUnnamedOffice": "Post office · name unavailable",
     "discoveryUnavailable": "No current discovery information",
-    "discoveryHint": "Shows the closest known post office to the member’s original presence announcement. Communication chooses its path automatically.",
+    "discoveryHint": "How this client discovered the member; message routes may differ.",
     "originalName": "Original name",
     "remark": "Remark",
     "title": "Member profile",

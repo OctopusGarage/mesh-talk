@@ -359,6 +359,16 @@ views: no overlapping requests in one subscription and no results applied after
 that subscription closes. Store-level owner/session checks remain mandatory;
 serial polling is not an authorization mechanism.
 
+Optional registration-origin disclosure stays with the existing network owners:
+`core/node/discovery_origin.rs` owns bounded consent and office signatures;
+`bridge_directory.rs` and `postoffice/federation.rs` own negotiated carriage and
+fixed expiry; `bridge_client.rs` owns source-side publication permission.
+Roster observations retain the validated proof without creating routing authority.
+Desktop presence IPC projects only office identity, name and remaining lifetime;
+the frontend ages this lifetime independently during failed refreshes. The existing
+account settings owner persists the default-off device choice. See
+[registration-origin disclosure](network-design-reference.md#optional-registration-origin-disclosure).
+
 ## 4. Parallel development contract
 
 1. **Find the owner first.** Consult the table, inspect its public interface and

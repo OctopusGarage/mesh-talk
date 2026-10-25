@@ -442,6 +442,8 @@
     "send": "Enviar captura"
   },
   "settings": {
+    "originSharing": "Compartir mi oficina postal de origen",
+    "originSharingDesc": "Permite que quienes descubran este dispositivo vean su oficina postal de origen. El nombre puede revelar tu red o ubicación. Las oficinas participantes pueden leer estos datos mediante la conexión cifrada. Desactivado por defecto; al desactivarlo cesa el nuevo envío y las copias existentes caducan pronto.",
     "title": "Ajustes",
     "description": "Gestiona privacidad, apariencia, mensajes, archivos y comportamiento de la aplicación.",
     "scrollMore": "Desplázate para ver más ajustes",
@@ -1077,12 +1079,15 @@
     "idConflict": "Otro tipo de biblioteca ya usa este ID de paquete."
   },
   "memberProfile": {
+    "registrationOrigin": "Oficina de registro",
+    "registrationOriginHint": "Solo se muestra cuando el miembro comparte su información de registro. Una oficina no indica su ubicación física ni la ruta de un mensaje.",
+    "registrationOriginUnavailable": "No hay información de registro compartida",
     "discoveredVia": "Origen de presencia",
     "discoveryLocal": "Red local · multidifusión UDP",
     "discoveryPostOffice": "Oficina postal · {{name}}",
-    "discoveryUnnamedOffice": "Oficina postal · origen desconocido",
+    "discoveryUnnamedOffice": "Oficina postal · nombre no disponible",
     "discoveryUnavailable": "Sin información de descubrimiento vigente",
-    "discoveryHint": "Muestra la oficina postal conocida más cercana al anuncio original de presencia del miembro. La ruta de comunicación se elige automáticamente.",
+    "discoveryHint": "Cómo este cliente descubrió al miembro; la ruta de los mensajes puede variar.",
     "originalName": "Nombre original",
     "remark": "Alias personal",
     "title": "Perfil del miembro",

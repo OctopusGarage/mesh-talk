@@ -442,6 +442,8 @@
     "send": "スクリーンショットを送信"
   },
   "settings": {
+    "originSharing": "自分の登録元ポストオフィスを共有",
+    "originSharingDesc": "この端末を検出した人に、登録元のポストオフィスを表示します。名前からネットワークや場所が推測される場合があります。中継するポストオフィスも暗号化された接続上でこの情報を読めます。初期設定はオフです。オフにすると新たな共有は止まり、既存のコピーは短時間で期限切れになります。",
     "title": "設定",
     "description": "プライバシー、外観、メッセージ、ファイル、アプリの動作を管理します。",
     "scrollMore": "スクロールして他の設定を見る",
@@ -1077,12 +1079,15 @@
     "idConflict": "別の種類のライブラリがこのパックIDを使用しています。"
   },
   "memberProfile": {
+    "registrationOrigin": "登録先のポストオフィス",
+    "registrationOriginHint": "本人が登録情報を共有した場合にのみ表示されます。ポストオフィスは実際の所在地やメッセージの経路を示すものではありません。",
+    "registrationOriginUnavailable": "共有された登録情報はありません",
     "discoveredVia": "オンライン情報の発信元",
     "discoveryLocal": "ローカルLAN · UDPマルチキャスト",
     "discoveryPostOffice": "ポストオフィス · {{name}}",
-    "discoveryUnnamedOffice": "ポストオフィス · 発信元不明",
+    "discoveryUnnamedOffice": "ポストオフィス · 名前不明",
     "discoveryUnavailable": "現在の検出元情報はありません",
-    "discoveryHint": "このクライアントが識別できる、元のオンライン通知に最も近いポストオフィスを表示します。通信経路は自動的に選択されます。",
+    "discoveryHint": "このクライアントがメンバーを検出した経路です。メッセージの経路は異なる場合があります。",
     "originalName": "元の名前",
     "remark": "メモ名",
     "title": "メンバープロフィール",

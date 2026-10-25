@@ -6,35 +6,19 @@ export interface MemberDiscoverySource {
   postOffice?: PresenceEvidence["post_office"];
 }
 
-/** Show the closest identified visible introducer per device, never a guessed origin. */
+/** Deduplicate people/devices without losing independently fresh introducers. */
 export function memberDiscoverySources(
   presence: PresenceInfo,
 ): MemberDiscoverySource[] {
   const sources = new Map<string, MemberDiscoverySource>();
   for (const device of presence.devices ?? []) {
-    const fresh = device.evidence.filter((entry) => entry.expires_in_secs > 0);
-    const offices = fresh
-      .filter(
-        (entry) =>
-          entry.source === "directory" &&
-          entry.post_office?.user_id &&
-          entry.post_office.name &&
-          Number.isInteger(entry.origin_hops) &&
-          entry.origin_hops! >= 0 &&
-          entry.origin_hops! <= 16,
-      )
-      .sort(
-        (a, b) =>
-          a.origin_hops! - b.origin_hops! ||
-          a.post_office!.user_id!.localeCompare(b.post_office!.user_id!),
-      );
-    const selected = offices[0];
-    for (const evidence of fresh) {
+    for (const evidence of device.evidence) {
+      if (evidence.expires_in_secs <= 0) continue;
       const postOffice =
-        evidence.source === "directory" ? selected?.post_office : undefined;
+        evidence.source === "directory" ? evidence.post_office : undefined;
       const key = JSON.stringify([
         evidence.source,
-        postOffice?.user_id ?? null,
+        postOffice?.user_id ?? postOffice?.endpoint ?? null,
       ]);
       if (!sources.has(key))
         sources.set(key, {
@@ -44,6 +28,32 @@ export function memberDiscoverySources(
     }
   }
   return [...sources.values()];
+}
+
+/** Registration origin is consented evidence, never inferred from a route. */
+export function memberRegistrationOrigins(
+  presence: PresenceInfo,
+): NonNullable<PresenceEvidence["registration_origin"]>[] {
+  const origins = new Map<
+    string,
+    NonNullable<PresenceEvidence["registration_origin"]>
+  >();
+  for (const device of presence.devices ?? []) {
+    for (const evidence of device.evidence) {
+      const origin = evidence.registration_origin;
+      if (
+        evidence.source !== "directory" ||
+        evidence.expires_in_secs <= 0 ||
+        !origin ||
+        origin.expires_in_secs <= 0
+      )
+        continue;
+      const existing = origins.get(origin.user_id);
+      if (!existing || existing.expires_in_secs < origin.expires_in_secs)
+        origins.set(origin.user_id, origin);
+    }
+  }
+  return [...origins.values()];
 }
 
 export interface MemberProfileTarget {

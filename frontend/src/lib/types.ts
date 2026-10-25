@@ -206,6 +206,12 @@ export interface PresenceEvidence {
     user_id?: string;
     name?: string;
   };
+  /** Consented registration office, independently verified and expiring. */
+  registration_origin?: {
+    user_id: string;
+    name: string;
+    expires_in_secs: number;
+  };
 }
 export interface PresenceDevice {
   user_id: string;
@@ -256,6 +262,8 @@ export interface AppSettings {
   physical_lan_only: boolean;
   /** Share public presence through an opt-in post-office bridge. */
   bridge_discovery_enabled: boolean;
+  /** Opt in to sharing this device's originating post office with directory viewers. */
+  origin_sharing_enabled: boolean;
   /** Preferred directly reachable post-office fingerprint; empty selects automatically with eligible alternatives. */
   bridge_hub_id: string;
   /** Incoming-call ringtone id (see lib/ringtones.ts). Defaults to "classic". */

@@ -7971,7 +7971,26 @@ async fn relay_receive_cadence_fixture(progressing_alternative: bool, reset: Rel
             }
         }
     });
-    let live = DeviceIdentity::generate();
+    // Rank synthetic churn offices ahead of the healthy office when its moved
+    // endpoint is cold and the policy reset creates a fresh schedule. Held
+    // listeners make their unresponsiveness deterministic instead of relying on
+    // platform-specific refusal of ports 9/10.
+    let mut identities = std::array::from_fn::<_, 3, _>(|_| DeviceIdentity::generate());
+    identities.sort_by_key(DeviceIdentity::user_id);
+    let [first_churn, second_churn, live] = identities;
+    let mut churn_offices = Vec::new();
+    let mut churn_listeners = Vec::new();
+    if progressing_alternative {
+        for identity in [first_churn, second_churn] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            churn_offices.push(Announce::new_post_office(
+                &identity,
+                "Synthetic unrelated office",
+                listener.local_addr().unwrap().port(),
+            ));
+            churn_listeners.push(listener);
+        }
+    }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let live_proof =
         Announce::new_post_office(&live, "Healthy", listener.local_addr().unwrap().port());
@@ -8086,22 +8105,17 @@ async fn relay_receive_cadence_fixture(progressing_alternative: bool, reset: Rel
             .lock()
             .unwrap()
             .update(&live_proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
-        let unrelated =
-            Announce::new_post_office(&DeviceIdentity::generate(), "New unrelated office", 9);
+        let unrelated = &churn_offices[0];
         b.roster
             .lock()
             .unwrap()
-            .update(&unrelated, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
+            .update(unrelated, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
     }
     let mut delayed_churn = if progressing_alternative {
         let recipient = b.clone();
+        let unrelated = churn_offices[1].clone();
         Some(tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let unrelated = Announce::new_post_office(
-                &DeviceIdentity::generate(),
-                "Another unrelated office",
-                10,
-            );
             recipient.roster.lock().unwrap().update(
                 &unrelated,
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -8184,31 +8198,21 @@ async fn relay_receive_cadence_fixture(progressing_alternative: bool, reset: Rel
     };
 
     let replacement_task = if progressing_alternative {
-        // The cadence/churn phase is complete. Retire its unreachable synthetic
-        // offices before independently checking permission and endpoint recovery;
-        // two refused Windows dials can consume that phase's entire four seconds.
+        // The cadence/churn phase is complete. Join its producer before retiring
+        // only its synthetic offices so it cannot reinsert one during the
+        // independent endpoint/policy-reset phase. A fresh schedule has no learned
+        // primary for the moved endpoint; unrelated blackholes must not turn this
+        // assertion into an OS-specific connection-failure timing test.
         if let Some(task) = delayed_churn.take() {
-            task.abort();
-            let _ = task.await;
+            task.await.unwrap();
         }
         {
             let mut roster = b.roster.lock().unwrap();
-            let churn = roster
-                .post_offices()
-                .into_iter()
-                .filter(|peer| {
-                    peer.public != live_proof.public() && peer.public != silent_proof.public()
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                churn.len(),
-                2,
-                "both unrelated roster updates must have run"
-            );
-            for peer in churn {
-                roster.forget(&peer.public);
+            for office in &churn_offices {
+                roster.forget(&office.public());
             }
         }
+        drop(churn_listeners);
         // Move this same authenticated office to a new endpoint while receive
         // permission is suspended, then prove the owned worker resumes there.
         b.set_post_office_permissions(true, false);

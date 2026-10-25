@@ -294,6 +294,7 @@ mod recovery_accounts_tests {
                 last_authenticated: None,
                 presence_expires_at: None,
                 presence_origin_expires_at: None,
+                registration_origin: None,
                 origin_hops: None,
             }],
             name: "Alice".into(),
