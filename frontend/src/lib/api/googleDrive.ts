@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { invokeSensitive } from "./sensitiveInvoke";
 import type { BackupCreated, BackupPreview, RestoreComplete } from "./recovery";
 export interface DriveArchive {
   id: string;
@@ -22,7 +23,7 @@ export const googleDrive = {
   list: (connectionId: string) =>
     invoke<DriveArchive[]>("google_drive_list", { connectionId }),
   create: (connectionId: string, recoveryKey: string) =>
-    invoke<BackupCreated>("google_drive_create_backup", {
+    invokeSensitive<BackupCreated>("google_drive_create_backup", {
       connectionId,
       recoveryKey,
     }),

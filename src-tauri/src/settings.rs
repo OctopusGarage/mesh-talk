@@ -320,6 +320,20 @@ impl SettingsState {
             Some(path),
         )
     }
+    fn account_path(&self, owner: &str) -> Result<std::path::PathBuf, CommandError> {
+        #[cfg(test)]
+        let root = self
+            .2
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(crate::data_dir);
+        #[cfg(not(test))]
+        let root = crate::data_dir();
+        config_store::account_path(&root, owner, SETTINGS_FILE)
+            .ok_or_else(|| CommandError::Authorization("Invalid settings owner".into()))
+    }
+
     fn snapshot(&self, owner: &str) -> Result<(u64, AppSettings), CommandError> {
         let inner = self.0.lock().unwrap();
         if inner.owner.as_deref() != Some(owner) {
@@ -779,9 +793,12 @@ async fn reconcile_shared_settings(
                     }
                 }
             }
-            let next = shared::project(
+            let next = protect_imported_settings(
                 &previous,
-                &node.account_preferences(SyncCategory::Appearance),
+                shared::project(
+                    &previous,
+                    &node.account_preferences(SyncCategory::Appearance),
+                ),
             );
             if shared::changed(&previous, &next).is_empty() {
                 return if state.needs_application(runtime, admission) {
@@ -837,12 +854,74 @@ fn normalize_settings(mut settings: AppSettings) -> Result<AppSettings, CommandE
     Ok(settings)
 }
 
+/// Linked preference records are not fresh local consent to relax protection.
+/// Keep each existing protection while still importing stronger and routine values.
+fn protect_imported_settings(previous: &AppSettings, mut next: AppSettings) -> AppSettings {
+    let level = next.privacy_level;
+    next = next.with_privacy_level(level);
+    let longer_or_disabled = |old: u32, new: u32| old > 0 && (new == 0 || new > old);
+    let mut preserved = false;
+    macro_rules! keep {
+        ($field:ident, $weaker:expr) => {
+            if $weaker {
+                next.$field = previous.$field;
+                preserved = true;
+            }
+        };
+    }
+    keep!(
+        notification_preview,
+        !previous.notification_preview && next.notification_preview
+    );
+    keep!(
+        auto_lock_seconds,
+        longer_or_disabled(previous.auto_lock_seconds, next.auto_lock_seconds)
+    );
+    keep!(
+        lock_when_hidden,
+        previous.lock_when_hidden && !next.lock_when_hidden
+    );
+    keep!(
+        confirm_sensitive_copy,
+        previous.confirm_sensitive_copy && !next.confirm_sensitive_copy
+    );
+    keep!(
+        clipboard_clear_seconds,
+        longer_or_disabled(
+            previous.clipboard_clear_seconds,
+            next.clipboard_clear_seconds
+        )
+    );
+    keep!(
+        retention_days,
+        longer_or_disabled(previous.retention_days, next.retention_days)
+    );
+    if preserved {
+        next.privacy_level = PrivacyLevel::Custom;
+    }
+    next
+}
+
+fn requires_identity_verification(previous: &AppSettings, next: &AppSettings) -> bool {
+    let longer_or_disabled = |old: u32, new: u32| old > 0 && (new == 0 || new > old);
+    (!previous.stay_signed_in && next.stay_signed_in)
+        || (!previous.notification_preview && next.notification_preview)
+        || longer_or_disabled(previous.auto_lock_seconds, next.auto_lock_seconds)
+        || (previous.lock_when_hidden && !next.lock_when_hidden)
+        || (previous.confirm_sensitive_copy && !next.confirm_sensitive_copy)
+        || longer_or_disabled(
+            previous.clipboard_clear_seconds,
+            next.clipboard_clear_seconds,
+        )
+        || longer_or_disabled(previous.retention_days, next.retention_days)
+}
+
 /// Update the toggles and persist them. If "stay signed in" was just turned OFF,
 /// immediately forget the saved keychain secret + `last_user` so the next launch
 /// shows the login screen (the toggle is the user's control over the stored secret).
 #[tauri::command]
-pub async fn set_app_settings(
-    app: tauri::AppHandle,
+pub async fn set_app_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     app_state: tauri::State<'_, crate::state::AppState>,
     state: tauri::State<'_, SettingsState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
@@ -850,11 +929,35 @@ pub async fn set_app_settings(
     settings: AppSettings,
     patch: Option<serde_json::Value>,
     expected_account: Option<String>,
+    password: Option<String>,
 ) -> Result<(), CommandError> {
-    let admission = owner
+    let mut admission = owner
         .as_deref()
         .map(|owner| RuntimeAdmission::capture(&app_state, &node_state, owner))
         .transpose()?;
+    // Serialize the comparison and durable save, but never hold a synchronous
+    // settings/session guard while the operating system asks for verification.
+    let _save = state.1.lock().await;
+    let entry_revision = owner
+        .as_deref()
+        .map(|owner| state.snapshot(owner).map(|(revision, _)| revision))
+        .transpose()?;
+    if let Some(owner) = owner.as_deref() {
+        let previous = state.get_for_owner(owner)?;
+        let next = match patch.as_ref() {
+            Some(patch) => shared::patch(&previous, patch)?,
+            None => settings.clone(),
+        };
+        let next = normalize_settings(next)?;
+        if requires_identity_verification(&previous, &next) {
+            let verified = admission
+                .take()
+                .unwrap()
+                .verify_identity(password, "change Mesh-Talk privacy protections")
+                .await?;
+            admission = Some(verified);
+        }
+    }
     // Installation controls remain usable during startup. They cannot write
     // account preference rows or normalize/change private account settings.
     if let Some(owner) = owner.as_deref()
@@ -866,15 +969,22 @@ pub async fn set_app_settings(
             admission.as_ref().unwrap().lease(),
             SETTINGS_FILE,
             |_| {
-                let previous = state.get_for_owner(owner)?;
-                let settings = shared::patch(&previous, patch.as_ref().unwrap())?;
-                let (settings, clear_user) = preserve_login_bookkeeping(settings, &previous);
-                let global = state.update_for_owner(owner, settings)?;
-                save(&app, &global);
-                if let Some(user) = clear_user.as_deref() {
-                    crate::session_store::clear(user);
-                }
-                Ok(())
+                admission.as_ref().unwrap().sensitive_commit(|| {
+                    if state.snapshot(owner)?.0 != entry_revision.unwrap() {
+                        return Err(CommandError::Authorization(
+                            "settings superseded during verification".into(),
+                        ));
+                    }
+                    let previous = state.get_for_owner(owner)?;
+                    let settings = shared::patch(&previous, patch.as_ref().unwrap())?;
+                    let (settings, clear_user) = preserve_login_bookkeeping(settings, &previous);
+                    let global = state.update_for_owner(owner, settings)?;
+                    save(&app, &global);
+                    if let Some(user) = clear_user.as_deref() {
+                        crate::session_store::clear(user);
+                    }
+                    Ok(())
+                })
             },
         );
     }
@@ -885,6 +995,11 @@ pub async fn set_app_settings(
                 .unwrap()
                 .with_runtime(|runtime| {
                     require_settings_account(runtime, expected_account.as_deref())?;
+                    if state.snapshot(owner)?.0 != entry_revision.unwrap() {
+                        return Err(CommandError::Authorization(
+                            "settings superseded during verification".into(),
+                        ));
+                    }
                     let previous = state.get_for_owner(owner)?;
                     let settings = match patch.as_ref() {
                         Some(patch) => shared::patch(&previous, patch)?,
@@ -901,10 +1016,7 @@ pub async fn set_app_settings(
                             Some(value),
                         )?;
                     }
-                    let path = config_store::account_path(&crate::data_dir(), owner, SETTINGS_FILE)
-                        .ok_or_else(|| {
-                            CommandError::Authorization("Invalid settings owner".into())
-                        })?;
+                    let path = state.account_path(owner)?;
                     config_store::write_account(&path, &AccountSettings::from(&settings))?;
                     let global = state.update_for_owner(owner, settings)?;
                     save(&app, &global);
@@ -936,6 +1048,7 @@ pub async fn set_app_settings(
         }
     }
 
+    drop(_save);
     // Apply the durable account preference to its running node, if still current.
     if let (Some(owner), Some(admission)) = (owner, admission) {
         let (revision, settings) = state.snapshot(&owner)?;
@@ -952,6 +1065,170 @@ pub async fn set_app_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn denied_saved_login_change_leaves_acknowledged_settings_untouched() {
+        use tauri::Manager;
+        let root = tempfile::tempdir().unwrap();
+        let auth = crate::state::AppState::new(crate::services::auth_service::AuthService::new(
+            Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().into()),
+            )),
+        ));
+        let user = crate::services::user::User {
+            user_id: "settings-owner".into(),
+            name: "Owner".into(),
+            account_login_name: None,
+            display_name: "Owner".into(),
+            address: "fixture".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        auth.session().publish("session".into(), user, "pw".into());
+        let state = SettingsState::isolated(root.path().join("settings.json"));
+        state.set(AppSettings {
+            stay_signed_in: false,
+            ..AppSettings::default()
+        });
+        state.activate_at("settings-owner", &root.path().join("account.json"));
+        auth.app_lock()
+            .set_identity_verifier(|| Err(CommandError::Authentication("Invalid password".into())));
+        let app = tauri::test::mock_builder()
+            .manage(auth)
+            .manage(state.clone())
+            .manage(crate::chat_commands::NodeState::empty())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let result = set_app_settings(
+            app.handle().clone(),
+            app.state(),
+            app.state(),
+            app.state(),
+            Some("settings-owner".into()),
+            state.get(),
+            Some(serde_json::json!({"stay_signed_in": true})),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(CommandError::Auth(_))));
+        assert!(!state.get().stay_signed_in);
+        assert!(!root.path().join("settings.json").exists());
+        assert!(!root.path().join("account.json").exists());
+    }
+
+    #[tokio::test]
+    async fn successful_settings_save_releases_serialization_before_live_application() {
+        use tauri::Manager;
+        let root = tempfile::tempdir().unwrap();
+        let auth = crate::state::AppState::new(crate::services::auth_service::AuthService::new(
+            Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().into()),
+            )),
+        ));
+        let user = crate::services::user::User {
+            user_id: "settings-success-owner".into(),
+            name: "Owner".into(),
+            account_login_name: None,
+            display_name: "Owner".into(),
+            address: "fixture".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        let lease = auth.session().publish("session".into(), user, "pw".into());
+        let state = SettingsState::isolated(root.path().join("settings.json"));
+        state.activate_at(lease.owner(), &root.path().join("missing.json"));
+        let node = crate::chat_commands::NodeState::empty();
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            lease.owner(),
+            "Owner",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let account = runtime.account_id().to_owned();
+        *node.0.write().await = Some(runtime);
+        let app = tauri::test::mock_builder()
+            .manage(auth)
+            .manage(state.clone())
+            .manage(node.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            set_app_settings(
+                app.handle().clone(),
+                app.state(),
+                app.state(),
+                app.state(),
+                Some(lease.owner().into()),
+                state.get(),
+                Some(serde_json::json!({"ringtone": "digital"})),
+                Some(account),
+                None,
+            ),
+        )
+        .await
+        .expect("save must release serialization before applying")
+        .unwrap();
+        assert_eq!(state.get().ringtone, "digital");
+        assert!(state.account_path(lease.owner()).unwrap().exists());
+        assert!(state.1.try_lock().is_ok());
+        node.0.write().await.take().unwrap().stop().await;
+    }
+
+    #[test]
+    fn imported_settings_keep_local_protections_and_accept_stronger_preferences() {
+        let previous = AppSettings::default().with_privacy_level(PrivacyLevel::Strict);
+        let mut imported = AppSettings::default().with_privacy_level(PrivacyLevel::Custom);
+        imported.auto_lock_seconds = 30;
+        imported.ringtone = "digital".into();
+        let next = protect_imported_settings(&previous, imported);
+        assert_eq!(next.auto_lock_seconds, 30);
+        assert!(next.lock_when_hidden);
+        assert!(next.confirm_sensitive_copy);
+        assert!(!next.notification_preview);
+        assert_eq!(next.clipboard_clear_seconds, 30);
+        assert_eq!(next.ringtone, "digital");
+        assert_eq!(next.privacy_level, PrivacyLevel::Custom);
+        assert!(!requires_identity_verification(&previous, &next));
+        assert_eq!(normalize_settings(next).unwrap().auto_lock_seconds, 30);
+    }
+
+    #[test]
+    fn sensitive_settings_compare_effective_protections() {
+        let strict = AppSettings::default().with_privacy_level(PrivacyLevel::Strict);
+        let mut cosmetic = strict.clone();
+        cosmetic.ringtone = "other".into();
+        assert!(!requires_identity_verification(&strict, &cosmetic));
+        assert!(requires_identity_verification(
+            &strict,
+            &AppSettings::default()
+        ));
+        assert!(!requires_identity_verification(
+            &AppSettings::default(),
+            &strict
+        ));
+        let mut custom = strict.clone();
+        custom.privacy_level = PrivacyLevel::Custom;
+        custom.auto_lock_seconds = 120;
+        assert!(requires_identity_verification(&strict, &custom));
+        custom = strict.clone();
+        custom.notification_preview = true;
+        assert!(requires_identity_verification(&strict, &custom));
+        let mut signed_out = strict.clone();
+        signed_out.stay_signed_in = false;
+        assert!(requires_identity_verification(&signed_out, &strict));
+    }
 
     #[tokio::test]
     async fn startup_reads_local_settings_before_the_cryptographic_runtime_is_ready() {

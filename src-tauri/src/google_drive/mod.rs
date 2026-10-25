@@ -32,6 +32,7 @@ struct Connection {
     created: Instant,
     session: SessionState,
     app_lock: crate::app_lock::AppLock,
+    authorization_revision: u64,
     cancelled: watch::Sender<bool>,
     busy: AtomicBool,
     token: tokio::sync::Mutex<Option<String>>,
@@ -50,6 +51,7 @@ impl Connection {
         Self {
             generation: session.generation(),
             session,
+            authorization_revision: app_lock.authorization_revision().unwrap_or(u64::MAX),
             app_lock,
             created: Instant::now(),
             cancelled,
@@ -73,8 +75,11 @@ impl Connection {
             ));
         }
         self.session
-            .unchanged(self.generation, || ())
-            .map_err(CommandError::Authorization)
+            .unchanged(self.generation, || {
+                self.app_lock
+                    .with_unchanged_revision(self.authorization_revision, || Ok(()))
+            })
+            .map_err(CommandError::Authorization)?
     }
     fn phase(&self, phase: &str, transferred: u64, total: u64) {
         if let Ok(mut p) = self.progress.lock() {
@@ -271,6 +276,7 @@ pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
     node_state: tauri::State<'_, NodeState>,
     connection_id: String,
     recovery_key: String,
+    password: Option<String>,
 ) -> Result<BackupCreated, CommandError> {
     let connection = state.get(&connection_id)?;
     let job = connection.begin()?;
@@ -300,6 +306,7 @@ pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
                 recovery_key,
                 false,
                 Some(connection.generation),
+                password,
             ))
             .await?;
         connection.current()?;
@@ -489,6 +496,16 @@ mod tests {
         finished.send(()).unwrap();
         assert!(task.await.unwrap().is_err());
     }
+    #[test]
+    fn drive_connection_rejects_authorization_revision_changes() {
+        let lock = crate::app_lock::AppLock::default();
+        let connection = Connection::new(SessionState::default(), lock.clone());
+        assert!(connection.current().is_ok());
+        lock.clear();
+        assert!(!lock.is_locked());
+        assert!(connection.current().is_err());
+    }
+
     #[test]
     fn registered_drive_commands_return_structured_errors_and_release_state() {
         let app = tauri::test::mock_builder()

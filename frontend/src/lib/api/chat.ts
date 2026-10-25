@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { invokeSensitive } from "./sensitiveInvoke";
 
 /** Local scheduling facts only; absence means unknown. */
 export interface DeliveryObservation {
@@ -537,9 +538,10 @@ export const chat = {
   searchContext: (owner: string, reference: SearchReference) =>
     invoke<SearchContext>("owner_search_context", { owner, reference }),
   search: (query: string) => invoke<SearchHitInfo[]>("search", { query }),
-  startLinking: () => invoke<string>("start_linking"),
+  startLinking: (syncAll = false) =>
+    invokeSensitive<string>("start_linking", { syncAll }),
   stopLinking: () => invoke<void>("stop_linking"),
-  linkDevice: (peer: string, code: string) =>
-    invoke<string>("link_device", { peer, code }),
+  linkDevice: (peer: string, code: string, syncAll = false) =>
+    invokeSensitive<string>("link_device", { peer, code, syncAll }),
   rekeyAccount: () => invoke<string>("rekey_account"),
 };

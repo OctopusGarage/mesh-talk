@@ -2,6 +2,21 @@ import { test, expect } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { expectDialogFitsViewport } from "./helpers/ui-audit";
+import type { Page } from "@playwright/test";
+
+async function mockAccess(page: Page, patch: Record<string, unknown> = {}) {
+  return page.evaluate((value) => {
+    const update = (
+      window as unknown as {
+        __mockSetLocalAgentAccess: (patch: Record<string, unknown>) => {
+          lifetime: string;
+          expires_at_ms: number | null;
+        };
+      }
+    ).__mockSetLocalAgentAccess;
+    return update(value);
+  }, patch);
+}
 
 for (const viewport of [
   { width: 1440, height: 1000 },
@@ -64,4 +79,66 @@ test("hidden contacts cannot receive a new agent scope while groups remain avail
   await panel.getByRole("checkbox", { name: /team/i }).check();
   await panel.locator("#setting-local-agent-access").click();
   await expect(panel.getByRole("status")).toContainText("Running");
+});
+
+test("temporary access preserves its deadline across refresh and scope edits", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  const panel = page.getByTestId("local-agent-settings");
+  await expect(panel.locator("#agent-access-duration")).toHaveValue("one_hour");
+  await panel.getByRole("checkbox", { name: /bob/i }).check();
+  await panel.locator("#setting-local-agent-access").click();
+  const initial = await mockAccess(page);
+  expect(initial.expires_at_ms).not.toBeNull();
+  await panel.getByTestId("refresh-agent-activity").click();
+  await expect(panel.getByRole("status")).toContainText("Running");
+  expect((await mockAccess(page)).expires_at_ms).toBe(initial.expires_at_ms);
+  // A draft continuous choice does not silently expand authority on a scope edit.
+  await panel.locator("#agent-access-duration").selectOption("persistent");
+  await panel.getByRole("checkbox", { name: /team/i }).check();
+  expect((await mockAccess(page)).expires_at_ms).toBe(initial.expires_at_ms);
+  await panel.getByTestId("renew-agent-access").click();
+  await expect
+    .poll(async () => (await mockAccess(page)).lifetime)
+    .toBe("persistent");
+  expect((await mockAccess(page)).expires_at_ms).toBeNull();
+});
+
+test("expired authorization stays revocable and activity renders only safe metadata", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await mockAccess(page, {
+    enabled: true,
+    running: true,
+    lifetime: "one_hour",
+    expires_at_ms: Date.now() - 1000,
+    destinations: [{ kind: "account", id: "acc_bob_bbbb2222" }],
+    recent_activity: [
+      {
+        at_ms: Date.now() - 2000,
+        destination: { kind: "account", id: "acc_bob_bbbb2222" },
+        action: "accepted",
+        text: "private body must not appear",
+        token: "private credential must not appear",
+        operation_id: "raw retry identifier must not appear",
+      },
+    ],
+  });
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  const panel = page.getByTestId("local-agent-settings");
+  await expect(panel.getByRole("status")).toContainText("Expired");
+  await expect(panel.locator("pre")).toHaveCount(0);
+  const activity = panel.getByTestId("agent-access-activity");
+  await expect(activity).toContainText("Local agent interface");
+  await expect(activity).toContainText("Accepted");
+  await expect(activity).not.toContainText("private body");
+  await expect(activity).not.toContainText("private credential");
+  await expect(activity).not.toContainText("raw retry");
+  const revoke = panel.locator("#setting-local-agent-access");
+  await expect(revoke).toBeEnabled();
+  await revoke.click();
+  await expect(revoke).toHaveAttribute("aria-checked", "false");
 });

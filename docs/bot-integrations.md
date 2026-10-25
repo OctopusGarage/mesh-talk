@@ -272,14 +272,33 @@ retain their original framing and CLI/MCP compatibility.
 
 ### Lifecycle and authority
 
+Enabling desktop local-agent access or adding selected conversations requires
+[fresh identity verification](privacy-controls.md#verify-sensitive-operations),
+including additions to a saved disabled scope. Disabling and scope reduction do
+not require a new prompt. Authentication is bound to the captured desktop
+session and lock revision and checked again at the grant/configuration commit.
+
 The saved preference, active listener and instructions state are distinct. The
 settings panel reports actual readiness and errors. Permission changes and startup
 reconciliation share one serialized desktop lifecycle owner; there is never a
 second grant-store writer or participant using the same desktop stores. Changing
 scope retires the previous listener and managed credential before replacement.
-The managed grant has an explicit nonexpiring timestamp but remains bounded by
-the service/session lifetime; disabling or restarting retires its listener, and a
-new listener revokes previous managed credentials before opening for requests.
+New desktop authorizations default to **One hour**. Choose **Until I turn it off**
+explicitly for ongoing automation. Existing saved continuous authorizations keep
+their behavior and are labeled accordingly. Temporary authorization stores an
+absolute deadline: retrying service setup, editing conversations, locking and
+unlocking, or restarting the app does not start a new hour. **Renew authorization**
+is an explicit operation requiring fresh identity verification. Extending access
+or changing it to continuous also requires verification; disabling and reducing
+scope remain available without a new prompt.
+
+The grant is checked again at actual message acceptance, so a request waiting
+when authorization expires cannot commit afterward. Expiry does not recall
+messages already accepted. The UI distinguishes expired authorization from a
+service error. Restarting replaces credentials without extending the saved
+deadline, and an expired authorization stays expired until explicitly renewed.
+Across app launches, deadlines rely on the system clock. During a running
+process, monotonic elapsed time prevents clock rollback from reviving authority.
 CLI-issued grants retain their documented explicit expiry/restart behavior.
 
 The desktop must be running and unlocked. Lock, logout, profile replacement and
@@ -287,7 +306,7 @@ runtime retirement reject captured requests at the actual message commit boundar
 Closing admission prevents pending requests from accepting new work, then the
 runtime-owned supervisor shuts down both adapters and joins their producers.
 Disabling does not recall already accepted messages. Normal restart restores the
-saved scope, issues fresh managed credentials and refreshes the one instructions
+unexpired saved scope, issues fresh managed credentials and refreshes the one instructions
 block. Core privacy, membership, rate limits and retry/delivery semantics above
 continue to apply. The service never unlocks the app or opens a second node.
 
@@ -297,6 +316,18 @@ private administrator configuration and CLI grant commands above remain availabl
 for manually managed clients. Settings takes precedence after an explicit choice.
 
 ## Revoke, inspect and stop
+
+Desktop General settings also shows recent activity for the **Local agent
+interface**. It includes recent accepted and retried sends, with time and target
+conversation, without message bodies, credentials or raw retry keys. Acceptance
+does not prove recipient delivery. The view contains at most 20 sends from the existing seven-day audit window
+and may be incomplete;
+an unavailable activity read is shown separately from an empty record.
+
+The desktop authorization is shared by local clients holding its credential.
+Activity identifies the local agent interface, not a verified AI application or
+vendor. It does not expose chat history or add an activity-reading tool to the
+producer API.
 
 ```sh
 ./target/debug/mesh-talk-integrations grant-list \

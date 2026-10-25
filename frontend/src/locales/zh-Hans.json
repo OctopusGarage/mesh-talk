@@ -431,6 +431,9 @@
     "send": "发送截图"
   },
   "settings": {
+    "privacyEffectiveState": "以下控件显示当前生效的已保存设置。选择预设后，需点击应用才会生效。保持登录和本地代理访问权限单独管理。",
+    "savedLoginEnabled": "已开启保持登录。下次自动登录还需要登录凭据已成功保存到此设备。",
+    "savedLoginDisabled": "保持登录已关闭：下次启动时需要登录。",
     "title": "设置",
     "description": "管理隐私、外观、消息、文件和应用行为。",
     "scrollMore": "滚动查看更多设置",
@@ -1143,6 +1146,10 @@
     }
   },
   "agentAccess": {
+    "privacyStatusDescription": "本地代理仅在服务运行时可访问明确授权的会话。设备隐私预设不会更改这些授权。",
+    "statusFailed": "无法获取代理访问状态",
+    "grantedConversations": "已授权 {{count}} 个会话",
+    "manageAccess": "管理代理访问权限",
     "title": "本地 Agent 接入",
     "description": "允许本机 Agent 使用当前登录账号发送文本和回复。",
     "selectFirst": "请先选择至少一个会话，再开启接入。",
@@ -1159,7 +1166,22 @@
     "copied": "已复制",
     "copyFailed": "复制失败，请选择上方说明并手动复制。",
     "group": "群聊",
-    "person": "联系人"
+    "person": "联系人",
+    "duration": "授权时长",
+    "oneHour": "一小时",
+    "persistent": "直到我主动关闭",
+    "expiresAt": "到期时间",
+    "expiredAt": "已到期于",
+    "expired": "已到期 · 续期后本地代理才能访问",
+    "renew": "续期授权",
+    "durationHint": "所选时长在启用或续期时生效。刷新、重试或更改会话不会延长授权。",
+    "activityTitle": "本地代理接口",
+    "refreshActivity": "刷新活动",
+    "activityDeliveryHint": "此处显示本地接口最近接受的请求。接受请求不代表收件人已收到消息。",
+    "activityEmpty": "近期没有已接受的请求。",
+    "activityFailed": "无法加载近期活动。请刷新重试。",
+    "activityAccepted": "已接受",
+    "activityRetried": "已重试"
   },
   "messageFavorites": {
     "title": "收藏夹",
@@ -1297,5 +1319,15 @@
     "finding": "正在查找设备…",
     "linking": "正在关联此设备…请保持两端应用打开。",
     "failed": "无法关联此设备。请保持来源应用打开，并使用新的配对码。"
+  },
+  "securityVerification": {
+    "title": "验证身份",
+    "description": "输入 Mesh-Talk 登录密码以授权此操作。本次验证仅用于当前操作。",
+    "continue": "验证并继续",
+    "backup": "创建加密备份",
+    "linking": "授权关联设备",
+    "agent": "更改本地智能体访问权限",
+    "settings": "更改安全设置",
+    "savedLogin": "在此设备上保存登录凭据"
   }
 }

@@ -7,7 +7,7 @@ import {
 } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { settings as settingsApi } from "@/lib/api";
-import { errorMessage } from "@/lib/error";
+import { errorMessage, isVerificationCanceled } from "@/lib/error";
 import { privacyFromSettings } from "@/lib/privacySettings";
 import { asRingtoneId } from "@/lib/ringtones";
 import type { AppSettings } from "@/lib/types";
@@ -126,6 +126,7 @@ export function useSettingsController(open: boolean) {
         setSavedCategory(category);
       },
       (error) => {
+        if (isVerificationCanceled(error)) return;
         const failed: SettingError = {
           kind:
             error instanceof SavedRefreshError

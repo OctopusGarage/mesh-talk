@@ -20,6 +20,11 @@ Each export generates its own key. A later export does not change the key needed
 for an older file. Mesh-Talk stores only the last successful backup's location,
 time, size, and counts on this device; it never stores the recovery key.
 
+Creating either a local or Google Drive backup also requires
+[fresh identity verification](privacy-controls.md#verify-sensitive-operations)
+before the snapshot is exported. The recovery-key challenge remains separate:
+it checks that you saved the key, while identity verification authorizes export.
+
 ## Restore after losing a device
 
 1. On the signed-out screen, select **Restore from encrypted backup**.

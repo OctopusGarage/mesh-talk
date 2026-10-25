@@ -431,6 +431,9 @@
     "send": "傳送截圖"
   },
   "settings": {
+    "privacyEffectiveState": "以下控制項顯示目前生效的已儲存設定。選擇預設後，需點擊套用才會生效。保持登入與本機代理存取權限分開管理。",
+    "savedLoginEnabled": "已開啟保持登入。下次自動登入還需要登入憑證已成功儲存至此裝置。",
+    "savedLoginDisabled": "保持登入已關閉：下次啟動時需要登入。",
     "title": "設定",
     "description": "管理隱私、外觀、訊息、檔案和應用程式行為。",
     "scrollMore": "捲動查看更多設定",
@@ -1143,6 +1146,10 @@
     }
   },
   "agentAccess": {
+    "privacyStatusDescription": "本機代理僅在服務執行時可存取明確授權的對話。裝置隱私預設不會變更這些授權。",
+    "statusFailed": "無法取得代理存取狀態",
+    "grantedConversations": "已授權 {{count}} 個對話",
+    "manageAccess": "管理代理存取權限",
     "title": "本機 Agent 存取",
     "description": "允許本機 Agent 使用目前登入的帳號傳送文字及回覆。",
     "selectFirst": "請先選擇至少一個對話，再開啟存取。",
@@ -1159,7 +1166,22 @@
     "copied": "已複製",
     "copyFailed": "複製失敗，請選取上方說明並手動複製。",
     "group": "群組",
-    "person": "聯絡人"
+    "person": "聯絡人",
+    "duration": "授權時長",
+    "oneHour": "一小時",
+    "persistent": "直到我主動關閉",
+    "expiresAt": "到期時間",
+    "expiredAt": "已到期於",
+    "expired": "已到期 · 續期後本機代理才能存取",
+    "renew": "續期授權",
+    "durationHint": "所選時長在啟用或續期時生效。重新整理、重試或變更對話不會延長授權。",
+    "activityTitle": "本機代理介面",
+    "refreshActivity": "重新整理活動",
+    "activityDeliveryHint": "此處顯示本機介面最近接受的請求。接受請求不代表收件人已收到訊息。",
+    "activityEmpty": "近期沒有已接受的請求。",
+    "activityFailed": "無法載入近期活動。請重新整理後重試。",
+    "activityAccepted": "已接受",
+    "activityRetried": "已重試"
   },
   "messageFavorites": {
     "title": "收藏夾",
@@ -1297,5 +1319,15 @@
     "finding": "正在尋找裝置…",
     "linking": "正在連結此裝置…請保持兩端應用程式開啟。",
     "failed": "無法連結此裝置。請保持來源應用程式開啟，並使用新的配對碼。"
+  },
+  "securityVerification": {
+    "title": "驗證身分",
+    "description": "輸入 Mesh-Talk 登入密碼以授權此操作。本次驗證僅用於目前操作。",
+    "continue": "驗證並繼續",
+    "backup": "建立加密備份",
+    "linking": "授權連結裝置",
+    "agent": "變更本機智慧體存取權限",
+    "settings": "變更安全設定",
+    "savedLogin": "在此裝置上儲存登入憑證"
   }
 }

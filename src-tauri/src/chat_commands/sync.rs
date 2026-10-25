@@ -92,6 +92,11 @@ pub async fn set_account_preference(
                     "Preference belongs to another account".into(),
                 ));
             }
+            if key.starts_with("settings.") {
+                return Err(CommandError::Authorization(
+                    "Settings preferences must use the settings command".into(),
+                ));
+            }
             runtime
                 .handle()
                 .set_account_preference(category, key, value)
@@ -116,6 +121,11 @@ pub async fn seed_account_preference(
             if runtime.account_id() != expected_account {
                 return Err(CommandError::Authorization(
                     "Preference belongs to another account".into(),
+                ));
+            }
+            if key.starts_with("settings.") {
+                return Err(CommandError::Authorization(
+                    "Settings preferences must use the settings command".into(),
                 ));
             }
             runtime
@@ -268,6 +278,39 @@ mod tests {
             .await
             .is_err()
         );
+
+        for key in [
+            "settings.privacy_level",
+            "settings.auto_lock_seconds",
+            "settings.stay_signed_in",
+        ] {
+            assert!(matches!(
+                set_account_preference(
+                    app.state(),
+                    state.clone(),
+                    SyncCategory::Appearance,
+                    key.into(),
+                    Some("0".into()),
+                    "sync-test".into(),
+                    expected_account.clone()
+                )
+                .await,
+                Err(CommandError::Authorization(_))
+            ));
+            assert!(matches!(
+                seed_account_preference(
+                    app.state(),
+                    state.clone(),
+                    SyncCategory::Appearance,
+                    key.into(),
+                    Some("0".into()),
+                    "sync-test".into(),
+                    expected_account.clone()
+                )
+                .await,
+                Err(CommandError::Authorization(_))
+            ));
+        }
 
         let original =
             get_device_sync_policy(app.state::<AppState>(), state.clone(), "sync-test".into())

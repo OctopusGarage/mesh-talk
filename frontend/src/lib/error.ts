@@ -6,6 +6,8 @@
 // legacy single-word kinds ("validation" / "authentication" / "service" / "network") are
 // kept here only so older/handwritten rejections still type-check and route sensibly.
 export type CommandErrorKind =
+  | "authentication-required"
+  | "authentication-canceled"
   | "link-no-direct-route"
   | "link-connection"
   | "link-timeout"
@@ -53,6 +55,10 @@ export function errorMessage(e: unknown): string {
 /** The error kind, when the rejection is a structured CommandError. */
 export function errorKind(e: unknown): CommandErrorKind | null {
   return isCommandError(e) ? e.kind : null;
+}
+
+export function isVerificationCanceled(e: unknown): boolean {
+  return errorKind(e) === "authentication-canceled";
 }
 
 // Coarse reason for a failed outgoing message. The backend now ships a structured

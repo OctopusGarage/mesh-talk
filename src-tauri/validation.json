@@ -2,6 +2,51 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-sensitive-operations",
+      "paths": [
+        "src-tauri/src/app_lock.rs",
+        "src-tauri/src/runtime_admission.rs",
+        "src-tauri/src/settings.rs",
+        "src-tauri/src/integrations.rs",
+        "src-tauri/src/integrations/local_access.rs",
+        "src-tauri/src/recovery.rs",
+        "src-tauri/src/google_drive/mod.rs",
+        "src-tauri/src/chat_commands/account.rs",
+        "src-tauri/src/commands.rs",
+        "src-tauri/src/chat_commands/sync.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "sensitive",
+            "dormant_scope_expansion_and_enabling_require_verification",
+            "denied_agent_enable_preserves_preferences_credentials_and_instructions",
+            "denied_saved_login_change_leaves_acknowledged_settings_untouched",
+            "imported_settings_keep_local_protections_and_accept_stronger_preferences",
+            "chat_commands::sync::tests::",
+            "drive_connection_rejects_authorization_revision_changes"
+          ]
+        }
+      ],
+      "consumers": [
+        "frontend-sensitive-operations"
+      ],
+      "capability": {
+        "summary": "Bind sensitive settings, local-agent grants, backup publication and device linking to fresh exact-session identity and lock-revision authority.",
+        "guide": "docs/privacy-controls.md#verify-sensitive-operations",
+        "invariants": [
+          {
+            "name": "Denied identity verification leaves the sensitive operation uncommitted; lock/unlock and session replacement invalidate captured proof before guarded commits.",
+            "reference": "docs/privacy-controls.md#verify-sensitive-operations"
+          }
+        ]
+      },
+      "escalation": [
+        "Verify packaged OS prompts and export/link/agent cancellation on each supported platform; test hooks and browser mocks do not certify native credential release."
+      ]
+    },
+    {
       "id": "desktop-account-group-inventory",
       "paths": [
         "src-tauri/src/chat_commands/channels.rs",
@@ -168,7 +213,7 @@
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
         "invariants": [
           {
-            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device’s draft",
+            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device\u2019s draft",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
@@ -432,7 +477,7 @@
         "frontend-local-agent-access"
       ],
       "capability": {
-        "summary": "Control one session-owned integration service from desktop settings and maintain a short user-level agent bootstrap.",
+        "summary": "Control one session-owned integration service, persist explicit authorization deadlines and expose content-free recent local-interface activity.",
         "guide": "docs/bot-integrations.md#desktop-local-agent-access",
         "invariants": [
           {
@@ -442,6 +487,14 @@
           {
             "name": "Only the marked AGENTS.md block is updated or removed; repeated toggles preserve unrelated instructions and prompts contain only public help discovery",
             "reference": "docs/bot-integrations.md#desktop-local-agent-access"
+          },
+          {
+            "name": "New authorizations default to one hour; legacy persistent grants survive, and retries/restarts/scope edits preserve deadlines while renewal and extensions require fresh identity verification.",
+            "reference": "docs/bot-integrations.md#lifecycle-and-authority"
+          },
+          {
+            "name": "Recent activity exposes only bounded time/destination/accepted-or-retried metadata without opening a second registry writer or attributing a shared token to an AI vendor.",
+            "reference": "docs/bot-integrations.md#revoke-inspect-and-stop"
           }
         ]
       },
@@ -702,7 +755,9 @@
     },
     {
       "id": "desktop-updates",
-      "consumers": ["frontend-updates"],
+      "consumers": [
+        "frontend-updates"
+      ],
       "paths": [
         "src-tauri/src/updates.rs",
         "src-tauri/src/updates/",

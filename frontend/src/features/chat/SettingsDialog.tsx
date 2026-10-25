@@ -73,6 +73,10 @@ export function SettingsDialog({
       <SecuritySettings
         controller={controller}
         onDraftChange={setPresetDraft}
+        onAgentSettings={() => {
+          focusTarget.current = "#setting-local-agent-access";
+          setCategory("general");
+        }}
         onNotifications={() => {
           focusTarget.current = "#setting-notification-preview";
           setCategory("notifications");

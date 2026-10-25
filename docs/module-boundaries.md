@@ -36,6 +36,16 @@ request schemas derive from the existing models. The General settings UI uses
 the shared save coordinator and an explicit-owner typed adapter. See
 [desktop local access](bot-integrations.md#desktop-local-agent-access).
 
+The local access owner persists absolute authorization deadlines and preserves
+them across service retries and session/runtime restarts. Only an explicitly
+verified enable, duration extension or renewal can extend authority. The shared
+integration grant authorizer checks expiry again at core acceptance. The desktop
+activity view uses the existing registry's bounded content-free send projection:
+read the live service registry while its supervisor exists, and open the saved
+registry only after its writer has stopped under the same controller serialization.
+The UI never creates a second grant-store owner or attributes a shared credential
+to a particular AI application. See [authorization lifetime](bot-integrations.md#lifecycle-and-authority).
+
 The headless CLI uses the core directly. A protocol change should not require
 Tauri; a presentation change should not alter the wire protocol. Not every helper
 in `lib/` is pure: `theme.ts`, for example, owns reactive appearance effects. Use
@@ -103,6 +113,18 @@ unlocking the application. The frontend message view owns the temporary
 conversation caches, reply
 quotes or notification previews. The [privacy guide](privacy-controls.md#protected-messages)
 owns the product behavior and limitations.
+
+Sensitive settings, saved-login retry, agent grants, backup publication and
+device linking reuse the per-operation proof in `src-tauri/src/app_lock.rs`.
+`runtime_admission.rs` carries its exact session and lock revision through native
+commit boundaries; it is never a renderer-issued or reusable unlock token.
+`settings.rs` owns effective downgrade decisions and the local protection floor
+for imported preferences. Generic preference IPC cannot write its `settings.*`
+namespace. `ui/lib/api/sensitiveInvoke.ts` retries only the captured operation
+when the backend requests a password; the app-owned
+`ui/features/auth/SensitiveVerificationDialog.tsx` supplies the prompt and cancels
+it on session retirement. The [sensitive-operation contract](privacy-controls.md#verify-sensitive-operations)
+owns user behavior and platform limits.
 
 `ui/store/conversationHistory.ts` owns active history reloads, bounded background
 coverage scans and expansion to a requested Event. It shares history selection
