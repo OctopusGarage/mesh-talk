@@ -1054,7 +1054,24 @@ It never marks a safety number verified or merges old-account conversations.
 
 Ongoing `MTAHS2` reconciliation separates file cards from file bytes; frozen `MTAHS1` retains its attachment-coupled behavior. Source and receiver category intersections and process-local policy revisions guard selected exports and durable imports. These changes keep the existing bounded page/frame budgets.
 
-Channel archive, file-card and attachment-byte exports require both source and requester to be accepted channel members. A pending invitation alone is not read permission.
+Channel archive, file-card and attachment-byte exports require the source to
+retain accepted membership under its current account. A certified sibling with
+an independently verified current binding to that same accepted account may
+receive a private account copy without a separate physical device membership.
+The source reuses the canonical account grant or validated legacy account-bound
+membership; a certificate or descriptive group inventory alone cannot grant read
+access. Pending invitations, retired account bindings and previous-account
+archives do not establish this entitlement. Existing source/receiver category
+permissions, signed history-sharing policy, recall, expiry and exact attachment
+scope still apply. Selected pages and subsequent chunks recheck current
+entitlement and privacy state; receiving a private copy installs no public
+membership, sender key or group administration permission.
+
+Authenticated sibling Wake hints carry invalidation metadata only. Their bounded
+existing worker remains active when optional history, attachment, appearance and
+contact synchronization are disabled, so mandatory account control requests and
+results can progress promptly. Every subsequent content exchange independently
+enforces its category permissions.
 
 Message Yourself is the self-account route. With no siblings, acceptance commits local history and encrypted file retention without reserving remote delivery capacity. A later certified sibling can reconcile retained records with their original logical IDs. Signed personal file evidence binds the exact manifest to its personal host; it does not grant access to unrelated account or channel files. Local acceptance and a completed selected exchange are distinct facts, and neither promises indefinite availability.
 

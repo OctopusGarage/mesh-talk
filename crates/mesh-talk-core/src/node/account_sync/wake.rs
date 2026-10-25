@@ -1,4 +1,5 @@
-//! Optional authenticated sibling invalidation; history/policy remain authoritative.
+//! Authenticated sibling invalidation for mandatory and optional account metadata.
+//! Category policy still governs every content exchange after this body-free hint.
 //! A process epoch distinguishes a restarted publisher's revision sequence.
 use super::*;
 use rand_core::RngCore;
@@ -169,7 +170,7 @@ impl Node {
             HashMap::new();
         let mut aborts: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
         loop {
-            while active.len() < SENDERS && wake_enabled(self.device_sync_policy()) {
+            while active.len() < SENDERS {
                 let Some((id, peer)) = queue.pop_front() else {
                     break;
                 };
@@ -231,14 +232,6 @@ impl Node {
                     }
                 }
             }
-            if !wake_enabled(self.device_sync_policy()) {
-                senders.shutdown().await;
-                active.clear();
-                task_owners.clear();
-                aborts.clear();
-                queue.clear();
-                continue;
-            }
             let revision = self.account_wake.revision.load(Ordering::Acquire);
             let devices = self.linked_devices();
             let certified: HashSet<_> = devices
@@ -276,9 +269,6 @@ impl Node {
     }
 }
 
-fn wake_enabled(policy: DeviceSyncPolicy) -> bool {
-    policy.history || policy.attachments || policy.appearance || policy.contacts
-}
 fn wake_routes(peer: &PeerRecord) -> Vec<std::net::SocketAddr> {
     let mut routes = peer
         .routes

@@ -11,7 +11,7 @@ use super::node::NodeError;
 use super::pairing::BackfillRecord;
 use super::session::SessionError;
 use super::*;
-use crate::discovery::roster::PeerRecord;
+use crate::discovery::{Announce, roster::PeerRecord};
 use crate::eventlog::event::{ConversationId, Event, EventId};
 use crate::identity::device::PublicIdentity;
 use crate::transport::SecureChannel;
@@ -28,7 +28,23 @@ use tokio::net::TcpStream;
 #[cfg(test)]
 use super::account_sync_wire::VERSION;
 
+/// A selected plaintext page or staged file retains its original expiry context.
+enum PrivateContent<'a> {
+    Record(&'a HistoryRecord),
+    Attachment(&'a SelectedAttachment),
+}
+
+/// The original authorized manifest behind one staged stream. A later alias
+/// of the same file conversation cannot replace this record or its lifetime.
+struct SelectedAttachment {
+    file: ConversationId,
+    row: super::received_log::ReceivedEntry,
+    manifest: crate::file::AnyManifest,
+    scope: Option<archive::PrivateChannelScope>,
+}
+
 mod archive;
+mod fanout;
 mod favorites;
 mod wake;
 pub(in crate::node) use wake::AccountWake;
@@ -81,6 +97,48 @@ struct PeerCursor {
     known_digest: [u8; 32],
     sweep_digest: [u8; 32],
     next_file: usize,
+}
+
+fn initial_sync_status(device_id: String) -> DeviceSyncStatus {
+    DeviceSyncStatus {
+        device_id,
+        phase: SyncPhase::CatchingUp,
+        pending_attachments: 0,
+        legacy_file_metadata: false,
+        document_phase: SyncPhase::CatchingUp,
+        document_error: None,
+        document_requires_upgrade: false,
+        error: None,
+    }
+}
+
+type DocumentStatus = (SyncPhase, Option<String>, bool);
+
+fn combined_document_status(
+    optional: Option<&DocumentStatus>,
+    mandatory: Option<&DocumentStatus>,
+) -> DocumentStatus {
+    let pending = (SyncPhase::CatchingUp, None, false);
+    let optional = optional.unwrap_or(&pending);
+    let mandatory = mandatory.unwrap_or(&pending);
+    let phases = [optional.0, mandatory.0];
+    let phase = if phases.contains(&SyncPhase::Error) {
+        SyncPhase::Error
+    } else if phases.contains(&SyncPhase::Disabled) {
+        SyncPhase::Disabled
+    } else if phases.iter().all(|phase| *phase == SyncPhase::UpToDate) {
+        SyncPhase::UpToDate
+    } else {
+        SyncPhase::CatchingUp
+    };
+    let error = if mandatory.0 == SyncPhase::Error {
+        mandatory.1.clone()
+    } else if optional.0 == SyncPhase::Error {
+        optional.1.clone()
+    } else {
+        mandatory.1.clone().or_else(|| optional.1.clone())
+    };
+    (phase, error, optional.2 || mandatory.2)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -174,6 +232,19 @@ impl Node {
         revision: u64,
         frame: &AccountHistoryFrame,
     ) -> Result<(), NodeError> {
+        #[cfg(test)]
+        if matches!(frame, AccountHistoryFrame::DocumentHeader { .. }) {
+            let hook = self.account_session_test_hook.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(channel.peer_identity().clone(), frame.clone()).await;
+            }
+        }
+        if self
+            .delivery_suspended
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(NodeError::Authorization("account source retired".into()));
+        }
         if self.device_sync_policy_snapshot().1 != revision {
             return Err(NodeError::Authorization(
                 "account sync policy changed".into(),
@@ -190,12 +261,103 @@ impl Node {
         controls: (u64, [u8; 32]),
         frame: &AccountHistoryFrame,
     ) -> Result<(), NodeError> {
+        if !self.account_private_sibling_current(channel.peer_identity())
+            || !self.account_allowed(channel.peer_identity(), channel.peer_announcement())
+        {
+            return Err(NodeError::Authorization(
+                "account source binding changed".into(),
+            ));
+        }
         if self.private_dm_control_revision() != controls {
             return Err(NodeError::Authorization(
                 "account recall state changed".into(),
             ));
         }
         self.send_account_frame(channel, version, revision, frame)
+            .await
+    }
+
+    fn private_record_current(&self, requester: &PublicIdentity, record: &HistoryRecord) -> bool {
+        match record {
+            HistoryRecord::Direct(row) => {
+                DmEnvelope::decode(&row.plaintext).is_some_and(|envelope| {
+                    !self.recipient_expired(
+                        &envelope.body,
+                        EventId::new(row.event_id),
+                        row.wall_clock,
+                    )
+                })
+            }
+            HistoryRecord::Channel(row) => {
+                self.account_private_channel_export_allowed(
+                    ConversationId::new(row.conversation),
+                    requester,
+                ) && !self.recipient_expired(
+                    &row.plaintext,
+                    EventId::new(row.event_id),
+                    row.wall_clock,
+                )
+            }
+            HistoryRecord::FileCard(row) => {
+                if row.peer_account.is_none()
+                    && !self.account_private_channel_export_allowed(
+                        ConversationId::new(row.host),
+                        requester,
+                    )
+                {
+                    return false;
+                }
+                let Ok(payload): Result<FileCardPayload, _> = bincode::DefaultOptions::new()
+                    .with_fixint_encoding()
+                    .with_limit(MAX_RECORD as u64)
+                    .reject_trailing_bytes()
+                    .deserialize(&row.payload)
+                else {
+                    return false;
+                };
+                !self.recipient_expired(
+                    &payload.manifest,
+                    EventId::new(row.event_id),
+                    row.wall_clock,
+                )
+            }
+        }
+    }
+
+    async fn send_account_content_frame(
+        &self,
+        channel: &mut SecureChannel<TcpStream>,
+        version: AccountSyncVersion,
+        revision: u64,
+        controls: (u64, [u8; 32]),
+        content: PrivateContent<'_>,
+        frame: &AccountHistoryFrame,
+    ) -> Result<(), NodeError> {
+        #[cfg(test)]
+        {
+            let hook = self.account_session_test_hook.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(channel.peer_identity().clone(), frame.clone()).await;
+            }
+        }
+        let current = match content {
+            PrivateContent::Record(record) => {
+                self.private_record_current(channel.peer_identity(), record)
+            }
+            PrivateContent::Attachment(selected) => self
+                .select_attachment_for_sibling(
+                    selected.file,
+                    channel.peer_identity(),
+                    Some(selected),
+                )
+                .is_some(),
+        };
+        if !current {
+            return Err(NodeError::Authorization(
+                "account private content no longer available".into(),
+            ));
+        }
+        self.send_account_history_frame(channel, version, revision, controls, frame)
             .await
     }
 
@@ -509,7 +671,29 @@ impl Node {
                 }
             }
         }
+        let channel_hosts: HashSet<_> = records
+            .iter()
+            .filter_map(|record| match record {
+                HistoryRecord::Channel(record) => Some(ConversationId::new(record.conversation)),
+                HistoryRecord::FileCard(record) if record.peer_account.is_none() => {
+                    Some(ConversationId::new(record.host))
+                }
+                _ => None,
+            })
+            .collect();
         for record in &records {
+            let host = match record {
+                HistoryRecord::Channel(record) => Some(ConversationId::new(record.conversation)),
+                HistoryRecord::FileCard(record) if record.peer_account.is_none() => {
+                    Some(ConversationId::new(record.host))
+                }
+                _ => None,
+            };
+            if host.is_some_and(|host| {
+                !self.account_private_channel_export_allowed(host, channel.peer_identity())
+            }) {
+                return false;
+            }
             let (header, plaintext) = match record {
                 HistoryRecord::Direct(record) => (
                     AccountHistoryFrame::RecordHeader {
@@ -544,19 +728,32 @@ impl Node {
                 ),
             };
             if self
-                .send_account_history_frame(channel, version, revision, controls, &header)
+                .send_account_content_frame(
+                    channel,
+                    version,
+                    revision,
+                    controls,
+                    PrivateContent::Record(record),
+                    &header,
+                )
                 .await
                 .is_err()
             {
                 return false;
             }
             for chunk in plaintext.chunks(MAX_CHUNK) {
+                if host.is_some_and(|host| {
+                    !self.account_private_channel_export_allowed(host, channel.peer_identity())
+                }) {
+                    return false;
+                }
                 if self
-                    .send_account_history_frame(
+                    .send_account_content_frame(
                         channel,
                         version,
                         revision,
                         controls,
+                        PrivateContent::Record(record),
                         &AccountHistoryFrame::RecordChunk {
                             bytes: chunk.to_vec(),
                         },
@@ -567,6 +764,11 @@ impl Node {
                     return false;
                 }
             }
+        }
+        if channel_hosts.iter().any(|host| {
+            !self.account_private_channel_export_allowed(*host, channel.peer_identity())
+        }) {
+            return false;
         }
         self.send_account_history_frame(
             channel,
@@ -582,10 +784,19 @@ impl Node {
         .is_ok()
     }
 
+    #[cfg(test)]
     fn import_account_file_card(
         &self,
         record: &FileCardRecord,
         version: AccountSyncVersion,
+    ) -> Result<(), NodeError> {
+        self.import_account_file_card_from_sibling(record, version, None)
+    }
+    fn import_account_file_card_from_sibling(
+        &self,
+        record: &FileCardRecord,
+        version: AccountSyncVersion,
+        source: Option<&Announce>,
     ) -> Result<(), NodeError> {
         let host = ConversationId::new(record.host);
         let event_id = EventId::new(record.event_id);
@@ -598,10 +809,19 @@ impl Node {
                 ));
             }
         } else {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            if !book.state(&host).is_some_and(|state| {
-                !state.pending_invite() && state.is_accepted_member(&self.user_id())
-            }) {
+            let allowed = source.map_or_else(
+                || {
+                    self.channels
+                        .lock()
+                        .expect("channels mutex not poisoned")
+                        .state(&host)
+                        .is_some_and(|state| {
+                            !state.pending_invite() && state.is_accepted_member(&self.user_id())
+                        })
+                },
+                |proof| self.account_private_channel_import_allowed(host, proof),
+            );
+            if !allowed {
                 return Err(NodeError::Authorization(
                     "file card requires accepted channel membership".into(),
                 ));
@@ -767,26 +987,51 @@ impl Node {
         file_conv: ConversationId,
         requester: &PublicIdentity,
     ) -> Option<crate::file::AnyManifest> {
+        self.select_attachment_for_sibling(file_conv, requester, None)
+            .map(|selected| selected.manifest)
+    }
+
+    fn select_attachment_for_sibling(
+        &self,
+        file_conv: ConversationId,
+        requester: &PublicIdentity,
+        exact: Option<&SelectedAttachment>,
+    ) -> Option<SelectedAttachment> {
         let (recalled, _) = self.account_archive_recalls();
         let own = self.account_id();
-        let me = self.user_id();
-        let requester_id = requester.user_id();
+        if !self.account_private_sibling_current(requester) {
+            return None;
+        }
         let mut hosts = HashSet::new();
         hosts.insert(account_conversation_id(&own, &own));
         for other in self.known_account_ids() {
             hosts.insert(account_conversation_id(&own, &other));
         }
+        let channel_scopes: HashMap<_, _> = if let Some(selected) = exact {
+            selected
+                .scope
+                .as_ref()
+                .and_then(|_| {
+                    self.account_private_channel_export_scope(selected.row.conversation, requester)
+                })
+                .map(|scope| (selected.row.conversation, scope))
+                .into_iter()
+                .collect()
+        } else {
+            self.account_private_archive_channels(requester)
+                .into_iter()
+                .filter_map(|host| {
+                    self.account_private_channel_export_scope(host, requester)
+                        .map(|scope| (host, scope))
+                })
+                .collect()
+        };
+        hosts.extend(channel_scopes.keys().copied());
+        if let Some(selected) = exact
+            && (!hosts.contains(&selected.row.conversation)
+                || channel_scopes.get(&selected.row.conversation) != selected.scope.as_ref())
         {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            for channel in book.channel_ids() {
-                if book.state(&channel).is_some_and(|state| {
-                    !state.is_dissolved()
-                        && state.is_accepted_member(&me)
-                        && state.is_accepted_member(&requester_id)
-                }) {
-                    hosts.insert(channel);
-                }
-            }
+            return None;
         }
         let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
         let rows = self
@@ -804,9 +1049,13 @@ impl Node {
             .expect("suppression mutex not poisoned");
         for host in hosts {
             for row in rows.entries_ref(&host) {
+                if exact.is_some_and(|selected| row != &selected.row) {
+                    continue;
+                }
                 if delivery.file_erased(host, row.event_id)
                     || delivery.manifest_event_erased(row.event_id)
                     || suppression.contains(host, row.event_id)
+                    || self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
                     || recalled
                         .get(&host)
                         .is_some_and(|ids| ids.contains(&row.event_id))
@@ -817,7 +1066,15 @@ impl Node {
                 if let Some(manifest) = super::files::eligible_manifest_row(row, proof, None)
                     && manifest.file_conv() == file_conv
                 {
-                    return Some(manifest);
+                    if exact.is_some_and(|selected| selected.manifest != manifest) {
+                        continue;
+                    }
+                    return Some(SelectedAttachment {
+                        file: file_conv,
+                        row: row.clone(),
+                        manifest,
+                        scope: channel_scopes.get(&host).cloned(),
+                    });
                 }
             }
         }
@@ -930,8 +1187,8 @@ impl Node {
         let controls = self.private_dm_control_revision();
         let staging = self
             .account_blocking(move |node| {
-                let manifest = node
-                    .attachment_for_sibling(file_conv, &peer)
+                let selected = node
+                    .select_attachment_for_sibling(file_conv, &peer, None)
                     .ok_or_else(|| {
                         NodeError::Authorization("attachment no longer shared".into())
                     })?;
@@ -941,22 +1198,30 @@ impl Node {
                     file_conv,
                     &staging.path().join("verified-attachment"),
                 )?;
-                Ok((staging, manifest))
+                Ok((staging, selected))
             })
             .await;
-        let Ok((staging, manifest)) = staging else {
+        let Ok((staging, selected)) = staging else {
             return false;
         };
+        let manifest = &selected.manifest;
         let path = staging.path().join("verified-attachment");
         let Ok(mut source) = tokio::fs::File::open(&path).await else {
             return false;
         };
         if self
-            .send_account_history_frame(
+            .select_attachment_for_sibling(file_conv, channel.peer_identity(), Some(&selected))
+            .is_none()
+        {
+            return false;
+        }
+        if self
+            .send_account_content_frame(
                 channel,
                 version,
                 revision,
                 controls,
+                PrivateContent::Attachment(&selected),
                 &AccountHistoryFrame::AttachmentStart {
                     file_conv: *file_conv.as_bytes(),
                     name: manifest.name().to_string(),
@@ -979,14 +1244,21 @@ impl Node {
             if read == 0 {
                 break;
             }
+            if self
+                .select_attachment_for_sibling(file_conv, channel.peer_identity(), Some(&selected))
+                .is_none()
+            {
+                return false;
+            }
             total += read as u64;
             hasher.update(&buffer[..read]);
             if self
-                .send_account_history_frame(
+                .send_account_content_frame(
                     channel,
                     version,
                     revision,
                     controls,
+                    PrivateContent::Attachment(&selected),
                     &AccountHistoryFrame::AttachmentChunk {
                         bytes: buffer[..read].to_vec(),
                     },
@@ -998,12 +1270,18 @@ impl Node {
             }
         }
         let actual: [u8; 32] = hasher.finalize().into();
-        if total == manifest.size() && actual == manifest.checksum() {
-            self.send_account_history_frame(
+        if total == manifest.size()
+            && actual == manifest.checksum()
+            && self
+                .select_attachment_for_sibling(file_conv, channel.peer_identity(), Some(&selected))
+                .is_some()
+        {
+            self.send_account_content_frame(
                 channel,
                 version,
                 revision,
                 controls,
+                PrivateContent::Attachment(&selected),
                 &AccountHistoryFrame::AttachmentComplete,
             )
             .await
@@ -1280,11 +1558,21 @@ impl Node {
         self.apply_account_history_page_at_revision(page, version, None)
     }
 
+    #[cfg(test)]
     fn apply_account_history_page_at_revision(
         &self,
         page: &[HistoryRecord],
         version: AccountSyncVersion,
         expected_revision: Option<u64>,
+    ) -> Result<(), NodeError> {
+        self.apply_account_history_page_from_sibling(page, version, expected_revision, None)
+    }
+    fn apply_account_history_page_from_sibling(
+        &self,
+        page: &[HistoryRecord],
+        version: AccountSyncVersion,
+        expected_revision: Option<u64>,
+        source: Option<&Announce>,
     ) -> Result<(), NodeError> {
         let _commit = self
             .account_sync_commit
@@ -1297,18 +1585,26 @@ impl Node {
             ));
         }
         if policy.history {
-            {
-                let book = self.channels.lock().expect("channels mutex not poisoned");
-                for record in page {
-                    if let HistoryRecord::Channel(record) = record {
-                        let channel = ConversationId::new(record.conversation);
-                        if !book.state(&channel).is_some_and(|state| {
-                            !state.pending_invite() && state.is_accepted_member(&self.user_id())
-                        }) {
-                            return Err(NodeError::Authorization(
-                                "channel history requires accepted membership".into(),
-                            ));
-                        }
+            for record in page {
+                if let HistoryRecord::Channel(record) = record {
+                    let channel = ConversationId::new(record.conversation);
+                    let allowed = source.map_or_else(
+                        || {
+                            self.channels
+                                .lock()
+                                .expect("channels mutex not poisoned")
+                                .state(&channel)
+                                .is_some_and(|state| {
+                                    !state.pending_invite()
+                                        && state.is_accepted_member(&self.user_id())
+                                })
+                        },
+                        |proof| self.account_private_channel_import_allowed(channel, proof),
+                    );
+                    if !allowed {
+                        return Err(NodeError::Authorization(
+                            "channel history requires an entitled account source".into(),
+                        ));
                     }
                 }
             }
@@ -1383,7 +1679,7 @@ impl Node {
         if version.includes_file_cards(policy.history, policy.attachments) {
             for record in page {
                 if let HistoryRecord::FileCard(record) = record {
-                    self.import_account_file_card(record, version)?;
+                    self.import_account_file_card_from_sibling(record, version, source)?;
                 }
             }
         }
@@ -1466,6 +1762,11 @@ impl Node {
                 },
             )
             .await?;
+        let source_proof = channel
+            .peer_announcement()
+            .cloned()
+            .or_else(|| self.account_private_source_announcement(channel.peer_identity()))
+            .ok_or_else(|| NodeError::Authorization("account source proof unavailable".into()))?;
         let mut page = HistoryPageAssembler::new();
         let mut seen_devices = HashSet::new();
         let mut seen_preferences = HashSet::new();
@@ -1571,10 +1872,11 @@ impl Node {
                                     "account sync policy changed".into(),
                                 ));
                             }
-                            node.apply_account_history_page_at_revision(
+                            node.apply_account_history_page_from_sibling(
                                 &complete.records,
                                 version,
                                 Some(revision),
+                                Some(&source_proof),
                             )
                         })
                         .await?;
@@ -1588,7 +1890,11 @@ impl Node {
 
     pub(in crate::node) async fn run_account_history_loop(self: Arc<Self>) {
         use std::collections::VecDeque;
-        const HISTORY_WORKERS: usize = 4;
+        // Partition the existing four history slots. A slow optional response
+        // retains its own page while mandatory directory/control work progresses
+        // through the same authenticated, globally admitted session pool.
+        const HISTORY_WORKERS: usize = 2;
+        const MANDATORY_WORKERS: usize = 2;
         const ATTACHMENT_WORKERS: usize = 2;
         let mut tick = tokio::time::interval(RETRY_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1600,6 +1906,17 @@ impl Node {
         let mut pending_refresh = HashSet::new();
         let mut history = tokio::task::JoinSet::new();
         let mut history_owners: HashMap<tokio::task::Id, String> = HashMap::new();
+        let mut mandatory = tokio::task::JoinSet::new();
+        let mut mandatory_owners: HashMap<tokio::task::Id, String> = HashMap::new();
+        let mut mandatory_cursors = HashMap::new();
+        let mut mandatory_queue: VecDeque<(String, PeerRecord)> = VecDeque::new();
+        let mut mandatory_active = HashSet::new();
+        let mut mandatory_refresh = HashSet::new();
+        // Cached projections survive while each independently owned cursor is
+        // inside a network task; a completed mandatory pull cannot erase an
+        // optional failure or falsely declare an unfinished optional page done.
+        let mut optional_statuses: HashMap<String, DocumentStatus> = HashMap::new();
+        let mut mandatory_statuses: HashMap<String, DocumentStatus> = HashMap::new();
         let mut attachment_owners: HashMap<tokio::task::Id, String> = HashMap::new();
         let mut attachments = tokio::task::JoinSet::new();
         let mut active_attachments = HashSet::new();
@@ -1611,10 +1928,83 @@ impl Node {
         let mut custody_migration = None;
         let mut inventory_publication = None;
         let mut group_access_publication = None;
+        let mut fanout = fanout::FanoutQueue::default();
+        let mut fanout_cursor = 0u64;
+        let mut fanout_tasks = tokio::task::JoinSet::new();
+        let mut fanout_owners = HashMap::new();
         loop {
+            if self
+                .delivery_suspended
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            let affected = self.maintain_account_group_operation_effects();
+            for (sequence, group) in self.account_group_fanout_page(fanout_cursor, fanout::CAPACITY)
+            {
+                if !fanout.observe(group, sequence) {
+                    break;
+                }
+                fanout_cursor = sequence;
+            }
+            for group in affected {
+                if let Some(sequence) = self.account_group_fanout_sequence(group) {
+                    // A full queue leaves this group in the durable journal
+                    // index. Do not advance the cursor past its older slot.
+                    if !fanout.observe(group, sequence) {
+                        fanout_cursor = fanout_cursor.min(sequence.saturating_sub(1));
+                    }
+                }
+            }
             self.migrate_channel_custody(&mut custody_migration);
             self.publish_account_group_access(&mut group_access_publication);
             self.publish_group_inventory(&mut inventory_publication);
+            while mandatory_active.len() < MANDATORY_WORKERS {
+                let Some((id, peer)) = mandatory_queue.pop_front() else {
+                    break;
+                };
+                if !mandatory_active.insert(id.clone()) {
+                    continue;
+                }
+                let mut state = mandatory_cursors
+                    .remove(&id)
+                    .unwrap_or_else(super::account_documents::sync::DocumentSyncCursor::mandatory);
+                let node = self.clone();
+                let Some(permit) = self.runtime_work.admit() else {
+                    return;
+                };
+                let owner = id.clone();
+                let task = mandatory.spawn(permit.track(async move {
+                    let _ = node.pull_account_documents_page(&peer, &mut state).await;
+                    (id, peer, state)
+                }));
+                mandatory_owners.insert(task.id(), owner);
+            }
+            while let Some(group) = fanout.start_next() {
+                // Bootstrap recovery may commit a group outside this turn's
+                // ordinary publication slice. Refresh that exact source before
+                // its owned public distribution can start.
+                self.publish_account_group_access_for(group);
+                self.publish_group_inventory_for(group);
+                self.publish_account_group_operations_for(group);
+                #[cfg(test)]
+                {
+                    let hook = self.control_fanout_start_test_hook.lock().unwrap().take();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
+                let node = self.clone();
+                let Some(permit) = self.runtime_work.admit() else {
+                    return;
+                };
+                let task = fanout_tasks.spawn(permit.track(async move {
+                    let members = node.channel_members(group);
+                    node.distribute_channel(group, &members).await;
+                    group
+                }));
+                fanout_owners.insert(task.id(), group);
+            }
             while active.len() < HISTORY_WORKERS {
                 let Some((id, peer)) = queue.pop_front() else {
                     break;
@@ -1622,7 +2012,10 @@ impl Node {
                 if !active.insert(id.clone()) {
                     continue;
                 }
-                let mut state = cursors.remove(&id).unwrap_or_default();
+                let mut state = cursors.remove(&id).unwrap_or_else(|| PeerCursor {
+                    documents: super::account_documents::sync::DocumentSyncCursor::optional(),
+                    ..PeerCursor::default()
+                });
                 let node = self.clone();
                 let Some(permit) = self.runtime_work.admit() else {
                     return;
@@ -1694,10 +2087,66 @@ impl Node {
             tokio::select! {
                 _ = tick.tick() => { enqueue_all = true; }
                 _ = self.account_sync_notify.notified() => { enqueue_all = true; }
+                result = fanout_tasks.join_next_with_id(), if !fanout_tasks.is_empty() => {
+                    let group = match result {
+                        Some(Ok((task, group))) => { fanout_owners.remove(&task); Some(group) },
+                        Some(Err(error)) => {
+                            log::debug!("account control fanout worker terminated: {error}");
+                            fanout_owners.remove(&error.id())
+                        }
+                        None => None,
+                    };
+                    if let Some(group) = group && fanout.finished(group)
+                        && let Some(sequence) = self.account_group_fanout_sequence(group)
+                        && !fanout.observe(group, sequence) {
+                        fanout_cursor = fanout_cursor.min(sequence.saturating_sub(1));
+                    }
+                }
+                result = mandatory.join_next_with_id(), if !mandatory.is_empty() => {
+                    if let Some(Err(error)) = &result
+                        && let Some(id) = mandatory_owners.remove(&error.id()) {
+                            mandatory_active.remove(&id);
+                            mandatory_refresh.remove(&id);
+                            mandatory_cursors.remove(&id);
+                            mandatory_statuses.insert(id.clone(), (SyncPhase::Error,
+                                Some("mandatory account document worker terminated".into()), false));
+                            let mut status = self.account_sync_status.lock().expect("account sync status mutex not poisoned")
+                                .get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
+                            let (phase, error, upgrade) = combined_document_status(optional_statuses.get(&id), mandatory_statuses.get(&id));
+                            status.document_phase = phase;
+                            status.document_error = error;
+                            status.document_requires_upgrade = upgrade;
+                            self.set_account_sync_status(id, status);
+                    }
+                    if let Some(Ok((task, (id, peer, state)))) = result {
+                        mandatory_owners.remove(&task);
+                        mandatory_active.remove(&id);
+                        let (policy, current_revision) = self.device_sync_policy_snapshot();
+                        if current_revision != revision { enqueue_all = true; }
+                        else {
+                            let continuation = mandatory_refresh.remove(&id) || state.pending;
+                            mandatory_statuses.insert(id.clone(), state.status(policy));
+                            let mut status = self.account_sync_status.lock().expect("account sync status mutex not poisoned")
+                                .get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
+                            let (phase, error, upgrade) = combined_document_status(optional_statuses.get(&id), mandatory_statuses.get(&id));
+                            status.document_phase = phase;
+                            status.document_error = error;
+                            status.document_requires_upgrade = upgrade;
+                            self.set_account_sync_status(id.clone(), status);
+                            mandatory_cursors.insert(id.clone(), state);
+                            if continuation {
+                                mandatory_queue.push_back((id, peer));
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                    }
+                }
                 result = history.join_next_with_id(), if !history.is_empty() => {
                     if let Some(Err(error)) = &result
                         && let Some(id) = history_owners.remove(&error.id()) {
                             active.remove(&id); pending_refresh.remove(&id); cursors.remove(&id);
+                            optional_statuses.insert(id.clone(), (SyncPhase::Error,
+                                Some("account document worker terminated".into()), false));
                             self.set_account_sync_status(id.clone(), DeviceSyncStatus { device_id: id,
                                 phase: SyncPhase::Error, pending_attachments: 0, legacy_file_metadata: false,
                                 document_phase:SyncPhase::Error,document_error:Some("account document worker terminated".into()),document_requires_upgrade:false,
@@ -1709,7 +2158,8 @@ impl Node {
                         let (policy, current_revision) = self.device_sync_policy_snapshot();
                         if current_revision != revision { enqueue_all = true; }
                         else {
-                            let (document_phase,document_error,document_requires_upgrade)=state.documents.status(policy);
+                            optional_statuses.insert(id.clone(), state.documents.status(policy));
+                            let (document_phase,document_error,document_requires_upgrade)=combined_document_status(optional_statuses.get(&id), mandatory_statuses.get(&id));
                             let mut status = DeviceSyncStatus { device_id: id.clone(), phase: SyncPhase::CatchingUp,
                                 pending_attachments: 0, legacy_file_metadata: false, error: None,document_phase,document_error,document_requires_upgrade };
                             let favorites_pending = state.favorite_next.is_some() || (state.favorites_supported && state.favorite_digest==[0;32] && state.favorite_error.is_none());
@@ -1831,13 +2281,22 @@ impl Node {
                 // Cancellation drops every network future. Blocking writers retain retirement
                 // admission and perform their own current-policy checks before commit.
                 history.abort_all();
+                mandatory.abort_all();
                 attachments.abort_all();
                 while history.join_next().await.is_some() {}
+                while mandatory.join_next().await.is_some() {}
                 while attachments.join_next().await.is_some() {}
                 active.clear();
                 pending_refresh.clear();
                 active_attachments.clear();
                 history_owners.clear();
+                mandatory_owners.clear();
+                mandatory_active.clear();
+                mandatory_refresh.clear();
+                mandatory_queue.clear();
+                mandatory_cursors.clear();
+                mandatory_statuses.clear();
+                optional_statuses.clear();
                 attachment_owners.clear();
                 queue.clear();
                 cursors.clear();
@@ -1848,10 +2307,34 @@ impl Node {
                 enqueue_all = true;
             }
             if enqueue_all {
-                for device in self.linked_devices() {
+                let devices = self.linked_devices();
+                let certified: HashSet<_> = devices
+                    .iter()
+                    .map(|device| device.public.user_id())
+                    .collect();
+                // Certification churn must not retain retired peer cursors or
+                // queued retries. Active exchanges retain their exact admission
+                // and recheck current authority before any durable import.
+                cursors.retain(|id, _| certified.contains(id));
+                mandatory_cursors.retain(|id, _| certified.contains(id));
+                optional_statuses.retain(|id, _| certified.contains(id));
+                mandatory_statuses.retain(|id, _| certified.contains(id));
+                queue.retain(|(id, _)| certified.contains(id));
+                mandatory_queue.retain(|(id, _)| certified.contains(id));
+                pending_refresh.retain(|id| certified.contains(id));
+                mandatory_refresh.retain(|id| certified.contains(id));
+                for device in devices {
                     let id = device.public.user_id();
                     if id == self.user_id() {
                         continue;
+                    }
+                    if mandatory_active.contains(&id) {
+                        mandatory_refresh.insert(id.clone());
+                    } else if !mandatory_queue.iter().any(|(queued, _)| queued == &id)
+                        && let Some(peer) = self.routing_peer(&id)
+                        && peer.public == device.public
+                    {
+                        mandatory_queue.push_back((id.clone(), peer));
                     }
                     if active.contains(&id) {
                         pending_refresh.insert(id);

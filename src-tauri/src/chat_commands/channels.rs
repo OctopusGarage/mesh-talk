@@ -77,6 +77,8 @@ pub struct ChannelInfo {
     pub shared_reference: bool,
     pub legacy_membership: bool,
     pub reference_members_complete: bool,
+    /// A retained descriptive snapshot is awaiting causal reconciliation.
+    pub directory_reconciling: bool,
     pub archived: bool,
     pub dissolved: bool,
     pub left: bool,
@@ -114,6 +116,9 @@ pub async fn list_channels(
                         reference_members_complete: reference
                             .as_ref()
                             .is_none_or(|reference| reference.members_complete),
+                        directory_reconciling: reference
+                            .as_ref()
+                            .is_some_and(|r| r.directory_reconciling),
                         legacy_membership: reference.as_ref().map_or_else(
                             || node.channel_legacy_membership(c.id),
                             |reference| reference.legacy_membership,
@@ -243,7 +248,14 @@ pub async fn channel_members(
                 )
                 .collect();
             Ok(ChannelMembersInfo {
-                history_policy: node.channel_history_policy(channel),
+                history_policy: reference
+                    .as_ref()
+                    .and_then(|r| r.observed_history_policy())
+                    .unwrap_or_else(|| node.channel_history_policy(channel)),
+                history_policy_known: reference
+                    .as_ref()
+                    .is_none_or(|r| r.observed_history_policy().is_some()),
+                directory_reconciling: reference.as_ref().is_some_and(|r| r.directory_reconciling),
                 owner: reference
                     .as_ref()
                     .map(|r| r.owner.clone())

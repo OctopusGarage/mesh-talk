@@ -540,6 +540,10 @@ pub(super) fn encode_policy(policy: HistoryPolicy) -> Vec<u8> {
     encode(&policy)
 }
 
+pub(super) fn decode_policy(bytes: &[u8]) -> Option<HistoryPolicy> {
+    decode(bytes)
+}
+
 pub(super) fn policy(events: &[&Event]) -> HistoryPolicy {
     View::new(events).policy(None)
 }
@@ -619,7 +623,11 @@ impl Node {
                 }
                 members = state.members().to_vec();
             }
-            self.append_event(channel, EventKind::ChannelHistoryPolicy, encode(&policy))?;
+            self.append_event(
+                channel,
+                EventKind::ChannelHistoryPolicy,
+                encode_policy(policy),
+            )?;
             self.process_channel(channel);
             Ok(())
         })?;

@@ -9,7 +9,9 @@ use crate::{
 use mesh_talk_core::eventlog::EventId;
 use serde::Serialize;
 
+mod group_operations;
 mod search;
+pub use group_operations::*;
 pub use search::*;
 
 fn parse_id(input: &str) -> Result<EventId, CommandError> {
@@ -708,6 +710,12 @@ mod tests {
                     crate::chat_commands::save_file,
                     crate::chat_commands::save_file_to_dir,
                     crate::chat_commands::write_temp_file,
+                    super::owner_create_channel,
+                    super::owner_new_account_group_operation_id,
+                    super::owner_submit_account_group_control,
+                    super::owner_account_group_operation_status,
+                    super::owner_list_account_group_operations,
+                    super::owner_cancel_account_group_operation,
                     super::owner_search_recent,
                     super::owner_search_context,
                     super::owner_reveal_message,
@@ -1023,12 +1031,236 @@ mod tests {
     }
 
     #[test]
+    fn registered_account_group_operation_reads_preserve_account_scope() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let operation_id = "12".repeat(32);
+        let status = fixture.invoke(
+            "owner_account_group_operation_status",
+            serde_json::json!({"owner":"alice", "expectedAccount":account, "operationId":operation_id}),
+        ).expect("typed operation status must be a registered owner-scoped command");
+        assert_eq!(status, serde_json::Value::Null);
+        assert_eq!(fixture.invoke(
+            "owner_list_account_group_operations",
+            serde_json::json!({"owner":"alice", "expectedAccount":account, "pendingOnly":true, "limit":20}),
+        ).unwrap(), serde_json::json!([]));
+        for (command, body) in [
+            (
+                "owner_new_account_group_operation_id",
+                serde_json::json!({}),
+            ),
+            (
+                "owner_account_group_operation_status",
+                serde_json::json!({"operationId":operation_id}),
+            ),
+            (
+                "owner_list_account_group_operations",
+                serde_json::json!({"pendingOnly":true, "limit":20}),
+            ),
+            (
+                "owner_submit_account_group_control",
+                serde_json::json!({"operationId":operation_id, "channelId":"34".repeat(32), "operation":{"kind":"rename","name":"Wrong account"}}),
+            ),
+            (
+                "owner_cancel_account_group_operation",
+                serde_json::json!({"operationId":operation_id}),
+            ),
+        ] {
+            let mut body = body;
+            body["owner"] = serde_json::json!("alice");
+            body["expectedAccount"] = serde_json::json!("00".repeat(16));
+            assert_eq!(
+                fixture.invoke(command, body).unwrap_err()["kind"],
+                "authorization",
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn registered_owner_channel_creation_checks_account_and_session() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let created = fixture.invoke("owner_create_channel", serde_json::json!({
+            "owner":"alice", "expectedAccount":account, "name":"Scoped creation", "memberIds":[],
+        })).expect("group creation must expose an explicit owner/account command");
+        let id = created.as_str().unwrap();
+        assert_eq!(id.len(), 64);
+        let rows = fixture
+            .invoke("list_channels", serde_json::json!({}))
+            .unwrap();
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["channel_id"] == id)
+            .unwrap();
+        assert_eq!(row["account_access"]["account_id"], account);
+        assert_eq!(row["account_access"]["role"], "owner");
+        let count = rows.as_array().unwrap().len();
+        for (owner, expected_account) in [
+            ("other", account.as_str()),
+            ("alice", "00000000000000000000000000000000"),
+        ] {
+            let error = fixture.invoke("owner_create_channel", serde_json::json!({
+                "owner":owner, "expectedAccount":expected_account, "name":"Must not create", "memberIds":[],
+            })).unwrap_err();
+            assert_eq!(error["kind"], "authorization");
+        }
+        assert_eq!(
+            fixture
+                .node
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .list_channels()
+                .len(),
+            count
+        );
+    }
+
+    #[test]
+    fn registered_account_group_operation_id_mint_is_scoped_and_has_no_admission() {
+        let fixture = Fixture::new();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let body = serde_json::json!({"owner":"alice", "expectedAccount":account});
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let value = fixture
+                .invoke("owner_new_account_group_operation_id", body.clone())
+                .expect("operation ID minting must be a registered owner-scoped command");
+            let id =
+                mesh_talk_core::node::AccountGroupOperationId::from_hex(value.as_str().unwrap())
+                    .unwrap();
+            assert!(
+                fixture
+                    .node
+                    .0
+                    .blocking_read()
+                    .as_ref()
+                    .unwrap()
+                    .handle()
+                    .account_group_operation_status(&account, id)
+                    .unwrap()
+                    .is_none(),
+                "minting an ID must not admit an operation"
+            );
+            ids.push(id);
+        }
+        assert_ne!(ids[0], ids[1]);
+        let error = fixture
+            .invoke(
+                "owner_new_account_group_operation_id",
+                serde_json::json!({"owner":"alice", "expectedAccount":"00".repeat(16)}),
+            )
+            .unwrap_err();
+        assert_eq!(error["kind"], "authorization");
+    }
+
+    #[test]
+    fn registered_account_group_operations_reject_queued_logout() {
+        for command in [
+            "owner_create_channel",
+            "owner_new_account_group_operation_id",
+            "owner_submit_account_group_control",
+            "owner_account_group_operation_status",
+            "owner_list_account_group_operations",
+            "owner_cancel_account_group_operation",
+        ] {
+            let fixture = Fixture::new();
+            let account = fixture
+                .node
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .account_id()
+                .to_owned();
+            let mut body = serde_json::json!({"owner":"alice", "expectedAccount":account});
+            match command {
+                "owner_create_channel" => {
+                    body["name"] = serde_json::json!("Must not create");
+                    body["memberIds"] = serde_json::json!([]);
+                }
+
+                "owner_new_account_group_operation_id" => {}
+                "owner_submit_account_group_control" => {
+                    body["operationId"] = serde_json::json!("12".repeat(32));
+                    body["channelId"] = serde_json::json!("34".repeat(32));
+                    body["operation"] =
+                        serde_json::json!({"kind":"rename","name":"Must not admit"});
+                }
+                "owner_list_account_group_operations" => {
+                    body["pendingOnly"] = serde_json::json!(true);
+                    body["limit"] = serde_json::json!(20);
+                }
+                _ => body["operationId"] = serde_json::json!("12".repeat(32)),
+            }
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
+            let lifecycle = fixture.node.0.blocking_write();
+            let webview = fixture.webview.clone();
+            let pending = std::thread::spawn(move || invoke(&webview, command, body));
+            let captured = entered_rx.recv_timeout(std::time::Duration::from_secs(2));
+            fixture.app_state.session().clear();
+            drop(lifecycle);
+            let result = pending.join().unwrap();
+            assert!(
+                captured.is_ok(),
+                "{command} must capture authority before waiting"
+            );
+            assert_eq!(result.unwrap_err()["kind"], "authorization", "{command}");
+            assert!(
+                fixture
+                    .node
+                    .0
+                    .blocking_read()
+                    .as_ref()
+                    .unwrap()
+                    .handle()
+                    .account_group_operation_status(
+                        &account,
+                        mesh_talk_core::node::AccountGroupOperationId::new([0x12; 32])
+                    )
+                    .unwrap()
+                    .is_none(),
+                "retired {command} cannot create an operation"
+            );
+        }
+    }
+
+    #[test]
     fn registered_account_group_access_keeps_owner_role_when_its_source_is_offline() {
         use mesh_talk_core::{
             channel::{ChannelMeta, new_channel_id},
             eventlog::{Event, EventKind, PersistentEventLog},
             identity::{account::Account, account_keystore, device::DeviceIdentity, keystore},
-            node::{AccountDocumentDomain, AccountGroupRole, NodeRuntime},
+            node::{
+                AccountDocumentDomain, AccountDocumentKey, AccountGroupRole, DocumentConversation,
+                NodeRuntime,
+            },
         };
         let id = new_channel_id();
         let source_device = DeviceIdentity::generate();
@@ -1095,6 +1327,47 @@ mod tests {
                     source.handle().account_group_access(id).unwrap().role,
                     AccountGroupRole::Owner
                 );
+                source
+                    .handle()
+                    .set_channel_history_policy(id, mesh_talk_core::channel::HistoryPolicy::LastTen)
+                    .await
+                    .unwrap();
+                source
+                    .handle()
+                    .put_account_document_if(
+                        AccountDocumentKey::Draft {
+                            conversation: DocumentConversation::Account(account.account_id()),
+                        },
+                        b"synthetic policy observation wake".to_vec(),
+                        None,
+                        |commit| commit(),
+                    )
+                    .unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let published = source
+                            .handle()
+                            .account_documents(AccountDocumentDomain::GroupInventory, None, 64)
+                            .unwrap()
+                            .items;
+                        if published.iter().any(|meta| {
+                            source
+                                .handle()
+                                .account_document(&meta.key)
+                                .unwrap()
+                                .is_some_and(|document| {
+                                    serde_json::from_slice::<serde_json::Value>(document.payload())
+                                        .unwrap()["directory"]["history_policy"]
+                                        == "last_ten"
+                                })
+                        }) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
                 source.stop().await;
             });
             fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
@@ -1144,6 +1417,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(members["account_access"], row["account_access"]);
+        assert_eq!(row["directory_reconciling"], false);
+        assert_eq!(members["directory_reconciling"], false);
+        assert_eq!(members["history_policy_known"], true);
+        assert_eq!(
+            members["history_policy"], "last_ten",
+            "reference displays the source's observed policy, not an invented local Off default"
+        );
         // Observation projects account permission without inventing a public
         // membership for this device or routing an action through an old API.
         assert_eq!(row["can_manage"], false);
@@ -3212,7 +3492,39 @@ mod tests {
         use tauri::Manager;
         let fixture = Fixture::new();
         let channel = "11".repeat(32);
+        let expected_account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
         let cases = [
+            (
+                "owner_create_channel",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "name":"Must not create", "memberIds":[]}),
+            ),
+            (
+                "owner_new_account_group_operation_id",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account}),
+            ),
+            (
+                "owner_account_group_operation_status",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "operationId":"12".repeat(32)}),
+            ),
+            (
+                "owner_list_account_group_operations",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "pendingOnly":true, "limit":20}),
+            ),
+            (
+                "owner_submit_account_group_control",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "operationId":"12".repeat(32), "channelId":channel, "operation":{"kind":"rename","name":"Must not admit"}}),
+            ),
+            (
+                "owner_cancel_account_group_operation",
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "operationId":"12".repeat(32)}),
+            ),
             (
                 "write_temp_file",
                 serde_json::json!({"bytes":[],"ext":"png"}),

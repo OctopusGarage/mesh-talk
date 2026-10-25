@@ -639,3 +639,97 @@ it("binds settings reads and edits to the current cryptographic account", async 
     patch: { notifications: false },
   });
 });
+
+it("keeps account group operation acceptance separate from public event commitment", async () => {
+  const pending = {
+    id: "operation-id",
+    account_id: "account",
+    group: "channel",
+    kind: "rename",
+    phase: { kind: "awaiting_acceptance" },
+    executions: [],
+    committed_events: [],
+    primary_event: null,
+  };
+  vi.mocked(invoke).mockResolvedValueOnce(pending);
+  expect(
+    await chat.submitAccountGroupControl(
+      "owner",
+      "account",
+      "operation-id",
+      "channel",
+      { kind: "rename", name: "New name" },
+    ),
+  ).toEqual(pending);
+  expect(invoke).toHaveBeenLastCalledWith(
+    "owner_submit_account_group_control",
+    {
+      owner: "owner",
+      expectedAccount: "account",
+      operationId: "operation-id",
+      channelId: "channel",
+      operation: { kind: "rename", name: "New name" },
+    },
+  );
+  await chat.accountGroupOperationStatus("owner", "account", "operation-id");
+  expect(invoke).toHaveBeenLastCalledWith(
+    "owner_account_group_operation_status",
+    {
+      owner: "owner",
+      expectedAccount: "account",
+      operationId: "operation-id",
+    },
+  );
+  await chat.listAccountGroupOperations("owner", "account", {
+    channelId: "channel",
+    pendingOnly: true,
+    after: "previous-operation-id",
+    limit: 25,
+  });
+  expect(invoke).toHaveBeenLastCalledWith(
+    "owner_list_account_group_operations",
+    {
+      owner: "owner",
+      expectedAccount: "account",
+      channelId: "channel",
+      pendingOnly: true,
+      after: "previous-operation-id",
+      limit: 25,
+    },
+  );
+  await chat.cancelAccountGroupOperation("owner", "account", "operation-id");
+  expect(invoke).toHaveBeenLastCalledWith(
+    "owner_cancel_account_group_operation",
+    {
+      owner: "owner",
+      expectedAccount: "account",
+      operationId: "operation-id",
+    },
+  );
+});
+
+it("mints a scoped operation ID before submitting a group intent", async () => {
+  const id = "ab".repeat(32);
+  vi.mocked(invoke).mockResolvedValueOnce(id);
+  expect(await chat.newAccountGroupOperationId("owner", "account")).toBe(id);
+  expect(invoke).toHaveBeenLastCalledWith(
+    "owner_new_account_group_operation_id",
+    {
+      owner: "owner",
+      expectedAccount: "account",
+    },
+  );
+});
+
+it("binds group creation to the captured owner and account", async () => {
+  vi.mocked(invoke).mockResolvedValueOnce("new-group");
+  expect(
+    await chat.createChannelForOwner("owner", "account", "Group", ["peer"]),
+  ).toBe("new-group");
+  expect(invoke).toHaveBeenLastCalledWith("owner_create_channel", {
+    owner: "owner",
+    expectedAccount: "account",
+    name: "Group",
+    memberIds: ["peer"],
+  });
+});

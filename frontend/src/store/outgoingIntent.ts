@@ -1,3 +1,13 @@
+import type {
+  GroupOperationContext,
+  GroupOperationTicket,
+} from "./accountGroupOperations";
+export {
+  submitGroupControlIntent,
+  refreshGroupOperationIntents,
+  cancelGroupOperationIntent,
+  GROUP_OPERATION_TICKET_CAP,
+} from "./outgoingIntent/groupOperations";
 import { readWithDeadline } from "@/lib/readDeadline";
 import { chat } from "@/lib/api/chat";
 import { errorMessage, sendFailReason } from "@/lib/error";
@@ -24,9 +34,15 @@ export type { SendIntent, SendPayload } from "./conversationModel";
 /** Outgoing work owns intent/cache transitions and serial delivery projection. */
 export interface OutgoingIntentState extends ConversationCacheState {
   statusBusy: boolean;
+  /** Body-free native operation lifecycle; message payloads remain in intents. */
+  groupOperations?: Record<string, GroupOperationTicket>;
+  groupOperationIssue?: Parameters<GroupOperationContext["report"]>[0];
 }
 
 export interface OutgoingIntentContext extends OutgoingIntentState {
+  onGroupOperationTerminal?: (
+    status: import("@/lib/types").AccountGroupOperationStatus,
+  ) => void;
   expiryNow?: number;
   runEpoch: number;
   identityEpoch: number;

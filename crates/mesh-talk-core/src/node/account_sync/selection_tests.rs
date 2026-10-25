@@ -1148,10 +1148,36 @@ async fn account_sync_pending_channel_requester_receives_no_archive_or_file_byte
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer = sibling_peer(&receiver, &source, listener.local_addr().unwrap());
     sibling_peer(&source, &receiver, "127.0.0.1:9".parse().unwrap());
-    let group = source
-        .create_channel_invited("private", vec![receiver.identity.public()])
+    // The owner belongs to another account. Retain genuine content from this
+    // account's earlier accepted lifetime, then remove and re-invite its only
+    // physical source. The receiver's account is therefore actually pending.
+    let owner = open_sibling(&dir.path().join("external-owner"), &Account::generate());
+    assert_ne!(owner.account_id(), source.account_id());
+    let group = owner
+        .create_channel_invited("private", vec![source.identity.public()])
         .await
         .unwrap();
+    let copy_public = |from: &Node, to: &Node| {
+        let events: Vec<_> = from
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut log = to.log.lock().unwrap();
+        for event in events {
+            if log.get(&event.id).is_none() {
+                log.append(event).unwrap();
+            }
+        }
+        drop(log);
+        to.process_channel(group);
+    };
+    copy_public(&owner, &source);
+    source.accept_channel_invite(group).await.unwrap();
+    copy_public(&source, &owner);
     source
         .send_channel_message(group, b"accepted members only")
         .await
@@ -1165,16 +1191,65 @@ async fn account_sync_pending_channel_requester_receives_no_archive_or_file_byte
     source
         .save_directory_archive(file, &dir.path().join("retained.txt"))
         .unwrap();
-    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    copy_public(&source, &owner);
+    owner
+        .remove_channel_member(group, &source.user_id())
+        .await
+        .unwrap();
+    copy_public(&owner, &source);
+    owner
+        .add_channel_member(group, source.identity.public())
+        .await
+        .unwrap();
+    copy_public(&owner, &source);
+    assert!(
+        source
+            .channels
+            .lock()
+            .unwrap()
+            .state(&group)
+            .unwrap()
+            .pending_invite()
+    );
+    assert!(
+        !source
+            .account_group_projection(group)
+            .state
+            .unwrap()
+            .is_accepted_member(&source.user_id())
+    );
+    assert!(receiver.channel_members(group).is_empty());
+    // Exclude background channel recovery while this fixture owns the real
+    // pending-account transition. Authentication and serving use production paths.
+    let serving = source.clone();
+    let mut server = tokio::task::JoinSet::new();
+    server.spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let serving = serving.clone();
+                    connections.spawn(async move {
+                        let channel = serving.privacy_accept(stream).await.unwrap();
+                        serving.serve_connection(channel).await;
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
     for accepted in [false, true] {
         if accepted {
-            source
-                .channels
-                .lock()
-                .unwrap()
-                .state_mut(&group)
-                .unwrap()
-                .accept_invite(&receiver.user_id(), EventId::new([71; 32]));
+            source.accept_channel_invite(group).await.unwrap();
+            copy_public(&source, &owner);
+            assert!(
+                source
+                    .account_group_projection(group)
+                    .state
+                    .unwrap()
+                    .is_accepted_member(&source.user_id())
+            );
         }
         let mut io = receiver
             .privacy_dial(peer.addr, &peer.public)
@@ -1223,11 +1298,65 @@ async fn account_sync_pending_channel_requester_receives_no_archive_or_file_byte
                 .attachment_for_sibling(file, &receiver.identity.public())
                 .is_some(),
             accepted,
-            "attachment serving requires accepted requester membership"
+            "attachment serving requires a currently accepted source in the requesting account"
         );
+        let mut attachment = receiver
+            .begin_account_exchange(
+                &peer,
+                AccountSyncVersion::V2,
+                AccountHistoryFrame::AttachmentRequestChecked {
+                    account_id: source.account_id(),
+                    file_conv: *file.as_bytes(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut copied = Vec::new();
+        let mut started = false;
+        loop {
+            let bytes = tokio::time::timeout(Duration::from_secs(3), attachment.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match AccountHistoryFrame::decode_versioned(&bytes).unwrap().1 {
+                AccountHistoryFrame::AttachmentUnavailable { .. } => {
+                    assert!(!accepted);
+                    break;
+                }
+                AccountHistoryFrame::AttachmentStart { .. } => {
+                    assert!(
+                        accepted,
+                        "a pending account must receive no attachment header"
+                    );
+                    started = true;
+                }
+                AccountHistoryFrame::AttachmentChunk { bytes } => {
+                    assert!(
+                        accepted,
+                        "a pending account must receive no attachment chunks"
+                    );
+                    copied.extend(bytes);
+                }
+                AccountHistoryFrame::AttachmentComplete => {
+                    assert!(accepted);
+                    break;
+                }
+                frame => panic!("unexpected attachment response: {frame:?}"),
+            }
+        }
+        assert_eq!(started, accepted);
+        assert_eq!(
+            copied,
+            if accepted {
+                b"private file bytes".to_vec()
+            } else {
+                Vec::new()
+            }
+        );
+        attachment.recycle(&receiver);
     }
-    server.abort();
-    let _ = server.await;
+    server.abort_all();
+    while server.join_next().await.is_some() {}
 }
 
 #[test]
@@ -2605,6 +2734,10 @@ async fn checked_attachment_unknown_erased_and_unshared_ids_have_identical_negat
             None,
             |commit| commit(),
         )
+        .await
+        .unwrap();
+    source
+        .set_channel_replica_enabled(channel, false)
         .await
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

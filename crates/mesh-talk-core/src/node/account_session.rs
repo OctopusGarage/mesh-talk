@@ -12,6 +12,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 
+#[cfg(test)]
+pub(in crate::node) type AccountSessionTestHook = dyn Fn(
+        crate::identity::device::PublicIdentity,
+        AccountHistoryFrame,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    + Send
+    + Sync;
+
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SESSION_REQUESTS: usize = 10_000;
@@ -245,6 +253,15 @@ impl Node {
                 Ok(Ok(()))
             ) {
                 return;
+            }
+            // Observe only acknowledged, authenticated exchanges. The hook is
+            // instance-scoped and never holds a store mutex or disclosure guard.
+            #[cfg(test)]
+            {
+                let hook = self.account_session_test_hook.lock().unwrap().clone();
+                if let Some(hook) = hook {
+                    hook(channel.peer_identity().clone(), frame.clone()).await;
+                }
             }
             let complete = match frame {
                 AccountHistoryFrame::AttachmentRequestChecked {

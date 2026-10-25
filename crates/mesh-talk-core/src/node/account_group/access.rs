@@ -349,7 +349,10 @@ impl Node {
         })
     }
 
-    fn account_group_binding_current(&self, proof: &crate::discovery::Announce) -> bool {
+    pub(in crate::node) fn account_group_binding_current(
+        &self,
+        proof: &crate::discovery::Announce,
+    ) -> bool {
         if !proof.verify()
             || proof.account_cert.as_ref().is_none_or(|certificate| {
                 certificate.account_ed25519_pub != self.account.public().ed25519_pub

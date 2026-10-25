@@ -69,8 +69,21 @@ impl Node {
             .filter(|group| after.is_none_or(|prior| group.as_bytes() > prior.as_bytes()))
             .take(16)
             .collect();
-        for group in &groups {
-            *after = Some(*group);
+        self.publish_account_group_access_groups(&groups);
+        *after = if groups.len() == 16 {
+            groups.last().copied()
+        } else {
+            None
+        };
+    }
+
+    /// An accepted effect refreshes its exact group before public fanout can wait.
+    pub(in crate::node) fn publish_account_group_access_for(&self, group: ConversationId) {
+        self.publish_account_group_access_groups(&[group]);
+    }
+
+    fn publish_account_group_access_groups(&self, groups: &[ConversationId]) {
+        for group in groups {
             let key = AccountDocumentKey::GroupControl {
                 channel: hex::encode(group.as_bytes()),
                 source_device: self.user_id(),
@@ -193,9 +206,6 @@ impl Node {
                 Ok(false) => {}
                 Err(error) => log::debug!("account group access publication deferred: {error}"),
             }
-        }
-        if groups.len() < 16 {
-            *after = None;
         }
     }
 }

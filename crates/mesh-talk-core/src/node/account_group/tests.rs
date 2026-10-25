@@ -759,3 +759,398 @@ async fn a_newer_source_member_observation_wins_before_its_public_transfer_arriv
         "this fixture must still lack the public transfer"
     );
 }
+
+#[tokio::test]
+async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let member = node(&dir.path().join("member"), &account);
+    let reference = node(&dir.path().join("reference"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let genesis = Event::new(
+        &owner.identity,
+        new_channel_id(),
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Before account rename".into(),
+            members: vec![
+                owner.identity.public(),
+                member.identity.public(),
+                external.identity.public(),
+            ],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    let group = genesis.conversation_id;
+    for target in [&owner, &member, &external] {
+        install(target, &genesis);
+    }
+    // Keep this an actual legacy group even when all running peers learn modern
+    // capability support. The real owner's pending invitation blocks migration.
+    let pending = DeviceIdentity::generate();
+    let invitation = Event::new(
+        &owner.identity,
+        group,
+        2,
+        vec![genesis.id],
+        2,
+        2,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Before account rename".into(),
+            members: vec![
+                owner.identity.public(),
+                member.identity.public(),
+                external.identity.public(),
+                pending.public(),
+            ],
+            epoch: 1,
+            owner: owner.user_id(),
+        }
+        .encode_invitation(),
+    );
+    for target in [&owner, &member, &external] {
+        install(target, &invitation);
+    }
+    for left in [&owner, &member, &reference] {
+        for right in [&owner, &member, &reference] {
+            if left.user_id() != right.user_id() {
+                link(left, right);
+            }
+        }
+        left.set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+    }
+    let mut servers = tokio::task::JoinSet::new();
+    let mut addresses = Vec::new();
+    let mut listeners = Vec::new();
+    for (name, target) in [
+        ("owner", &owner),
+        ("member", &member),
+        ("reference", &reference),
+        ("external", &external),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        configure(target, &dir.path().join(name), address.port());
+        addresses.push(address);
+        listeners.push(listener);
+    }
+    for left in [&owner, &member, &reference, &external] {
+        for (right, address) in [&owner, &member, &reference, &external]
+            .into_iter()
+            .zip(&addresses)
+        {
+            if left.user_id() != right.user_id() {
+                left.roster.lock().unwrap().update(
+                    &right.signed_announce("Rename peer", address.port()),
+                    address.ip(),
+                    &left.user_id(),
+                );
+            }
+        }
+    }
+    // The first scheduler tick must see the real listening routes. This is
+    // setup, distinct from the action's unchanged eight-second deadline.
+    for (target, listener) in [&owner, &member, &reference, &external]
+        .into_iter()
+        .zip(listeners)
+    {
+        servers.spawn(target.clone().run_accept_loop(listener));
+    }
+    owner.publish_account_group_access(&mut None);
+    pull_group_control(&reference, &owner, addresses[0]).await;
+    pull_group_control(&member, &owner, addresses[0]).await;
+    assert_eq!(
+        reference.account_group_access(group).unwrap().role,
+        AccountGroupRole::Owner
+    );
+    assert_eq!(
+        member.account_group_access(group).unwrap().role,
+        AccountGroupRole::Owner
+    );
+    assert!(reference.channel_members(group).is_empty());
+    assert!(!reference.channel_can_manage(group));
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let requester_ready = reference.group_operation_versions.lock().unwrap()
+                .get(&owner.user_id()).is_some_and(|support| support.public == owner.identity.public());
+            let source_ready = owner.group_operation_versions.lock().unwrap()
+                .get(&reference.user_id()).is_some_and(|support| support.public == reference.identity.public());
+            if requester_ready && source_ready { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("cold authenticated capability exchanges must progress in both directions without submitting work or manual polling");
+    let id = reference
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    let submitted = reference
+        .submit_account_group_operation_if(
+            &account.account_id(),
+            id,
+            group,
+            AccountGroupOperation::Rename {
+                name: "  After account rename  ".into(),
+            },
+            |commit| commit(),
+        )
+        .expect(
+            "a certified reference-only owner sibling must durably submit the account operation",
+        );
+    assert!(matches!(
+        submitted.phase,
+        AccountGroupOperationPhase::WaitingForExecutor
+            | AccountGroupOperationPhase::AwaitingAcceptance
+            | AccountGroupOperationPhase::Accepted
+    ));
+    assert!(
+        submitted.committed_events.is_empty(),
+        "source acceptance is not a fabricated public EventId"
+    );
+    let committed = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let status = reference
+                .account_group_operation_status(&account.account_id(), id)
+                .unwrap();
+            if let Some(status) = status
+                && status.phase == AccountGroupOperationPhase::Committed
+                && reference.channel_shared_reference(group).is_some_and(|view|
+                    view.name == "After account rename" && !view.directory_reconciling)
+                && external
+                    .channels
+                    .lock()
+                    .unwrap()
+                    .state(&group)
+                    .is_some_and(|state| state.name() == "After account rename")
+            {
+                break status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let requester_phase = reference.account_group_operation_status(&account.account_id(), id)
+            .unwrap().map(|status| status.phase);
+        let source_phase = owner.account_group_operation_status(&account.account_id(), id)
+            .unwrap().map(|status| status.phase);
+        let requester_projection = reference.operation_projection(group);
+        let source_projection = owner.operation_projection(group);
+        panic!("real owner rename did not converge: requester={requester_phase:?}, source={source_phase:?}, request_heads={}, result_heads={}, requester_ready={}, source_ready={}",
+            requester_projection.requests.len(), source_projection.results.len(),
+            reference.group_operation_versions.lock().unwrap().contains_key(&owner.user_id()),
+            owner.group_operation_versions.lock().unwrap().contains_key(&reference.user_id()));
+    });
+    let events: Vec<_> = external
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ChannelRename)
+        .cloned()
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].verify_signature() && events[0].verify_integrity());
+    assert_eq!(
+        events[0].author.ed25519_pub(),
+        &owner.identity.public().ed25519_pub
+    );
+    assert_eq!(committed.committed_events, vec![events[0].id]);
+    let duplicate = reference
+        .submit_account_group_operation(
+            &account.account_id(),
+            id,
+            group,
+            AccountGroupOperation::Rename {
+                name: "After account rename".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(duplicate.phase, AccountGroupOperationPhase::Committed);
+    assert_eq!(duplicate.committed_events, committed.committed_events);
+    assert!(
+        reference.channel_members(group).is_empty(),
+        "delegation cannot install a public membership grant"
+    );
+    servers.abort_all();
+    while servers.join_next().await.is_some() {}
+}
+
+#[test]
+fn retired_session_cannot_admit_an_account_group_operation_for_the_same_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let genesis = legacy_group(&owner, &external);
+    install(&owner, &genesis);
+    let id = owner
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    let before = owner
+        .log
+        .lock()
+        .unwrap()
+        .fingerprint_and_len(&genesis.conversation_id);
+    let result = owner.submit_account_group_operation_if(
+        &account.account_id(),
+        id,
+        genesis.conversation_id,
+        AccountGroupOperation::Rename {
+            name: "Retired session rename".into(),
+        },
+        |_| {
+            Err(crate::node::NodeError::Authorization(
+                "runtime owner retired".into(),
+            ))
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(crate::node::NodeError::Authorization(_))
+    ));
+    assert!(
+        owner
+            .account_group_operation_status(&account.account_id(), id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        owner
+            .log
+            .lock()
+            .unwrap()
+            .fingerprint_and_len(&genesis.conversation_id),
+        before
+    );
+    assert!(
+        owner
+            .list_account_group_operations(
+                &account.account_id(),
+                AccountGroupOperationQuery {
+                    group: Some(genesis.conversation_id),
+                    pending_only: true,
+                    after: None,
+                    limit: 16,
+                }
+            )
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[path = "tests/mandatory_latency.rs"]
+mod mandatory_latency;
+
+#[tokio::test]
+async fn modern_inherited_owner_executes_rename_through_the_account_facade() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let sibling = node(&dir.path().join("sibling"), &account);
+    let group = owner
+        .create_channel("Modern inherited owner", vec![])
+        .await
+        .unwrap();
+    owner
+        .maintain_account_channels(
+            &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
+        )
+        .await;
+    assert!(
+        owner
+            .account_group_projection(group)
+            .authority
+            .current_event()
+            .is_some()
+    );
+    link(&owner, &sibling);
+    link(&sibling, &owner);
+    for event in owner.log.lock().unwrap().events(&group) {
+        install(&sibling, event);
+    }
+    // Use the existing signed inheritance control against the real account
+    // grant produced above. No physical member or authority is invented.
+    let projection = sibling.account_group_projection(group);
+    let authority = projection.authority.current_event().unwrap();
+    let grant = projection
+        .authority
+        .account_grant(&account.public().ed25519_pub)
+        .and_then(crate::node::channel_account_authority::AccountGrant::id)
+        .unwrap();
+    let inheritance = crate::node::channel_account_bootstrap::DeviceControl::Inherit {
+        authority,
+        grant,
+        device: sibling.own_group_proof(),
+        account_signature: account
+            .sign(
+                &crate::node::channel_account_bootstrap::inheritance_account_message(
+                    group,
+                    authority,
+                    grant,
+                    &sibling.identity.public(),
+                ),
+            )
+            .to_vec(),
+    };
+    sibling
+        .append_event(
+            group,
+            EventKind::ChannelDeviceInheritance,
+            inheritance.encode(),
+        )
+        .unwrap();
+    sibling.process_channel(group);
+    assert!(
+        sibling.channel_can_manage(group),
+        "the existing modern authority owner must authorize its inherited sibling"
+    );
+    assert_ne!(sibling.channel_owner(group), sibling.user_id());
+    let id = sibling
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    sibling
+        .submit_account_group_operation(
+            &account.account_id(),
+            id,
+            group,
+            AccountGroupOperation::Rename {
+                name: "Modern account renamed".into(),
+            },
+        )
+        .unwrap();
+    sibling.maintain_account_group_operations().await;
+    assert_eq!(
+        sibling
+            .account_group_operation_status(&account.account_id(), id)
+            .unwrap()
+            .unwrap()
+            .phase,
+        AccountGroupOperationPhase::Committed,
+        "a current account owner may execute through its inherited public device grant"
+    );
+    assert_eq!(
+        sibling
+            .channels
+            .lock()
+            .unwrap()
+            .state(&group)
+            .unwrap()
+            .name(),
+        "Modern account renamed"
+    );
+}
+
+#[path = "tests/simple_controls.rs"]
+mod simple_controls;
+
+#[path = "tests/recovered_fanout.rs"]
+mod recovered_fanout;

@@ -129,6 +129,9 @@ pub struct ChannelMemberInfo {
 #[derive(Serialize)]
 pub struct ChannelMembersInfo {
     pub history_policy: mesh_talk_core::channel::HistoryPolicy,
+    /// False when a descriptive reference has no source-confirmed policy.
+    pub history_policy_known: bool,
+    pub directory_reconciling: bool,
     pub owner: String,
     pub owner_account_id: Option<String>,
     pub can_manage: bool,
@@ -188,6 +191,8 @@ mod tests {
                 account_access: None,
                 members: vec![],
                 history_policy: policy,
+                history_policy_known: true,
+                directory_reconciling: false,
             })
             .unwrap();
             assert_eq!(value["history_policy"], expected);

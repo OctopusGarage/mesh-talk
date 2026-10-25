@@ -655,6 +655,7 @@ impl Node {
             Ok(result) => {
                 self.delivery_suspended
                     .store(true, std::sync::atomic::Ordering::Release);
+                self.account_sync_notify.notify_one();
                 Ok(result)
             }
             Err(error) => {
@@ -989,12 +990,14 @@ impl Node {
                     .is_some_and(|tx| match tx.body() {
                         DeliveryTransaction::Outgoing { .. }
                         | DeliveryTransaction::OutgoingManifest { .. }
-                        | DeliveryTransaction::ChannelOutgoing { .. } => true,
+                        | DeliveryTransaction::ChannelOutgoing { .. }
+                        | DeliveryTransaction::ChannelControl { .. } => true,
                         DeliveryTransaction::Incoming { sender, .. }
                         | DeliveryTransaction::IncomingManifest { sender, .. } => {
                             !self.certified_sibling(sender)
                         }
-                        DeliveryTransaction::Requested { .. } => false,
+                        DeliveryTransaction::Requested { .. }
+                        | DeliveryTransaction::GroupRequested { .. } => false,
                     });
             let transaction_id = store.pending_transactions().first().map(|tx| tx.id());
             if let Some(
@@ -1029,19 +1032,35 @@ impl Node {
                         }
                         _ => None,
                     });
+            let control_channel =
+                store
+                    .pending_transactions()
+                    .first()
+                    .and_then(|tx| match tx.body() {
+                        DeliveryTransaction::ChannelControl { events } => {
+                            events.first().map(|event| event.conversation_id)
+                        }
+                        _ => None,
+                    });
             let installed = {
                 let mut ratchet = self.dm_ratchet.lock().expect("ratchet lock not poisoned");
                 let mut log = self.log.lock().expect("log lock not poisoned");
                 let mut received = self.received.lock().expect("received lock not poisoned");
                 let mut sent = self.sentlog.lock().expect("sent lock not poisoned");
                 let mut files = self.received_files.lock().expect("files lock not poisoned");
-                store.recover_next_with_channels(
+                let mut complete =
+                    |operation: &super::account_group::operations::journal::OperationReference,
+                     events: &[Event]| {
+                        self.complete_account_group_operation(operation, events)
+                    };
+                store.recover_next_with_group_operations(
                     &mut ratchet,
                     &mut log,
                     &mut sent,
                     &mut received,
                     Some(&mut files),
                     Some(&mut self.channel_senders.lock().expect("sender store lock")),
+                    Some(&mut complete),
                 )
             };
             let removed = transaction_id.is_some_and(|id| {
@@ -1063,6 +1082,12 @@ impl Node {
                         state.import_my_sender(epoch, key);
                     }
                 }
+            }
+            if removed && let Some(channel) = control_channel {
+                // All log/sidecar guards have ended. Install canonical control
+                // state before allowing the next local author allocation.
+                self.refresh_channel_control_metadata(channel);
+                self.account_sync_notify.notify_one();
             }
             if removed && wake_local {
                 self.note_account_local_change();

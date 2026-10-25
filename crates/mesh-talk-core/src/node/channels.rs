@@ -1,6 +1,9 @@
 //! Channel lifecycle: create, membership, sender-key distribution, and sends. Split out of node.rs (one `impl Node` block per domain).
 
-use super::channel::ChannelBook;
+mod simple_control;
+pub(in crate::node) use simple_control::{SimpleControl, normalize_simple_name};
+
+use super::channel::{ChannelBook, ChannelMembershipProjection};
 use super::node::now_millis;
 use super::*;
 use crate::channel::{ChannelMeta, ChannelState};
@@ -150,12 +153,20 @@ impl Node {
                 || state.member_account_id(&public.user_id()) == Some(self.account_id().as_str()))
     }
     pub(in crate::node) fn channel_identity_is_current(&self, state: &ChannelState) -> bool {
+        let current = self.account_group_projection(state.id());
+        self.channel_identity_is_current_in(state, &current)
+    }
+
+    fn channel_identity_is_current_in(
+        &self,
+        state: &ChannelState,
+        current: &ChannelMembershipProjection,
+    ) -> bool {
         if !state.is_accepted_member(&self.user_id())
             || !state.members().contains(&self.identity.public())
         {
             return false;
         }
-        let current = self.account_group_projection(state.id());
         if current.authority.current_event().is_some() {
             current.authority.key_epoch() == Some(state.epoch())
                 && current
@@ -165,11 +176,20 @@ impl Node {
             state.owner_account_id().is_none()
         }
     }
+
     pub(in crate::node) fn channel_identity_can_manage(&self, state: &ChannelState) -> bool {
-        if !self.channel_identity_is_current(state) {
+        let current = self.account_group_projection(state.id());
+        self.channel_identity_can_manage_in(state, &current)
+    }
+
+    fn channel_identity_can_manage_in(
+        &self,
+        state: &ChannelState,
+        current: &ChannelMembershipProjection,
+    ) -> bool {
+        if !self.channel_identity_is_current_in(state, current) {
             return false;
         }
-        let current = self.account_group_projection(state.id());
         if current.authority.current_event().is_some() {
             current
                 .authority
@@ -1279,12 +1299,7 @@ impl Node {
                     "only the channel owner can rename the channel".into(),
                 ));
             }
-            let new_name = new_name.trim();
-            if new_name.is_empty() {
-                return Err(NodeError::InvalidInput(
-                    "channel name cannot be empty".into(),
-                ));
-            }
+            let new_name = normalize_simple_name(new_name)?;
             // Unchanged name → no-op (don't post a redundant event).
             if new_name == current_name {
                 return Ok(());

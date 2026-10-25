@@ -105,6 +105,83 @@ export interface ChannelActivityInfo {
 export type ChannelHistoryPolicy =
   "off" | "last_ten" | "last_three_days" | "last_ten_within_three_days";
 
+export type AccountGroupOperationKind =
+  | "text"
+  | "sticker"
+  | "file"
+  | "reaction"
+  | "recall"
+  | "invite"
+  | "accept_invitation"
+  | "decline_invitation"
+  | "rename"
+  | "remove_account"
+  | "transfer_ownership"
+  | "dissolve"
+  | "history_policy"
+  | "leave_account";
+
+export type AccountGroupOperationRejection =
+  | "not_authorized"
+  | "owner_must_transfer"
+  | "membership_changed"
+  | "original_signer_no_longer_authorized"
+  | "invalid_target"
+  | "expired"
+  | "invalid_payload"
+  | "operation_id_conflict"
+  | "resource_limit";
+
+export type AccountGroupOperationPhase =
+  | {
+      kind:
+        | "waiting_for_executor"
+        | "awaiting_acceptance"
+        | "accepted"
+        | "executing"
+        | "reconciling"
+        | "cancellation_requested"
+        | "cancelled"
+        | "committed";
+    }
+  | {
+      kind: "action_required" | "rejected";
+      reason: AccountGroupOperationRejection;
+    };
+
+/** Lifecycle metadata only; request content and public event identity stay separate. */
+export interface AccountGroupOperationStatus {
+  id: string;
+  account_id: string;
+  group: string;
+  kind: AccountGroupOperationKind;
+  phase: AccountGroupOperationPhase;
+  executions: Array<{
+    device_id: string;
+    phase: AccountGroupOperationPhase;
+    committed_events: string[];
+  }>;
+  committed_events: string[];
+  primary_event: string | null;
+}
+
+export type AccountGroupControlRequest =
+  | { kind: "rename"; name: string }
+  | {
+      kind: "invite" | "remove_account" | "transfer_ownership";
+      target_account_id: string;
+    }
+  | { kind: "set_history_policy"; policy: ChannelHistoryPolicy }
+  | {
+      kind:
+        | "accept_invitation"
+        | "decline_invitation"
+        | "leave_account"
+        | "dissolve";
+    }
+  | { kind: "react"; target: string; emoji: string; remove: boolean }
+  | { kind: "recall"; target: string };
+
 export interface AccountGroupAccessInfo {
   account_id: string;
   role: "invited" | "member" | "owner" | "left" | "dissolved" | "unknown";
@@ -117,6 +194,9 @@ export interface AccountGroupAccessInfo {
 }
 
 export interface ChannelMembersInfo {
+  /** Absent on older hosts; false means the displayed policy is not yet observed. */
+  history_policy_known?: boolean;
+  directory_reconciling?: boolean;
   account_access?: AccountGroupAccessInfo | null;
   /** Native authorization for the current certified device/account. */
   can_manage?: boolean;
@@ -156,6 +236,7 @@ export interface ChannelInfo {
   shared_reference?: boolean;
   legacy_membership?: boolean;
   reference_members_complete?: boolean;
+  directory_reconciling?: boolean;
   /** Native authorization; false overrides legacy device ownership. */
   can_manage?: boolean;
   owner_account_id?: string | null;

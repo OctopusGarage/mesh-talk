@@ -1,10 +1,14 @@
 use super::super::account_sync_wire::{AccountHistoryFrame, AccountSyncVersion, MAX_CHUNK};
-use super::wire::{DocumentComplete, DocumentRequest, MAX_PAGE_BYTES};
+use super::wire::{
+    DocumentComplete, DocumentRequest, MAX_PAGE_BYTES, OperationCapability, OperationContinuation,
+    OperationProbe,
+};
 use super::*;
 use crate::{
     discovery::roster::PeerRecord,
     transport::{SecureChannel, TransportError},
 };
+use rand_core::RngCore;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -16,10 +20,30 @@ pub(in crate::node) struct GroupProtocolSupport {
     pub public: crate::identity::device::PublicIdentity,
     pub observed_at: Instant,
 }
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum DocumentSyncScope {
+    #[default]
+    All,
+    Mandatory,
+    Optional,
+}
+impl DocumentSyncScope {
+    fn mask(self) -> u16 {
+        match self {
+            Self::All => 511,
+            Self::Mandatory => 384,
+            Self::Optional => 127,
+        }
+    }
+}
 pub(in crate::node) struct DocumentSyncCursor {
+    scope: DocumentSyncScope,
     pub(super) domain: usize,
     pub(super) after: Option<AccountDocumentKey>,
     pub(super) digests: [[u8; 32]; 9],
+    // The legacy digest remains access-only, even when the peer ignores the
+    // optional operation probe. Its digest and continuation have a separate scope.
+    operation_digest: [u8; 32],
     pub(in crate::node) retry_at: Option<Instant>,
     last_failure_at: Option<Instant>,
     pub(in crate::node) error: Option<String>,
@@ -43,9 +67,11 @@ pub(in crate::node) struct DocumentSyncCursor {
 impl Default for DocumentSyncCursor {
     fn default() -> Self {
         Self {
+            scope: DocumentSyncScope::All,
             domain: 8,
             after: None,
             digests: [[0; 32]; 9],
+            operation_digest: [0; 32],
             retry_at: None,
             last_failure_at: None,
             error: None,
@@ -69,6 +95,29 @@ impl Default for DocumentSyncCursor {
     }
 }
 impl DocumentSyncCursor {
+    pub(in crate::node) fn mandatory() -> Self {
+        Self {
+            scope: DocumentSyncScope::Mandatory,
+            ..Self::default()
+        }
+    }
+    pub(in crate::node) fn optional() -> Self {
+        Self {
+            scope: DocumentSyncScope::Optional,
+            domain: 0,
+            ..Self::default()
+        }
+    }
+    fn enabled_mask(&self, policy: super::super::DeviceSyncPolicy) -> u16 {
+        DOMAINS.iter().enumerate().fold(0, |mask, (index, domain)| {
+            if self.scope.mask() & (1 << index) != 0 && document_enabled(*domain, policy) {
+                mask | (1 << index)
+            } else {
+                mask
+            }
+        })
+    }
+    #[cfg(test)]
     fn group_unavailable(&mut self) {
         self.last_failure_at = Some(Instant::now());
         self.group_retry_at = Some(Instant::now() + Duration::from_secs(300));
@@ -77,6 +126,23 @@ impl DocumentSyncCursor {
         self.domain = 7;
         self.pending = true;
         self.up_to_date = false;
+    }
+    fn group_interrupted(&mut self, received_header: bool) {
+        self.last_failure_at = Some(Instant::now());
+        self.group_upgrade = false;
+        self.group_retry_at =
+            (!received_header).then(|| Instant::now() + Duration::from_millis(100));
+        self.after = None;
+        self.digests[8] = [0; 32];
+        self.operation_digest = [0; 32];
+        self.settled &= !256;
+        self.pending = true;
+        self.up_to_date = false;
+        if !received_header {
+            // An older source may not understand v5. Its v4 inventory can
+            // still progress, without inventing authenticated upgrade evidence.
+            self.domain = 7;
+        }
     }
     fn group_supported(&mut self) {
         // A validated v5 response proves support for this domain. Clear earlier
@@ -133,12 +199,16 @@ impl DocumentSyncCursor {
         policy: super::super::DeviceSyncPolicy,
     ) -> (super::super::SyncPhase, Option<String>, bool) {
         use super::super::SyncPhase;
+        let enabled = self.enabled_mask(policy);
+        if enabled == 0 {
+            return (SyncPhase::UpToDate, None, false);
+        }
         let upgrade = self.requires_upgrade
             && ((policy.history || policy.appearance) && !self.control_upgrade
                 || policy.history && self.control_upgrade)
-            || self.custody_upgrade && policy.history
-            || self.inventory_upgrade
-            || self.group_upgrade;
+            || self.custody_upgrade && policy.history && self.scope.mask() & 64 != 0
+            || self.inventory_upgrade && self.scope.mask() & 128 != 0
+            || self.group_upgrade && self.scope.mask() & 256 != 0;
         if let Some(error) = &self.error
             && (policy.history
                 || policy.appearance
@@ -146,12 +216,6 @@ impl DocumentSyncCursor {
                 || self.error_domain == Some(AccountDocumentDomain::GroupControl))
         {
             return (SyncPhase::Error, Some(error.clone()), upgrade);
-        }
-        let mut enabled = 0u16;
-        for (i, domain) in DOMAINS.iter().enumerate() {
-            if document_enabled(*domain, policy) {
-                enabled |= 1 << i;
-            }
         }
         if self.remotely_disabled & enabled != 0 {
             return (SyncPhase::Disabled, Some("source_sync_off".into()), false);
@@ -212,6 +276,12 @@ fn document_enabled(domain: AccountDocumentDomain, policy: super::super::DeviceS
 fn failure() -> NodeError {
     NodeError::Channel("invalid account document exchange".into())
 }
+fn transport_closed(error: &NodeError) -> bool {
+    matches!(error,
+        NodeError::Session(super::super::session::SessionError::Transport(TransportError::Io(error)))
+        if matches!(error.kind(),std::io::ErrorKind::UnexpectedEof
+            |std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe))
+}
 impl Node {
     pub(in crate::node) async fn serve_account_documents(
         self: &Arc<Self>,
@@ -228,20 +298,33 @@ impl Node {
         let (policy, revision) = self.device_sync_policy_snapshot();
         let enabled = document_enabled(request.domain, policy);
         let domain = request.domain;
-        let after = request.after;
-        let known = request.known_digest;
+        let operation = request
+            .operation
+            .filter(|probe| domain == AccountDocumentDomain::GroupControl && probe.supported());
+        let include_operations = operation.is_some();
+        let after = operation
+            .as_ref()
+            .and_then(|probe| probe.after.as_ref().map(OperationContinuation::key))
+            .or(request.after);
+        let known = operation
+            .as_ref()
+            .map_or(request.known_digest, |probe| probe.known_digest);
+        let operation = operation.map(|probe| OperationCapability {
+            version: 1,
+            nonce: probe.nonce,
+        });
         let Ok((items, digest)) = self
             .account_blocking(move |node| {
                 let store = node.account_documents.lock().expect("documents mutex");
                 let digest = if enabled {
-                    store.digest(domain)
+                    store.digest_scope(domain, include_operations)
                 } else {
                     [0; 32]
                 };
                 let rows = if !enabled || (after.is_none() && known != [0; 32] && known == digest) {
                     Vec::new()
                 } else {
-                    store.list(domain, after.as_ref(), 64)
+                    store.list_scope(domain, after.as_ref(), 64, include_operations)
                 };
                 Ok((rows, digest))
             })
@@ -268,7 +351,7 @@ impl Node {
                 .account_documents
                 .lock()
                 .expect("documents mutex")
-                .list(domain, Some(&key), 1);
+                .list_scope(domain, Some(&key), 1, include_operations);
             if !more.is_empty() {
                 next = Some(key);
             }
@@ -326,6 +409,7 @@ impl Node {
                 next,
                 digest,
                 enabled,
+                operation,
             })
             .expect("document completion serializes");
             self.send_account_frame(
@@ -367,8 +451,10 @@ impl Node {
                 .is_some_and(|(failed, supported)| supported > failed)
         {
             cursor.group_supported();
-            cursor.domain = 8;
-            cursor.after = None;
+            if cursor.scope != DocumentSyncScope::Optional {
+                cursor.domain = 8;
+                cursor.after = None;
+            }
         }
         if cursor.retry_at.is_some_and(|at| Instant::now() < at) {
             return Ok(());
@@ -399,6 +485,11 @@ impl Node {
         let policy = self.device_sync_policy();
         let mut eligible = false;
         for _ in 0..DOMAINS.len() {
+            if cursor.scope.mask() & (1 << cursor.domain) == 0 {
+                cursor.domain = (cursor.domain + 1) % DOMAINS.len();
+                cursor.after = None;
+                continue;
+            }
             if ((4..6).contains(&cursor.domain) && cursor.control_retry_at.is_some())
                 || (cursor.domain == 6 && cursor.custody_retry_at.is_some())
                 || (cursor.domain == 7 && cursor.inventory_retry_at.is_some())
@@ -418,7 +509,7 @@ impl Node {
             cursor.after = None;
         }
         if !eligible {
-            cursor.up_to_date = false;
+            cursor.up_to_date = cursor.enabled_mask(policy) == 0;
             cursor.pending = false;
             return Ok(());
         }
@@ -426,6 +517,24 @@ impl Node {
         let result = self.pull_document_exchange(peer, cursor).await;
         if result.is_err() {
             cursor.last_failure_at = Some(Instant::now());
+        }
+        if attempted_domain == AccountDocumentDomain::GroupControl
+            && result.as_ref().is_err_and(transport_closed)
+        {
+            cursor.pending = true;
+            cursor.up_to_date = false;
+            cursor.after = None;
+            cursor.digests[8] = [0; 32];
+            // Source publication can invalidate a selected page. Retry that
+            // page promptly; malformed frames/nonces keep the ordinary error
+            // path and are never treated as a transport interruption.
+            cursor.retry_at = cursor
+                .group_retry_at
+                .is_none()
+                .then(|| Instant::now() + Duration::from_millis(100));
+            cursor.error = None;
+            cursor.error_domain = None;
+            return result;
         }
         if result.is_err()
             && match attempted_domain {
@@ -458,8 +567,62 @@ impl Node {
         peer: &PeerRecord,
         cursor: &mut DocumentSyncCursor,
     ) -> Result<(), NodeError> {
+        let operation_probe = DOMAINS[cursor.domain] == AccountDocumentDomain::GroupControl;
+        let result = self.pull_document_exchange_inner(peer, cursor).await;
+        if operation_probe && result.is_err() {
+            self.retire_operation_support(&peer.public, Instant::now());
+        }
+        result
+    }
+    fn retire_operation_support(
+        &self,
+        peer: &crate::identity::device::PublicIdentity,
+        observed_at: Instant,
+    ) {
+        let mut support = self
+            .group_operation_versions
+            .lock()
+            .expect("operation versions mutex");
+        if support
+            .get(&peer.user_id())
+            .is_some_and(|known| known.public == *peer && known.observed_at <= observed_at)
+        {
+            support.remove(&peer.user_id());
+        }
+    }
+    async fn pull_document_exchange_inner(
+        self: &Arc<Self>,
+        peer: &PeerRecord,
+        cursor: &mut DocumentSyncCursor,
+    ) -> Result<(), NodeError> {
         let domain = DOMAINS[cursor.domain];
         let (_, revision) = self.device_sync_policy_snapshot();
+        let operation = if domain == AccountDocumentDomain::GroupControl {
+            // Retain authenticated support while refreshing it. An in-flight
+            // request has no negative outcome; failure/no-echo retires support
+            // when that outcome is actually observed below.
+            let mut nonce = [0; 32];
+            while nonce == [0; 32] {
+                rand_core::OsRng.fill_bytes(&mut nonce);
+            }
+            Some(OperationProbe {
+                version: 1,
+                nonce,
+                after: match &cursor.after {
+                    Some(AccountDocumentKey::GroupOperation {
+                        channel,
+                        source_device,
+                    }) => Some(OperationContinuation {
+                        channel: channel.clone(),
+                        source_device: source_device.clone(),
+                    }),
+                    _ => None,
+                },
+                known_digest: std::mem::take(&mut cursor.operation_digest),
+            })
+        } else {
+            None
+        };
         let request = DocumentRequest {
             version: match domain {
                 AccountDocumentDomain::GroupInventory => 4,
@@ -470,8 +633,12 @@ impl Node {
             },
             account_id: self.account_id(),
             domain,
-            after: cursor.after.clone(),
+            after: cursor
+                .after
+                .clone()
+                .filter(|key| !matches!(key, AccountDocumentKey::GroupOperation { .. })),
             known_digest: cursor.digests[cursor.domain],
+            operation,
         };
         let exchange = self
             .begin_account_exchange(
@@ -489,7 +656,7 @@ impl Node {
                     && matches!(&error,NodeError::Session(super::super::session::SessionError::Transport(TransportError::Io(e))) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe))
                 {
                     if request.version == 5 {
-                        cursor.group_unavailable();
+                        cursor.group_interrupted(false);
                     } else if request.version == 4 {
                         cursor.inventory_unavailable();
                     } else if request.version == 3 {
@@ -502,8 +669,18 @@ impl Node {
             }
         };
         cursor.supported |= channel.reusable();
+        if domain == AccountDocumentDomain::GroupControl
+            && (channel.peer_identity() != &peer.public
+                || !self.certified_sibling(&peer.public)
+                || !self.account_allowed(channel.peer_identity(), channel.peer_announcement()))
+        {
+            return Err(failure());
+        }
         let mut pending: Option<(AccountDocumentMeta, zeroize::Zeroizing<Vec<u8>>)> = None;
-        let mut last = cursor.after.clone();
+        let mut group_records = Vec::new();
+        // An old peer ignores the optional operation cursor and may legitimately
+        // return access rows below it. Apply that bound only after its echo.
+        let mut last = request.after.clone();
         let mut records = 0;
         let mut total = 0usize;
         let started = tokio::time::Instant::now();
@@ -520,7 +697,30 @@ impl Node {
                     let pre_reply_close = matches!(&error,TransportError::Io(e) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe));
                     if request.version >= 2 && pre_reply_close {
                         if request.version == 5 {
-                            cursor.group_unavailable();
+                            // Each access observation is independently signed.
+                            // Preserve only fully received, validated role rows;
+                            // operation rows still require the matching terminal
+                            // capability and never enter the store on EOF.
+                            if let Some(row) = pending.take() {
+                                group_records.push(row);
+                            }
+                            for (meta, mut payload) in group_records.drain(..) {
+                                if matches!(meta.key, AccountDocumentKey::GroupControl { .. })
+                                    && payload.len() == meta.content_len as usize
+                                {
+                                    self.commit_imported_document(
+                                        meta,
+                                        std::mem::take(&mut *payload),
+                                        revision,
+                                        peer.public.clone(),
+                                    )
+                                    .await?;
+                                }
+                            }
+                            cursor.group_interrupted(records > 0);
+                            return Err(NodeError::Session(
+                                super::super::session::SessionError::Transport(error),
+                            ));
                         } else if request.version == 4 {
                             cursor.inventory_unavailable();
                         } else if request.version == 3 {
@@ -558,13 +758,17 @@ impl Node {
                         cursor.control_retry_at = None;
                     }
                     if let Some((meta, mut payload)) = pending.take() {
-                        self.commit_imported_document(
-                            meta,
-                            std::mem::take(&mut *payload),
-                            revision,
-                            peer.public.clone(),
-                        )
-                        .await?;
+                        if domain == AccountDocumentDomain::GroupControl {
+                            group_records.push((meta, payload));
+                        } else {
+                            self.commit_imported_document(
+                                meta,
+                                std::mem::take(&mut *payload),
+                                revision,
+                                peer.public.clone(),
+                            )
+                            .await?;
+                        }
                     }
                     let meta: AccountDocumentMeta =
                         serde_json::from_slice(&body).map_err(|_| failure())?;
@@ -593,6 +797,33 @@ impl Node {
                         return Err(failure());
                     }
                     payload.extend_from_slice(&bytes);
+                    // Role observations have their own source signature and do
+                    // not depend on the optional operation capability echo.
+                    // Commit a complete role row before waiting for a later
+                    // operation blob, which may be missing or interrupted.
+                    if domain == AccountDocumentDomain::GroupControl
+                        && matches!(meta.key, AccountDocumentKey::GroupControl { .. })
+                        && payload.len() == meta.content_len as usize
+                    {
+                        if !channel.io_admitted()
+                            || channel.peer_identity() != &peer.public
+                            || !self.certified_sibling(&peer.public)
+                            || !self.account_allowed(
+                                channel.peer_identity(),
+                                channel.peer_announcement(),
+                            )
+                        {
+                            return Err(failure());
+                        }
+                        let (meta, mut payload) = pending.take().expect("complete role row");
+                        self.commit_imported_document(
+                            meta,
+                            std::mem::take(&mut *payload),
+                            revision,
+                            peer.public.clone(),
+                        )
+                        .await?;
+                    }
                 }
                 AccountHistoryFrame::DocumentsComplete { body } => {
                     cursor.supported = true;
@@ -610,13 +841,17 @@ impl Node {
                         cursor.control_retry_at = None;
                     }
                     if let Some((meta, mut payload)) = pending.take() {
-                        self.commit_imported_document(
-                            meta,
-                            std::mem::take(&mut *payload),
-                            revision,
-                            peer.public.clone(),
-                        )
-                        .await?;
+                        if domain == AccountDocumentDomain::GroupControl {
+                            group_records.push((meta, payload));
+                        } else {
+                            self.commit_imported_document(
+                                meta,
+                                std::mem::take(&mut *payload),
+                                revision,
+                                peer.public.clone(),
+                            )
+                            .await?;
+                        }
                     }
                     let complete: DocumentComplete =
                         serde_json::from_slice(&body).map_err(|_| failure())?;
@@ -629,11 +864,68 @@ impl Node {
                     {
                         return Err(failure());
                     }
+                    // The authenticated Noise channel and a fresh nonce bind the
+                    // capability to this exact full peer and current exchange.
+                    // A plain v5 response proves access support only.
+                    let include_operations = match (&request.operation, &complete.operation) {
+                        (Some(probe), Some(capability))
+                            if capability.version == probe.version
+                                && capability.nonce == probe.nonce =>
+                        {
+                            true
+                        }
+                        (_, Some(_)) => return Err(failure()),
+                        _ => false,
+                    };
+                    if domain == AccountDocumentDomain::GroupControl {
+                        let effective_after = if include_operations {
+                            request
+                                .operation
+                                .as_ref()
+                                .and_then(|probe| {
+                                    probe.after.as_ref().map(OperationContinuation::key)
+                                })
+                                .or_else(|| request.after.clone())
+                        } else {
+                            request.after.clone()
+                        };
+                        if !channel.io_admitted()
+                            || channel.peer_identity() != &peer.public
+                            || !self.certified_sibling(&peer.public)
+                            || !self.account_allowed(
+                                channel.peer_identity(),
+                                channel.peer_announcement(),
+                            )
+                            || group_records.iter().any(|(meta, _)| {
+                                (!include_operations
+                                    && matches!(
+                                        meta.key,
+                                        AccountDocumentKey::GroupOperation { .. }
+                                    ))
+                                    || effective_after
+                                        .as_ref()
+                                        .is_some_and(|after| after >= &meta.key)
+                            })
+                        {
+                            return Err(failure());
+                        }
+                        // Keep the entire bounded control page out of the store
+                        // until capability and continuation scope are verified.
+                        for (meta, mut payload) in group_records.drain(..) {
+                            self.commit_imported_document(
+                                meta,
+                                std::mem::take(&mut *payload),
+                                revision,
+                                peer.public.clone(),
+                            )
+                            .await?;
+                        }
+                    }
                     let local = self
                         .account_documents
                         .lock()
                         .expect("documents mutex")
-                        .digest(domain);
+                        .digest_scope(domain, include_operations);
                     cursor.visited |= 1 << cursor.domain;
                     if complete.enabled {
                         cursor.remotely_disabled &= !(1 << cursor.domain);
@@ -651,14 +943,38 @@ impl Node {
                     }
                     cursor.after = complete.next;
                     if cursor.after.is_none() {
-                        cursor.digests[cursor.domain] = if local == complete.digest {
-                            complete.digest
-                        } else {
-                            [0; 32]
-                        };
+                        cursor.digests[cursor.domain] =
+                            if domain == AccountDocumentDomain::GroupControl {
+                                // Legacy peers continue to compare access-only
+                                // metadata, regardless of the optional probe scope.
+                                self.account_documents
+                                    .lock()
+                                    .expect("documents mutex")
+                                    .digest_scope(domain, false)
+                            } else if local == complete.digest {
+                                complete.digest
+                            } else {
+                                [0; 32]
+                            };
+                        if include_operations && local == complete.digest {
+                            cursor.operation_digest = complete.digest;
+                        }
                         cursor.domain = (cursor.domain + 1) % DOMAINS.len();
                     }
+                    if request.version == 5 && (!include_operations || !complete.enabled) {
+                        self.retire_operation_support(&peer.public, Instant::now());
+                    }
                     if request.version == 5 && complete.enabled {
+                        if !channel.io_admitted()
+                            || channel.peer_identity() != &peer.public
+                            || !self.certified_sibling(&peer.public)
+                            || !self.account_allowed(
+                                channel.peer_identity(),
+                                channel.peer_announcement(),
+                            )
+                        {
+                            return Err(failure());
+                        }
                         cursor.group_supported();
                         self.account_group_versions
                             .lock()
@@ -670,8 +986,20 @@ impl Node {
                                     observed_at: Instant::now(),
                                 },
                             );
+                        if include_operations {
+                            self.group_operation_versions
+                                .lock()
+                                .expect("operation versions mutex")
+                                .insert(
+                                    peer.public.user_id(),
+                                    GroupProtocolSupport {
+                                        public: peer.public.clone(),
+                                        observed_at: Instant::now(),
+                                    },
+                                );
+                        }
                     }
-                    let mut supported_mask = 511u16;
+                    let mut supported_mask = cursor.scope.mask();
                     if cursor.group_retry_at.is_some() {
                         supported_mask &= !256;
                     }
@@ -687,11 +1015,11 @@ impl Node {
                     cursor.pending =
                         cursor.after.is_some() || cursor.visited & supported_mask != supported_mask;
                     cursor.up_to_date = cursor.settled & supported_mask == supported_mask
-                        && cursor.remotely_disabled == 0
+                        && cursor.remotely_disabled & cursor.scope.mask() == 0
                         && !cursor.requires_upgrade
-                        && !cursor.custody_upgrade
-                        && !cursor.inventory_upgrade
-                        && !cursor.group_upgrade;
+                        && (cursor.scope.mask() & 64 == 0 || !cursor.custody_upgrade)
+                        && (cursor.scope.mask() & 128 == 0 || !cursor.inventory_upgrade)
+                        && (cursor.scope.mask() & 256 == 0 || !cursor.group_upgrade);
                     cursor.retry_at = None;
                     cursor.error = None;
                     channel.recycle(self);
@@ -804,6 +1132,161 @@ mod control_policy_status_tests {
 #[cfg(test)]
 mod group_control_tests {
     use super::*;
+    #[tokio::test]
+    async fn a_changed_role_page_retries_without_claiming_the_authenticated_source_is_unsupported()
+    {
+        use crate::node::AccountGroupRole;
+        let mut fixture = UpgradeFixture::new().await;
+        let first = fixture
+            .source
+            .create_channel("first role", vec![])
+            .await
+            .unwrap();
+        let second = fixture
+            .source
+            .create_channel("second role", vec![])
+            .await
+            .unwrap();
+        fixture.source.publish_account_group_access(&mut None);
+        let selected = fixture.source.account_documents.lock().unwrap().list_scope(
+            AccountDocumentDomain::GroupControl,
+            None,
+            64,
+            false,
+        );
+        assert_eq!(selected.len(), 2);
+        let first_key = selected[0].key.clone();
+        let second_key = selected[1].key.clone();
+        let changed_group = match &second_key {
+            AccountDocumentKey::GroupControl { channel, .. }
+                if *channel == hex::encode(first.as_bytes()) =>
+            {
+                first
+            }
+            AccountDocumentKey::GroupControl { channel, .. }
+                if *channel == hex::encode(second.as_bytes()) =>
+            {
+                second
+            }
+            _ => panic!("expected a selected real group role"),
+        };
+        let (blocked, blocked_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let blocked = Arc::new(std::sync::Mutex::new(Some(blocked)));
+        let release_rx = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+        let exact_peer = fixture.target.identity.public();
+        let blocked_key = first_key.clone();
+        *fixture.source.account_session_test_hook.lock().unwrap() =
+            Some(Arc::new(move |peer, frame| {
+                let blocked = blocked.clone();
+                let release_rx = release_rx.clone();
+                let blocked_key = blocked_key.clone();
+                let exact_peer = exact_peer.clone();
+                Box::pin(async move {
+                    if peer != exact_peer {
+                        return;
+                    }
+                    let AccountHistoryFrame::DocumentHeader { body } = frame else {
+                        return;
+                    };
+                    let meta: AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
+                    if meta.key != blocked_key {
+                        return;
+                    }
+                    let signal = blocked.lock().unwrap().take();
+                    if let Some(signal) = signal {
+                        signal.send(()).unwrap();
+                        let released = release_rx.lock().unwrap().take().unwrap();
+                        released.await.unwrap();
+                    }
+                })
+            }));
+        let target = fixture.target.clone();
+        let peer = fixture.peer.clone();
+        let pulling = tokio::spawn(async move {
+            let mut cursor = DocumentSyncCursor::mandatory();
+            let result = target.pull_account_documents_page(&peer, &mut cursor).await;
+            (result, cursor)
+        });
+        tokio::time::timeout(Duration::from_secs(5), blocked_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        fixture
+            .source
+            .dissolve_channel(changed_group)
+            .await
+            .unwrap();
+        fixture.source.publish_account_group_access(&mut None);
+        let updated = fixture
+            .source
+            .account_documents
+            .lock()
+            .unwrap()
+            .meta(&second_key)
+            .unwrap();
+        assert!(
+            updated.content_hash != selected[1].content_hash,
+            "the actual dissolve must replace the second selected role observation"
+        );
+        release.send(()).unwrap();
+        let (result, mut cursor) = tokio::time::timeout(Duration::from_secs(5), pulling)
+            .await
+            .unwrap()
+            .unwrap();
+        *fixture.source.account_session_test_hook.lock().unwrap() = None;
+        assert!(result.is_err() || cursor.pending);
+        assert!(
+            !cursor.group_upgrade && !cursor.requires_upgrade,
+            "a changed page after a valid signed role header is not authenticated unsupported evidence"
+        );
+        assert!(
+            cursor.group_retry_at.is_none(),
+            "ordinary source publication must not impose a five-minute group protocol cooldown"
+        );
+        assert!(cursor.pending && !cursor.up_to_date);
+        assert!(
+            fixture
+                .target
+                .account_documents
+                .lock()
+                .unwrap()
+                .meta(&first_key)
+                .is_some(),
+            "a fully received independently valid role observation survives the interrupted page"
+        );
+        assert!(
+            fixture
+                .target
+                .account_documents
+                .lock()
+                .unwrap()
+                .meta(&second_key)
+                .is_none(),
+            "the changed row was never received and cannot be installed from the stale selection"
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let _ = fixture
+                    .target
+                    .pull_account_documents_page(&fixture.peer, &mut cursor)
+                    .await;
+                if fixture
+                    .target
+                    .account_group_access(changed_group)
+                    .unwrap()
+                    .role
+                    == AccountGroupRole::Dissolved
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a stable replacement role must converge promptly after the page retry");
+        fixture.servers.shutdown().await;
+    }
     struct UpgradeFixture {
         _directory: tempfile::TempDir,
         source: Arc<Node>,
@@ -870,6 +1353,581 @@ mod group_control_tests {
         cursor.domain = 8;
         assert!(cursor.group_retry_at.unwrap() > Instant::now() + Duration::from_secs(240));
         cursor
+    }
+    #[tokio::test]
+    async fn authenticated_operation_probe_establishes_separate_full_source_support() {
+        let mut fixture = UpgradeFixture::new().await;
+        fixture.prove_support().await;
+        assert!(
+            fixture
+                .target
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .get(&fixture.source.user_id())
+                .is_some_and(|support| support.public == fixture.source.identity.public()),
+            "an operation-capable authenticated exchange must establish its own support evidence"
+        );
+        fixture.servers.shutdown().await;
+    }
+    /// Speak the access-only v5 JSON dialect over a real authenticated Noise
+    /// session. Unknown JSON fields are deliberately ignored by this responder.
+    async fn receive_document_request(
+        source: &Arc<Node>,
+        listener: tokio::net::TcpListener,
+    ) -> (SecureChannel<TcpStream>, Vec<u8>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut channel = source.privacy_accept(stream).await.unwrap();
+        let bytes = channel.recv().await.unwrap();
+        let (_, frame) = AccountHistoryFrame::decode_versioned(&bytes).unwrap();
+        let body = match frame {
+            AccountHistoryFrame::SessionRequest {
+                request_id,
+                request:
+                    super::super::super::account_sync_wire::AccountSessionRequest::Documents { body },
+            } => {
+                channel
+                    .send(
+                        &AccountHistoryFrame::SessionReady { request_id }
+                            .encode_version(AccountSyncVersion::V2)
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                body
+            }
+            AccountHistoryFrame::DocumentsRequest { body } => body,
+            _ => panic!("expected account documents request"),
+        };
+        (channel, body)
+    }
+    async fn access_only_reply(
+        fixture: &UpgradeFixture,
+        cursor: &mut DocumentSyncCursor,
+        wrong_nonce: bool,
+        send_operation: bool,
+    ) -> (Result<(), NodeError>, serde_json::Value) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut peer = fixture.peer.clone();
+        peer.addr = listener.local_addr().unwrap();
+        let source = fixture.source.clone();
+        let server = tokio::spawn(async move {
+            let (mut channel, body) = receive_document_request(&source, listener).await;
+            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if send_operation {
+                let (meta, payload) = {
+                    let store = source.account_documents.lock().unwrap();
+                    let meta = store
+                        .list(AccountDocumentDomain::GroupControl, None, 1)
+                        .pop()
+                        .unwrap();
+                    let payload = store.get(&meta.key).unwrap().unwrap().payload().to_vec();
+                    (meta, payload)
+                };
+                for frame in [
+                    AccountHistoryFrame::DocumentHeader {
+                        body: serde_json::to_vec(&meta).unwrap(),
+                    },
+                    AccountHistoryFrame::DocumentChunk { bytes: payload },
+                ] {
+                    let _ = channel
+                        .send(&frame.encode_version(AccountSyncVersion::V2).unwrap())
+                        .await;
+                }
+            }
+            let mut complete = serde_json::json!({
+                "enabled": true,
+                "domain": "group_control",
+                "next": null,
+                "digest": source.account_documents.lock().unwrap()
+                    .digest_scope(AccountDocumentDomain::GroupControl, false),
+            });
+            if wrong_nonce {
+                let mut nonce = [11u8; 32];
+                if let Some(echoed) = request.pointer("/operation/nonce") {
+                    nonce = serde_json::from_value(echoed.clone()).unwrap();
+                    nonce[0] ^= 1;
+                }
+                complete["operation"] = serde_json::json!({ "version": 1, "nonce": nonce });
+            }
+            let _ = channel
+                .send(
+                    &AccountHistoryFrame::DocumentsComplete {
+                        body: serde_json::to_vec(&complete).unwrap(),
+                    }
+                    .encode_version(AccountSyncVersion::V2)
+                    .unwrap(),
+                )
+                .await;
+            request
+        });
+        let result = fixture.target.pull_document_exchange(&peer, cursor).await;
+        (result, server.await.unwrap())
+    }
+    fn seed_operation_support(fixture: &UpgradeFixture) {
+        fixture
+            .target
+            .group_operation_versions
+            .lock()
+            .unwrap()
+            .insert(
+                fixture.source.user_id(),
+                GroupProtocolSupport {
+                    public: fixture.source.identity.public(),
+                    observed_at: Instant::now(),
+                },
+            );
+    }
+    async fn later_operation_probe_result_retires_a_concurrent_positive(close: bool) {
+        let mut fixture = UpgradeFixture::new().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut peer = fixture.peer.clone();
+        peer.addr = listener.local_addr().unwrap();
+        let source = fixture.source.clone();
+        let (seen, seen_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut channel, _) = receive_document_request(&source, listener).await;
+            seen.send(()).unwrap();
+            release_rx.await.unwrap();
+            if !close {
+                let complete = DocumentComplete {
+                    enabled: true,
+                    domain: AccountDocumentDomain::GroupControl,
+                    next: None,
+                    digest: source
+                        .account_documents
+                        .lock()
+                        .unwrap()
+                        .digest_scope(AccountDocumentDomain::GroupControl, false),
+                    operation: None,
+                };
+                channel
+                    .send(
+                        &AccountHistoryFrame::DocumentsComplete {
+                            body: serde_json::to_vec(&complete).unwrap(),
+                        }
+                        .encode_version(AccountSyncVersion::V2)
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        seed_operation_support(&fixture);
+        let target = fixture.target.clone();
+        let pending = tokio::spawn(async move {
+            target
+                .pull_document_exchange(&peer, &mut DocumentSyncCursor::default())
+                .await
+        });
+        seen_rx.await.unwrap();
+        assert!(
+            fixture
+                .target
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.source.user_id()),
+            "an in-flight refresh is not negative capability evidence and must not erase the prior authenticated operation support"
+        );
+        fixture.prove_support().await;
+        assert!(
+            fixture
+                .target
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.source.user_id()),
+            "the independent positive probe must complete before the older pending request resolves"
+        );
+        release.send(()).unwrap();
+        let result = pending.await.unwrap();
+        if close {
+            assert!(result.is_err());
+        } else {
+            result.unwrap();
+        }
+        server.await.unwrap();
+        assert!(
+            !fixture
+                .target
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.source.user_id()),
+            "the later failed or access-only outcome must retire a preceding concurrent positive"
+        );
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn a_later_failed_operation_probe_retires_a_concurrent_positive() {
+        later_operation_probe_result_retires_a_concurrent_positive(true).await;
+    }
+    #[tokio::test]
+    async fn a_later_access_only_reply_retires_a_concurrent_positive() {
+        later_operation_probe_result_retires_a_concurrent_positive(false).await;
+    }
+    #[tokio::test]
+    async fn access_only_v5_reply_retires_old_operation_support_without_an_upgrade_claim() {
+        let mut fixture = UpgradeFixture::new().await;
+        seed_operation_support(&fixture);
+        let mut cursor = DocumentSyncCursor::default();
+        let (result, _) = access_only_reply(&fixture, &mut cursor, false, false).await;
+        result.unwrap();
+        assert!(
+            !fixture
+                .target
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.source.user_id()),
+            "a successful access-only v5 response is not operation support"
+        );
+        assert!(!cursor.group_upgrade && !cursor.requires_upgrade);
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn operation_capability_echo_with_another_nonce_is_rejected() {
+        let mut fixture = UpgradeFixture::new().await;
+        seed_operation_support(&fixture);
+        let (result, _) =
+            access_only_reply(&fixture, &mut DocumentSyncCursor::default(), true, false).await;
+        assert!(
+            result.is_err(),
+            "another exchange's nonce cannot prove operation support"
+        );
+        assert!(
+            !fixture
+                .target
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.source.user_id())
+        );
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn operation_continuation_never_enters_the_legacy_after_field() {
+        let mut fixture = UpgradeFixture::new().await;
+        let mut cursor = DocumentSyncCursor {
+            after: Some(AccountDocumentKey::GroupOperation {
+                channel: "a".repeat(64),
+                source_device: fixture.source.user_id(),
+            }),
+            ..DocumentSyncCursor::default()
+        };
+        cursor.digests[8] = [91; 32];
+        let (result, request) = access_only_reply(&fixture, &mut cursor, false, false).await;
+        result.unwrap();
+        assert!(
+            request["after"].is_null(),
+            "old v5 peers cannot decode operation keys in the legacy continuation"
+        );
+        assert!(
+            request
+                .pointer("/operation/after")
+                .is_some_and(|after| !after.is_null())
+        );
+        assert_eq!(
+            request["known_digest"],
+            serde_json::json!(([91u8; 32])),
+            "the legacy access-only digest keeps its original scope"
+        );
+        assert_eq!(
+            request.pointer("/operation/known_digest"),
+            Some(&serde_json::json!(([0u8; 32]))),
+            "a previous access-only digest cannot suppress the first operation scope fetch"
+        );
+        fixture.servers.shutdown().await;
+    }
+    fn install_operation_head(fixture: &UpgradeFixture) -> AccountDocumentKey {
+        use crate::{
+            eventlog::ConversationId,
+            node::account_group::operations::wire::{OperationFrame, OperationProjection},
+        };
+        let group = ConversationId::new([71; 32]);
+        let key = AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: fixture.source.user_id(),
+        };
+        let payload =
+            OperationFrame::new(&fixture.source, group, 1, OperationProjection::default()).encode();
+        let meta = AccountDocumentMeta::new(
+            &fixture.source.account,
+            fixture.source.user_id(),
+            key.clone(),
+            1,
+            &payload,
+            false,
+        );
+        fixture
+            .source
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(meta, &payload)
+            .unwrap();
+        key
+    }
+    #[tokio::test]
+    async fn optional_cursor_with_no_enabled_content_settles_without_mandatory_work() {
+        let mut fixture = UpgradeFixture::new().await;
+        fixture
+            .target
+            .set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+        fixture
+            .target
+            .set_device_sync_category(SyncCategory::Appearance, false)
+            .unwrap();
+        let mut cursor = DocumentSyncCursor::optional();
+        fixture
+            .target
+            .pull_account_documents_page(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert!(!cursor.pending && cursor.up_to_date);
+        assert_eq!(
+            cursor.status(fixture.target.device_sync_policy()).0,
+            crate::node::SyncPhase::UpToDate
+        );
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn authenticated_mandatory_upgrade_preserves_an_optional_page_continuation() {
+        let mut fixture = UpgradeFixture::new().await;
+        let mut keys = Vec::new();
+        for index in 1..=65 {
+            let key = AccountDocumentKey::Draft {
+                conversation: DocumentConversation::Account(format!("{index:032x}")),
+            };
+            fixture
+                .source
+                .put_account_document_if(key.clone(), b"bounded draft".to_vec(), None, |commit| {
+                    commit()
+                })
+                .unwrap();
+            keys.push(key);
+        }
+        let mut cursor = DocumentSyncCursor::optional();
+        cursor.controls_unavailable();
+        cursor.after = Some(keys[63].clone());
+        fixture.prove_support().await;
+        fixture
+            .target
+            .pull_account_documents_page(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert!(
+            fixture.target.account_document_meta(&keys[0]).is_none(),
+            "fresh mandatory capability cannot restart an optional sweep"
+        );
+        assert!(fixture.target.account_document_meta(&keys[64]).is_some());
+        assert!(cursor.after.is_none());
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn access_only_v5_request_excludes_operation_rows_and_their_digest() {
+        let mut fixture = UpgradeFixture::new().await;
+        install_operation_head(&fixture);
+        let request = DocumentRequest {
+            version: 5,
+            account_id: fixture.target.account_id(),
+            domain: AccountDocumentDomain::GroupControl,
+            after: None,
+            known_digest: [0; 32],
+            operation: None,
+        };
+        let mut channel = fixture
+            .target
+            .begin_account_exchange(
+                &fixture.peer,
+                AccountSyncVersion::V2,
+                AccountHistoryFrame::DocumentsRequest {
+                    body: request.encode(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut records = 0;
+        let digest = loop {
+            let bytes = channel.recv().await.unwrap();
+            match AccountHistoryFrame::decode_versioned(&bytes).unwrap().1 {
+                AccountHistoryFrame::DocumentHeader { .. } => records += 1,
+                AccountHistoryFrame::DocumentChunk { .. } => {}
+                AccountHistoryFrame::DocumentsComplete { body } => {
+                    break serde_json::from_slice::<DocumentComplete>(&body)
+                        .unwrap()
+                        .digest;
+                }
+                _ => panic!("expected document response"),
+            }
+        };
+        assert_eq!(
+            records, 0,
+            "a peer without an explicit operation probe receives only access rows"
+        );
+        assert_eq!(
+            digest,
+            fixture
+                .source
+                .account_documents
+                .lock()
+                .unwrap()
+                .digest_scope(AccountDocumentDomain::GroupControl, false)
+        );
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn operation_rows_are_not_installed_without_the_matching_completion_capability() {
+        let mut fixture = UpgradeFixture::new().await;
+        let key = install_operation_head(&fixture);
+        let (result, _) =
+            access_only_reply(&fixture, &mut DocumentSyncCursor::default(), false, true).await;
+        assert!(
+            fixture
+                .target
+                .account_documents
+                .lock()
+                .unwrap()
+                .meta(&key)
+                .is_none(),
+            "a source cannot install an operation row before authenticating this exchange's capability"
+        );
+        assert!(result.is_err());
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn a_broken_operation_blob_cannot_starve_a_complete_role_invalidation() {
+        use crate::node::AccountGroupRole;
+        let mut fixture = UpgradeFixture::new().await;
+        let group = fixture
+            .source
+            .create_channel("Role survives operation damage", vec![])
+            .await
+            .unwrap();
+        fixture.source.publish_account_group_access(&mut None);
+        fixture.prove_support().await;
+        assert_eq!(
+            fixture.target.account_group_access(group).unwrap().role,
+            AccountGroupRole::Owner
+        );
+        fixture.source.dissolve_channel(group).await.unwrap();
+        fixture.source.publish_account_group_access(&mut None);
+        let operation_key = install_operation_head(&fixture);
+        {
+            let store = fixture.source.account_documents.lock().unwrap();
+            let hash = store.meta(&operation_key).unwrap().content_hash;
+            store.remove_blob_for_test(hash);
+        }
+        assert!(
+            fixture
+                .target
+                .pull_document_exchange(&fixture.peer, &mut DocumentSyncCursor::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fixture.target.account_group_access(group).unwrap().role,
+            AccountGroupRole::Dissolved,
+            "a fully received authenticated role invalidation must survive a later operation blob failure"
+        );
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn legacy_access_rows_below_an_operation_continuation_still_converge() {
+        let mut fixture = UpgradeFixture::new().await;
+        let group = fixture
+            .source
+            .create_channel("legacy response", vec![])
+            .await
+            .unwrap();
+        fixture.source.publish_account_group_access(&mut None);
+        let key = AccountDocumentKey::GroupControl {
+            channel: hex::encode(group.as_bytes()),
+            source_device: fixture.source.user_id(),
+        };
+        assert!(
+            fixture
+                .source
+                .account_documents
+                .lock()
+                .unwrap()
+                .meta(&key)
+                .is_some()
+        );
+        let mut cursor = DocumentSyncCursor {
+            after: Some(AccountDocumentKey::GroupOperation {
+                channel: "f".repeat(64),
+                source_device: fixture.source.user_id(),
+            }),
+            ..DocumentSyncCursor::default()
+        };
+        let (result, _) = access_only_reply(&fixture, &mut cursor, false, true).await;
+        assert!(
+            result.is_ok(),
+            "a legacy responder ignores the optional operation continuation"
+        );
+        assert!(
+            fixture
+                .target
+                .account_documents
+                .lock()
+                .unwrap()
+                .meta(&key)
+                .is_some()
+        );
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn operation_probe_rejects_a_peer_with_the_same_ed_key_and_another_transport_key() {
+        let mut fixture = UpgradeFixture::new().await;
+        let mut peer = fixture.peer.clone();
+        peer.public.x25519_pub[0] ^= 1;
+        assert!(
+            fixture
+                .target
+                .pull_document_exchange(&peer, &mut DocumentSyncCursor::default())
+                .await
+                .is_err()
+        );
+        assert!(
+            !fixture
+                .target
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.source.user_id())
+        );
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn a_first_operation_scope_fetch_imports_actual_signed_operation_metadata() {
+        let mut fixture = UpgradeFixture::new().await;
+        let key = install_operation_head(&fixture);
+        let mut cursor = DocumentSyncCursor::default();
+        cursor.digests[8] = fixture
+            .source
+            .account_documents
+            .lock()
+            .unwrap()
+            .digest_scope(AccountDocumentDomain::GroupControl, false);
+        fixture
+            .target
+            .pull_document_exchange(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert!(
+            fixture
+                .target
+                .account_documents
+                .lock()
+                .unwrap()
+                .meta(&key)
+                .is_some()
+        );
+        fixture.servers.shutdown().await;
     }
     #[tokio::test]
     async fn a_v5_response_on_one_cursor_unblocks_another_only_for_the_exact_source() {

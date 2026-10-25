@@ -1092,6 +1092,27 @@ impl Node {
         self.process_channel_reception(conv, "live");
     }
 
+    /// Install validated control metadata independently of plaintext retries,
+    /// preserving local crypto state and the pending plaintext batch.
+    pub(in crate::node) fn refresh_channel_control_metadata(&self, conv: ConversationId) {
+        let changed = {
+            // Match the book -> log order used by outgoing allocation.
+            let mut book = self.channels.lock().expect("channels mutex not poisoned");
+            let before = book.info_projection(conv);
+            let log = self.log.lock().expect("log mutex not poisoned");
+            if let Some(projected) =
+                super::channel::ChannelBook::projected_metadata(conv, &log.events(&conv))
+                && let Some(state) = book.state_mut(&conv)
+            {
+                state.install_membership_projection(projected);
+            }
+            before != book.info_projection(conv)
+        };
+        if changed {
+            let _ = self.channel_changes.send(conv);
+        }
+    }
+
     /// Recovery provenance is supplied by the operation, never inferred from a
     /// sender's wall clock. A multi-message decryption pass is a catch-up batch.
     pub(in crate::node) fn process_channel_reception(

@@ -6,7 +6,17 @@
       "paths": [
         "crates/mesh-talk-core/src/node/account_group/",
         "crates/mesh-talk-core/src/node/account_documents/group_control.rs",
-        "crates/mesh-talk-core/src/node/account_documents/store.rs"
+        "crates/mesh-talk-core/src/node/account_documents/store.rs",
+        "crates/mesh-talk-core/src/node/delivery_store.rs",
+        "crates/mesh-talk-core/src/node/delivery_store_tests.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/node/account_documents/group_operations.rs",
+        "crates/mesh-talk-core/src/node/channels/simple_control.rs",
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/node/join_history.rs",
+        "crates/mesh-talk-core/src/node/account_sync/wake.rs",
+        "crates/mesh-talk-core/src/node/account_sync/fanout.rs"
       ],
       "rust": [
         {
@@ -35,7 +45,18 @@
             "node::account_documents::tests::group_control_unavailable_obsolete_cache_cannot_orphan_a_large_negative_head",
             "node::account_documents::tests::group_control_broken_obsolete_cache_does_not_downgrade_a_large_current_view",
             "node::account_documents::tests::group_control_normal_authorization_history_growth_keeps_bounded_current_heads",
-            "node::account_documents::tests::group_control_removal_and_reinvite_never_reuse_the_old_membership_lifetime"
+            "node::account_documents::tests::group_control_removal_and_reinvite_never_reuse_the_old_membership_lifetime",
+            "node::delivery_store::tests::typed_rename_control_enters_the_bound_effect_wal",
+            "node::delivery_store::tests::group_control_without_completion_adapter_does_not_install_or_retire",
+            "node::delivery_store::tests::failed_group_completion_keeps_exact_effect_for_restart_retry",
+            "node::delivery_store::tests::group_control_rejects_wrong_kind_binding_and_malformed_name",
+            "node::delivery_store::tests::group_control_rejects_a_different_inner_logical_operation_id",
+            "node::delivery_store::tests::typed_history_policy_control_enters_the_bound_effect_wal",
+            "node::delivery_store::tests::typed_dissolve_control_enters_the_bound_effect_wal",
+            "node::delivery_store::tests::group_control_rejects_malformed_policy_and_nonempty_dissolution",
+            "node::delivery_store::tests::group_control_rejects_valid_payload_bound_to_another_kind_or_digest",
+            "node::delivery_store::tests::group_control_requires_exact_original_request_wrappers",
+            "node::account_sync::fanout::tests::"
           ]
         }
       ],
@@ -53,6 +74,18 @@
           },
           {
             "name": "A required local recovery receipt and its source head share one durable index append; compaction retains the matching receipt, budget failure preserves the previous pair, and a complete replacement may release it.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Prepared account effects recover exact public events and sidecars, durably record the immutable source terminal outcome, then retire before later allocation; canonical control metadata refresh cannot depend on plaintext retry readiness.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Authenticated body-free sibling invalidations remain active when all optional history, attachment, appearance and contact categories are disabled; mandatory group control latency does not depend on the periodic repair tick.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Affected canonical group access and inventory, followed by the exact durable operation result, publish before public fanout waits; canonical no-op retries allocate no invented public effect and obsolete owner authority cannot execute an awaiting control.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           }
         ]

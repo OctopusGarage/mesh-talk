@@ -1923,3 +1923,603 @@ fn pending_personal_message_does_not_reserve_remote_status_bytes() {
         .expect("a pending local projection must not reserve remote status bytes");
     assert_eq!(store.pending_transactions().len(), 2);
 }
+
+struct GroupControlFixture {
+    dir: tempfile::TempDir,
+    owner: DeviceIdentity,
+    origin: DeviceIdentity,
+    account: crate::identity::account::Account,
+    reference: super::OperationReference,
+    genesis: Event,
+    effect: Event,
+}
+
+fn group_control_fixture() -> GroupControlFixture {
+    use crate::node::{
+        AccountGroupExecution, AccountGroupOperation, AccountGroupOperationId,
+        AccountGroupOperationKind, AccountGroupRole, AccountGroupSource, AuthorityExpectation,
+        MembershipLifetime,
+    };
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let owner = DeviceIdentity::generate();
+    let origin = DeviceIdentity::generate();
+    let account = crate::identity::account::Account::generate();
+    let group = ConversationId::new([0x81; 32]);
+    let genesis = Event::new(
+        &owner,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        crate::channel::ChannelMeta {
+            name: "Control WAL before".into(),
+            members: vec![owner.public()],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    let rename = Event::new(
+        &owner,
+        group,
+        2,
+        vec![genesis.id],
+        2,
+        2,
+        EventKind::ChannelRename,
+        b"Control WAL after".to_vec(),
+    );
+    let operation = AccountGroupOperation::Rename {
+        name: "Control WAL after".into(),
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"mesh-talk-account-group-operation-body-v1");
+    digest.update(group.as_bytes());
+    digest.update(serde_json::to_vec(&operation).unwrap());
+    let mut reference = super::OperationReference {
+        id: AccountGroupOperationId::for_origin(&origin.public(), [0x82; 16]),
+        group,
+        kind: AccountGroupOperationKind::Rename,
+        digest: digest.finalize().into(),
+        origin: crate::discovery::Announce::new_with_account(
+            &origin,
+            &account,
+            "Operation origin",
+            9,
+        ),
+        executor: AccountGroupSource {
+            device: owner.public(),
+            role: AccountGroupRole::Owner,
+            lifetime: MembershipLifetime {
+                member: owner.public(),
+                membership: genesis.id,
+                acceptance: None,
+            },
+            authority: AuthorityExpectation {
+                authority: None,
+                epoch: 0,
+            },
+            execution: AccountGroupExecution::Local,
+        },
+        signature: Vec::new(),
+    };
+    reference.signature = origin.sign(&reference.message()).to_vec();
+    assert!(reference.valid(&account.public().ed25519_pub));
+    GroupControlFixture {
+        dir,
+        owner,
+        origin,
+        account,
+        reference,
+        genesis,
+        effect: rename,
+    }
+}
+
+fn group_control_transaction(fixture: &GroupControlFixture, event: Event) -> DeliveryTransaction {
+    DeliveryTransaction::GroupRequested {
+        operation: fixture.reference.clone(),
+        transaction: Box::new(DeliveryTransaction::Requested {
+            request: RequestRecord {
+                request_id: *fixture.reference.id.as_bytes(),
+                digest: fixture.reference.digest,
+                destination: crate::node::MessageDestination::Channel(fixture.reference.group),
+                message_id: event.id,
+                accepted_at_ms: crate::node::node::now_millis(),
+            },
+            transaction: Box::new(DeliveryTransaction::ChannelControl {
+                events: vec![event],
+            }),
+        }),
+    }
+}
+
+fn group_control_store(fixture: &GroupControlFixture) -> DeliveryStore {
+    let mut store = DeliveryStore::open(fixture.dir.path(), "pw").unwrap();
+    store
+        .bind_profile(
+            &fixture.dir.path().join("events"),
+            "pw",
+            &fixture.owner.public(),
+            &fixture.account.account_id(),
+        )
+        .unwrap();
+    store
+}
+
+#[test]
+fn typed_rename_control_enters_the_bound_effect_wal() {
+    let fixture = group_control_fixture();
+    let mut store = group_control_store(&fixture);
+    let mut log = PersistentEventLog::open(&fixture.dir.path().join("events"), "pw").unwrap();
+    log.append_durable(fixture.genesis.clone()).unwrap();
+    store
+        .begin(group_control_transaction(&fixture, fixture.effect.clone()))
+        .expect("the narrow owner-signed rename batch must have a durable effect WAL");
+    assert!(
+        log.get(&fixture.effect.id).is_none(),
+        "WAL admission does not publish the effect"
+    );
+    assert_eq!(store.pending_transactions()[0].id(), fixture.effect.id);
+    drop(store);
+    let store = group_control_store(&fixture);
+    assert_eq!(store.pending_transactions().len(), 1);
+    assert_eq!(store.pending_transactions()[0].id(), fixture.effect.id);
+}
+
+#[test]
+fn group_control_without_completion_adapter_does_not_install_or_retire() {
+    let fixture = group_control_fixture();
+    let mut store = group_control_store(&fixture);
+    let mut log = PersistentEventLog::open(&fixture.dir.path().join("events"), "pw").unwrap();
+    log.append_durable(fixture.genesis.clone()).unwrap();
+    store
+        .begin(group_control_transaction(&fixture, fixture.effect.clone()))
+        .unwrap();
+    let mut ratchet =
+        DmRatchet::new(RatchetSessions::open(&fixture.dir.path().join("sessions"), "pw").unwrap());
+    let mut sent = SentLog::open(&fixture.dir.path().join("sent"), "pw").unwrap();
+    let mut received = ReceivedLog::open(&fixture.dir.path().join("received"), "pw").unwrap();
+    assert!(
+        store
+            .recover_next(&mut ratchet, &mut log, &mut sent, &mut received)
+            .is_err()
+    );
+    assert!(log.get(&fixture.effect.id).is_none());
+    assert_eq!(store.pending_transactions().len(), 1);
+    assert!(sent.entries(&fixture.reference.group).is_empty());
+}
+
+#[test]
+fn failed_group_completion_keeps_exact_effect_for_restart_retry() {
+    let fixture = group_control_fixture();
+    let mut store = group_control_store(&fixture);
+    let mut log = PersistentEventLog::open(&fixture.dir.path().join("events"), "pw").unwrap();
+    log.append_durable(fixture.genesis.clone()).unwrap();
+    store
+        .begin(group_control_transaction(&fixture, fixture.effect.clone()))
+        .unwrap();
+    let mut ratchet =
+        DmRatchet::new(RatchetSessions::open(&fixture.dir.path().join("sessions"), "pw").unwrap());
+    let mut sent = SentLog::open(&fixture.dir.path().join("sent"), "pw").unwrap();
+    let mut received = ReceivedLog::open(&fixture.dir.path().join("received"), "pw").unwrap();
+    let terminal_path = fixture.dir.path().join("source-terminal");
+    let (mut terminal, _): (EncryptedRecordLog<Vec<EventId>>, _) =
+        EncryptedRecordLog::open(&terminal_path, "pw", b"MTTEST").unwrap();
+    terminal.fail_appends_for_test(true).unwrap();
+    let mut complete = |reference: &super::OperationReference, events: &[Event]| {
+        assert_eq!(reference.id, fixture.reference.id);
+        let ids: Vec<_> = events.iter().map(|event| event.id).collect();
+        assert_eq!(ids, vec![fixture.effect.id]);
+        terminal.append_durable(&ids)
+    };
+    assert!(
+        store
+            .recover_next_with_group_operations(
+                &mut ratchet,
+                &mut log,
+                &mut sent,
+                &mut received,
+                None,
+                None,
+                Some(&mut complete)
+            )
+            .is_err()
+    );
+    assert!(
+        log.get(&fixture.effect.id).is_some(),
+        "the terminal callback runs only after the exact effect is durable"
+    );
+    assert_eq!(store.pending_transactions().len(), 1);
+    assert_eq!(store.pending_transactions()[0].id(), fixture.effect.id);
+    assert!(sent.entries(&fixture.reference.group).is_empty());
+    drop((store, log, ratchet, sent, received, terminal));
+    let mut store = group_control_store(&fixture);
+    let mut log = PersistentEventLog::open(&fixture.dir.path().join("events"), "pw").unwrap();
+    let mut ratchet =
+        DmRatchet::new(RatchetSessions::open(&fixture.dir.path().join("sessions"), "pw").unwrap());
+    let mut sent = SentLog::open(&fixture.dir.path().join("sent"), "pw").unwrap();
+    let mut received = ReceivedLog::open(&fixture.dir.path().join("received"), "pw").unwrap();
+    let (mut terminal, rows): (EncryptedRecordLog<Vec<EventId>>, _) =
+        EncryptedRecordLog::open(&terminal_path, "pw", b"MTTEST").unwrap();
+    assert!(rows.is_empty());
+    let mut complete = |reference: &super::OperationReference, events: &[Event]| {
+        assert_eq!(reference.id, fixture.reference.id);
+        terminal.append_durable(&events.iter().map(|event| event.id).collect())
+    };
+    assert_eq!(
+        store
+            .recover_next_with_group_operations(
+                &mut ratchet,
+                &mut log,
+                &mut sent,
+                &mut received,
+                None,
+                None,
+                Some(&mut complete)
+            )
+            .unwrap(),
+        Some(fixture.effect.id)
+    );
+    assert!(store.pending_transactions().is_empty());
+    assert_eq!(
+        log.events(&fixture.reference.group)
+            .iter()
+            .filter(|event| event.kind == EventKind::ChannelRename)
+            .count(),
+        1
+    );
+    assert_eq!(
+        log.next_sequence(
+            &fixture.reference.group,
+            &crate::eventlog::Author::from_ed25519(fixture.owner.public().ed25519_pub)
+        )
+        .unwrap(),
+        3
+    );
+    drop(terminal);
+    let (_, rows): (EncryptedRecordLog<Vec<EventId>>, _) =
+        EncryptedRecordLog::open(&terminal_path, "pw", b"MTTEST").unwrap();
+    assert_eq!(rows, vec![vec![fixture.effect.id]]);
+}
+
+#[test]
+fn group_control_rejects_wrong_kind_binding_and_malformed_name() {
+    let fixture = group_control_fixture();
+    let mut store = group_control_store(&fixture);
+    for count in [0, 2] {
+        let mut transaction = group_control_transaction(&fixture, fixture.effect.clone());
+        if let DeliveryTransaction::GroupRequested { transaction, .. } = &mut transaction
+            && let DeliveryTransaction::Requested { transaction, .. } = transaction.as_mut()
+            && let DeliveryTransaction::ChannelControl { events } = transaction.as_mut()
+        {
+            *events = vec![fixture.effect.clone(); count];
+        }
+        assert!(store.begin(transaction).is_err());
+    }
+    let other = DeviceIdentity::generate();
+    let group = fixture.reference.group;
+    let invalid_events = [
+        Event::new(
+            &fixture.owner,
+            group,
+            2,
+            vec![fixture.genesis.id],
+            2,
+            2,
+            EventKind::ChannelLeave,
+            Vec::new(),
+        ),
+        Event::new(
+            &other,
+            group,
+            2,
+            vec![fixture.genesis.id],
+            2,
+            2,
+            EventKind::ChannelRename,
+            b"Control WAL after".to_vec(),
+        ),
+        Event::new(
+            &fixture.owner,
+            ConversationId::new([0x84; 32]),
+            2,
+            vec![],
+            2,
+            2,
+            EventKind::ChannelRename,
+            b"Control WAL after".to_vec(),
+        ),
+        Event::new(
+            &fixture.owner,
+            group,
+            2,
+            vec![fixture.genesis.id],
+            2,
+            2,
+            EventKind::ChannelRename,
+            b"  ".to_vec(),
+        ),
+        Event::new(
+            &fixture.owner,
+            group,
+            2,
+            vec![fixture.genesis.id],
+            2,
+            2,
+            EventKind::ChannelRename,
+            b" padded ".to_vec(),
+        ),
+        Event::new(
+            &fixture.owner,
+            group,
+            2,
+            vec![fixture.genesis.id],
+            2,
+            2,
+            EventKind::ChannelRename,
+            vec![0xff],
+        ),
+        Event::new(
+            &fixture.owner,
+            group,
+            2,
+            vec![fixture.genesis.id],
+            2,
+            2,
+            EventKind::ChannelRename,
+            vec![b'a'; 16 * 1024 + 1],
+        ),
+    ];
+    let wrong_name = Event::new(
+        &fixture.owner,
+        group,
+        2,
+        vec![fixture.genesis.id],
+        2,
+        2,
+        EventKind::ChannelRename,
+        b"A different valid name".to_vec(),
+    );
+    assert!(
+        store
+            .begin(group_control_transaction(&fixture, wrong_name))
+            .is_err()
+    );
+    let mut wrong_source = group_control_transaction(&fixture, fixture.effect.clone());
+    if let DeliveryTransaction::GroupRequested { operation, .. } = &mut wrong_source {
+        operation.executor.device.x25519_pub[0] ^= 1;
+        operation.signature = fixture.origin.sign(&operation.message()).to_vec();
+        assert!(operation.valid(&fixture.account.public().ed25519_pub));
+    }
+    assert!(store.begin(wrong_source).is_err());
+    let other_account = crate::identity::account::Account::generate();
+    let mut wrong_account = group_control_transaction(&fixture, fixture.effect.clone());
+    if let DeliveryTransaction::GroupRequested { operation, .. } = &mut wrong_account {
+        operation.origin = crate::discovery::Announce::new_with_account(
+            &fixture.origin,
+            &other_account,
+            "Other account",
+            9,
+        );
+        operation.signature = fixture.origin.sign(&operation.message()).to_vec();
+        assert!(operation.valid(&other_account.public().ed25519_pub));
+    }
+    assert!(store.begin(wrong_account).is_err());
+    for event in invalid_events {
+        assert!(
+            store
+                .begin(group_control_transaction(&fixture, event))
+                .is_err()
+        );
+    }
+    assert!(
+        store
+            .begin(DeliveryTransaction::ChannelControl {
+                events: vec![fixture.effect.clone()]
+            })
+            .is_err()
+    );
+    assert!(store.pending_transactions().is_empty());
+}
+
+#[test]
+fn group_control_rejects_a_different_inner_logical_operation_id() {
+    let fixture = group_control_fixture();
+    let mut store = group_control_store(&fixture);
+    let mut transaction = group_control_transaction(&fixture, fixture.effect.clone());
+    if let DeliveryTransaction::GroupRequested { transaction, .. } = &mut transaction
+        && let DeliveryTransaction::Requested { request, .. } = transaction.as_mut()
+    {
+        request.request_id = [0xfe; 32];
+    }
+    assert!(
+        store.begin(transaction).is_err(),
+        "the exact original logical ID must bind both durable request owners"
+    );
+    assert!(store.pending_transactions().is_empty());
+}
+
+fn simple_control_fixture(
+    operation: crate::node::AccountGroupOperation,
+    kind: EventKind,
+    payload: Vec<u8>,
+) -> GroupControlFixture {
+    let mut fixture = group_control_fixture();
+    fixture.reference.kind = operation.kind();
+    fixture.reference.digest = crate::node::account_group::operations::journal::operation_digest(
+        fixture.reference.group,
+        &operation,
+    );
+    fixture.reference.signature = fixture.origin.sign(&fixture.reference.message()).to_vec();
+    assert!(
+        fixture
+            .reference
+            .valid(&fixture.account.public().ed25519_pub)
+    );
+    fixture.effect = Event::new(
+        &fixture.owner,
+        fixture.reference.group,
+        2,
+        vec![fixture.genesis.id],
+        2,
+        2,
+        kind,
+        payload,
+    );
+    fixture
+}
+
+#[test]
+fn typed_history_policy_control_enters_the_bound_effect_wal() {
+    let policy = crate::channel::HistoryPolicy::LastTen;
+    let fixture = simple_control_fixture(
+        crate::node::AccountGroupOperation::SetHistoryPolicy { policy },
+        EventKind::ChannelHistoryPolicy,
+        crate::node::join_history::encode_policy(policy),
+    );
+    let mut store = group_control_store(&fixture);
+    store
+        .begin(group_control_transaction(&fixture, fixture.effect.clone()))
+        .expect("a signed exact history-policy effect must enter its bound recovery WAL");
+    drop(store);
+    assert_eq!(
+        group_control_store(&fixture).pending_transactions().len(),
+        1
+    );
+}
+
+#[test]
+fn typed_dissolve_control_enters_the_bound_effect_wal() {
+    let fixture = simple_control_fixture(
+        crate::node::AccountGroupOperation::Dissolve,
+        EventKind::ChannelDissolve,
+        Vec::new(),
+    );
+    let mut store = group_control_store(&fixture);
+    store
+        .begin(group_control_transaction(&fixture, fixture.effect.clone()))
+        .expect("a signed exact dissolution effect must enter its bound recovery WAL");
+    drop(store);
+    assert_eq!(
+        group_control_store(&fixture).pending_transactions().len(),
+        1
+    );
+}
+
+#[test]
+fn group_control_rejects_malformed_policy_and_nonempty_dissolution() {
+    let policy = crate::channel::HistoryPolicy::LastTen;
+    let canonical = crate::node::join_history::encode_policy(policy);
+    let mut trailing = canonical.clone();
+    trailing.push(0);
+    for payload in [Vec::new(), vec![0xff; 4], trailing] {
+        let fixture = simple_control_fixture(
+            crate::node::AccountGroupOperation::SetHistoryPolicy { policy },
+            EventKind::ChannelHistoryPolicy,
+            payload,
+        );
+        let mut store = group_control_store(&fixture);
+        assert!(
+            store
+                .begin(group_control_transaction(&fixture, fixture.effect.clone()))
+                .is_err()
+        );
+        assert!(store.pending_transactions().is_empty());
+    }
+    let fixture = simple_control_fixture(
+        crate::node::AccountGroupOperation::Dissolve,
+        EventKind::ChannelDissolve,
+        vec![0],
+    );
+    let mut store = group_control_store(&fixture);
+    assert!(
+        store
+            .begin(group_control_transaction(&fixture, fixture.effect.clone()))
+            .is_err()
+    );
+    assert!(store.pending_transactions().is_empty());
+}
+
+#[test]
+fn group_control_rejects_valid_payload_bound_to_another_kind_or_digest() {
+    let policy = crate::channel::HistoryPolicy::LastTen;
+    for operation in [
+        crate::node::AccountGroupOperation::Dissolve,
+        crate::node::AccountGroupOperation::SetHistoryPolicy {
+            policy: crate::channel::HistoryPolicy::default(),
+        },
+    ] {
+        let fixture = simple_control_fixture(
+            operation,
+            EventKind::ChannelHistoryPolicy,
+            crate::node::join_history::encode_policy(policy),
+        );
+        let mut store = group_control_store(&fixture);
+        assert!(
+            store
+                .begin(group_control_transaction(&fixture, fixture.effect.clone()))
+                .is_err()
+        );
+        assert!(store.pending_transactions().is_empty());
+    }
+}
+
+#[test]
+fn group_control_requires_exact_original_request_wrappers() {
+    let fixture = group_control_fixture();
+    let canonical = || group_control_transaction(&fixture, fixture.effect.clone());
+    let DeliveryTransaction::GroupRequested {
+        operation,
+        transaction,
+    } = canonical()
+    else {
+        unreachable!()
+    };
+    let DeliveryTransaction::Requested {
+        request,
+        transaction: body,
+    } = *transaction
+    else {
+        unreachable!()
+    };
+    let malformed = [
+        DeliveryTransaction::Requested {
+            request: request.clone(),
+            transaction: Box::new(DeliveryTransaction::GroupRequested {
+                operation: operation.clone(),
+                transaction: body,
+            }),
+        },
+        DeliveryTransaction::GroupRequested {
+            operation: operation.clone(),
+            transaction: Box::new(DeliveryTransaction::ChannelControl {
+                events: vec![fixture.effect.clone()],
+            }),
+        },
+        DeliveryTransaction::GroupRequested {
+            operation,
+            transaction: Box::new(canonical()),
+        },
+        DeliveryTransaction::GroupRequested {
+            operation: fixture.reference.clone(),
+            transaction: Box::new(DeliveryTransaction::Requested {
+                request: request.clone(),
+                transaction: Box::new(DeliveryTransaction::Requested {
+                    request,
+                    transaction: Box::new(DeliveryTransaction::ChannelControl {
+                        events: vec![fixture.effect.clone()],
+                    }),
+                }),
+            }),
+        },
+    ];
+    let mut store = group_control_store(&fixture);
+    for transaction in malformed {
+        assert!(store.begin(transaction).is_err());
+        assert!(store.pending_transactions().is_empty());
+    }
+}

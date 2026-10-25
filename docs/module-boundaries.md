@@ -194,6 +194,17 @@ coverage cannot count one logical message twice. Independent messages with equal
 text retain separate IDs and counts. Legacy providers without a logical identity
 retain their compatibility counter path.
 
+`ui/store/accountGroupOperations.ts` coordinates typed group operation IPC through
+explicit lease and state ports. It retains logical operation IDs through
+uncertain replies and separates pending, committed, rejected and cancellation
+outcomes. `outgoingIntent/groupOperations.ts` binds body-free tickets to the
+existing aggregate outgoing state with atomic capacity and protected retention;
+it does not create another message cache. Original native invocation lifetime
+protects terminal tickets from eviction, as do message-intent references.
+The existing ticker and action/message owners must supply observation scheduling,
+terminal presentation and exact public-event reconciliation. Session checks also
+cover synchronous retirement caused by reactive state and diagnostic callbacks.
+
 `ui/store/channelActions.ts` owns channel creation, member edits, ownership
 transfer, invitation acceptance, leaving, dissolution and renaming. Its narrow
 state/context defines channel projections and explicit capture, command,
@@ -616,6 +627,46 @@ readiness. Their typed projection contains account and device identifiers,
 role and readiness, without raw keys or private operation bodies. A failed
 observation explicitly requires reconciliation rather than restoring cached
 authority.
+
+Directory reconciliation and observed history policy are descriptive metadata,
+separate from account permission and execution readiness. Reference list/member
+projections preserve the last coherent source observation, disclose unresolved
+reconciliation, and mark a missing policy as unknown instead of asserting a
+local default. A policy observation cannot authorize archive or attachment
+release; those owners recheck current membership and disclosure policy.
+
+Group creation retains its existing public creation and invitation producer.
+Its owner-scoped desktop adapter checks the expected account and exact runtime
+session before resolving invitees and rechecks at the creation commit. It does
+not invent an existing group lifetime or operation reference before genesis.
+
+Typed desktop operation commands capture the exact local session owner and
+expected account. Durable submission and cancellation recheck that authority at
+the core admission callback; lifecycle reads retain the matching runtime guard.
+The guarded ID factory binds an opaque ID to the full origin device and a random
+nonce without accepting work. Deduplication still belongs to the account and ID;
+a sibling resolves the original reference before resuming a foreign-origin ID.
+Logical operation IDs remain separate from committed public event IDs. Bounded
+list and status projections contain lifecycle metadata only. The frontend IPC
+adapter preserves pending outcomes for the existing action and outgoing-intent
+owners; acceptance alone does not finish a dialog or mark a message as sent.
+
+Simple owner controls prepare their exact signed public effect from the same
+locked canonical membership projection used to revalidate the pinned source.
+Their original logical operation, request digest and full executor identity bind
+the existing delivery WAL; durable public effects and sidecars precede the
+immutable completion result. A canonical no-op still requires a durable parent
+view and never invents a public event ID. Affected source access and inventory
+publish through their existing signed owners before public fanout can wait on a
+slow member.
+
+Authenticated body-free sibling invalidations remain active independently of
+optional content categories. Mandatory control requests and results reuse that
+bounded wake and account-document channel; content transfer still applies its
+own category, sharing and read-entitlement checks. The
+[network contract](network-design-reference.md#g-linking-and-ongoing-account-synchronization)
+owns the distinction between an accepted account's private copy and public
+physical membership.
 
 ### Account profiles and private trust
 

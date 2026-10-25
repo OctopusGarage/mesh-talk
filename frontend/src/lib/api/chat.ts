@@ -1,4 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import type {
+  AccountGroupControlRequest,
+  AccountGroupOperationStatus,
+} from "../types";
 
 /** Local scheduling facts only; absence means unknown. */
 export interface DeliveryObservation {
@@ -262,6 +266,57 @@ export const chat = {
       ...(progressKey ? { progressKey } : {}),
       ...(protection ? { protection } : {}),
     }),
+  newAccountGroupOperationId: (owner: string, expectedAccount: string) =>
+    invoke<string>("owner_new_account_group_operation_id", {
+      owner,
+      expectedAccount,
+    }),
+  submitAccountGroupControl: (
+    owner: string,
+    expectedAccount: string,
+    operationId: string,
+    channelId: string,
+    operation: AccountGroupControlRequest,
+  ) =>
+    invoke<AccountGroupOperationStatus>("owner_submit_account_group_control", {
+      owner,
+      expectedAccount,
+      operationId,
+      channelId,
+      operation,
+    }),
+  accountGroupOperationStatus: (
+    owner: string,
+    expectedAccount: string,
+    operationId: string,
+  ) =>
+    invoke<AccountGroupOperationStatus | null>(
+      "owner_account_group_operation_status",
+      { owner, expectedAccount, operationId },
+    ),
+  listAccountGroupOperations: (
+    owner: string,
+    expectedAccount: string,
+    query: {
+      channelId?: string;
+      pendingOnly: boolean;
+      after?: string;
+      limit: number;
+    },
+  ) =>
+    invoke<AccountGroupOperationStatus[]>(
+      "owner_list_account_group_operations",
+      { owner, expectedAccount, ...query },
+    ),
+  cancelAccountGroupOperation: (
+    owner: string,
+    expectedAccount: string,
+    operationId: string,
+  ) =>
+    invoke<AccountGroupOperationStatus>(
+      "owner_cancel_account_group_operation",
+      { owner, expectedAccount, operationId },
+    ),
   enqueueChannelText: (
     owner: string,
     channelId: string,
@@ -404,6 +459,18 @@ export const chat = {
     invoke<string>("send_file_to_account", { account, path, media }),
 
   // Channels
+  createChannelForOwner: (
+    owner: string,
+    expectedAccount: string,
+    name: string,
+    memberIds: string[],
+  ) =>
+    invoke<string>("owner_create_channel", {
+      owner,
+      expectedAccount,
+      name,
+      memberIds,
+    }),
   createChannel: (name: string, memberIds: string[]) =>
     invoke<string>("create_channel", { name, memberIds }),
   channelMembers: (channelId: string) =>

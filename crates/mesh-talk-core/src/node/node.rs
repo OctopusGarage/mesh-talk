@@ -224,6 +224,8 @@ pub struct Node {
     pub(in crate::node) expiry_first_seen: Mutex<HashMap<EventId, std::time::Instant>>,
     pub(in crate::node) runtime_work: Arc<super::runtime_work::RuntimeWork>,
     #[cfg(test)]
+    pub(in crate::node) control_fanout_start_test_hook: BlockingTestHook,
+    #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
     #[cfg(test)]
     pub(in crate::node) profile_read_hook: BlockingTestHook,
@@ -239,6 +241,9 @@ pub struct Node {
     pub(in crate::node) empty_file_cache_self_wakes: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(in crate::node) accepted_hook: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    #[cfg(test)]
+    pub(in crate::node) account_session_test_hook:
+        Mutex<Option<Arc<super::account_session::AccountSessionTestHook>>>,
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
     /// Host preference. Relay selection and every relay dial consult this live flag.
     pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
@@ -261,8 +266,16 @@ pub struct Node {
         Mutex<super::account_transition_store::AccountTransitionStore>,
     pub(in crate::node) account_documents:
         Mutex<super::account_documents::store::AccountDocumentStore>,
+    pub(in crate::node) group_operations:
+        Mutex<super::account_group::operations::journal::OperationJournal>,
     pub(in crate::node) account_document_updates: tokio::sync::watch::Sender<u64>,
     pub(in crate::node) account_group_versions:
+        Mutex<HashMap<String, super::account_documents::sync::GroupProtocolSupport>>,
+    pub(in crate::node) operation_epoch: u64,
+    pub(in crate::node) operation_queries:
+        Mutex<HashMap<super::AccountGroupOperationId, (u64, std::time::Instant)>>,
+    pub(in crate::node) operation_seen: Mutex<HashMap<String, [u8; 32]>>,
+    pub(in crate::node) group_operation_versions:
         Mutex<HashMap<String, super::account_documents::sync::GroupProtocolSupport>>,
     pub(in crate::node) account_suppression: Mutex<super::account_suppression::AccountSuppression>,
     pub(in crate::node) favorites: Mutex<super::favorites::FavoriteStore>,
@@ -584,6 +597,13 @@ impl Node {
         let recovered_sent_ids =
             recovered_ids_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut dm_ratchet = DmRatchet::new(sessions);
+        let mut group_operations =
+            super::account_group::operations::journal::OperationJournal::open(
+                dir,
+                password,
+                account.public().ed25519_pub,
+                identity.public(),
+            )?;
         let mut delivery = super::delivery_store::DeliveryStore::open_for_log(log_path, password)?;
         delivery.bind_profile(
             log_path,
@@ -593,13 +613,14 @@ impl Node {
         )?;
         delivery.validate_owner(&identity.public(), &account.account_id())?;
         while delivery
-            .recover_next_with_channels(
+            .recover_next_with_group_operations(
                 &mut dm_ratchet,
                 &mut log,
                 &mut sentlog,
                 &mut received,
                 Some(&mut received_files),
                 Some(&mut channel_senders),
+                Some(&mut |reference, events| group_operations.complete(reference, events)),
             )?
             .is_some()
         {}
@@ -796,6 +817,8 @@ impl Node {
             expiry_first_seen: Mutex::new(HashMap::new()),
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
+            control_fanout_start_test_hook: Mutex::new(None),
+            #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
             #[cfg(test)]
             profile_read_hook: Mutex::new(None),
@@ -811,14 +834,21 @@ impl Node {
             empty_file_cache_self_wakes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             accepted_hook: Mutex::new(None),
+            #[cfg(test)]
+            account_session_test_hook: Mutex::new(None),
             privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),
             identity,
             account,
             account_devices: Mutex::new(account_devices),
             account_transitions: Mutex::new(account_transitions),
             account_documents: Mutex::new(account_documents),
+            group_operations: Mutex::new(group_operations),
             account_document_updates,
             account_group_versions: Mutex::new(HashMap::new()),
+            group_operation_versions: Mutex::new(HashMap::new()),
+            operation_epoch: rand_core::RngCore::next_u64(&mut rand_core::OsRng),
+            operation_queries: Mutex::new(HashMap::new()),
+            operation_seen: Mutex::new(HashMap::new()),
             account_suppression: Mutex::new(account_suppression),
             favorites: Mutex::new(favorites),
             favorite_media,

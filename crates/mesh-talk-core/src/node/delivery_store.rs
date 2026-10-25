@@ -1,5 +1,6 @@
 //! Encrypted delivery transaction journal and immutable outbox metadata.
 
+use super::account_group::operations::journal::OperationReference;
 use super::dm_envelope::DmEnvelope;
 use super::dm_ratchet::{DmRatchet, PreparedRatchet};
 use super::received_log::{ReceivedEntry, ReceivedLog};
@@ -13,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+
+pub(crate) type GroupOperationCompletion<'a> =
+    dyn FnMut(&OperationReference, &[Event]) -> Result<(), LogError> + 'a;
 
 const JOURNAL_MAGIC: &[u8; 6] = b"MTDTX1";
 const OUTBOX_MAGIC: &[u8; 6] = b"MTDOB1";
@@ -213,6 +217,13 @@ pub(crate) enum DeliveryTransaction {
         sent: SentEntry,
         senders: Vec<(u64, Vec<u8>)>,
     },
+    ChannelControl {
+        events: Vec<Event>,
+    },
+    GroupRequested {
+        operation: OperationReference,
+        transaction: Box<DeliveryTransaction>,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,21 +238,34 @@ pub(crate) struct RequestRecord {
 impl DeliveryTransaction {
     pub(crate) fn body(&self) -> &Self {
         match self {
-            Self::Requested { transaction, .. } => transaction.body(),
+            Self::Requested { transaction, .. } | Self::GroupRequested { transaction, .. } => {
+                transaction.body()
+            }
             _ => self,
         }
     }
     fn request(&self) -> Option<&RequestRecord> {
         match self {
             Self::Requested { request, .. } => Some(request),
+            Self::GroupRequested { transaction, .. } => transaction.request(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn group_operation(&self) -> Option<&OperationReference> {
+        match self {
+            Self::GroupRequested { operation, .. } => Some(operation),
+            Self::Requested { transaction, .. } => transaction.group_operation(),
             _ => None,
         }
     }
 
     pub(crate) fn id(&self) -> EventId {
         match self.body() {
-            Self::Requested { .. } => unreachable!(),
-            Self::ChannelOutgoing { events, .. } => events.last().expect("channel message").id,
+            Self::Requested { .. } | Self::GroupRequested { .. } => unreachable!(),
+            Self::ChannelOutgoing { events, .. } | Self::ChannelControl { events } => {
+                events.last().expect("channel effect").id
+            }
             Self::Outgoing { message, .. } | Self::OutgoingManifest { message, .. } => {
                 message.logical_id
             }
@@ -505,8 +529,10 @@ impl DeliveryStore {
         }
         for tx in &self.pending {
             let valid = match tx.body() {
-                DeliveryTransaction::Requested { .. } => unreachable!(),
-                DeliveryTransaction::ChannelOutgoing { events, .. } => events
+                DeliveryTransaction::Requested { .. }
+                | DeliveryTransaction::GroupRequested { .. } => unreachable!(),
+                DeliveryTransaction::ChannelOutgoing { events, .. }
+                | DeliveryTransaction::ChannelControl { events } => events
                     .iter()
                     .all(|e| e.author.ed25519_pub() == &own.ed25519_pub),
                 DeliveryTransaction::Outgoing { message, .. } => message_ok(message),
@@ -550,7 +576,21 @@ impl DeliveryStore {
                         && receipt.as_ref().is_none_or(|r| receipt_ok(r))
                 }
             };
-            if !valid {
+            let group_valid = tx.group_operation().is_none_or(|operation| {
+                operation.executor.device == *own
+                    && operation
+                        .origin
+                        .account_cert
+                        .as_ref()
+                        .is_some_and(|certificate| {
+                            crate::identity::account::AccountPublic {
+                                ed25519_pub: certificate.account_ed25519_pub,
+                            }
+                            .account_id()
+                                == account
+                        })
+            });
+            if !valid || !group_valid {
                 return Err(invalid("delivery transaction belongs to another profile"));
             }
         }
@@ -853,6 +893,7 @@ impl DeliveryStore {
         self.recover_next_with_channels(ratchet, log, sent, received, files, None)
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn recover_next_with_channels(
         &mut self,
@@ -863,16 +904,48 @@ impl DeliveryStore {
         files: Option<&mut ReceivedLog>,
         channel_senders: Option<&mut super::channel_senders::ChannelSenderStore>,
     ) -> Result<Option<EventId>, LogError> {
+        self.recover_next_with_group_operations(
+            ratchet,
+            log,
+            sent,
+            received,
+            files,
+            channel_senders,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn recover_next_with_group_operations(
+        &mut self,
+        ratchet: &mut DmRatchet,
+        log: &mut PersistentEventLog,
+        sent: &mut SentLog,
+        received: &mut ReceivedLog,
+        files: Option<&mut ReceivedLog>,
+        channel_senders: Option<&mut super::channel_senders::ChannelSenderStore>,
+        mut completion: Option<&mut GroupOperationCompletion<'_>>,
+    ) -> Result<Option<EventId>, LogError> {
         self.sync_replacement()?;
         let Some(tx) = self.pending.first() else {
             return Ok(None);
         };
+        if tx.group_operation().is_some() && completion.is_none() {
+            return Err(invalid("group control recovery adapter required"));
+        }
         let id = tx.id();
         // The host syncs causal parents before begin. Re-sync before replay as
         // well, including the original incoming event and receipt's parents.
         log.sync()?;
         match tx.body() {
-            DeliveryTransaction::Requested { .. } => unreachable!(),
+            DeliveryTransaction::Requested { .. } | DeliveryTransaction::GroupRequested { .. } => {
+                unreachable!()
+            }
+            DeliveryTransaction::ChannelControl { events } => {
+                for event in events {
+                    log.append_durable(event.clone())?;
+                }
+            }
             DeliveryTransaction::ChannelOutgoing {
                 events,
                 sent: entry,
@@ -971,6 +1044,18 @@ impl DeliveryStore {
         }
         if let Some(request) = self.pending[0].request().cloned() {
             self.install_record(OutboxRecord::Request(request))?;
+        }
+        if let Some(operation) = self.pending[0].group_operation() {
+            let events = match self.pending[0].body() {
+                DeliveryTransaction::ChannelControl { events } => events,
+                _ => return Err(invalid("invalid group operation recovery effects")),
+            };
+            // The durable source result is a required sidecar. Keep the exact
+            // transaction pending until that owner confirms its own sync.
+            let complete = completion
+                .as_mut()
+                .ok_or_else(|| invalid("group control recovery adapter required"))?;
+            complete(operation, events)?;
         }
         // Rewrite commits before sync; update the live index even if the final
         // directory sync fails, and prohibit further mutations until it retries.
@@ -2547,8 +2632,90 @@ impl DeliveryStore {
     }
 
     fn validate_transaction(&self, tx: &DeliveryTransaction) -> Result<(), LogError> {
+        if let Some(operation) = tx.group_operation() {
+            let Some(certificate) = operation.origin.account_cert.as_ref() else {
+                return Err(invalid("group operation has no account binding"));
+            };
+            let DeliveryTransaction::GroupRequested { transaction, .. } = tx else {
+                return Err(invalid("invalid group operation wrapper"));
+            };
+            let DeliveryTransaction::Requested {
+                request,
+                transaction,
+            } = transaction.as_ref()
+            else {
+                return Err(invalid("invalid group operation request wrapper"));
+            };
+            let event = match transaction.as_ref() {
+                DeliveryTransaction::ChannelControl { events } => match events.as_slice() {
+                    [event] => event,
+                    _ => return Err(invalid("invalid group control effect count")),
+                },
+                _ => return Err(invalid("invalid group operation effect kind")),
+            };
+            if !operation.valid(&certificate.account_ed25519_pub)
+                || operation.executor.role != super::AccountGroupRole::Owner
+                || self.profile.as_ref().is_some_and(|(_, owner)| {
+                    owner.device != operation.executor.device
+                        || owner.account
+                            != crate::identity::account::AccountPublic {
+                                ed25519_pub: certificate.account_ed25519_pub,
+                            }
+                            .account_id()
+                })
+                || request.request_id != *operation.id.as_bytes()
+                || request.digest != operation.digest
+                || request.message_id != event.id
+                || request.destination
+                    != super::outgoing_message::MessageDestination::Channel(operation.group)
+            {
+                return Err(invalid("invalid group operation transaction binding"));
+            }
+        }
+
         match tx.body() {
-            DeliveryTransaction::Requested { .. } => unreachable!(),
+            DeliveryTransaction::Requested { .. } | DeliveryTransaction::GroupRequested { .. } => {
+                unreachable!()
+            }
+            DeliveryTransaction::ChannelControl { events } => {
+                let operation = tx
+                    .group_operation()
+                    .ok_or_else(|| invalid("group control requires operation binding"))?;
+                let [event] = events.as_slice() else {
+                    return Err(invalid("invalid group control effect count"));
+                };
+                let control = super::channels::SimpleControl::from_event(event)
+                    .ok_or_else(|| invalid("invalid group control payload"))?;
+                let effect = match control {
+                    super::channels::SimpleControl::Rename(name) => {
+                        super::AccountGroupOperation::Rename { name }
+                    }
+                    super::channels::SimpleControl::HistoryPolicy(policy) => {
+                        super::AccountGroupOperation::SetHistoryPolicy { policy }
+                    }
+                    super::channels::SimpleControl::Dissolve => {
+                        super::AccountGroupOperation::Dissolve
+                    }
+                };
+                if effect.kind() != operation.kind
+                    || event.conversation_id != operation.group
+                    || event.author.ed25519_pub() != &operation.executor.device.ed25519_pub
+                    || event.seq == 0
+                    || event.lamport == 0
+                    || event.parents.is_empty()
+                    || !event.is_canonical()
+                    || !event.verify_integrity()
+                    || !event.verify_signature()
+                    || !super::session::event_fits_frame(event)
+                    || super::account_group::operations::journal::operation_digest(
+                        event.conversation_id,
+                        &effect,
+                    ) != operation.digest
+                {
+                    return Err(invalid("invalid group control transaction"));
+                }
+                Ok(())
+            }
             DeliveryTransaction::ChannelOutgoing {
                 events,
                 sent,
@@ -2801,8 +2968,11 @@ impl DeliveryStore {
 
 fn metadata_for(tx: &DeliveryTransaction) -> Option<OutboxRecord> {
     match tx.body() {
-        DeliveryTransaction::Requested { .. } => unreachable!(),
-        DeliveryTransaction::ChannelOutgoing { .. } => None,
+        DeliveryTransaction::Requested { .. } | DeliveryTransaction::GroupRequested { .. } => {
+            unreachable!()
+        }
+        DeliveryTransaction::ChannelOutgoing { .. }
+        | DeliveryTransaction::ChannelControl { .. } => None,
         DeliveryTransaction::Outgoing { message, .. }
         | DeliveryTransaction::OutgoingManifest { message, .. } => {
             // A personal message with no known siblings has no transport work.

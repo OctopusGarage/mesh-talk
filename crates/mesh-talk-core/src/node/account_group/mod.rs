@@ -7,6 +7,12 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 mod access;
+pub(in crate::node) mod operations;
+pub use operations::{
+    AccountGroupOperation, AccountGroupOperationExecution, AccountGroupOperationId,
+    AccountGroupOperationKind, AccountGroupOperationPhase, AccountGroupOperationQuery,
+    AccountGroupOperationRejection, AccountGroupOperationStatus, PreparedAccountGroupMessage,
+};
 pub(in crate::node) mod wire;
 
 /// Account permission and executor reachability have independent lifetimes.

@@ -1,5 +1,7 @@
 use super::*;
 use store::AccountDocumentStore;
+#[path = "inventory_causality_tests.rs"]
+mod inventory_causality;
 fn key() -> AccountDocumentKey {
     AccountDocumentKey::Draft {
         conversation: DocumentConversation::Account("a".repeat(32)),
@@ -624,6 +626,7 @@ fn document_extension_preserves_old_tags_and_rejects_legacy_codec() {
         domain: AccountDocumentDomain::Draft,
         after: None,
         known_digest: [0; 32],
+        operation: None,
     };
     let frame = AccountHistoryFrame::DocumentsRequest {
         body: request.encode(),
@@ -682,6 +685,7 @@ async fn unrelated_noise_peer_cannot_fetch_account_documents() {
         domain: AccountDocumentDomain::Draft,
         after: None,
         known_digest: [0; 32],
+        operation: None,
     };
     channel
         .send(
@@ -1070,6 +1074,7 @@ async fn policy_off_on_while_payload_is_inflight_denies_document_commit() {
                     domain: AccountDocumentDomain::Draft,
                     next: None,
                     digest,
+                    operation: None,
                 })
                 .unwrap(),
             },
@@ -1750,6 +1755,7 @@ fn private_control_request_versions_keep_legacy_domains_unchanged() {
             account_id: "a".repeat(32),
             after: None,
             known_digest: [0; 32],
+            operation: None,
         };
         assert_eq!(
             DocumentRequest::decode(&request.encode()).is_some(),
@@ -4450,13 +4456,25 @@ fn group_inventory_sources_retract_independently_and_restore_absence_preserves_r
     let target = node(&dir.path().join("target"), &account);
     let id = group_inventory_legacy_fixture(&owner, &a, "Before");
     let first = group_inventory_source_document(&a, id);
+    // This retained v4 fixture deliberately constructs two descriptive writers.
+    // Current source-authenticated directory bodies cannot be re-signed by a sibling.
+    let mut value: serde_json::Value = serde_json::from_slice(first.payload()).unwrap();
+    value.as_object_mut().unwrap().remove("directory");
+    let legacy_payload = serde_json::to_vec(&value).unwrap();
+    let legacy_meta = AccountDocumentMeta::new(
+        &account,
+        a.user_id(),
+        first.meta.key.clone(),
+        first.meta.revision,
+        &legacy_payload,
+        false,
+    );
     target
         .account_documents
         .lock()
         .unwrap()
-        .merge(first.meta.clone(), first.payload())
+        .merge(legacy_meta, &legacy_payload)
         .unwrap();
-    let mut value: serde_json::Value = serde_json::from_slice(first.payload()).unwrap();
     value["source_device"] = serde_json::json!(b.user_id());
     value["observer"] = serde_json::to_value(crate::node::account_devices::AccountDevice {
         public: b.identity.public(),

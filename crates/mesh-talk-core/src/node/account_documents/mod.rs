@@ -7,6 +7,7 @@ use std::fmt;
 mod controls;
 mod custody;
 mod group_control;
+mod group_operations;
 mod inventory;
 pub use inventory::{GroupInventoryMember, GroupInventoryReference};
 pub(super) mod store;
@@ -74,6 +75,10 @@ pub enum AccountDocumentKey {
         channel: String,
         source_device: String,
     },
+    GroupOperation {
+        channel: String,
+        source_device: String,
+    },
 }
 impl DocumentConversation {
     fn valid(&self) -> bool {
@@ -100,7 +105,9 @@ impl AccountDocumentKey {
             Self::DmRecall { .. } => AccountDocumentDomain::DmRecall,
             Self::ChannelCustody { .. } => AccountDocumentDomain::ChannelCustody,
             Self::GroupInventory { .. } => AccountDocumentDomain::GroupInventory,
-            Self::GroupControl { .. } => AccountDocumentDomain::GroupControl,
+            Self::GroupControl { .. } | Self::GroupOperation { .. } => {
+                AccountDocumentDomain::GroupControl
+            }
         }
     }
     fn valid(&self) -> bool {
@@ -110,6 +117,10 @@ impl AccountDocumentKey {
                 source_device,
             }
             | Self::GroupControl {
+                channel,
+                source_device,
+            }
+            | Self::GroupOperation {
                 channel,
                 source_device,
             } => hex(channel, 64) && hex(source_device, 32),
@@ -163,6 +174,7 @@ impl AccountDocumentKey {
         match self {
             Self::GroupInventory { .. } => 128 * 1024,
             Self::GroupControl { .. } => super::account_group::wire::MAX_HEAD_BYTES,
+            Self::GroupOperation { .. } => 4 * 1024 * 1024,
             Self::ChannelCustody { .. } => 4096,
             Self::Draft { .. } => 64 * 1024,
             Self::ReadReceipt { .. } => 0,
@@ -179,12 +191,13 @@ impl AccountDocumentKey {
                 | Self::ChannelCustody { .. }
                 | Self::GroupInventory { .. }
                 | Self::GroupControl { .. }
+                | Self::GroupOperation { .. }
         )
     }
     fn protocol_version(&self) -> u8 {
         match self {
             Self::GroupInventory { .. } => 4,
-            Self::GroupControl { .. } => 5,
+            Self::GroupControl { .. } | Self::GroupOperation { .. } => 5,
             Self::ChannelCustody { .. } => 3,
             Self::DmReaction { .. } | Self::DmRecall { .. } => 2,
             _ => 1,

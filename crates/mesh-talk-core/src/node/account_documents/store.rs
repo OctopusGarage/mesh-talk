@@ -13,9 +13,14 @@ const MAX_ORDINARY_KEYS: usize = 4096;
 const MAX_MESSAGE_KEYS: usize = 65536;
 const MAX_REFERENCE_KEYS: usize = 4096;
 const MAX_GROUP_CONTROL_KEYS: usize = 4096;
+const MAX_GROUP_OPERATION_KEYS: usize = 4096;
+const MAX_OPERATION_LIVE: u64 = 32 * 1024 * 1024;
 // Read receipts have no blobs; each other retained key owns at most one blob.
-const MAX_OWNED_BLOBS: usize =
-    MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS + MAX_REFERENCE_KEYS + MAX_GROUP_CONTROL_KEYS;
+const MAX_OWNED_BLOBS: usize = MAX_ORDINARY_KEYS
+    + MAX_MESSAGE_KEYS
+    + MAX_REFERENCE_KEYS
+    + MAX_GROUP_CONTROL_KEYS
+    + MAX_GROUP_OPERATION_KEYS;
 // Include key.salt and one replacement/partial blob interrupted before cleanup.
 const MAX_MEDIA_ENTRIES: usize = MAX_OWNED_BLOBS + 2;
 const MAX_LIVE: u64 = 128 * 1024 * 1024;
@@ -47,7 +52,9 @@ impl LocalPublicationReceipt {
             && self.revision == meta.revision
             && self.content_hash == meta.content_hash
             && !meta.tombstone
-            && matches!(&meta.key, AccountDocumentKey::GroupControl { channel, source_device }
+            && matches!(&meta.key,
+                AccountDocumentKey::GroupControl { channel, source_device }
+                | AccountDocumentKey::GroupInventory { channel, source_device }
                 if *channel == hex::encode(self.group) && *source_device == source.user_id()
                     && meta.writer_device == *source_device)
     }
@@ -78,6 +85,15 @@ struct LocalIndexRow {
         skip_serializing_if = "Option::is_none"
     )]
     receipt: Option<serde_json::Value>,
+    #[serde(
+        default,
+        rename = "_local_inventory_source_authenticated",
+        skip_serializing_if = "is_false"
+    )]
+    source_authenticated: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 struct RetainedPublicationReceipt {
     receipt: LocalPublicationReceipt,
@@ -87,15 +103,20 @@ struct RetainedPublicationReceipt {
 fn encode_row(
     meta: &AccountDocumentMeta,
     receipt: Option<&LocalPublicationReceipt>,
+    source_authenticated: bool,
 ) -> Result<Vec<u8>, LogError> {
-    match receipt {
-        None => serde_json::to_vec(meta).map_err(|_| corrupt()),
-        Some(receipt) => serde_json::to_vec(&LocalIndexRow {
-            meta: meta.clone(),
-            receipt: Some(serde_json::to_value(receipt).map_err(|_| corrupt())?),
-        })
-        .map_err(|_| corrupt()),
+    if receipt.is_none() && !source_authenticated {
+        return serde_json::to_vec(meta).map_err(|_| corrupt());
     }
+    serde_json::to_vec(&LocalIndexRow {
+        meta: meta.clone(),
+        receipt: receipt
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| corrupt())?,
+        source_authenticated,
+    })
+    .map_err(|_| corrupt())
 }
 pub(in crate::node) struct AccountDocumentStore {
     file: EncryptedRecordLog<Vec<u8>>,
@@ -106,9 +127,13 @@ pub(in crate::node) struct AccountDocumentStore {
     journal_bytes: usize,
     counts: [usize; 9],
     live_bytes: u64,
+    operation_keys: usize,
+    operation_bytes: u64,
     digest_xor: [[u8; 32]; 9],
     incomplete: BTreeSet<AccountDocumentKey>,
     local_receipts: BTreeMap<AccountDocumentKey, RetainedPublicationReceipt>,
+    // Bounded by current inventory keys; never exported in document metadata.
+    inventory_source_floors: BTreeSet<AccountDocumentKey>,
     receipt_bytes: usize,
     index_bytes: usize,
     #[cfg(test)]
@@ -190,9 +215,12 @@ impl AccountDocumentStore {
             journal_bytes,
             counts: [0; 9],
             live_bytes: 0,
+            operation_keys: 0,
+            operation_bytes: 0,
             digest_xor: [[0; 32]; 9],
             incomplete: BTreeSet::new(),
             local_receipts: BTreeMap::new(),
+            inventory_source_floors: BTreeSet::new(),
             receipt_bytes: 0,
             index_bytes: INDEX_HEADER,
             #[cfg(test)]
@@ -205,7 +233,11 @@ impl AccountDocumentStore {
             let row: LocalIndexRow = serde_json::from_slice(&bytes).map_err(|_| corrupt())?;
             if bytes.len() > 8192
                 && (row.receipt.is_none()
-                    || !matches!(row.meta.key, AccountDocumentKey::GroupControl { .. }))
+                    || !matches!(
+                        row.meta.key,
+                        AccountDocumentKey::GroupControl { .. }
+                            | AccountDocumentKey::GroupInventory { .. }
+                    ))
             {
                 return Err(corrupt());
             }
@@ -216,12 +248,35 @@ impl AccountDocumentStore {
                 .filter(|receipt| {
                     receipt.matches(&row.meta, &receipt.source) && receipt.frontier().is_some()
                 });
-            if store
+            if row.source_authenticated
+                && !matches!(row.meta.key, AccountDocumentKey::GroupInventory { .. })
+            {
+                return Err(corrupt());
+            }
+            let same = store.current.get(&row.meta.key) == Some(&row.meta);
+            let newer = store
                 .current
                 .get(&row.meta.key)
-                .is_none_or(|old| old.order() < row.meta.order())
-            {
-                store.install_record(row.meta, receipt);
+                .is_none_or(|old| old.order() < row.meta.order());
+            let local_repair = same
+                && (receipt.is_some() && !store.local_receipts.contains_key(&row.meta.key)
+                    || row.source_authenticated
+                        && !store.inventory_source_floors.contains(&row.meta.key));
+            if newer || local_repair {
+                // Local auxiliary state may be durably repaired without changing
+                // the public signed metadata. Replay must retain that same-head
+                // receipt/floor, and cannot erase an already retained receipt.
+                let receipt = if same {
+                    receipt.or_else(|| {
+                        store
+                            .local_receipts
+                            .get(&row.meta.key)
+                            .map(|retained| retained.receipt.clone())
+                    })
+                } else {
+                    receipt
+                };
+                store.install_record(row.meta, receipt, row.source_authenticated);
             }
         }
         for key in store.current.keys() {
@@ -260,9 +315,23 @@ impl AccountDocumentStore {
         after: Option<&AccountDocumentKey>,
         limit: usize,
     ) -> Vec<AccountDocumentMeta> {
+        self.list_scope(domain, after, limit, true)
+    }
+    pub(super) fn list_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        after: Option<&AccountDocumentKey>,
+        limit: usize,
+        include_operations: bool,
+    ) -> Vec<AccountDocumentMeta> {
         self.current
             .values()
-            .filter(|m| m.key.domain() == domain && after.is_none_or(|a| &m.key > a))
+            .filter(|m| {
+                m.key.domain() == domain
+                    && (include_operations
+                        || !matches!(m.key, AccountDocumentKey::GroupOperation { .. }))
+                    && after.is_none_or(|a| &m.key > a)
+            })
             .take(limit.min(64))
             .cloned()
             .collect()
@@ -278,6 +347,48 @@ impl AccountDocumentStore {
         hash.update(self.digest_xor[index]);
         hash.update((self.counts[index] as u64).to_be_bytes());
         hash.finalize().into()
+    }
+    pub(super) fn digest_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        include_operations: bool,
+    ) -> [u8; 32] {
+        if include_operations || domain != AccountDocumentDomain::GroupControl {
+            return self.digest(domain);
+        }
+        if self
+            .incomplete
+            .iter()
+            .any(|key| matches!(key, AccountDocumentKey::GroupControl { .. }))
+        {
+            return [0; 32];
+        }
+        let mut xor = [0; 32];
+        let mut count = 0u64;
+        for meta in self
+            .current
+            .values()
+            .filter(|meta| matches!(meta.key, AccountDocumentKey::GroupControl { .. }))
+        {
+            count += 1;
+            for (byte, part) in xor.iter_mut().zip(metadata_hash(meta)) {
+                *byte ^= part;
+            }
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"mesh-talk-account-document-index-v1");
+        hash.update([domain as u8]);
+        hash.update(xor);
+        hash.update(count.to_be_bytes());
+        hash.finalize().into()
+    }
+    pub(super) fn operation_rows(&self) -> Vec<AccountDocumentMeta> {
+        self.current
+            .values()
+            .filter(|meta| matches!(meta.key, AccountDocumentKey::GroupOperation { .. }))
+            .take(MAX_GROUP_OPERATION_KEYS)
+            .cloned()
+            .collect()
     }
     pub(super) fn list_custody(
         &self,
@@ -313,16 +424,21 @@ impl AccountDocumentStore {
     }
     #[cfg(test)]
     fn install(&mut self, meta: AccountDocumentMeta) {
-        self.install_record(meta, None);
+        self.install_record(meta, None, false);
     }
     fn install_record(
         &mut self,
         meta: AccountDocumentMeta,
         receipt: Option<LocalPublicationReceipt>,
+        source_authenticated: bool,
     ) {
         if let Some(old) = self.current.get(&meta.key) {
             let row_len = self.local_receipts.get(&meta.key).map_or_else(
-                || encode_row(old, None).expect("metadata serializes").len(),
+                || {
+                    encode_row(old, None, self.inventory_source_floors.contains(&meta.key))
+                        .expect("metadata serializes")
+                        .len()
+                },
                 |old| old.row_len,
             );
             self.index_bytes -= row_len + INDEX_FRAME;
@@ -330,9 +446,16 @@ impl AccountDocumentStore {
         if let Some(old) = self.local_receipts.remove(&meta.key) {
             self.receipt_bytes -= old.encoded_len;
         }
-        let row_len = encode_row(&meta, receipt.as_ref())
-            .expect("local metadata serializes")
-            .len();
+        if source_authenticated {
+            self.inventory_source_floors.insert(meta.key.clone());
+        }
+        let row_len = encode_row(
+            &meta,
+            receipt.as_ref(),
+            self.inventory_source_floors.contains(&meta.key),
+        )
+        .expect("local metadata serializes")
+        .len();
         self.index_bytes += row_len + INDEX_FRAME;
         if let Some(receipt) = receipt {
             let encoded_len = serde_json::to_vec(&receipt)
@@ -347,6 +470,18 @@ impl AccountDocumentStore {
                     row_len,
                 },
             );
+        }
+        if matches!(meta.key, AccountDocumentKey::GroupOperation { .. }) {
+            if let Some(old) = self.current.get(&meta.key) {
+                if !old.tombstone {
+                    self.operation_bytes -= u64::from(old.content_len);
+                }
+            } else {
+                self.operation_keys += 1;
+            }
+            if !meta.tombstone {
+                self.operation_bytes += u64::from(meta.content_len);
+            }
         }
         let index = meta.key.domain() as usize;
         if let Some(old) = self.current.get(&meta.key) {
@@ -452,13 +587,33 @@ impl AccountDocumentStore {
     ) -> bool {
         let old = self.current.get(key);
         (old.is_some()
-            || self.counts[AccountDocumentDomain::GroupControl as usize] < MAX_GROUP_CONTROL_KEYS)
+            || self.counts[AccountDocumentDomain::GroupControl as usize]
+                .saturating_sub(self.operation_keys)
+                < MAX_GROUP_CONTROL_KEYS)
             && self
                 .live_bytes
                 .saturating_sub(
                     old.filter(|meta| !meta.tombstone)
                         .map_or(0, |meta| u64::from(meta.content_len)),
                 )
+                .saturating_add(bytes as u64)
+                <= MAX_LIVE
+    }
+    pub(super) fn operation_payload_fits(&self, key: &AccountDocumentKey, bytes: usize) -> bool {
+        let old = self
+            .current
+            .get(key)
+            .filter(|meta| !meta.tombstone)
+            .map_or(0, |meta| u64::from(meta.content_len));
+        (self.current.contains_key(key) || self.operation_keys < MAX_GROUP_OPERATION_KEYS)
+            && self
+                .operation_bytes
+                .saturating_sub(old)
+                .saturating_add(bytes as u64)
+                <= MAX_OPERATION_LIVE
+            && self
+                .live_bytes
+                .saturating_sub(old)
                 .saturating_add(bytes as u64)
                 <= MAX_LIVE
     }
@@ -478,7 +633,35 @@ impl AccountDocumentStore {
         let head =
             crate::node::account_group::wire::GroupControlHead::decode(payload, &self.account)
                 .ok_or_else(corrupt)?;
-        let receipt = if head.access.complete_frontier {
+        self.merge_local_publication(
+            meta,
+            payload,
+            frontier,
+            head.proof.public(),
+            *head.group.as_bytes(),
+            head.access.complete_frontier,
+        )
+    }
+    pub(super) fn merge_local_group_inventory(
+        &mut self,
+        meta: AccountDocumentMeta,
+        payload: &[u8],
+        frontier: Vec<EventId>,
+    ) -> Result<bool, LogError> {
+        let (source, group, complete) =
+            super::inventory::local_publication(payload, &self.account).ok_or_else(corrupt)?;
+        self.merge_local_publication(meta, payload, frontier, source, *group.as_bytes(), complete)
+    }
+    fn merge_local_publication(
+        &mut self,
+        meta: AccountDocumentMeta,
+        payload: &[u8],
+        frontier: Vec<EventId>,
+        source: PublicIdentity,
+        group: [u8; 32],
+        complete: bool,
+    ) -> Result<bool, LogError> {
+        let receipt = if complete {
             None
         } else {
             if frontier.is_empty() || frontier.len() > MAX_LOCAL_FRONTIER {
@@ -487,15 +670,13 @@ impl AccountDocumentStore {
             let receipt = LocalPublicationReceipt {
                 version: 1,
                 account_public: self.account,
-                source: head.proof.public(),
-                group: *head.group.as_bytes(),
+                source: source.clone(),
+                group,
                 revision: meta.revision,
                 content_hash: meta.content_hash,
                 frontier_hex: frontier.iter().map(EventId::to_hex).collect(),
             };
-            if !receipt.matches(&meta, &head.proof.public())
-                || receipt.frontier().as_ref() != Some(&frontier)
-            {
+            if !receipt.matches(&meta, &source) || receipt.frontier().as_ref() != Some(&frontier) {
                 return Err(corrupt());
             }
             Some(receipt)
@@ -523,6 +704,9 @@ impl AccountDocumentStore {
         self.validate(&meta)?;
         if meta.key.is_private_control()
             && !match meta.key {
+                AccountDocumentKey::GroupOperation { .. } => {
+                    crate::node::account_group::operations::valid_payload(&meta, payload)
+                }
                 AccountDocumentKey::GroupControl { .. } => {
                     super::group_control::valid_payload(&meta, payload)
                 }
@@ -549,23 +733,53 @@ impl AccountDocumentStore {
             .get(&meta.key)
             .filter(|old| old.order() >= meta.order())
         {
-            if old == &meta
-                && !meta.tombstone
-                && (self.incomplete.contains(&meta.key) || self.get(&meta.key).is_err())
-            {
-                self.media
-                    .store_bytes(
-                        ConversationId::new(meta.content_hash),
-                        "document.bin",
-                        payload,
-                    )
-                    .map_err(LogError::Io)?;
-                self.incomplete.remove(&meta.key);
-                return Ok(true);
+            // An ordinary import intentionally cannot carry a source's private
+            // recovery receipt. The real source can reconstruct it from its
+            // exact validated public view without changing the signed head.
+            let recovering_local_receipt =
+                old == &meta && receipt.is_some() && !self.local_receipts.contains_key(&meta.key);
+            if !recovering_local_receipt {
+                if old == &meta
+                    && !meta.tombstone
+                    && (self.incomplete.contains(&meta.key) || self.get(&meta.key).is_err())
+                {
+                    self.media
+                        .store_bytes(
+                            ConversationId::new(meta.content_hash),
+                            "document.bin",
+                            payload,
+                        )
+                        .map_err(LogError::Io)?;
+                    self.incomplete.remove(&meta.key);
+                    return Ok(true);
+                }
+                return Ok(false);
             }
-            return Ok(false);
         }
-        let bytes = encode_row(&meta, receipt.as_ref())?;
+        let inventory = matches!(meta.key, AccountDocumentKey::GroupInventory { .. });
+        let source_authenticated =
+            inventory && !meta.tombstone && super::inventory::source_authenticated(payload);
+        let old_floor = self.inventory_source_floors.contains(&meta.key);
+        if inventory && !meta.tombstone && !source_authenticated {
+            if old_floor {
+                return Err(corrupt());
+            }
+            if self
+                .current
+                .get(&meta.key)
+                .is_some_and(|old| !old.tombstone)
+            {
+                match self.get(&meta.key) {
+                    Ok(Some(old)) if super::inventory::source_authenticated(old.payload()) => {
+                        return Err(corrupt());
+                    }
+                    Err(_) => return Err(corrupt()),
+                    _ => {}
+                }
+            }
+        }
+        let source_authenticated = old_floor || source_authenticated;
+        let bytes = encode_row(&meta, receipt.as_ref(), source_authenticated)?;
         let old_receipt = self.local_receipts.get(&meta.key);
         let receipt_len = receipt
             .as_ref()
@@ -578,7 +792,7 @@ impl AccountDocumentStore {
             .get(&meta.key)
             .map(|old| {
                 old_receipt.map_or_else(
-                    || encode_row(old, None).map(|bytes| bytes.len()),
+                    || encode_row(old, None, old_floor).map(|bytes| bytes.len()),
                     |old| Ok(old.row_len),
                 )
             })
@@ -638,6 +852,7 @@ impl AccountDocumentStore {
                             self.local_receipts
                                 .get(&meta.key)
                                 .map(|retained| &retained.receipt),
+                            self.inventory_source_floors.contains(&meta.key),
                         )
                     })
                     .collect();
@@ -660,7 +875,7 @@ impl AccountDocumentStore {
         }
         self.journal_bytes += bytes.len() + INDEX_FRAME;
         self.records += 1;
-        self.install_record(meta, receipt);
+        self.install_record(meta, receipt, source_authenticated);
         if let Some(old_hash) = old_hash
             && !self.live().contains(&ConversationId::new(old_hash))
         {
@@ -675,9 +890,13 @@ impl AccountDocumentStore {
         let seen = matches!(meta.key, AccountDocumentKey::ReadReceipt { .. });
         let custody = matches!(meta.key, AccountDocumentKey::ChannelCustody { .. });
         let reference = matches!(meta.key, AccountDocumentKey::GroupInventory { .. });
+        let operation = matches!(meta.key, AccountDocumentKey::GroupOperation { .. });
         let group_control = matches!(meta.key, AccountDocumentKey::GroupControl { .. });
-        let count = if group_control {
+        let count = if operation {
+            self.operation_keys
+        } else if group_control {
             self.counts[AccountDocumentDomain::GroupControl as usize]
+                .saturating_sub(self.operation_keys)
         } else if reference {
             self.counts[AccountDocumentDomain::GroupInventory as usize]
         } else if custody {
@@ -693,7 +912,9 @@ impl AccountDocumentStore {
         };
         if !self.current.contains_key(&meta.key)
             && count
-                >= if group_control {
+                >= if operation {
+                    MAX_GROUP_OPERATION_KEYS
+                } else if group_control {
                     MAX_GROUP_CONTROL_KEYS
                 } else if reference {
                     MAX_REFERENCE_KEYS
@@ -716,6 +937,19 @@ impl AccountDocumentStore {
             } else {
                 u64::from(meta.content_len)
             };
+        if operation
+            && self
+                .operation_bytes
+                .saturating_sub(previous)
+                .saturating_add(if meta.tombstone {
+                    0
+                } else {
+                    u64::from(meta.content_len)
+                })
+                > MAX_OPERATION_LIVE
+        {
+            return Err(corrupt());
+        }
         if bytes > MAX_LIVE {
             return Err(corrupt());
         }
@@ -733,6 +967,50 @@ impl AccountDocumentStore {
 mod tests {
     use super::*;
     #[test]
+    fn account_document_index_reopen_counts_physical_encrypted_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let path = dir
+            .path()
+            .join(format!("account-documents-{}.log", account.account_id()));
+        let open =
+            || AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        let check = |store: &AccountDocumentStore| {
+            assert_eq!(
+                store.journal_bytes as u64,
+                std::fs::metadata(&path).unwrap().len(),
+                "index budget must count physical encrypted bytes after reopen or compaction"
+            );
+        };
+        let mut store = open();
+        check(&store);
+        drop(store);
+        store = open();
+        check(&store);
+        for revision in 1..=4 {
+            if revision == 4 {
+                store.compact_next_for_test();
+            }
+            let payload = format!("draft revision {revision}");
+            let meta = AccountDocumentMeta::new(
+                &account,
+                "a".repeat(32),
+                AccountDocumentKey::Draft {
+                    conversation: DocumentConversation::Account("b".repeat(32)),
+                },
+                revision,
+                payload.as_bytes(),
+                false,
+            );
+            assert!(store.merge(meta, payload.as_bytes()).unwrap());
+            check(&store);
+            drop(store);
+            store = open();
+            check(&store);
+        }
+    }
+
+    #[test]
     fn ordinary_index_rows_remain_exact_raw_metadata_json() {
         let account = Account::generate();
         let meta = AccountDocumentMeta::new(
@@ -746,7 +1024,7 @@ mod tests {
             false,
         );
         let raw = serde_json::to_vec(&meta).unwrap();
-        assert!(encode_row(&meta, None).unwrap() == raw);
+        assert!(encode_row(&meta, None, false).unwrap() == raw);
         let row: LocalIndexRow = serde_json::from_slice(&raw).unwrap();
         assert!(row.meta == meta && row.receipt.is_none());
         // Match the storage owner's actual bincode/encrypted frame shape.
@@ -803,8 +1081,8 @@ mod tests {
             wrong.frontier_hex = frontier;
             assert!(wrong.frontier().is_none());
         }
-        let ordinary = encode_row(&meta, None).unwrap();
-        let augmented = encode_row(&meta, Some(&receipt)).unwrap();
+        let ordinary = encode_row(&meta, None, false).unwrap();
+        let augmented = encode_row(&meta, Some(&receipt), false).unwrap();
         assert!(augmented.len() > ordinary.len());
         let parsed: LocalIndexRow = serde_json::from_slice(&augmented).unwrap();
         assert!(parsed.meta == meta && parsed.receipt.is_some());
@@ -860,7 +1138,11 @@ mod tests {
         assert!(store.validate(&meta).is_err());
         assert_eq!(
             MAX_OWNED_BLOBS,
-            MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS + MAX_REFERENCE_KEYS + MAX_GROUP_CONTROL_KEYS
+            MAX_ORDINARY_KEYS
+                + MAX_MESSAGE_KEYS
+                + MAX_REFERENCE_KEYS
+                + MAX_GROUP_CONTROL_KEYS
+                + MAX_GROUP_OPERATION_KEYS
         );
     }
 

@@ -15,8 +15,11 @@ pub use account_access::{
     AccountAccessSyncStatus,
 };
 pub use account_group::{
-    AccountGroupAccess, AccountGroupExecution, AccountGroupRole, AccountGroupSource,
-    AuthorityExpectation, MembershipLifetime,
+    AccountGroupAccess, AccountGroupExecution, AccountGroupOperation,
+    AccountGroupOperationExecution, AccountGroupOperationId, AccountGroupOperationKind,
+    AccountGroupOperationPhase, AccountGroupOperationQuery, AccountGroupOperationRejection,
+    AccountGroupOperationStatus, AccountGroupRole, AccountGroupSource, AuthorityExpectation,
+    MembershipLifetime, PreparedAccountGroupMessage,
 };
 pub(crate) mod account_devices;
 mod account_documents;

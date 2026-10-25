@@ -7,7 +7,8 @@
         "src-tauri/src/chat_commands/channels.rs",
         "src-tauri/src/account_documents.rs",
         "src-tauri/src/owner_commands.rs",
-        "src-tauri/src/chat_commands/models.rs"
+        "src-tauri/src/chat_commands/models.rs",
+        "src-tauri/src/owner_commands/group_operations.rs"
       ],
       "rust": [
         {
@@ -17,7 +18,13 @@
             "owner_commands::tests::registered_group_control_requires_typed_access_for_every_generic_document_command",
             "group_inventory_display_roster_matches_legacy_people_and_preserves_modern_members",
             "owner_commands::tests::registered_account_controls_reject_generic_writes_and_removals",
-            "owner_commands::tests::registered_account_group_access_keeps_owner_role_when_its_source_is_offline"
+            "owner_commands::tests::registered_account_group_access_keeps_owner_role_when_its_source_is_offline",
+            "owner_commands::tests::registered_account_group_operation_reads_preserve_account_scope",
+            "owner_commands::tests::registered_account_group_operations_reject_queued_logout",
+            "owner_commands::tests::registered_account_group_operation_id_mint_is_scoped_and_has_no_admission",
+            "owner_commands::tests::registered_owner_channel_creation_checks_account_and_session",
+            "owner_commands::tests::queued_channel_mutation_rejects_lock_and_same_owner_relogin",
+            "owner_commands::group_operations::tests::"
           ]
         }
       ],
@@ -43,6 +50,14 @@
           },
           {
             "name": "Registered list/member reads project account role separately from executor readiness; an offline original owner preserves Owner on a nonmember sibling without inventing public membership or exposing private control payloads.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Typed account operation commands expose body-free lifecycle summaries with distinct logical operation and public event IDs; lock, logout and same-owner session replacement reject queued admission, cancellation and reads.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Registered reference metadata exposes causal reconciliation separately from account permissions and distinguishes an observed history policy from an unknown local fallback; descriptive policy observations never authorize history disclosure.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           }
         ]
@@ -183,7 +198,7 @@
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
         "invariants": [
           {
-            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device’s draft",
+            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device\u2019s draft",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
