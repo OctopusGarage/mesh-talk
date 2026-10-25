@@ -280,7 +280,11 @@ impl Node {
         new_password: &str,
     ) -> Result<Arc<Self>, SnapshotError> {
         let mut media_names = HashMap::new();
+        let mut account_created_at_ms = None;
         let header = read_snapshot(&mut source, |record| {
+            if let SnapshotRecordV1::AccountCreation { created_at_ms } = &record {
+                account_created_at_ms = *created_at_ms;
+            }
             if let SnapshotRecordV1::FileCard { manifest, .. } = record {
                 let card = crate::file::decode_manifest(&manifest)
                     .ok_or(SnapshotError::InvalidFileCard)?;
@@ -299,7 +303,11 @@ impl Node {
         std::fs::create_dir(staging_dir).map_err(|_| SnapshotError::Io)?;
         let result = (|| {
             let identity = DeviceIdentity::generate();
-            let account = Account::from_secret_bytes(header.account_secret);
+            let account = Account::from_secret_bytes_with_created_at(
+                header.account_secret,
+                account_created_at_ms,
+            )
+            .ok_or(SnapshotError::InvalidAccount)?;
             keystore::save(
                 &staging_dir.join("identity.keystore"),
                 new_password,
@@ -430,6 +438,11 @@ impl Node {
                     // Preserve old snapshot tags without restoring retired filtering state.
                     SnapshotRecordV1::DmLanguageProfile { .. }
                     | SnapshotRecordV1::DmLanguageDecision { .. } => {}
+                    SnapshotRecordV1::AccountCreation { .. } => {}
+                    SnapshotRecordV1::AccountProfile { profile } => {
+                        node.receive_account_profile(&profile)
+                            .map_err(|_| SnapshotError::InvalidEncoding)?;
+                    }
                     SnapshotRecordV1::PeerTrustCard { card } => {
                         if !node
                             .receive_trust_card(&card)
@@ -684,6 +697,11 @@ impl Node {
             .expect("recalls mutex not poisoned")
             .snapshot_marks();
         let profiles = self.account_profiles.snapshot();
+        let current_profiles = self
+            .profiles
+            .lock()
+            .expect("profiles mutex not poisoned")
+            .all();
         let trust_cards = self
             .trust_cards
             .lock()
@@ -695,6 +713,8 @@ impl Node {
                 .and_then(|count| count.checked_add(recalls.len()))
                 .and_then(|count| count.checked_add(profiles.len()))
                 .and_then(|count| count.checked_add(trust_cards.len()))
+                .and_then(|count| count.checked_add(current_profiles.len()))
+                .and_then(|count| count.checked_add(1))
                 .and_then(|count| count.checked_add(event_count))
                 .and_then(|count| count.checked_add(file_count))
                 .and_then(|count| count.checked_add(file_contacts.len()))
@@ -841,6 +861,12 @@ impl Node {
                 avatar,
             })?;
         }
+        writer.push(&SnapshotRecordV1::AccountCreation {
+            created_at_ms: self.account.created_at_ms(),
+        })?;
+        for profile in current_profiles {
+            writer.push(&SnapshotRecordV1::AccountProfile { profile })?;
+        }
         for card in trust_cards {
             writer.push(&SnapshotRecordV1::PeerTrustCard { card })?;
         }
@@ -911,4 +937,96 @@ fn preview_snapshot<R: Read>(source: R) -> Result<BackupPreview, SnapshotError> 
         media_files: media.len() as u64,
         missing_media,
     })
+}
+
+#[cfg(test)]
+mod creation_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_snapshot_claimed_dates_never_become_authoritative_account_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let header = SnapshotHeaderV1 {
+            schema_version: 3,
+            account_secret: account.secret_bytes(),
+            account_id: account.account_id(),
+            source_device_ed25519_pubs: vec![DeviceIdentity::generate().public().ed25519_pub],
+            created_at_ms: 100,
+            record_count: 1,
+        };
+        let card = crate::node::TrustCard::new(
+            &account,
+            1,
+            "Legacy".into(),
+            String::new(),
+            Some(42),
+            None,
+        );
+        let mut bytes = Vec::new();
+        crate::recovery::snapshot::write_snapshot(
+            &mut bytes,
+            &header,
+            [SnapshotRecordV1::PeerTrustCard { card }],
+        )
+        .unwrap();
+        let target = dir.path().join("legacy-restored");
+        let restored =
+            Node::install_recovery_snapshot(std::io::Cursor::new(bytes), &target, "pw").unwrap();
+        assert_eq!(restored.account.created_at_ms(), None);
+        assert_eq!(
+            account_keystore::load(&target.join("account.keystore"), "pw")
+                .unwrap()
+                .created_at_ms(),
+            None
+        );
+    }
+
+    #[test]
+    fn recovery_preserves_authoritative_creation_and_never_uses_backup_time() {
+        for account in [Account::generate(), Account::from_secret_bytes([39; 32])] {
+            let dir = tempfile::tempdir().unwrap();
+            let expected = account.created_at_ms();
+            let (d, _) = mpsc::unbounded_channel();
+            let (c, _) = mpsc::unbounded_channel();
+            let (f, _) = mpsc::unbounded_channel();
+            let node = Node::open_with_account(
+                DeviceIdentity::generate(),
+                account,
+                Arc::new(Mutex::new(Roster::default())),
+                d,
+                c,
+                f,
+                &dir.path().join("events.log"),
+                &dir.path().join("sent.log"),
+                "pw",
+            )
+            .unwrap();
+            let mut bytes = Vec::new();
+            node.write_recovery_snapshot(&mut bytes, 100).unwrap();
+            let target = dir.path().join("restored");
+            let restored = Node::install_recovery_snapshot(
+                std::io::Cursor::new(bytes),
+                &target,
+                "new-password",
+            )
+            .unwrap();
+            assert_eq!(restored.account.created_at_ms(), expected);
+            assert_eq!(
+                account_keystore::load(&target.join("account.keystore"), "new-password")
+                    .unwrap()
+                    .created_at_ms(),
+                expected
+            );
+            let mut bytes = Vec::new();
+            restored.write_recovery_snapshot(&mut bytes, 200).unwrap();
+            let restored_again = Node::install_recovery_snapshot(
+                std::io::Cursor::new(bytes),
+                &dir.path().join("restored-again"),
+                "newer-password",
+            )
+            .unwrap();
+            assert_eq!(restored_again.account.created_at_ms(), expected);
+        }
+    }
 }

@@ -5,6 +5,62 @@ import type { PresenceMap } from "../src/lib/types";
 const BOB = "acc_bob_bbbb2222";
 const GROUP = "chan_team_dddd4444";
 
+test("registration office survives a different introducer and expires during IPC failure", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 760, height: 520 });
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate((account) => {
+    (
+      window as unknown as { __mockSetPresence: (map: PresenceMap) => void }
+    ).__mockSetPresence({
+      [account]: {
+        online: true,
+        last_seen_secs: 0,
+        devices: [
+          {
+            user_id: "device_bob_2222",
+            evidence: [
+              {
+                source: "directory",
+                last_seen_secs: 0,
+                expires_in_secs: 30,
+                post_office: {
+                  user_id: "office-mac",
+                  name: "Mac forwarding office",
+                  endpoint: "100.64.0.2:47479",
+                },
+                registration_origin: {
+                  user_id: "office-windows",
+                  name: "Windows 10 office",
+                  expires_in_secs: 6,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+  }, BOB);
+  await page.getByTestId("conversation-member-profile").click();
+  const origin = page.getByTestId("member-registration-origins");
+  const source = page.getByTestId("member-discovery-sources");
+  await expect(origin).toContainText("Windows 10 office");
+  await expect(source).toContainText("Mac forwarding office");
+  await expect(origin).not.toContainText("Mac forwarding office");
+  await origin.scrollIntoViewIfNeeded();
+  await page.evaluate(() => {
+    (
+      window as unknown as { __mockPresenceFailure: (value: boolean) => void }
+    ).__mockPresenceFailure(true);
+  });
+  await expect(origin).toContainText("No shared registration information", {
+    timeout: 12000,
+  });
+  await expect(source).toContainText("Mac forwarding office");
+});
+
 test("group header counts accepted people and each row has its own state", async ({
   page,
 }) => {

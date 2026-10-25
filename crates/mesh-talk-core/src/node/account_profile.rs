@@ -99,13 +99,6 @@ impl AccountProfiles {
             .ok_or_else(|| NodeError::InvalidInput("account profile revision exhausted".into()))?;
         Ok(super::node::now_millis().max(next))
     }
-    /// Preflight additional revisions needed by a coordinated signed-card edit.
-    pub fn validate_avatar_revision_headroom(&self, extra_revisions: u64) -> Result<(), NodeError> {
-        self.next_avatar_revision(&self.state())?
-            .checked_add(extra_revisions)
-            .ok_or_else(|| NodeError::InvalidInput("account profile revision exhausted".into()))?;
-        Ok(())
-    }
     /// Recheck signatures after caller authentication. Retired metadata is ignored
     /// when reconstructing our own publication, including older MTPF2 profiles.
     pub fn receive(&self, payload: &ProfilePayload) -> Result<bool, LogError> {
@@ -131,6 +124,23 @@ impl AccountProfiles {
         let applied = state
             .avatars
             .record(&account, card.revision, card.avatar.clone())?;
+        if account == self.account.account_id() {
+            state.current = Self::reconstruct(&self.account, &state.avatars);
+        }
+        Ok(applied)
+    }
+    pub fn receive_account_profile(
+        &self,
+        profile: &super::AccountProfile,
+    ) -> Result<bool, LogError> {
+        if !profile.verify() {
+            return Ok(false);
+        }
+        let mut state = self.state();
+        let account = profile.account_id();
+        let applied = state
+            .avatars
+            .record(&account, profile.revision, profile.avatar.clone())?;
         if account == self.account.account_id() {
             state.current = Self::reconstruct(&self.account, &state.avatars);
         }

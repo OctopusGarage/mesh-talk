@@ -32,8 +32,18 @@ fn valid_history_snapshot_completes() {
     for schema_version in [1, SNAPSHOT_SCHEMA_VERSION] {
         let mut header = header();
         header.schema_version = schema_version;
+        if schema_version >= 4 {
+            header.record_count += 1;
+        }
         let mut validator = SnapshotValidator::new(header).unwrap();
         validator.accept(&received()).unwrap();
+        if schema_version >= 4 {
+            validator
+                .accept(&SnapshotRecordV1::AccountCreation {
+                    created_at_ms: None,
+                })
+                .unwrap();
+        }
         validator.finish().unwrap();
     }
 }
@@ -504,4 +514,102 @@ fn trust_card_snapshot_checks_signature_version_and_duplicates() {
         validator.accept(&record),
         Err(SnapshotError::UnsupportedVersion)
     );
+}
+
+#[test]
+fn immutable_creation_metadata_requires_v4_and_rejects_invalid_or_duplicate_dates() {
+    let record = SnapshotRecordV1::AccountCreation {
+        created_at_ms: Some(1_700_000_000_000),
+    };
+    let mut old = header();
+    old.schema_version = 3;
+    assert_eq!(
+        SnapshotValidator::new(old).unwrap().accept(&record),
+        Err(SnapshotError::UnsupportedVersion)
+    );
+    let mut current = header();
+    current.record_count = 2;
+    current.schema_version = SNAPSHOT_SCHEMA_VERSION;
+    let mut validator = SnapshotValidator::new(current.clone()).unwrap();
+    validator.accept(&record).unwrap();
+    assert_eq!(
+        validator.accept(&record),
+        Err(SnapshotError::DuplicateRecord)
+    );
+    for time in [0, 253_402_300_800_000, u64::MAX] {
+        let mut validator = SnapshotValidator::new(current.clone()).unwrap();
+        assert_eq!(
+            validator.accept(&SnapshotRecordV1::AccountCreation {
+                created_at_ms: Some(time)
+            }),
+            Err(SnapshotError::InvalidAccount)
+        );
+    }
+}
+
+#[test]
+fn snapshot_requires_own_profile_to_match_authoritative_creation_metadata() {
+    let account = Account::from_secret_bytes([0x7f; 32]);
+    let mut profile = mesh_talk_core::node::AccountProfile {
+        account_ed25519_pub: account.public().ed25519_pub,
+        revision: 1,
+        display_name: "Alice".into(),
+        bio: String::new(),
+        created_at_ms: Some(1_700_000_000_000),
+        avatar: None,
+        signature: [0; 64],
+    };
+    let mut input = b"mesh-talk-account-profile-v1".to_vec();
+    input.extend(
+        bincode::serialize(&(
+            profile.account_ed25519_pub,
+            profile.revision,
+            &profile.display_name,
+            &profile.bio,
+            profile.created_at_ms,
+            &profile.avatar,
+        ))
+        .unwrap(),
+    );
+    profile.signature = account.sign(&input);
+    assert!(profile.verify());
+    for metadata_first in [true, false] {
+        for creation in [None, Some(1_700_000_000_000), Some(1_700_000_000_001)] {
+            let mut current = header();
+            current.schema_version = SNAPSHOT_SCHEMA_VERSION;
+            current.record_count = 2;
+            let mut validator = SnapshotValidator::new(current).unwrap();
+            let metadata = SnapshotRecordV1::AccountCreation {
+                created_at_ms: creation,
+            };
+            let record = SnapshotRecordV1::AccountProfile {
+                profile: profile.clone(),
+            };
+            let records = if metadata_first {
+                [metadata, record]
+            } else {
+                [record, metadata]
+            };
+            for record in records {
+                validator.accept(&record).unwrap();
+            }
+            assert_eq!(
+                validator.finish(),
+                if creation == profile.created_at_ms {
+                    Ok(())
+                } else {
+                    Err(SnapshotError::InvalidAccount)
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn schema_four_cannot_silently_omit_authoritative_creation_metadata() {
+    let mut current = header();
+    current.schema_version = SNAPSHOT_SCHEMA_VERSION;
+    let mut validator = SnapshotValidator::new(current).unwrap();
+    validator.accept(&received()).unwrap();
+    assert_eq!(validator.finish(), Err(SnapshotError::InvalidAccount));
 }

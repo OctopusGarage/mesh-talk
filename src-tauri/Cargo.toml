@@ -31,6 +31,8 @@ tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-opener = "2"
+# Version-bound signatures and native bundle replacement without paid OS certificates.
+tauri-plugin-updater = "=2.14.0"
 # Shared (versions from the workspace)
 tokio = { workspace = true }
 serde = { workspace = true }

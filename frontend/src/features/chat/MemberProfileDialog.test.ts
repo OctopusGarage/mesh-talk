@@ -62,6 +62,57 @@ vi.mock("@/components/ui/dialog", () => {
 
 import { MemberProfileDialog } from "./MemberProfileDialog";
 
+it("labels Windows registration origin separately from its Mac discovery introducer", () => {
+  presenceState.value = {
+    online: true,
+    last_seen_secs: 0,
+    devices: [
+      {
+        user_id: "device-a",
+        evidence: [
+          {
+            source: "directory",
+            last_seen_secs: 0,
+            expires_in_secs: 10,
+            post_office: {
+              name: "Mac office",
+              user_id: "mac-office",
+              endpoint: "10.0.0.1:47479",
+            },
+            registration_origin: {
+              user_id: "windows-office",
+              name: "Windows 10 office",
+              expires_in_secs: 5,
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const html = renderToStaticMarkup(
+    createElement(MemberProfileDialog, {
+      target: { name: "Duncan", accountId: "account-a" },
+      onOpenChange: () => {},
+    }),
+  );
+  expect(html).toContain("Registration office");
+  expect(html).toContain("Windows 10 office");
+  expect(html).toContain("Post office · Mac office");
+  expect(html).toContain("does not establish physical location");
+});
+
+it("does not describe a missing origin proof as a user hiding their location", () => {
+  const html = renderToStaticMarkup(
+    createElement(MemberProfileDialog, {
+      target: { name: "Duncan", accountId: "account-a" },
+      onOpenChange: () => {},
+    }),
+  );
+  expect(html).toContain("No shared registration information");
+  expect(html).not.toContain("origin unknown");
+  expect(html).not.toContain("hidden by");
+});
+
 it("shows full account and device IDs plus the known network endpoint", () => {
   const html = renderToStaticMarkup(
     createElement(MemberProfileDialog, {

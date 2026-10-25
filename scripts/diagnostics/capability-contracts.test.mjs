@@ -133,8 +133,8 @@ test("outgoing capability selects tests for acceptance projection and retired fr
 test("session capability retains executable generation and retirement obligations", () => {
   const obligations = [
     [
-      "Signed-card acceptance releases the UI before admitted network fanout completes",
-      "owner_commands::tests::signed_card_publication_returns_after_local_commit_with_a_stalled_peer",
+      "Profile acceptance releases the UI before admitted network fanout completes",
+      "owner_commands::tests::account_profile_save_returns_after_local_commit_with_a_stalled_peer",
       "src-tauri/src/owner_commands.rs",
     ],
     [

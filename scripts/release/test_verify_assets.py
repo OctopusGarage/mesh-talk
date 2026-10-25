@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import io
+import tarfile
 import plistlib
 import subprocess
 import tempfile
@@ -10,7 +12,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from verify_assets import archive_member, elf_fingerprint, native_metadata, normalize_bundle_markers, verify_directory, verify_post_office_binary
+from verify_assets import mac_updater_metadata, archive_member, elf_fingerprint, native_metadata, normalize_bundle_markers, verify_directory, verify_post_office_binary
 
 
 class ReleaseAssetsTests(unittest.TestCase):
@@ -82,6 +84,49 @@ class ReleaseAssetsTests(unittest.TestCase):
 
     def test_complete_release(self):
         self.assertEqual(len(self.verify()), 12)
+
+    def add_updater_assets(self):
+        for platform in self.entries:
+            extension = "app.tar.gz" if platform.startswith("macos_") else "nsis.exe" if platform.startswith("windows_") else "AppImage"
+            name = f"mesh-talk-update_v0.1.5_{platform}.{extension}"
+            data = b"signed updater payload" if platform.startswith("macos_") else b"installer bytes"
+            for file, data in ((name, data), (name + ".sig", b"version-bound signature")):
+                (self.root / file).write_bytes(data)
+                self.entries[platform]["release/" + file] = data
+            self.write_archive(platform)
+
+    def test_updater_assets_must_match_the_verified_archive(self):
+        self.add_updater_assets()
+        self.assertEqual(len(self.verify()), 12)
+        path = next(self.root.glob("mesh-talk-update_*.sig"))
+        path.write_bytes(b"substituted signature")
+        with self.assertRaisesRegex(ValueError, "updater.*match"):
+            self.verify()
+
+    def test_updater_assets_require_the_complete_platform_matrix(self):
+        self.add_updater_assets()
+        next(self.root.glob("mesh-talk-update_*.AppImage")).unlink()
+        with self.assertRaisesRegex(ValueError, "asset set"):
+            self.verify()
+
+    def test_macos_updater_checks_version_architecture_and_executable_mode(self):
+        def bundle(version="0.1.5", cpu=0x0100000C, mode=0o755):
+            result = io.BytesIO()
+            with tarfile.open(fileobj=result, mode="w:gz") as archive:
+                for name, data, permissions in (
+                    ("mesh-talk.app/Contents/Info.plist", plistlib.dumps({"CFBundleShortVersionString": version, "CFBundleExecutable": "mesh-talk"}), 0o644),
+                    ("mesh-talk.app/Contents/MacOS/mesh-talk", b"\xcf\xfa\xed\xfe" + cpu.to_bytes(4, "little"), mode),
+                ):
+                    member = tarfile.TarInfo(name)
+                    member.size = len(data)
+                    member.mode = permissions
+                    archive.addfile(member, io.BytesIO(data))
+            result.seek(0)
+            return result
+        self.assertIn("macho", mac_updater_metadata(bundle(), "0.1.5", "macos_arm64"))
+        for source in (bundle(version="0.1.4"), bundle(cpu=0x01000007), bundle(mode=0o644)):
+            with self.assertRaises(ValueError):
+                mac_updater_metadata(source, "0.1.5", "macos_arm64")
 
     def test_macos_archive_needs_only_the_dmg(self):
         for platform in ("macos_arm64", "macos_x86_64"):

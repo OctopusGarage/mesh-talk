@@ -1,15 +1,18 @@
 # Updating Mesh-Talk
 
 Open **More → About** and choose an **Update channel**, then **Check for updates**.
-Checks happen only when requested. Downloads and installation remain separate manual actions;
-the app does not install software, restart itself, or reset your local account store.
+Checks happen only when requested. Eligible installations offer **Update and restart**:
+Mesh-Talk downloads and verifies the signed update, installs it and restarts the application.
+Other installations offer **Download update** with platform-specific manual instructions.
+Changing channels never starts a download or installation. Updates preserve the local data directory;
+storage compatibility remains a separate requirement.
 
 ## Choose a channel
 
-| Channel | Intended use | Publication |
-|---|---|---|
-| **Stable** (default) | Everyday use | A maintainer publishes a verified, tagged official release. |
-| **Nightly** | Trying recent features and fixes; builds may contain bugs | CI builds trusted `main` daily when it changes, or on an explicit manual request, then publishes a verified GitHub prerelease. |
+| Channel              | Intended use                                              | Publication                                                                                                                    |
+| -------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **Stable** (default) | Everyday use                                              | A maintainer publishes a verified, tagged official release.                                                                    |
+| **Nightly**          | Trying recent features and fixes; builds may contain bugs | CI builds trusted `main` daily when it changes, or on an explicit manual request, then publishes a verified GitHub prerelease. |
 
 The choice is saved on this device, independently of accounts. Selecting a channel does not
 start a network request or installation. Nightly also accepts a newer Stable release when
@@ -44,10 +47,69 @@ encrypted backup and recovery key before trying Nightly or returning to an older
 There is one installation and one existing `~/.mesh-talk` data directory; the channels do not
 create independent profiles or support concurrent Stable and Nightly instances.
 
+## One-click installation
+
+Automatic installation requires a packaged release with an embedded updater public key and a
+matching, version-bound signed payload in the selected release. macOS supports installed `.app`
+bundles outside mounted `/Volumes` images and App Translocation; Windows supports NSIS installations; Linux supports
+AppImage installations. Source/debug builds, MSI, DEB/RPM and releases without updater artifacts
+retain the manual path. Install the first updater-enabled release manually before using this feature.
+
+**Update and restart** downloads into a private temporary folder, validates the exact release,
+channel, OS and architecture, checks size/SHA-256 and verifies the updater signature against the
+public key embedded in the running application. The signed version must equal the full logical
+release identity, including Nightly run and attempt. A renderer cannot provide URLs, paths, keys,
+signatures or replacement bytes. Downloads are cancellable; a canceled download never starts an
+installation. Signature errors leave the running application untouched.
+
+Before installation the UI flushes conversation drafts. An unfinished call, file transfer or draft
+save failure keeps the verified update ready for **Restart to update** after the work finishes.
+Installation and restart disable competing update actions. The native installer handles application
+replacement and any system authorization; canceled authorization or installation errors offer retry
+and **Download manually**. Prepared updates are session-local and temporary: restarting before
+installation requires downloading again. Restart requests use Tauri's lifecycle handling and macOS
+LaunchServices rather than launching a child that inherits the login agent's process group.
+
+No paid Apple Developer ID or Windows publisher certificate is required for updater signatures.
+These signatures authenticate update bytes; they do not grant administrator rights or remove
+Gatekeeper/SmartScreen warnings for unsigned distribution. The system may request a password or
+another permitted authorization method. Touch ID is not promised and the application does not add
+an artificial biometric prompt. Restart resumes a session only according to the existing **Stay
+signed in** and app-lock settings; updating never silently enables persistent login. Native
+replacement recovery does not imply rollback of an incompatible storage migration.
+
+### Free updater signing setup
+
+Generate a dedicated updater key pair once, outside the repository, using the installed Tauri CLI:
+
+```bash
+node frontend/node_modules/@tauri-apps/cli/tauri.js signer generate --write-keys /secure/path/mesh-talk-updater.key
+```
+
+Store the private key securely with a backup. Configure GitHub Actions repository variable
+`MESH_TALK_UPDATER_PUBLIC_KEY` with the complete generated `.pub` file contents, and secret
+`TAURI_SIGNING_PRIVATE_KEY` with the matching private key contents. If encrypted, also configure
+secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Neither key requires a paid service. Never commit
+the private key, put it in frontend resources, print it to logs or generate a fresh release key per
+build. Changing keys requires a separate compatibility/migration design for installed clients.
+
+The release workflow exposes this pair only to its existing trusted main Nightly and verified
+Stable tag build paths. `scripts/release/updater.mjs prepare` creates an ignored build configuration;
+`collect` copies native updater payloads and signs their complete logical version. Both keys absent
+keeps manual-only publication; configuring only one fails the build. Local updater builds must
+provide the same public-key environment value to compile the trust root into the host.
+
+Each platform publishes `mesh-talk-update_<tag>_<platform>.app.tar.gz`, `.nsis.exe` or `.AppImage`
+and its `.sig`. The same bytes are included in the platform ZIP and its checksum manifest. The
+existing cosign/provenance gate verifies that ZIP; the aggregate verifier requires a complete
+updater platform matrix and byte-for-byte equality between embedded and standalone assets.
+Existing draft/source checks, immutability and explicit Stable publication remain required.
+This is a full-package update mechanism; no delta/patch delivery is implemented.
+
 ## Download verification and installation
 
 The app saves the compatible ZIP to Downloads. The ZIP contains platform installers and
-`SHA256SUMS`. The app streams it to a temporary file, checks the published size and SHA-256
+`SHA256SUMS` (and updater payloads when enabled). The app streams it to a temporary file, checks the published size and SHA-256
 digest from GitHub's Releases API, and only then shows **Show in Downloads**. Canceling or
 failing a download removes the temporary file. An existing ZIP is reused only if its size and
 digest still match. Download requests re-fetch the exact selected release and enforce its channel,
@@ -56,11 +118,11 @@ immutable build. The renderer cannot provide an arbitrary URL or destination pat
 
 After downloading, unzip, quit Mesh-Talk, and install it yourself:
 
-| Platform | Install |
-|---|---|
-| macOS | Open the DMG and drag Mesh-Talk to Applications, replacing the existing app. |
-| Windows | Run the EXE installer, or use MSI for a managed installation. Nightly rebuilds can share the native base version; these are manual replacements, not MSI-version-based automatic updates. |
-| Linux | Install the DEB or RPM for your distribution, or use the AppImage. A distribution package manager may require an explicit reinstall for a same-base Nightly. |
+| Platform | Install                                                                                                                                                                                   |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS    | Open the DMG and drag Mesh-Talk to Applications, replacing the existing app.                                                                                                              |
+| Windows  | Run the EXE installer, or use MSI for a managed installation. Nightly rebuilds can share the native base version; these are manual replacements, not MSI-version-based automatic updates. |
+| Linux    | Install the DEB or RPM for your distribution, or use the AppImage. A distribution package manager may require an explicit reinstall for a same-base Nightly.                              |
 
 The ZIP's adjacent `.bundle` signature and build attestation support independent provenance
 verification; follow the release's **Verifying your download** instructions. The in-app SHA-256
@@ -73,6 +135,41 @@ catalog (up to three pages of 10 entries, stopping at a page containing recogniz
 An exhausted discovery bound is reported explicitly. Public download links are available from the
 [project download page](https://octopusgarage.github.io/mesh-talk/#download), without Actions
 artifact access or a GitHub login.
+
+## Public website downloads
+
+The project site requests GitHub's latest Stable release metadata and presents
+its desktop ZIP packages directly. It accepts only published full releases,
+exact unsuffixed desktop archive names and matching GitHub asset URLs. Relays,
+legacy Lite packages, signature bundles and prereleases are not desktop download
+choices. There is no separately maintained website version number or binary URL.
+
+The visitor's operating system selects the initial platform tab. Browser client
+hints can also identify a supported 64-bit CPU. When hints are unavailable,
+denied or ambiguous, the page offers explicit architecture choices; in
+particular, Safari's `MacIntel` platform string does not distinguish Intel from
+Apple silicon. Explicit platform choices update the primary download button; architecture choices
+are remembered for the browser session when session storage is available. Visitors
+can always change platform and architecture. Mobile
+visitors choose a desktop package explicitly. A missing package is reported,
+never silently replaced with another architecture or an older release.
+
+A download click uses GitHub's ordinary asset link and shows platform-specific
+unzip, install and first-run guidance. The Mac guide includes the release-owned
+app-specific quarantine command with copy feedback; it does not run commands or
+request system privileges. Opening the guide separately does not start a download. The guide offers the
+exact selected asset as **Download again**, and keeps focus on a visible control
+after the architecture chooser closes.
+The page cannot observe completion of the browser's download and does not claim
+the archive has been checked. Follow the release notes for signature and
+provenance verification. This differs from the desktop updater's verified
+transfer described above.
+
+Release lookup has a bounded timeout and a retry action. If GitHub is unavailable
+or rate-limited, or JavaScript is disabled, ordinary release-page links remain
+available. Downloading and installing remain explicit visitor actions. Browser
+coverage is owned by `frontend/e2e/site-downloads.spec.ts`; these fixtures prove
+page selection and interaction, not native installation or release provenance.
 
 ## Publish Nightly builds
 
@@ -120,8 +217,9 @@ publication retains its source-check, artifact-verification and container gates.
 must never be made the repository's latest Stable release.
 
 Local validation selects the updater, frontend update store/browser flow and release-script
-regressions through their module `validation.json` contracts. Native same-version replacement
-(macOS, Windows EXE/MSI and Linux package formats), exact-source hosted signing/attestation and
+regressions through their module `validation.json` contracts. Native one-click installation, authorization cancellation, restart from normal/login-agent launches,
+window/session/draft restoration and same-base Nightly replacement (macOS, Windows NSIS and Linux
+AppImage), manual MSI/DEB/RPM replacements, exact-source hosted signing/attestation and
 first real Nightly publication require their native/hosted evidence; mocked browser tests do not
 establish those properties. No claim of cross-version data compatibility follows from a green build.
 

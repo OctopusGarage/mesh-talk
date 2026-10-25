@@ -33,6 +33,8 @@ pub struct PeerEndpoint {
     pub presence_expires_at: Option<Instant>,
     /// Original directory expiry in Unix seconds, retained across repeated old-relay evidence.
     pub presence_origin_expires_at: Option<u64>,
+    /// Optional consented registration relationship; never routing authority.
+    pub registration_origin: Option<crate::node::RegistrationOrigin>,
 }
 
 impl PeerEndpoint {
@@ -409,6 +411,31 @@ impl Roster {
         }
     }
 
+    pub(crate) fn set_registration_origin(
+        &mut self,
+        id: &str,
+        relay: SocketAddr,
+        origin: Option<crate::node::RegistrationOrigin>,
+    ) {
+        let mut changed = false;
+        if let Some(peer) = self.peers.get_mut(id) {
+            let now = crate::node::discovery_origin::unix_now();
+            let origin = origin.filter(|proof| proof.valid_for(&peer.public, now));
+            for route in &mut peer.routes {
+                if route.addr == relay
+                    && route.source == RouteSource::PostOffice
+                    && route.registration_origin != origin
+                {
+                    route.registration_origin = origin.clone();
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.publish_observation();
+        }
+    }
+
     pub fn update_routed(
         &mut self,
         announce: &Announce,
@@ -526,6 +553,7 @@ impl Roster {
             .find(|route| route.addr == relay && route.source == RouteSource::PostOffice);
         let prior_expiry = prior.and_then(|route| route.presence_expires_at);
         let prior_origin = prior.and_then(|route| route.presence_origin_expires_at);
+        let prior_registration = prior.and_then(|route| route.registration_origin.clone());
         routes.retain(|route| route.addr != relay || route.source != RouteSource::PostOffice);
         routes.push(PeerEndpoint {
             addr: relay,
@@ -534,6 +562,7 @@ impl Roster {
             last_authenticated: None,
             presence_expires_at: prior_expiry,
             presence_origin_expires_at: prior_origin,
+            registration_origin: prior_registration,
         });
         if routes.len() > MAX_ROUTES_PER_PEER {
             routes.remove(0);
@@ -732,6 +761,7 @@ impl Roster {
             presence_expires_at: (source == RouteSource::Authenticated)
                 .then_some(now + PUBLIC_PRESENCE_TTL),
             presence_origin_expires_at: None,
+            registration_origin: None,
         });
         if routes.len() > MAX_ROUTES_PER_PEER {
             routes.remove(0);
@@ -804,6 +834,7 @@ impl Roster {
                 last_authenticated: Some(now),
                 presence_expires_at: None,
                 presence_origin_expires_at: None,
+                registration_origin: None,
             });
             if peer.routes.len() > MAX_ROUTES_PER_PEER {
                 peer.routes.remove(0);
@@ -927,6 +958,87 @@ impl Roster {
 
 #[cfg(test)]
 mod routed_tests {
+    #[test]
+    fn registration_origin_is_bound_to_the_exact_directory_route_and_clears_on_omission() {
+        use crate::node::discovery_origin::{OriginConsent, RegistrationOrigin};
+        let device = DeviceIdentity::generate();
+        let office = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Duncan", 1);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let origin = RegistrationOrigin::new(
+            &office,
+            "Windows 10 office",
+            OriginConsent::new(&device, &office.public(), now_secs + 10),
+        )
+        .unwrap();
+        let mut roster = Roster::default();
+        let relay = "127.0.0.1:47479".parse().unwrap();
+        let other_relay = "127.0.0.2:47479".parse().unwrap();
+        roster.update_relayed(&proof, relay, "self");
+        roster.update_relayed(&proof, other_relay, "self");
+        roster.set_registration_origin(&proof.user_id, relay, Some(origin.clone()));
+        let peer = roster.get(&proof.user_id).unwrap();
+        assert_eq!(
+            peer.routes
+                .iter()
+                .find(|route| route.addr == relay)
+                .unwrap()
+                .registration_origin
+                .as_ref()
+                .unwrap()
+                .office_user_id(),
+            office.user_id()
+        );
+        assert!(
+            peer.routes
+                .iter()
+                .find(|route| route.addr == other_relay)
+                .unwrap()
+                .registration_origin
+                .is_none()
+        );
+        // Directory staging preserves the last committed metadata until commit;
+        // an accepted omission, including a legacy reply, removes it.
+        roster.update_relayed(&proof, relay, "self");
+        assert!(
+            roster
+                .get(&proof.user_id)
+                .unwrap()
+                .routes
+                .iter()
+                .find(|route| route.addr == relay)
+                .unwrap()
+                .registration_origin
+                .is_some()
+        );
+        roster.set_registration_origin(&proof.user_id, relay, None);
+        assert!(
+            roster
+                .get(&proof.user_id)
+                .unwrap()
+                .routes
+                .iter()
+                .find(|route| route.addr == relay)
+                .unwrap()
+                .registration_origin
+                .is_none()
+        );
+
+        let stranger = DeviceIdentity::generate();
+        let other_proof = Announce::new_with_account(&stranger, &Account::generate(), "Other", 1);
+        roster.update_relayed(&other_proof, relay, "self");
+        roster.set_registration_origin(&other_proof.user_id, relay, Some(origin));
+        assert!(
+            roster.get(&other_proof.user_id).unwrap().routes[0]
+                .registration_origin
+                .is_none(),
+            "another participant cannot borrow consent"
+        );
+    }
+
     #[test]
     fn directory_commit_notifies_presence_after_staging_without_recovery_storms() {
         let device = DeviceIdentity::generate();

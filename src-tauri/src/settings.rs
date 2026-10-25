@@ -74,6 +74,9 @@ pub struct AppSettings {
     /// Share public presence with an opted-in post-office bridge. Defaults off.
     #[serde(default)]
     pub bridge_discovery_enabled: bool,
+    /// Permit disclosure of this device's originating office. Independent opt-in.
+    #[serde(default)]
+    pub origin_sharing_enabled: bool,
     /// Preferred relay fingerprint. Other verified relays remain available for failover.
     #[serde(default)]
     pub bridge_hub_id: String,
@@ -120,6 +123,7 @@ impl Default for AppSettings {
             post_office_receive_enabled: true,
             physical_lan_only: false,
             bridge_discovery_enabled: false,
+            origin_sharing_enabled: false,
             bridge_hub_id: String::new(),
             ringtone: default_ringtone(),
             privacy_level: PrivacyLevel::Balanced,
@@ -174,6 +178,7 @@ struct AccountSettings {
     post_office_receive_enabled: bool,
     physical_lan_only: bool,
     bridge_discovery_enabled: bool,
+    origin_sharing_enabled: bool,
     bridge_hub_id: String,
     ringtone: String,
     privacy_level: PrivacyLevel,
@@ -202,6 +207,7 @@ impl From<&AppSettings> for AccountSettings {
             post_office_receive_enabled: value.post_office_receive_enabled,
             physical_lan_only: value.physical_lan_only,
             bridge_discovery_enabled: value.bridge_discovery_enabled,
+            origin_sharing_enabled: value.origin_sharing_enabled,
             bridge_hub_id: value.bridge_hub_id.clone(),
             ringtone: value.ringtone.clone(),
             privacy_level: value.privacy_level,
@@ -229,6 +235,7 @@ impl AccountSettings {
             post_office_receive_enabled: self.post_office_receive_enabled,
             physical_lan_only: self.physical_lan_only,
             bridge_discovery_enabled: self.bridge_discovery_enabled,
+            origin_sharing_enabled: self.origin_sharing_enabled,
             bridge_hub_id: self.bridge_hub_id.clone(),
             ringtone: self.ringtone.clone(),
             privacy_level: self.privacy_level,
@@ -540,6 +547,17 @@ async fn apply_relay_settings(
     })
     .await
     .map_err(|error| CommandError::Authorization(error.to_string()))?;
+    node.set_origin_sharing_enabled_if(settings.origin_sharing_enabled, |commit| {
+        admission.authorize_io(runtime, &mut || {
+            state
+                .commit_current(owner, revision, || Ok(commit()))
+                .map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+                })?
+        })
+    })
+    .await
+    .map_err(|error| CommandError::Authorization(error.to_string()))?;
     admission.checked(runtime, || {
         state.commit_current(owner, revision, || {
             node.set_post_office_permissions(
@@ -764,6 +782,7 @@ mod tests {
                     AppSettings {
                         retention_days: 1,
                         physical_lan_only: true,
+                        origin_sharing_enabled: true,
                         ..AppSettings::default()
                     },
                 )
@@ -795,6 +814,10 @@ mod tests {
             assert!(
                 !handle.physical_lan_only(),
                 "obsolete settings cannot commit runtime policy or reach retention pruning"
+            );
+            assert!(
+                !handle.origin_sharing_enabled(),
+                "obsolete settings cannot enable origin disclosure"
             );
             node.0.write().await.take().unwrap().stop().await;
         }
@@ -844,6 +867,7 @@ mod tests {
                     "settings-owner",
                     AppSettings {
                         physical_lan_only: true,
+                        origin_sharing_enabled: true,
                         ..AppSettings::default()
                     },
                 )
@@ -915,6 +939,11 @@ mod tests {
                 handle.physical_lan_only(),
                 change == "current",
                 "startup policy for {change}"
+            );
+            assert_eq!(
+                handle.origin_sharing_enabled(),
+                change == "current",
+                "origin disclosure policy for {change}"
             );
             node.0.write().await.take().unwrap().stop().await;
         }
@@ -1089,7 +1118,40 @@ mod tests {
         assert!(s.post_office_receive_enabled);
         assert!(!s.physical_lan_only);
         assert!(!s.bridge_discovery_enabled, "bridge discovery defaults off");
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["origin_sharing_enabled"],
+            serde_json::json!(false),
+            "existing installations do not opt into origin disclosure"
+        );
         assert!(s.bridge_hub_id.is_empty(), "no hub is pinned by default");
+    }
+
+    #[test]
+    fn origin_sharing_is_owner_scoped_and_survives_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let alice_path = config_store::account_path(root.path(), "alice", SETTINGS_FILE).unwrap();
+        let bob_path = config_store::account_path(root.path(), "bob", SETTINGS_FILE).unwrap();
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "origin_sharing_enabled": true
+        }))
+        .unwrap();
+        config_store::write_account(&alice_path, &AccountSettings::from(&settings)).unwrap();
+        let state = SettingsState::default();
+        state.activate_at("alice", &alice_path);
+        assert_eq!(
+            serde_json::to_value(state.get()).unwrap()["origin_sharing_enabled"],
+            serde_json::json!(true)
+        );
+        state.activate_at("bob", &bob_path);
+        assert_eq!(
+            serde_json::to_value(state.get()).unwrap()["origin_sharing_enabled"],
+            serde_json::json!(false)
+        );
+        state.activate_at("alice", &alice_path);
+        assert_eq!(
+            serde_json::to_value(state.get()).unwrap()["origin_sharing_enabled"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]

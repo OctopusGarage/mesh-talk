@@ -14,6 +14,7 @@
 
 // Protocol/core modules live in the `mesh_talk_core` crate; this crate is the
 // Tauri desktop shell over it.
+pub mod account_profile;
 pub mod app_lock;
 pub mod avatars;
 mod background_command;
@@ -46,7 +47,6 @@ pub mod state;
 mod tailscale_discovery;
 pub mod tray;
 pub mod trust;
-pub mod trust_cards;
 pub mod updates;
 mod window_geometry;
 mod window_visibility;
@@ -183,6 +183,7 @@ pub fn run_tauri_configured(
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Launch-at-login. `--hidden` is passed on autostart so a login-time launch
         // comes up straight to the tray (see the WindowEvent handler / frontend boot).
         .plugin(tauri_plugin_autostart::init(
@@ -438,6 +439,8 @@ pub fn run_tauri_configured(
                 crate::diagnostics::env_info,
                 crate::updates::check_for_update,
                 crate::updates::download_update,
+                crate::updates::native::prepare_update,
+                crate::updates::native::install_update,
                 crate::updates::cancel_update_download,
                 crate::settings::get_app_settings,
                 crate::drafts::load_conversation_drafts,
@@ -445,11 +448,8 @@ pub fn run_tauri_configured(
                 crate::settings::set_app_settings,
                 crate::trust::get_trust,
                 crate::trust::mark_verified,
-                crate::trust_cards::get_trust_card,
-                crate::trust_cards::publish_trust_card,
-                crate::trust_cards::import_trust_artifact,
-                crate::trust_cards::create_trust_introduction,
-                crate::trust_cards::witness_trust_creation,
+                crate::account_profile::get_account_profile,
+                crate::account_profile::save_account_bio,
                 crate::favorites::get_favorites,
                 crate::favorites::set_favorite,
                 crate::favorites::set_favorite_records,

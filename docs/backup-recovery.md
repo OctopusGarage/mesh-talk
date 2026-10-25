@@ -51,10 +51,14 @@ and previous identity cannot be recovered by a password reset.
 ## Snapshot compatibility
 
 New backups use snapshot schema 3; this build also accepts schemas 1 and 2.
-Schema 3 preserves signed public [trust cards](peer-trust.md), including their
-self-declared creation claims and attached proofs. Older snapshots contain no
-trust-card evidence and never gain an inferred creation date. Private relationship
-observations are not included in public card records. The retired
+Schema 4 preserves automatically signed [account profiles](peer-trust.md) and
+requires a separate immutable account-creation metadata record. The restored key
+and creation metadata are installed together before the account opens. A backup
+creation date never becomes an account creation date. Older schemas remain
+readable; missing creation metadata stays unknown. Frozen schema-3 public cards
+and proofs remain compatible but their manually declared dates never become
+system-recorded creation metadata. Private relationship observations are not
+included in public profile records. The retired
 message-language metadata in older schema 2 backups is validated for format and
 authenticity but does not restore restrictions or hidden-message decisions.
 New backups omit that metadata. Display-language preferences remain ordinary

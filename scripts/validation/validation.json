@@ -46,6 +46,7 @@
         "scripts/diagnostics/release-state.test.mjs",
         "scripts/diagnostics/release-verifier.test.mjs",
         "scripts/diagnostics/release-workflow.test.mjs",
+        "scripts/diagnostics/release-updater.test.mjs",
         "scripts/diagnostics/version-contract.test.mjs",
         "scripts/diagnostics/version-automation.test.mjs",
         "site/index.html",
@@ -61,6 +62,7 @@
         "scripts/diagnostics/release-state.test.mjs",
         "scripts/diagnostics/release-verifier.test.mjs",
         "scripts/diagnostics/release-workflow.test.mjs",
+        "scripts/diagnostics/release-updater.test.mjs",
         "scripts/diagnostics/version-contract.test.mjs",
         "scripts/diagnostics/version-automation.test.mjs"
       ],
@@ -71,6 +73,10 @@
         "summary": "Maintain one Cargo product target and reviewed release/next-target PRs, publishing complete exact-source verified Stable releases and immutable automatic main-branch Nightlies.",
         "guide": "docs/updates.md",
         "invariants": [
+          {
+            "name": "Optional free updater signing binds the full logical build version; standalone native payloads and signatures must match the verified ZIP and form a complete platform matrix. Missing keys keep the manual path; partial signing configuration fails closed.",
+            "reference": "docs/updates.md#free-updater-signing-setup"
+          },
           {
             "name": "Stable publication remains explicit; Nightly is opt-in, main-only and never latest, with all platform assets verified before visibility; desktop packages omit optional packs and edition suffixes.",
             "reference": "docs/updates.md"

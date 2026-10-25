@@ -12,12 +12,23 @@ vi.mock("@/store/presence", async (importOriginal) => {
       actual.usePresence.getState().map[id] ?? actual.OFFLINE,
   };
 });
+vi.mock("@/store/accountProfiles", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/store/accountProfiles")>();
+  return {
+    ...actual,
+    useAccountProfile: (id: string) =>
+      actual.useAccountProfiles.getState().profiles[id],
+  };
+});
 vi.mock("@/components/identity", () => ({
   AvatarEditMenu: ({ children }: { children: ReactNode }) => children,
 }));
 vi.mock("@/components/GroupAvatar", () => ({ GroupAvatar: () => null }));
 vi.mock("./MemberProfileDialog", () => ({ MemberProfileDialog: () => null }));
-import { ChannelHeader } from "./ConversationHeaders";
+import { useAccountProfiles } from "@/store/accountProfiles";
+import { useAuth } from "@/store/auth";
+import { ChannelHeader, ConversationBio } from "./ConversationHeaders";
 
 beforeEach(() => {
   setLanguage("en");
@@ -71,4 +82,41 @@ it("localizes person counts and explicitly separates unresolved device membershi
 it("does not label raw device counts as people before the presence snapshot arrives", () => {
   expect(render()).toContain("Updating member presence");
   expect(render()).not.toContain("24 members");
+});
+
+it("shows the active account's About text with a full-text title and never another account's bio", () => {
+  useAccountProfiles.setState({
+    profiles: {
+      alice: {
+        account_id: "alice",
+        display_name: "Alice",
+        bio: "Long personal status 🌱\nSecond line",
+        created_at_ms: null,
+      },
+      bob: {
+        account_id: "bob",
+        display_name: "Bob",
+        bio: "Bob only",
+        created_at_ms: null,
+      },
+    },
+  });
+  const html = renderToStaticMarkup(
+    createElement(ConversationBio, { accountId: "alice" }),
+  );
+  expect(html).toContain("Long personal status 🌱");
+  expect(html).toContain('title="Long personal status');
+  expect(html).toContain("truncate");
+  expect(html).not.toContain("Bob only");
+  const switched = renderToStaticMarkup(
+    createElement(ConversationBio, { accountId: "bob" }),
+  );
+  expect(switched).toContain("Bob only");
+  expect(switched).not.toContain("Long personal");
+  useAuth.setState({ generation: useAuth.getState().generation + 1 });
+  expect(
+    renderToStaticMarkup(
+      createElement(ConversationBio, { accountId: "alice" }),
+    ),
+  ).not.toContain("Long personal");
 });

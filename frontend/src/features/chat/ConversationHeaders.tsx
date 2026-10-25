@@ -1,3 +1,5 @@
+import { captureRuntimeOwner } from "@/store/ownership";
+import { useAccountProfile } from "@/store/accountProfiles";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Bookmark } from "lucide-react";
@@ -45,6 +47,7 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
   const { t } = useTranslation();
   const [profileOpen, setProfileOpen] = useState(false);
   const owner = useAuth((s) => s.user?.id);
+  const sessionGeneration = useAuth((s) => s.generation);
   const peers = useChat((s) => s.peers);
   const presence = usePresenceFor(id);
   const status = presenceStatus(presence);
@@ -55,6 +58,7 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
     rosterProjection(peers).contactForAccount(id)?.user_id ?? "";
   const [trustResult, setTrustResult] = useState<{
     owner: string;
+    sessionGeneration: number;
     id: string;
     fingerprint: string;
     verified: boolean;
@@ -62,19 +66,23 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
   const verified =
     trustResult !== null &&
     trustResult.owner === owner &&
+    trustResult.sessionGeneration === sessionGeneration &&
     trustResult.id === id &&
     trustResult.fingerprint === fingerprint &&
     trustResult.verified;
   useEffect(() => {
     if (!fingerprint || !owner) return;
+    const lease = captureRuntimeOwner();
     let live = true;
     void chatApi
       .getTrust(owner, id, fingerprint)
       .then(
         (tr) =>
           live &&
+          lease.current() &&
           setTrustResult({
             owner,
+            sessionGeneration,
             id,
             fingerprint,
             verified: tr.verified && !tr.fingerprint_changed,
@@ -84,8 +92,8 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
     return () => {
       live = false;
     };
-  }, [owner, id, fingerprint]);
-  useEffect(() => setProfileOpen(false), [id]);
+  }, [owner, sessionGeneration, id, fingerprint]);
+  useEffect(() => setProfileOpen(false), [owner, sessionGeneration, id]);
 
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
@@ -169,6 +177,25 @@ export function ChannelHeader({
                   : groupPresenceLabel(presence, t)}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The public About text occupies available header space without crowding actions. */
+export function ConversationBio({ accountId }: { accountId: string }) {
+  const profile = useAccountProfile(accountId);
+  const bio = profile?.bio?.trim();
+  return (
+    <div className="min-w-0 flex-1">
+      {bio && (
+        <p
+          data-testid="conversation-bio"
+          className="truncate text-xs text-muted-foreground"
+          title={bio}
+        >
+          {bio}
+        </p>
+      )}
     </div>
   );
 }

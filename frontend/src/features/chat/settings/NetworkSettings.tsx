@@ -115,6 +115,27 @@ export function NetworkSettings({
               />
             }
           />
+          <SettingsRow
+            id="setting-origin-sharing"
+            icon={icon}
+            title={t("settings.originSharing")}
+            desc={t("settings.originSharingDesc")}
+            control={
+              <Switch
+                id="setting-origin-sharing"
+                checked={s.origin_sharing_enabled ?? false}
+                disabled={
+                  c.saving ||
+                  (!s.origin_sharing_enabled &&
+                    (availability.directory.disabled ||
+                      !s.bridge_discovery_enabled))
+                }
+                onCheckedChange={(on) =>
+                  void c.update({ origin_sharing_enabled: on }, "connection")
+                }
+              />
+            }
+          />
           <div className="pt-5">
             <SettingsRow
               id="setting-post-office"

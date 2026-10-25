@@ -7,7 +7,9 @@ use crate::eventlog::event::{ConversationId, Event, EventId};
 use crate::eventlog::store::AppendOutcome;
 use crate::eventlog::sync::SyncStore;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
-use crate::node::bridge_directory::{BridgeDirectory, FederatedPresence};
+use crate::node::bridge_directory::{
+    BridgeDirectory, FederatedPresence, FederatedPresenceWithOrigin,
+};
 use crate::node::session::request_round;
 use crate::postoffice::gateway::GatewayProof;
 use crate::postoffice::{FederatedMailbox, MAX_RELAY_AGE, PostOffice};
@@ -22,6 +24,8 @@ use tokio::net::TcpStream;
 
 const REQUEST: &[u8] = b"MTFI1Q";
 const REQUEST_V2: &[u8] = b"MTFI2Q";
+const REQUEST_V3: &[u8] = b"MTFI3Q";
+const PRESENCE_ORIGIN_FRAME: &[u8] = b"MTFP2D";
 const RESPONSE: &[u8] = b"MTFI1R";
 const IDS_PER_PAGE: usize = 512;
 const MAX_PAGES: usize = 256;
@@ -123,6 +127,14 @@ impl FederationDirectory {
         Self(Arc::new(Mutex::new(BridgeDirectory::with_gateway(gateway))))
     }
 
+    /// Set the operator's bounded display name; only consenting clients disclose it.
+    pub fn set_office_name(&self, name: &str) {
+        self.0
+            .lock()
+            .expect("directory lock not poisoned")
+            .set_office_name(name);
+    }
+
     pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.0
             .lock()
@@ -153,16 +165,35 @@ impl FederationDirectory {
         store: &Arc<Mutex<PostOffice>>,
         network: &super::network::RelayNetwork,
     ) -> Result<usize, String> {
-        sync_version(
-            addr,
-            identity,
-            expected,
-            store,
-            Some(&self.0),
-            REQUEST_V2,
-            Some(network),
-        )
+        tokio::time::timeout(ROUND_TIMEOUT, async {
+            match sync_version(
+                addr,
+                identity,
+                expected,
+                store,
+                Some(&self.0),
+                REQUEST_V3,
+                Some(network),
+            )
+            .await
+            {
+                Err(error) if error == "unsupported federation version" => {
+                    sync_version(
+                        addr,
+                        identity,
+                        expected,
+                        store,
+                        Some(&self.0),
+                        REQUEST_V2,
+                        Some(network),
+                    )
+                    .await
+                }
+                result => result,
+            }
+        })
         .await
+        .map_err(|_| "federation exchange deadline exceeded".to_string())?
     }
 
     pub async fn sync_with_relay(
@@ -225,14 +256,73 @@ where
         })
 }
 
+fn encode_origin_page(
+    proofs: &[FederatedPresenceWithOrigin],
+    last: bool,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = PRESENCE_ORIGIN_FRAME.to_vec();
+    bytes.push(u8::from(last));
+    bytes.extend(bincode::serialize(proofs).map_err(|error| error.to_string())?);
+    (bytes.len() <= MAX_PLAINTEXT)
+        .then_some(bytes)
+        .ok_or_else(|| "federation origin page is too large".into())
+}
+
+fn decode_origin_page(bytes: &[u8]) -> Result<(Vec<FederatedPresenceWithOrigin>, bool), String> {
+    let body = bytes
+        .strip_prefix(PRESENCE_ORIGIN_FRAME)
+        .ok_or("invalid federation origin frame")?;
+    if bytes.len() > MAX_PLAINTEXT || body.is_empty() || body[0] > 1 {
+        return Err("invalid federation origin page".into());
+    }
+    let mut proofs: Vec<FederatedPresenceWithOrigin> = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(MAX_PLAINTEXT as u64)
+        .reject_trailing_bytes()
+        .deserialize(&body[1..])
+        .map_err(|error| error.to_string())?;
+    let now = unix_now();
+    if proofs.len() > PRESENCE_PER_PAGE {
+        return Err("federation origin count exceeds bound".into());
+    }
+    for entry in &mut proofs {
+        entry.origin = entry
+            .origin
+            .take()
+            .filter(|origin| origin.valid_for(&entry.presence.announce.public(), now));
+    }
+    Ok((proofs, body[0] == 1))
+}
+
 async fn send_presence_pages<IO>(
     channel: &mut SecureChannel<IO>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
     limit: usize,
+    origins: bool,
 ) -> Result<(), String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    if origins {
+        let mut proofs = directory
+            .map(|directory| {
+                directory
+                    .lock()
+                    .expect("directory lock not poisoned")
+                    .export_with_origins(Instant::now(), unix_now())
+            })
+            .unwrap_or_default();
+        proofs.truncate(limit);
+        if proofs.is_empty() {
+            send_frame(channel, &encode_origin_page(&[], true)?).await?;
+        } else {
+            let count = proofs.len().div_ceil(PRESENCE_PER_PAGE);
+            for (index, page) in proofs.chunks(PRESENCE_PER_PAGE).enumerate() {
+                send_frame(channel, &encode_origin_page(page, index + 1 == count)?).await?;
+            }
+        }
+        return Ok(());
+    }
     let mut proofs = directory
         .map(|directory| {
             directory
@@ -261,10 +351,40 @@ async fn receive_presence_pages<IO>(
     channel: &mut SecureChannel<IO>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
     limit: usize,
+    origins: bool,
 ) -> Result<(), String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    if origins {
+        let mut proofs = Vec::new();
+        let mut complete = false;
+        for _ in 0..limit.div_ceil(PRESENCE_PER_PAGE) {
+            let bytes = tokio::time::timeout(ROUND_TIMEOUT, channel.recv())
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            let (page, last) = decode_origin_page(&bytes)?;
+            proofs.extend(page);
+            if proofs.len() > limit {
+                return Err("federation origin count exceeds bound".into());
+            }
+            if last {
+                complete = true;
+                break;
+            }
+        }
+        if !complete {
+            return Err("incomplete federation origin presence".into());
+        }
+        if let Some(directory) = directory {
+            directory
+                .lock()
+                .map_err(|error| error.to_string())?
+                .import_with_origins(&proofs, unix_now());
+        }
+        return Ok(());
+    }
     let mut proofs = Vec::new();
     let mut complete = false;
     for _ in 0..limit.div_ceil(PRESENCE_PER_PAGE) {
@@ -292,11 +412,15 @@ where
 }
 
 pub(crate) fn is_inventory_request(bytes: &[u8]) -> bool {
-    bytes == REQUEST || bytes == REQUEST_V2
+    bytes == REQUEST || bytes == REQUEST_V2 || bytes == REQUEST_V3
+}
+
+pub(crate) fn origin_capable(request: &[u8]) -> bool {
+    request == REQUEST_V3
 }
 
 pub(crate) fn presence_limit(request: &[u8]) -> usize {
-    if request == REQUEST_V2 {
+    if request == REQUEST_V2 || request == REQUEST_V3 {
         crate::node::bridge_directory::MAX_MEMBERS
     } else {
         crate::node::bridge_directory::LEGACY_MAX_MEMBERS
@@ -394,6 +518,7 @@ where
     Ok(entries)
 }
 
+#[cfg(test)]
 pub(crate) async fn send_inventory<IO>(
     channel: &mut SecureChannel<IO>,
     store: &Arc<Mutex<PostOffice>>,
@@ -403,9 +528,22 @@ pub(crate) async fn send_inventory<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    send_inventory_versioned(channel, store, directory, limit, false).await
+}
+
+pub(crate) async fn send_inventory_versioned<IO>(
+    channel: &mut SecureChannel<IO>,
+    store: &Arc<Mutex<PostOffice>>,
+    directory: Option<&Arc<Mutex<BridgeDirectory>>>,
+    limit: usize,
+    origins: bool,
+) -> Result<FederationStore, String>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
     tokio::time::timeout(
         ROUND_TIMEOUT,
-        send_inventory_inner(channel, store, directory, limit),
+        send_inventory_inner(channel, store, directory, limit, origins),
     )
     .await
     .map_err(|_| "federation inventory deadline exceeded".to_string())?
@@ -416,11 +554,12 @@ async fn send_inventory_inner<IO>(
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
     limit: usize,
+    origins: bool,
 ) -> Result<FederationStore, String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    receive_presence_pages(channel, directory, limit).await?;
+    receive_presence_pages(channel, directory, limit, origins).await?;
     let remote = receive_inventory_pages(channel).await?;
     let mut local = {
         let mut office = store.lock().map_err(|e| e.to_string())?;
@@ -432,7 +571,7 @@ where
     };
     local.sort_by_key(|entry| *entry.id.as_bytes());
     send_inventory_pages(channel, &local).await?;
-    send_presence_pages(channel, directory, limit).await?;
+    send_presence_pages(channel, directory, limit, origins).await?;
     Ok(FederationStore::new(store, remote))
 }
 
@@ -456,16 +595,13 @@ async fn sync_with_directory(
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
 ) -> Result<usize, String> {
     tokio::time::timeout(ROUND_TIMEOUT, async {
-        match sync_version(addr, identity, expected, store, directory, REQUEST_V2, None).await {
-            Ok(count) => Ok(count),
-            // A clean authenticated close before the first protocol response is
-            // the deployed legacy version-rejection signal. Network, malformed
-            // data and post-negotiation errors must not repeat the whole exchange.
-            Err(error) if error == "unsupported federation version" => {
-                sync_version(addr, identity, expected, store, directory, REQUEST, None).await
+        for request in [REQUEST_V3, REQUEST_V2, REQUEST] {
+            match sync_version(addr, identity, expected, store, directory, request, None).await {
+                Err(error) if error == "unsupported federation version" => continue,
+                result => return result,
             }
-            Err(error) => Err(error),
         }
+        Err("unsupported federation version".into())
     })
     .await
     .map_err(|_| "federation exchange deadline exceeded".to_string())?
@@ -497,7 +633,7 @@ async fn sync_version(
         network.connect(&mut channel).await?;
     }
     send_frame(&mut channel, request).await?;
-    send_presence_pages(&mut channel, directory, limit).await?;
+    send_presence_pages(&mut channel, directory, limit, origin_capable(request)).await?;
     let mut local = {
         let mut office = store.lock().map_err(|e| e.to_string())?;
         office.prune_expired().map_err(|e| e.to_string())?;
@@ -511,7 +647,7 @@ async fn sync_version(
         .map_err(|e| e.to_string())?
         .adopt_federated_arrivals(&remote, SystemTime::now())
         .map_err(|e| e.to_string())?;
-    receive_presence_pages(&mut channel, directory, limit).await?;
+    receive_presence_pages(&mut channel, directory, limit, origin_capable(request)).await?;
     let local_digests = local
         .iter()
         .map(|entry| (entry.id, entry.digest))
@@ -558,6 +694,34 @@ mod tests {
     use super::*;
     use crate::{discovery::Announce, identity::account::Account};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn expired_optional_origin_does_not_discard_federated_presence() {
+        let user = DeviceIdentity::generate();
+        let office = DeviceIdentity::generate();
+        let now = unix_now();
+        let consent =
+            crate::node::discovery_origin::OriginConsent::new(&user, &office.public(), now - 1);
+        let origin = crate::node::discovery_origin::RegistrationOrigin::new(
+            &office,
+            "Windows 10 office",
+            consent,
+        )
+        .unwrap();
+        let proof = Announce::new_with_account(&user, &Account::generate(), "Duncan", 47474);
+        let entries = vec![FederatedPresenceWithOrigin {
+            presence: FederatedPresence {
+                announce: proof,
+                expires_at_secs: now + 10,
+            },
+            origin: Some(origin),
+        }];
+        let (decoded, last) =
+            decode_origin_page(&encode_origin_page(&entries, true).unwrap()).unwrap();
+        assert!(last);
+        assert_eq!(decoded.len(), 1);
+        assert!(decoded[0].origin.is_none());
+    }
 
     #[tokio::test]
     async fn federation_inventory_write_releases_a_backpressured_peer() {
@@ -634,7 +798,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut channel = SecureChannel::accept(stream, &remote).await.unwrap();
-            assert_eq!(channel.recv().await.unwrap(), REQUEST_V2);
+            assert_eq!(channel.recv().await.unwrap(), REQUEST_V3);
             accepted.send(()).unwrap();
             std::future::pending::<()>().await;
         });
@@ -906,10 +1070,12 @@ mod tests {
         let learned = target.clone();
         let server = tokio::spawn(async move {
             let identity = DeviceIdentity::from_secret_bytes(be, bx);
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut first = SecureChannel::accept(stream, &identity).await.unwrap();
-            assert_eq!(first.recv().await.unwrap(), REQUEST_V2);
-            drop(first); // Simulate a pre-v2 endpoint rejecting the new request.
+            for request in [REQUEST_V3, REQUEST_V2] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut first = SecureChannel::accept(stream, &identity).await.unwrap();
+                assert_eq!(first.recv().await.unwrap(), request);
+                drop(first); // Simulate a legacy endpoint rejecting each new request.
+            }
             let (stream, _) = listener.accept().await.unwrap();
             let mut legacy = SecureChannel::accept(stream, &identity).await.unwrap();
             assert_eq!(legacy.recv().await.unwrap(), REQUEST);

@@ -51,6 +51,16 @@ the inner event. The legacy format remains relay-specific.
 
 ## What remains visible
 
+Optional [registration-origin disclosure](network-design-reference.md#optional-registration-origin-disclosure)
+adds a participant-approved office name and identity to directory metadata.
+It defaults off and uses the existing encrypted channels; participating relays
+can read it. This does not change the recipient encryption of message content.
+The participant controls disclosure on the registering device. Turning it off
+stops new consent; existing signed origin proofs retain only their original
+15-second lease, and already observed information cannot be erased remotely.
+An office name can reveal a site. Disabling this optional disclosure does not
+hide TCP addresses, existing discovery observations or immediate introducers.
+
 | Relay observation                              | Why it remains visible                                                                       |
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | Authenticated connecting device and IP address | Noise identity authentication and TCP routing                                                |

@@ -1,8 +1,9 @@
-//! Explicit, manual release downloads. The renderer cannot choose a URL or local path:
+//! Explicit release downloads and signed native update handoff. The renderer cannot choose a URL or local path:
 //! each request rechecks the exact published release and matching asset for
 //! this build's OS and architecture before writing to Downloads.
 
 mod channel;
+pub mod native;
 
 use std::{path::PathBuf, sync::OnceLock, time::Duration};
 
@@ -57,6 +58,7 @@ struct ReleaseAsset {
 
 #[derive(Serialize)]
 pub struct UpdateCheck {
+    pub automatic_install: bool,
     pub current_version: String,
     pub latest_version: String,
     pub is_newer: bool,
@@ -77,6 +79,7 @@ pub struct DownloadProgress {
 
 #[derive(Serialize)]
 pub struct DownloadedUpdate {
+    pub installable: bool,
     pub path: String,
     pub file_name: String,
 }
@@ -155,7 +158,15 @@ fn describe_release(
         .as_deref()
         .and_then(|name| selected_asset(release, name));
     let newer = latest > current;
+    let automatic_install =
+        newer && native::available() && native::assets(release, os, arch).is_some();
+    let asset = if automatic_install {
+        native::assets(release, os, arch).map(|(payload, _)| payload)
+    } else {
+        asset
+    };
     Ok(UpdateCheck {
+        automatic_install,
         current_version: current_build_version().to_string(),
         latest_version: release.tag_name[1..].to_string(),
         is_newer: newer,
@@ -418,6 +429,7 @@ pub async fn download_update(
         find_verified_existing(&downloads, &name, asset, &cancel_receiver).await?
     {
         return Ok(DownloadedUpdate {
+            installable: false,
             path: existing.to_string_lossy().into_owned(),
             file_name: existing
                 .file_name()
@@ -451,6 +463,7 @@ pub async fn download_update(
         return Err(error);
     }
     Ok(DownloadedUpdate {
+        installable: false,
         path: final_path.to_string_lossy().into_owned(),
         file_name: final_path
             .file_name()
@@ -655,7 +668,7 @@ async fn download_and_verify_with_client(
         }
         file.write_all(&chunk)
             .await
-            .map_err(|_| "Could not write the update to Downloads")?;
+            .map_err(|_| "Could not write the update file")?;
         hash.update(&chunk);
         if last_reported.elapsed() >= Duration::from_millis(200) || downloaded == asset.size {
             let _ = on_progress.send(DownloadProgress {

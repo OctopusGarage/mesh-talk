@@ -219,6 +219,7 @@ Online tolerance never extends a discovery-source label. Discovery metadata is
 additive desktop IPC and does not change wire formats, trust or route selection.
 Neither a source nor an endpoint establishes physical location or the path of any
 particular message.
+
 A direct application path means no intermediate Mesh Talk post office; it says
 nothing about Tailscale's underlying transport. Online does not guarantee TCP,
 message delivery, file transfer, or calls. UDP discovery can succeed while TCP
@@ -368,6 +369,47 @@ not an empty successful snapshot or a fabricated network diagnosis. Successful
 withdrawals take effect immediately. Up to 1,024 actually observed historical
 account/device entries remain Offline within the session, without inventing times
 for never-observed people. Lock/logout/replacement clears this history.
+
+### Optional registration-origin disclosure
+
+Registration origin is separate from the immediate directory introducer. A
+participant can opt in to sharing the identity and display name of the post
+office with which that device registered. The device-local setting defaults off,
+including after upgrading an installation that has no saved choice. Ordinary
+bridge discovery and messaging do not require this optional disclosure.
+
+The registering device signs a consent bound to its full device identity, the
+exact office identity and a fixed expiry. The office signs that registration
+relationship and its bounded display name. Versioned directory and federation
+envelopes preserve the proof unchanged across forwarding hops. Receivers verify
+both signatures and the participant binding before projecting it; hop counts,
+preferred routes, office names and address prefixes cannot establish origin.
+The client consents to one eligible registration office: a locally discovered
+office first, otherwise the first office in the established candidate order
+(including an explicit preference). Refreshes through other offices do not
+authorize them to claim origin. Different devices may register with different
+offices. The profile distinguishes these offices from immediate introducers.
+
+Origin proofs have a fixed maximum 15-second lease. Forwarding, re-querying and
+Online presentation tolerance never extend that lease. Missing metadata means
+unavailable; it does not prove that the participant explicitly withheld it.
+Older protocol versions continue ordinary discovery without optional origin
+metadata, using their existing wire layouts. No origin binding is added to
+public UDP multicast announcements or durable route hints.
+
+Changing the sharing choice uses the existing privacy send gate and generation
+checks. Disabling waits for already admitted sends, invalidates prepared work,
+stops signing new consent and wakes directory refresh. A fresh registration
+without consent clears the source office's optional proof. Already forwarded
+proofs can remain on disconnected peers until their original lease expires;
+information another party has already read cannot be recalled. This setting
+does not conceal socket addresses from connected peers or the registering office.
+
+Origin metadata uses the existing authenticated encrypted channels. Participating
+post offices can read it; it has no additional recipient encryption. Office
+names may reveal a network or site, so sharing requires the participant's own
+choice. The payload contains no participant IP, subnet, coordinates or full
+relay path. It authenticates a registration relationship, never physical location.
 
 ### Protocol surfaces and durable ownership
 

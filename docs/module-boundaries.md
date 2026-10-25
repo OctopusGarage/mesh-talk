@@ -219,6 +219,9 @@ for preview/run commands, unknown-path handling and the unchanged mandatory gate
 
 `src-tauri/src/updates/channel.rs` owns channel eligibility and immutable build ordering;
 `updates.rs` owns bounded GitHub discovery, exact-release revalidation and verified manual downloads.
+`updates/native.rs` owns signed native payload selection, private staging, version-bound verification
+and platform installer/restart handoff. The host never accepts installer paths or trust keys from IPC.
+`ui/store/updateRestart.ts` coordinates draft persistence and active-work deferral before installation.
 The frontend update store owns the device-local channel preference and invalidation of checked
 candidates; its IPC adapter forwards the choice without choosing packages. The existing release
 workflow and `scripts/release/` own build identity, publication and provenance.
@@ -258,6 +261,16 @@ Periodic network observations use `useSerialPoll.ts`, shared with other live
 views: no overlapping requests in one subscription and no results applied after
 that subscription closes. Store-level owner/session checks remain mandatory;
 serial polling is not an authorization mechanism.
+
+Optional registration-origin disclosure stays with the existing network owners:
+`core/node/discovery_origin.rs` owns bounded consent and office signatures;
+`bridge_directory.rs` and `postoffice/federation.rs` own negotiated carriage and
+fixed expiry; `bridge_client.rs` owns source-side publication permission.
+Roster observations retain the validated proof without creating routing authority.
+Desktop presence IPC projects only office identity, name and remaining lifetime;
+the frontend ages this lifetime independently during failed refreshes. The existing
+account settings owner persists the default-off device choice. See
+[registration-origin disclosure](network-design-reference.md#optional-registration-origin-disclosure).
 
 ## 4. Parallel development contract
 
@@ -435,17 +448,19 @@ Markdown rendering, static publication and read-only documentation MCP. These
 modules consume no private messaging state and introduce no core protocol
 responsibility. See [help system maintenance](help-system.md).
 
-### Peer trust evidence
+### Account profiles and private trust
 
-`core/node/trust_card.rs` owns signed public card and proof validation; its node
-I/O owner owns authenticated publication and encrypted current-card persistence.
-Send preparation and final WAL mutation enter host authority before acquiring the
-delivery journal; cached request lookups release that journal before requesting
-host authority. Profile publication must never be blocked by the opposite order.
-The desktop replies to signed-card publication after durable local acceptance,
-while a detached admitted task finishes best-effort peer/relay fanout.
-`src-tauri/src/trust_cards.rs` adapts admitted commands and bounded versioned JSON.
-`src-tauri/src/trust.rs` owns private first-observed time, device-change history
-and manual verification. Profile renderers must not derive verification from a
-valid public signature. The [peer trust guide](peer-trust.md) owns claim meanings
-and evidence limits.
+`identity/account.rs` and `identity/account_keystore.rs` own immutable creation
+metadata persisted with the account key. Pairing and recovery preserve it without
+inferring missing dates. `node/account_profile_data.rs` owns signed bounded
+ordinary profile data and current-profile persistence; `node/account_profile_io.rs`
+owns admitted edits, authenticated reception and legacy compatibility.
+Send preparation enters host authority before acquiring the delivery journal.
+Desktop biography saves reply after durable local acceptance while admitted fanout
+continues independently. The ordinary nickname and bio edit share the publication
+mutex, preventing a stale bio save from undoing a rename.
+`src-tauri/src/account_profile.rs` exposes reads and bio edits, with no caller-supplied
+names, timestamps or public proofs. `src-tauri/src/trust.rs` owns private observation
+history and manual verification. Frontend `store/accountProfiles.ts` shares
+session-bound profile reads and live invalidations across the header and dialogs.
+The [profile and verification guide](peer-trust.md) owns meanings and evidence limits.

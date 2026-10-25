@@ -1,4 +1,4 @@
-import { TrustCardPanel } from "./TrustCardPanel";
+import { AccountProfilePanel } from "./AccountProfilePanel";
 import { useEffect, useState } from "react";
 import { Check, Pencil, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -170,11 +170,10 @@ export function ProfileDialog({
           </dl>
         </div>
         {open && myAccountId && (
-          <TrustCardPanel
+          <AccountProfilePanel
             key={`${user?.id}:${myAccountId}`}
             accountId={myAccountId}
             own
-            displayName={displayName}
           />
         )}
       </DialogContent>

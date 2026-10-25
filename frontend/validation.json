@@ -2,6 +2,41 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-discovery-origin",
+      "paths": [
+        "frontend/src/features/chat/memberProfileDetails.ts",
+        "frontend/src/features/chat/MemberProfileDialog.tsx",
+        "frontend/src/store/presence.ts",
+        "frontend/src/features/chat/settings/NetworkSettings.tsx",
+        "frontend/e2e/person-presence.spec.ts",
+        "frontend/e2e/settings-recovery.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/memberProfileDetails.test.ts",
+        "src/features/chat/MemberProfileDialog.test.ts",
+        "src/store/presence.test.ts",
+        "src/features/chat/settings/NetworkSettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts"
+      ],
+      "capability": {
+        "summary": "Expose only verified, independently expiring registration origins and keep participant-controlled disclosure off by default.",
+        "guide": "docs/network-design-reference.md#optional-registration-origin-disclosure",
+        "invariants": [
+          {
+            "name": "Original office and immediate introducer remain distinct; IPC silence cannot renew origin disclosure",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          },
+          {
+            "name": "Sharing belongs to the active participant and stale owners or missing legacy settings cannot enable it",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          }
+        ]
+      },
+      "escalation": [
+        "Run encrypted multi-hop core scenarios and a native settings/profile smoke check; mocked IPC alone does not prove Windows office deployment."
+      ]
+    },
+    {
       "id": "frontend-conversation-drafts",
       "paths": [
         "frontend/src/store/drafts.ts",
@@ -488,7 +523,7 @@
       ]
     },
     {
-      "id": "frontend-trust-cards",
+      "id": "frontend-account-profile",
       "paths": [
         "frontend/src/features/chat/TrustCardPanel.tsx",
         "frontend/src/lib/api/trustCards.ts",
@@ -497,30 +532,41 @@
         "frontend/e2e/trust-cards.spec.ts",
         "frontend/src/features/chat/TrustCardPanel.test.ts",
         "frontend/src/locales/en.json",
-        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png"
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png",
+        "frontend/src/features/chat/AccountProfilePanel.tsx",
+        "frontend/src/features/chat/AccountProfilePanel.test.ts",
+        "frontend/src/lib/api/accountProfile.ts",
+        "frontend/src/lib/accountProfile.test.ts",
+        "frontend/src/store/accountProfiles.ts",
+        "frontend/src/store/accountProfiles.test.ts",
+        "frontend/e2e/account-profiles.spec.ts",
+        "frontend/src/features/chat/ConversationHeadersSession.test.ts"
       ],
       "frontend": [
-        "src/lib/trustCard.test.ts",
+        "src/lib/accountProfile.test.ts",
         "src/features/chat/VerifyContactDialog.test.ts",
-        "src/features/chat/TrustCardPanel.test.ts"
+        "src/features/chat/AccountProfilePanel.test.ts",
+        "src/store/accountProfiles.test.ts",
+        "src/features/chat/ConversationHeaders.test.ts",
+        "src/features/chat/ConversationHeadersSession.test.ts"
       ],
       "consumers": ["frontend-chat"],
       "capability": {
-        "summary": "Present signed public profiles and explicit proofs separately from device-local verification and observation history.",
-        "guide": "docs/ARCHITECTURE.md",
+        "summary": "Edit one ordinary profile and show the same About text in conversation headers and contact details with session-bound refresh.",
+        "guide": "docs/peer-trust.md",
         "invariants": [
           {
-            "name": "Signed statements do not automatically verify people or export local trust",
-            "reference": "docs/ARCHITECTURE.md"
+            "name": "Creation dates are read-only metadata; legacy unknown dates stay unknown",
+            "reference": "docs/peer-trust.md"
           },
           {
-            "name": "Creation dates remain unknown until explicitly declared",
-            "reference": "docs/ARCHITECTURE.md"
+            "name": "Retired asynchronous reads cannot populate a replacement account or contact; accepted profile changes refresh visible biographies",
+            "reference": "docs/peer-trust.md"
           }
         ]
       },
       "escalation": [
-        "Run e2e/trust-cards.spec.ts for publish/import/export/proof controls. Native signatures, persistence and transport require owning Rust evidence."
+        "Run e2e/account-profiles.spec.ts for ordinary profile editing, read-only dates, removed proof controls and header/detail biography consistency. Native identity, persistence and transport require owning Rust evidence."
       ]
     },
     {
@@ -624,6 +670,8 @@
       "paths": [
         "frontend/src/store/updates.ts",
         "frontend/src/store/updates.test.ts",
+        "frontend/src/store/updateRestart.ts",
+        "frontend/src/store/updateRestart.test.ts",
         "frontend/src/features/chat/UpdatePanel.tsx",
         "frontend/src/features/chat/UpdatePanel.test.ts",
         "frontend/src/lib/api/diagnostics.ts",
@@ -633,13 +681,18 @@
       ],
       "frontend": [
         "src/store/updates.test.ts",
+        "src/store/updateRestart.test.ts",
         "src/features/chat/UpdatePanel.test.ts",
         "src/lib/api/diagnostics.test.ts"
       ],
       "capability": {
-        "summary": "Persist a device-local explicit update channel and discard prior candidates on channel changes, preserving native release and platform authority.",
+        "summary": "Coordinate explicit signed updates, safe restart preparation and manual fallback while preserving native release, platform and channel authority.",
         "guide": "docs/updates.md",
         "invariants": [
+          {
+            "name": "Only host-eligible signed updates install automatically; cancellation prevents installation, pending drafts are flushed, active work defers restart, and native failures retain a retryable prepared update with manual fallback.",
+            "reference": "docs/updates.md#one-click-installation"
+          },
           {
             "name": "About displays the host logical build identity; channel changes never implicitly check, download or downgrade, and in-flight work prevents selection changes",
             "reference": "docs/updates.md"
@@ -687,6 +740,131 @@
       },
       "escalation": [
         "Run e2e/notification-permission.spec.ts and affected settings/visual browser scenarios. Native authorization prompts and OS navigation require packaged-app macOS/Windows evidence."
+      ]
+    },
+    {
+      "id": "public-site-experience",
+      "paths": [
+        "site/index.html",
+        "site/landing.css",
+        "site/site.js",
+        "site/theme.css",
+        "tools/help/build.mjs",
+        "tools/help/style.css",
+        "frontend/e2e/site-audit.spec.ts",
+        "frontend/e2e/help-website.spec.ts",
+        "site/downloads.js",
+        "frontend/e2e/site-downloads.spec.ts",
+        "frontend/e2e/helpers/public-site.ts",
+        "tools/help/site.mjs",
+        "tools/help/navigation.mjs",
+        "site/404.html",
+        "frontend/playwright.site.config.ts",
+        "site/i18n.js",
+        "site/locales/",
+        "site/motion.js",
+        "site/motion.css",
+        "site/screenshots/",
+        "docs/screenshots/",
+        "frontend/e2e/site-capture.spec.ts",
+        "frontend/e2e/site-language.spec.ts",
+        "frontend/e2e/site-motion.spec.ts",
+        "tools/help/public-language.test.mjs",
+        "site/network-flow.js",
+        "site/faq-motion.js",
+        "site/faq-motion.css",
+        "frontend/e2e/site-network-flow.spec.ts",
+        "frontend/e2e/site-faq-motion.spec.ts"
+      ],
+      "escalation": [
+        "Verify the landing page and generated current/versioned readers at desktop and mobile widths, with keyboard navigation, reduced motion, JavaScript disabled and both reader color schemes. Preserve GitHub Pages project paths and truthful network, privacy, recovery and release guidance."
+      ],
+      "capability": {
+        "summary": "Present the public product tour and searchable versioned user guide with accessible progressive interactions.",
+        "guide": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling",
+        "invariants": [
+          {
+            "name": "The static site and current/versioned help share the public theme and self-hosted font; content, download destinations and guide navigation remain usable without JavaScript.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "Product previews and platform controls support keyboard selection, screenshot viewers restore focus, and motion respects reduced-motion preferences.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "Direct downloads use current published Stable metadata and exact desktop asset URLs; browser OS detection never silently substitutes an uncertain architecture. Download help does not claim transfer or signature verification completed.",
+            "reference": "docs/updates.md#public-website-downloads"
+          },
+          {
+            "name": "User-selected platform/architecture control the primary download; session preferences, modal focus, gallery navigation, FAQ fragments and help search history remain coherent across supported browser engines.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "The public language owner ships complete same-key locale resources; URL choice overrides saved/browser preferences. Article English fallback is explicit, commands and resource destinations remain unchanged, and failed or stale loads cannot partially translate the current page.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "The core messaging preview precedes optional Marketplace examples; motion is bounded, interruptible and immediately cancelled by reduced-motion preference changes without delaying native interactions.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "Topology packets illustrate direct LAN and optional routed custody, never live delivery evidence. User pause, viewport exit, tab hiding and reduced-motion changes stop traffic work. Image selection commits only decoded current requests; FAQ transitions remain interruptible and preserve native semantics.",
+            "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
+          },
+          {
+            "name": "Product screenshots originate from native 2x browser captures; responsive candidates preserve mobile efficiency, decoded theme changes retain resolution selection, and enlarged views link to full-resolution originals.",
+            "reference": "docs/screenshots/README.md"
+          }
+        ]
+      },
+      "node": [
+        "tools/help/help.test.mjs",
+        "tools/help/corpus.test.mjs",
+        "tools/help/public-language.test.mjs"
+      ]
+    },
+    {
+      "id": "frontend-localization",
+      "paths": [
+        "frontend/src/lib/i18n.ts",
+        "frontend/vite.config.ts",
+        "frontend/src/lib/i18n.test.ts",
+        "frontend/src/lib/format.ts",
+        "frontend/src/lib/format.test.ts",
+        "frontend/src/lib/localeParity.test.ts",
+        "frontend/src/locales/",
+        "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/lib/presenceLabels.test.ts",
+        "frontend/e2e/language-settings.spec.ts",
+        "frontend/e2e/login-recovery.spec.ts",
+        "frontend/e2e/ui-audit-shell.spec.ts",
+        "docs/help/topics/language.md"
+      ],
+      "frontend": [
+        "src/lib/i18n.test.ts",
+        "src/lib/format.test.ts",
+        "src/lib/localeParity.test.ts",
+        "src/lib/settingsTranslations.test.ts",
+        "src/lib/privacyTranslations.test.ts",
+        "src/lib/presenceLabels.test.ts",
+        "src/features/auth/LoginScreen.test.ts"
+      ],
+      "capability": {
+        "summary": "Select and persist one of eight complete interface languages across desktop UI, including Portuguese and Korean.",
+        "guide": "docs/help/topics/language.md",
+        "invariants": [
+          {
+            "name": "Every registered interface language has matching English keys, nonempty strings and unchanged interpolation variables; native language labels stay selectable without redesigning settings.",
+            "reference": "docs/help/topics/language.md"
+          },
+          {
+            "name": "Saved desktop choice wins over supported system/browser languages; regional Portuguese maps to pt-BR and regional Korean to ko. Immediate switching updates document language even if preference storage is unavailable; conversation dates and elapsed-time labels follow the selected language. Public language preference remains separate; automatic website language detection does not persist a fixed preference, explicit choices do, native language names carry their language tags, and English-authored articles disclose their fallback.",
+            "reference": "docs/help/topics/language.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Verify switching, reload persistence, short-window creation and sidebar/settings layout in Portuguese and Korean. Browser mocks cover interface behavior, not native operating-system menus or translated article content."
       ]
     }
   ],
@@ -906,7 +1084,7 @@
       "native": ["host"]
     },
     {
-      "id": "frontend-trust-cards-acceptance",
+      "id": "frontend-account-profile-acceptance",
       "paths": [
         "frontend/src/features/chat/TrustCardPanel.tsx",
         "frontend/src/lib/api/trustCards.ts",
@@ -915,9 +1093,23 @@
         "frontend/e2e/trust-cards.spec.ts",
         "frontend/src/features/chat/ProfileDialog.tsx",
         "frontend/src/features/chat/VerifyContactDialog.tsx",
-        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png"
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/profile-dialog-dark-820x620.png",
+        "frontend/src/features/chat/AccountProfilePanel.tsx",
+        "frontend/src/features/chat/AccountProfilePanel.test.ts",
+        "frontend/src/lib/api/accountProfile.ts",
+        "frontend/src/lib/accountProfile.test.ts",
+        "frontend/src/store/accountProfiles.ts",
+        "frontend/src/store/accountProfiles.test.ts",
+        "frontend/e2e/account-profiles.spec.ts",
+        "frontend/src/features/chat/ConversationHeaders.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/MemberProfileDialog.tsx"
       ],
-      "browser": ["e2e/trust-cards.spec.ts", "e2e/ui-audit-dialogs.spec.ts"]
+      "browser": [
+        "e2e/account-profiles.spec.ts",
+        "e2e/ui-audit-dialogs.spec.ts",
+        "e2e/ui-visual-regression.spec.ts"
+      ]
     },
     {
       "id": "group-sync",
@@ -971,6 +1163,8 @@
       "paths": [
         "frontend/src/store/updates.ts",
         "frontend/src/store/updates.test.ts",
+        "frontend/src/store/updateRestart.ts",
+        "frontend/src/store/updateRestart.test.ts",
         "frontend/src/features/chat/UpdatePanel.tsx",
         "frontend/src/features/chat/UpdatePanel.test.ts",
         "frontend/src/lib/api/diagnostics.ts",
@@ -997,6 +1191,73 @@
         "e2e/notification-permission.spec.ts",
         "e2e/settings-categories.spec.ts",
         "e2e/ui-visual-regression.spec.ts"
+      ]
+    },
+    {
+      "id": "public-site-experience",
+      "paths": [
+        "site/index.html",
+        "site/landing.css",
+        "site/site.js",
+        "site/theme.css",
+        "tools/help/build.mjs",
+        "tools/help/style.css",
+        "frontend/e2e/site-audit.spec.ts",
+        "frontend/e2e/help-website.spec.ts",
+        "site/downloads.js",
+        "frontend/e2e/site-downloads.spec.ts",
+        "frontend/e2e/helpers/public-site.ts",
+        "tools/help/site.mjs",
+        "tools/help/navigation.mjs",
+        "site/404.html",
+        "frontend/playwright.site.config.ts",
+        "site/i18n.js",
+        "site/locales/",
+        "site/motion.js",
+        "site/motion.css",
+        "site/screenshots/",
+        "docs/screenshots/",
+        "frontend/e2e/site-capture.spec.ts",
+        "frontend/e2e/site-language.spec.ts",
+        "frontend/e2e/site-motion.spec.ts",
+        "tools/help/public-language.test.mjs",
+        "site/network-flow.js",
+        "site/faq-motion.js",
+        "site/faq-motion.css",
+        "frontend/e2e/site-network-flow.spec.ts",
+        "frontend/e2e/site-faq-motion.spec.ts"
+      ],
+      "browser": [
+        "e2e/site-audit.spec.ts",
+        "e2e/help-website.spec.ts",
+        "e2e/site-downloads.spec.ts",
+        "e2e/site-language.spec.ts",
+        "e2e/site-motion.spec.ts",
+        "e2e/site-network-flow.spec.ts",
+        "e2e/site-faq-motion.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-localization",
+      "paths": [
+        "frontend/src/lib/i18n.ts",
+        "frontend/vite.config.ts",
+        "frontend/src/lib/format.ts",
+        "frontend/src/lib/format.test.ts",
+        "frontend/src/lib/i18n.test.ts",
+        "frontend/src/lib/localeParity.test.ts",
+        "frontend/src/locales/",
+        "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/lib/presenceLabels.test.ts",
+        "frontend/e2e/language-settings.spec.ts",
+        "frontend/e2e/login-recovery.spec.ts",
+        "frontend/e2e/ui-audit-shell.spec.ts",
+        "docs/help/topics/language.md"
+      ],
+      "browser": [
+        "e2e/language-settings.spec.ts",
+        "e2e/login-recovery.spec.ts",
+        "e2e/ui-audit-shell.spec.ts"
       ]
     }
   ]
