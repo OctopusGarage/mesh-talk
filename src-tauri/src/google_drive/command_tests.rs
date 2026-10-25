@@ -4,6 +4,7 @@ use mesh_talk_core::identity::manager::IdentityManager;
 use mesh_talk_core::node::{Node, NodeRuntime};
 use mesh_talk_core::recovery::key::RecoveryKey;
 use serde_json::{Value, json};
+use std::path::Path;
 use tauri::Manager;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -43,6 +44,8 @@ impl Fixture {
             .invoke_handler(tauri::generate_handler![
                 google_drive_available,
                 google_drive_connect,
+                google_drive_resume,
+                google_drive_forget,
                 google_drive_disconnect,
                 google_drive_progress,
                 google_drive_list,
@@ -51,6 +54,10 @@ impl Fixture {
                 google_drive_inspect,
                 google_drive_restore,
                 crate::recovery::create_backup,
+                crate::recovery::prepare_backup_key,
+                crate::recovery::setup::backup_setup,
+                crate::recovery::setup::confirm_backup_key,
+                crate::recovery::setup::set_backup_destination,
                 crate::recovery::restore_backup,
                 crate::app_lock::lock_app
             ])
@@ -636,4 +643,422 @@ fn legacy_saved_backup_preview_defaults_favorites_counts() {
         ),
         (0, 0, 0)
     );
+}
+
+#[test]
+fn backup_key_is_reused_when_the_dialog_reopens() {
+    let fixture = Fixture::new();
+    fixture.sign_in();
+    let first = fixture.invoke("prepare_backup_key", json!({})).unwrap();
+    let second = fixture.invoke("prepare_backup_key", json!({})).unwrap();
+    assert_eq!(
+        first, second,
+        "reopening backup must not replace its recovery key"
+    );
+}
+
+#[test]
+fn backup_setup_acknowledgement_and_destination_survive_reopen() {
+    let fixture = Fixture::new();
+    fixture.sign_in();
+    let initial = fixture.invoke("backup_setup", json!({})).unwrap();
+    assert_eq!(initial["confirmed"], false);
+    assert_eq!(initial["destination"], "local");
+    let wrong = RecoveryKey::generate().display();
+    assert!(
+        fixture
+            .invoke("confirm_backup_key", json!({"recoveryKey":wrong}))
+            .is_err()
+    );
+    assert_eq!(
+        fixture.invoke("backup_setup", json!({})).unwrap()["confirmed"],
+        false
+    );
+    fixture
+        .invoke(
+            "confirm_backup_key",
+            json!({"recoveryKey":initial["recovery_key"]}),
+        )
+        .unwrap();
+    fixture
+        .invoke("set_backup_destination", json!({"destination":"drive"}))
+        .unwrap();
+    let next = fixture.invoke("backup_setup", json!({})).unwrap();
+    assert_eq!(next["confirmed"], true);
+    assert_eq!(next["destination"], "drive");
+    assert_eq!(next["recovery_key"], initial["recovery_key"]);
+    assert!(
+        fixture
+            .invoke(
+                "set_backup_destination",
+                json!({"destination":"https://other.invalid"})
+            )
+            .is_err()
+    );
+    let encrypted = std::fs::read(
+        fixture
+            .root
+            .path()
+            .join("users/fixture-user/meta/backup_setup.enc"),
+    )
+    .unwrap();
+    let key = next["recovery_key"].as_str().unwrap();
+    assert!(
+        !encrypted
+            .windows(key.len())
+            .any(|bytes| bytes == key.as_bytes())
+    );
+    fixture.state.session().clear();
+    assert!(fixture.invoke("backup_setup", json!({})).is_err());
+    fixture
+        .state
+        .auth_service()
+        .login("fixture-user".into(), PASSWORD.into())
+        .unwrap();
+    assert_eq!(fixture.invoke("backup_setup", json!({})).unwrap(), next);
+}
+
+#[test]
+fn saved_key_backup_requires_one_time_confirmation_and_remains_readable() {
+    let fixture = Fixture::new();
+    fixture.sign_in();
+    let setup = fixture.invoke("backup_setup", json!({})).unwrap();
+    let path = fixture
+        .root
+        .path()
+        .join("first.mtbackup")
+        .display()
+        .to_string();
+    let failure = fixture
+        .invoke("create_backup", json!({"destination":path}))
+        .unwrap_err();
+    assert!(
+        failure["message"]
+            .as_str()
+            .unwrap()
+            .contains("Save your recovery key")
+    );
+    assert!(!Path::new(&path).exists());
+    fixture
+        .invoke(
+            "confirm_backup_key",
+            json!({"recoveryKey":setup["recovery_key"]}),
+        )
+        .unwrap();
+    let first = fixture
+        .invoke("create_backup", json!({"destination":path}))
+        .unwrap();
+    fixture.wait_for_runtime();
+    let second = fixture
+        .invoke(
+            "create_backup",
+            json!({"destination":fixture.root.path().join("second.mtbackup")}),
+        )
+        .unwrap();
+    fixture.wait_for_runtime();
+    assert_eq!(first["recovery_key"], setup["recovery_key"]);
+    assert_eq!(second["recovery_key"], setup["recovery_key"]);
+    let key = RecoveryKey::parse(setup["recovery_key"].as_str().unwrap()).unwrap();
+    let preview = Node::inspect_encrypted_recovery_archive(
+        std::fs::File::open(&path).unwrap(),
+        &key,
+        fixture.root.path(),
+    )
+    .unwrap();
+    assert_eq!(preview.account_id, first["preview"]["account_id"]);
+    let encrypted_second = std::fs::read(fixture.root.path().join("second.mtbackup")).unwrap();
+    assert_ne!(
+        std::fs::read(&path).unwrap(),
+        encrypted_second,
+        "reused keys must retain fresh archive salts"
+    );
+}
+
+#[test]
+fn corrupt_saved_setup_is_never_silently_replaced() {
+    let fixture = Fixture::new();
+    fixture.sign_in();
+    fixture.invoke("backup_setup", json!({})).unwrap();
+    let path = fixture
+        .root
+        .path()
+        .join("users/fixture-user/meta/backup_setup.enc");
+    std::fs::write(&path, b"damaged encrypted setup").unwrap();
+    assert!(fixture.invoke("backup_setup", json!({})).is_err());
+    assert_eq!(std::fs::read(path).unwrap(), b"damaged encrypted setup");
+}
+
+struct RefreshProvider {
+    endpoint: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    task: tauri::async_runtime::JoinHandle<()>,
+}
+impl RefreshProvider {
+    fn new(status: &'static str) -> Self {
+        let listener =
+            tauri::async_runtime::block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let received = requests.clone();
+        let task = tauri::async_runtime::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut chunk = [0; 1024];
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk[..read]);
+                    assert!(bytes.len() < 32 * 1024);
+                    if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|value| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                received
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8(bytes).unwrap());
+                let body = if status == "400 Bad Request" {
+                    r#"{"error":"invalid_grant"}"#
+                } else {
+                    r#"{"access_token":"fixture-access-token","token_type":"Bearer","expires_in":3600}"#
+                };
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+            }
+        });
+        Self {
+            endpoint,
+            requests,
+            task,
+        }
+    }
+}
+impl Drop for RefreshProvider {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+fn remember_grant(fixture: &Fixture, token: &str) -> (remembered::Owner, Arc<Connection>) {
+    let owner = remembered::Owner::capture(&fixture.state, &fixture.node).unwrap();
+    let connection = Arc::new(Connection::new(
+        fixture.state.session().clone(),
+        fixture.state.app_lock().clone(),
+    ));
+    tauri::async_runtime::block_on(owner.save(token.into(), connection.clone())).unwrap();
+    (owner, connection)
+}
+fn refresh_provider(fixture: &Fixture, provider: &RefreshProvider) {
+    *fixture
+        .app
+        .state::<DriveState>()
+        .refresh_override
+        .lock()
+        .unwrap() = Some(provider.endpoint.clone());
+}
+
+#[test]
+fn remembered_grant_resumes_refreshes_and_is_explicitly_forgotten() {
+    let fixture = Fixture::new();
+    fixture.sign_in();
+    let provider = Provider::new();
+    *fixture
+        .app
+        .state::<DriveState>()
+        .client_override
+        .lock()
+        .unwrap() = Some(provider.client.clone());
+    let refresh = RefreshProvider::new("200 OK");
+    refresh_provider(&fixture, &refresh);
+    let (owner, _) = remember_grant(&fixture, "fixture-refresh-token");
+    let encrypted = std::fs::read(
+        fixture
+            .root
+            .path()
+            .join("users/fixture-user/meta/google_drive.enc"),
+    )
+    .unwrap();
+    assert!(
+        !encrypted
+            .windows(21)
+            .any(|part| part == b"fixture-refresh-token")
+    );
+    assert_eq!(
+        fixture.invoke("google_drive_resume", json!({})).unwrap(),
+        true
+    );
+    assert_eq!(
+        fixture.invoke("google_drive_list", json!({})).unwrap(),
+        json!([])
+    );
+    let connection = fixture.app.state::<DriveState>().get(CONNECTION).unwrap();
+    *connection.token_expires.lock().unwrap() = Some(Instant::now() - Duration::from_secs(1));
+    assert_eq!(
+        fixture.invoke("google_drive_list", json!({})).unwrap(),
+        json!([])
+    );
+    assert_eq!(refresh.requests.lock().unwrap().len(), 2);
+    for request in refresh.requests.lock().unwrap().iter() {
+        assert!(request.contains("grant_type=refresh_token"));
+        assert!(request.contains("refresh_token=fixture-refresh-token"));
+        assert!(!request.contains("recovery"));
+    }
+    fixture
+        .invoke("google_drive_disconnect", json!({}))
+        .unwrap();
+    assert!(
+        tauri::async_runtime::block_on(owner.load())
+            .unwrap()
+            .is_some(),
+        "closing retains the encrypted grant"
+    );
+    assert_eq!(
+        fixture.invoke("google_drive_resume", json!({})).unwrap(),
+        true
+    );
+    fixture.invoke("google_drive_forget", json!({})).unwrap();
+    assert!(
+        tauri::async_runtime::block_on(owner.load())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        fixture.invoke("google_drive_resume", json!({})).unwrap(),
+        false
+    );
+}
+
+#[test]
+fn signed_out_restore_and_other_local_users_never_borrow_saved_access_or_keys() {
+    let fixture = Fixture::new();
+    fixture.sign_in();
+    let setup = fixture.invoke("backup_setup", json!({})).unwrap();
+    let (old_owner, _) = remember_grant(&fixture, "fixture-refresh-token");
+    fixture.state.session().clear();
+    assert_eq!(
+        fixture.invoke("google_drive_resume", json!({})).unwrap(),
+        false
+    );
+    assert!(tauri::async_runtime::block_on(old_owner.load()).is_err());
+    fixture
+        .state
+        .auth_service()
+        .register("other-user".into(), PASSWORD.into(), "other".into())
+        .unwrap();
+    fixture
+        .state
+        .auth_service()
+        .login("other-user".into(), PASSWORD.into())
+        .unwrap();
+    let other = remembered::Owner::capture(&fixture.state, &fixture.node).unwrap();
+    assert!(
+        tauri::async_runtime::block_on(other.load())
+            .unwrap()
+            .is_none()
+    );
+    let other_setup = fixture.invoke("backup_setup", json!({})).unwrap();
+    assert_ne!(other_setup["recovery_key"], setup["recovery_key"]);
+    assert_eq!(other_setup["confirmed"], false);
+}
+
+#[test]
+fn cancelled_oauth_cannot_restore_a_forgotten_grant() {
+    let fixture = Fixture::new();
+    fixture.sign_in();
+    let (owner, connection) = remember_grant(&fixture, "fixture-refresh-token");
+    connection.cancelled.send_replace(true);
+    tauri::async_runtime::block_on(owner.forget()).unwrap();
+    assert!(
+        tauri::async_runtime::block_on(owner.save("late-refresh-token".into(), connection))
+            .is_err()
+    );
+    assert!(
+        tauri::async_runtime::block_on(owner.load())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn rejected_refresh_forgets_only_the_rejected_grant_and_network_errors_retain_it() {
+    let fixture = Fixture::new();
+    fixture.sign_in();
+    let (owner, old_connection) = remember_grant(&fixture, "old-refresh-token");
+    remember_grant(&fixture, "new-refresh-token");
+    tauri::async_runtime::block_on(
+        owner.forget_rejected("old-refresh-token".into(), old_connection),
+    )
+    .unwrap();
+    assert_eq!(
+        tauri::async_runtime::block_on(owner.load())
+            .unwrap()
+            .as_deref(),
+        Some("new-refresh-token")
+    );
+    for status in [
+        "408 Request Timeout",
+        "429 Too Many Requests",
+        "401 Unauthorized",
+    ] {
+        let temporary = RefreshProvider::new(status);
+        refresh_provider(&fixture, &temporary);
+        assert!(fixture.invoke("google_drive_resume", json!({})).is_err());
+        assert!(
+            tauri::async_runtime::block_on(owner.load())
+                .unwrap()
+                .is_some(),
+            "a retryable/configuration failure must retain remembered access"
+        );
+    }
+    let unavailable = RefreshProvider::new("503 Service Unavailable");
+    refresh_provider(&fixture, &unavailable);
+    assert_eq!(
+        fixture
+            .invoke("google_drive_resume", json!({}))
+            .unwrap_err()["kind"],
+        "io"
+    );
+    assert!(
+        tauri::async_runtime::block_on(owner.load())
+            .unwrap()
+            .is_some()
+    );
+    let revoked = RefreshProvider::new("400 Bad Request");
+    refresh_provider(&fixture, &revoked);
+    assert_eq!(
+        fixture.invoke("google_drive_resume", json!({})).unwrap(),
+        false
+    );
+    assert!(
+        tauri::async_runtime::block_on(owner.load())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn app_lock_blocks_saved_keys_and_remembered_google_grants() {
+    let fixture = Fixture::new();
+    fixture.sign_in();
+    let (owner, _) = remember_grant(&fixture, "fixture-refresh-token");
+    fixture.invoke("lock_app", json!({})).unwrap();
+    assert!(fixture.invoke("backup_setup", json!({})).is_err());
+    assert!(tauri::async_runtime::block_on(owner.load()).is_err());
+    assert!(fixture.invoke("google_drive_resume", json!({})).is_err());
 }

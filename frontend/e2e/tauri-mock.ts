@@ -965,6 +965,8 @@ export const test = base.extend({
           ).join(""),
         );
 
+      let backupConfirmed = false;
+      let backupDestination = "local";
       const responses: Record<string, (a: Record<string, unknown>) => unknown> =
         {
           owner_node_identity: (a) => ({
@@ -1914,6 +1916,22 @@ export const test = base.extend({
           // Synthetic recovery fixture; never use this key outside browser tests.
           prepare_backup_key: () =>
             "11111111-22222222-33333333-44444444-55555555-66666666-77777777-88888888",
+          backup_setup: () => ({
+            recovery_key:
+              "11111111-22222222-33333333-44444444-55555555-66666666-77777777-88888888",
+            confirmed: backupConfirmed,
+            destination: backupDestination,
+          }),
+          confirm_backup_key: () => {
+            backupConfirmed = true;
+          },
+          set_backup_destination: (a) => {
+            backupDestination = String(a.destination);
+          },
+          google_drive_available: () => false,
+          google_drive_resume: () => false,
+          google_drive_disconnect: ok,
+          google_drive_forget: ok,
           backup_status: () => null,
 
           // settings

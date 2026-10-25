@@ -575,10 +575,15 @@ The [profile and verification guide](peer-trust.md) owns meanings and evidence l
 
 ## Google Drive recovery transport
 
-`src-tauri/src/google_drive/` owns ephemeral desktop OAuth grants, exact-session
-admission, bounded Drive HTTP transfers and temporary encrypted file lifetimes.
+`src-tauri/src/google_drive/` owns remembered password-encrypted local OAuth
+refresh grants, ephemeral operation connections, exact-session admission, bounded
+Drive HTTP transfers and temporary encrypted file lifetimes. Its `remembered.rs`
+keeps Google credentials native and separate from recovery archives.
 `src-tauri/src/recovery.rs` remains the owner of consistent snapshot/runtime restart,
-archive verification and transactional profile restore; `core/recovery/` owns format
+archive verification and transactional profile restore. Its `recovery/setup.rs`
+owns the reusable local recovery key, one-time acknowledgement and selected
+destination, using the existing password-encrypted local-user storage and exact
+session/lock authority. `core/recovery/` owns format
 and cryptography. `ui/lib/api/googleDrive.ts` adapts IPC, and
 `ui/features/recovery/` provides shared connection/progress presentation for the
 existing export/restore dialogs. See [backup and recovery](backup-recovery.md#google-drive-security-and-boundaries).

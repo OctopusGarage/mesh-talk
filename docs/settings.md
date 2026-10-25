@@ -214,8 +214,10 @@ Cancel leaves the old value. **Create a backup first** opens the existing backup
 workflow without saving the shorter retention window. Increasing retention or
 selecting Forever does not require a destructive-change confirmation.
 
-Last-backup status is available without generating a new recovery key. Export
-still requires a fresh key and the existing key-confirmation challenge. The
+Last-backup status is available without preparing a recovery key. First-time
+backup setup asks the user to save and acknowledge one reusable recovery key;
+later exports use the encrypted saved key without a typing challenge. The selected
+destination and signed-in Google connection are remembered for manual backups. The
 native destination picker is guarded against duplicate requests and stale
 owner/view completions. Restoration starts on the sign-in screen, as described
 in [backup and recovery](backup-recovery.md).

@@ -546,6 +546,7 @@
       "id": "desktop-recovery",
       "paths": [
         "src-tauri/src/recovery.rs",
+        "src-tauri/src/recovery/",
         "src-tauri/src/trust.rs"
       ],
       "rust": [
@@ -553,6 +554,7 @@
           "package": "mesh-talk",
           "filters": [
             "recovery::",
+            "google_drive::command_tests::",
             "trust::"
           ]
         }
@@ -560,6 +562,20 @@
       "consumers": [
         "desktop-session"
       ],
+      "capability": {
+        "summary": "Create consistent manual encrypted backups with one acknowledged reusable local recovery key, then verify and transactionally restore into a new local profile.",
+        "guide": "docs/backup-recovery.md",
+        "invariants": [
+          {
+            "name": "Saved keys and destination preferences remain encrypted per local user; corrupt setup is never silently replaced and acknowledgement is required before a saved-key export.",
+            "reference": "docs/backup-recovery.md#create-a-backup"
+          },
+          {
+            "name": "Every archive retains a fresh salt and original key compatibility; verified restoration installs its supplied key with the new local credentials.",
+            "reference": "docs/backup-recovery.md#restore-after-losing-a-device"
+          }
+        ]
+      },
       "escalation": [
         "Crypto, archive and trust persistence changes require affected core recovery integration tests and frontend/native restore evidence."
       ]
@@ -877,11 +893,11 @@
         "desktop-recovery"
       ],
       "capability": {
-        "summary": "Transport verified encrypted recovery archives to a user-selected Google account using bounded, cancellable desktop OAuth and Drive requests.",
+        "summary": "Transport verified encrypted recovery archives using a reusable acknowledged recovery key and remembered encrypted Google refresh grant, with bounded cancellable requests and manual backups.",
         "guide": "docs/backup-recovery.md#google-drive-backup-and-restore",
         "invariants": [
           {
-            "name": "Drive grants and pending work belong to the exact desktop session generation; recovery keys never reach Google.",
+            "name": "Active Drive connections and pending work belong to the exact desktop session generation; saved refresh grants are encrypted per local user, signed-out restore remains temporary, and recovery keys never reach Google.",
             "reference": "docs/backup-recovery.md#google-drive-security-and-boundaries"
           },
           {
@@ -1096,7 +1112,8 @@
       "id": "desktop-google-drive-acceptance",
       "paths": [
         "src-tauri/src/google_drive/",
-        "src-tauri/src/recovery.rs"
+        "src-tauri/src/recovery.rs",
+        "src-tauri/src/recovery/"
       ],
       "browser": [
         "e2e/google-drive-backup.spec.ts",

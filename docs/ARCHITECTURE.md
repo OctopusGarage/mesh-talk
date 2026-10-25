@@ -1253,9 +1253,11 @@ limit; authenticated checkpoint compaction remains a separate protocol decision.
 ### Manual encrypted backup and recovery
 
 `recovery/{snapshot,archive,key}.rs` defines a versioned logical snapshot inside
-an authenticated `MTBACK1` stream. Every export uses a fresh 256-bit recovery key;
-the user saves that key separately from the `.mtbackup` file. The application never
-stores the key. Archive chunks are bounded, encrypted with AES-256-GCM using an
+an authenticated `MTBACK1` stream. Desktop setup generates one 256-bit recovery
+key, which the user saves separately and acknowledges once. The desktop host
+retains it in password-encrypted local-user storage for later manual exports.
+Every archive still has a fresh random salt; older per-export keys remain valid
+for their original archives. Archive chunks are bounded, encrypted with AES-256-GCM using an
 HKDF-derived key, and closed by a separately keyed authenticated digest. A missing
 final seal, wrong key, altered frame, duplicate record, or invalid signed event is
 rejected before a restored profile can be published.

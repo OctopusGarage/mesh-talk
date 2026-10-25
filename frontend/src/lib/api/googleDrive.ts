@@ -15,13 +15,17 @@ export const googleDrive = {
   available: () => invoke<boolean>("google_drive_available"),
   connect: (connectionId: string) =>
     invoke<void>("google_drive_connect", { connectionId }),
+  resume: (connectionId: string) =>
+    invoke<boolean>("google_drive_resume", { connectionId }),
+  forget: (connectionId: string) =>
+    invoke<void>("google_drive_forget", { connectionId }),
   disconnect: (connectionId: string) =>
     invoke<void>("google_drive_disconnect", { connectionId }),
   progress: (connectionId: string) =>
     invoke<DriveProgress>("google_drive_progress", { connectionId }),
   list: (connectionId: string) =>
     invoke<DriveArchive[]>("google_drive_list", { connectionId }),
-  create: (connectionId: string, recoveryKey: string) =>
+  create: (connectionId: string, recoveryKey?: string) =>
     invoke<BackupCreated>("google_drive_create_backup", {
       connectionId,
       recoveryKey,

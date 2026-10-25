@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
   global: vi.fn(),
   contact: vi.fn(),
   prepare: vi.fn(),
+  setup: vi.fn(),
+  confirmKey: vi.fn(),
+  setDestination: vi.fn(),
   status: vi.fn(),
   create: vi.fn(),
   save: vi.fn(),
@@ -24,6 +27,9 @@ vi.mock("@/lib/api", () => ({
   },
   recovery: {
     prepareKey: mocks.prepare,
+    setup: mocks.setup,
+    confirmKey: mocks.confirmKey,
+    setDestination: mocks.setDestination,
     status: mocks.status,
     create: mocks.create,
   },
@@ -108,6 +114,13 @@ beforeEach(() => {
   mocks.state = { generation: 0, runEpoch: 0, identityEpoch: 0, ready: true };
   mocks.policy.mockResolvedValue({ global_auto: false, contact_auto: null });
   mocks.prepare.mockResolvedValue("aaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh");
+  mocks.setup.mockResolvedValue({
+    recovery_key: "aaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh",
+    confirmed: false,
+    destination: "local",
+  });
+  mocks.confirmKey.mockResolvedValue(undefined);
+  mocks.setDestination.mockResolvedValue(undefined);
   mocks.status.mockResolvedValue(null);
   host = document.createElement("div");
   root = createRoot(host);
@@ -125,13 +138,10 @@ const exportButton = () =>
 async function openBackup() {
   await render(createElement(DataRecoverySettings));
   await act(async () => mocks.dialog.change?.(true));
-  const input = host.querySelector<HTMLInputElement>("input")!;
   await act(async () => {
-    Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype,
-      "value",
-    )!.set!.call(input, "bbbb-gggg");
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+    host
+      .querySelector<HTMLInputElement>('[data-testid="recovery-key-saved"]')!
+      .click();
   });
 }
 it("keeps receive policy unknown while loading and allows retry after failure", async () => {
@@ -205,15 +215,25 @@ it("does not admit a stale backup export after the settings view closes and reop
 });
 
 it("ignores a backup key prepared by an earlier owner even after an owner ABA transition", async () => {
-  const pending = deferred<string>();
-  mocks.prepare.mockReturnValueOnce(pending.promise);
+  const pending = deferred<{
+    recovery_key: string;
+    confirmed: boolean;
+    destination: string;
+  }>();
+  mocks.setup.mockReturnValueOnce(pending.promise);
   await render(createElement(DataRecoverySettings));
   await act(async () => mocks.dialog.change?.(true));
   mocks.state.generation++;
   await render(createElement(DataRecoverySettings));
   mocks.state.generation++;
   await render(createElement(DataRecoverySettings));
-  await act(async () => pending.resolve("private-old-owner-key"));
+  await act(async () =>
+    pending.resolve({
+      recovery_key: "private-old-owner-key",
+      confirmed: false,
+      destination: "local",
+    }),
+  );
   expect(host.textContent).not.toContain("private-old-owner-key");
 });
 
@@ -229,18 +249,18 @@ it("retries unavailable backup status without generating a key", async () => {
   expect(mocks.prepare).not.toHaveBeenCalled();
 });
 
-it("keeps the challenge and permits another attempt after cancelling the picker", async () => {
+it("keeps the saved-key acknowledgement after cancelling the picker", async () => {
   mocks.save.mockResolvedValue(null);
   await openBackup();
   await act(async () => exportButton().click());
   expect(mocks.create).not.toHaveBeenCalled();
   expect(exportButton().disabled).toBe(false);
-  expect(host.querySelector<HTMLInputElement>("input")!.value).toBe(
-    "bbbb-gggg",
-  );
+  expect(mocks.confirmKey).toHaveBeenCalledTimes(1);
+  await act(async () => exportButton().click());
+  expect(mocks.confirmKey).toHaveBeenCalledTimes(1);
 });
 
-it("exports with the verified per-export key and prevents a second export", async () => {
+it("confirms the key once and exports using the native saved key", async () => {
   mocks.save.mockResolvedValue("/tmp/current.mtbackup");
   mocks.create.mockResolvedValue({
     archive_bytes: 1024,
@@ -248,12 +268,12 @@ it("exports with the verified per-export key and prevents a second export", asyn
   });
   await openBackup();
   await act(async () => exportButton().click());
-  expect(mocks.create).toHaveBeenCalledWith(
-    "/tmp/current.mtbackup",
+  expect(mocks.confirmKey).toHaveBeenCalledWith(
     "aaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh",
   );
+  expect(mocks.create).toHaveBeenCalledWith("/tmp/current.mtbackup");
   expect(host.textContent).toContain("recovery.backupComplete");
-  expect(exportButton().disabled).toBe(true);
+  expect(exportButton()).toBeNull();
 });
 
 it("ignores stale receive policy reads and writes when runtime ownership expires", async () => {
@@ -286,19 +306,16 @@ it("notifies the history page after a current backup succeeds", async () => {
   });
   await render(createElement(DataRecoverySettings, { onBackupCreated }));
   await act(async () => mocks.dialog.change?.(true));
-  const input = host.querySelector<HTMLInputElement>("input")!;
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype,
-      "value",
-    )!.set!.call(input, "bbbb-gggg");
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+  await act(async () =>
+    host
+      .querySelector<HTMLInputElement>('[data-testid="recovery-key-saved"]')!
+      .click(),
+  );
   await act(async () => exportButton().click());
   expect(onBackupCreated).toHaveBeenCalledTimes(1);
 });
 
-it("prepares a key when the backup dialog is opened by its history page", async () => {
+it("loads one-time setup when opened by its history page", async () => {
   const onOpenChange = vi.fn();
   await render(
     createElement(DataRecoverySettings, { open: false, onOpenChange }),
@@ -307,7 +324,8 @@ it("prepares a key when the backup dialog is opened by its history page", async 
   await render(
     createElement(DataRecoverySettings, { open: true, onOpenChange }),
   );
-  expect(mocks.prepare).toHaveBeenCalledTimes(1);
+  expect(mocks.setup).toHaveBeenCalledTimes(1);
+  expect(mocks.prepare).not.toHaveBeenCalled();
   expect(host.textContent).toContain("aaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh");
 });
 
@@ -315,14 +333,11 @@ it("invalidates a pending picker when the controlling history page closes the di
   const pending = deferred<string>();
   mocks.save.mockReturnValue(pending.promise);
   await render(createElement(DataRecoverySettings, { open: true }));
-  const input = host.querySelector<HTMLInputElement>("input")!;
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype,
-      "value",
-    )!.set!.call(input, "bbbb-gggg");
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+  await act(async () =>
+    host
+      .querySelector<HTMLInputElement>('[data-testid="recovery-key-saved"]')!
+      .click(),
+  );
   await act(async () => exportButton().click());
   await render(createElement(DataRecoverySettings, { open: false }));
   await act(async () => pending.resolve("/tmp/stale.mtbackup"));
@@ -344,8 +359,88 @@ it("publishes a verified backup and releases busy state while messaging restarts
     }),
   );
   expect(host.textContent).toContain("recovery.backupComplete");
-  const newKey = Array.from(host.querySelectorAll("button")).find(
-    (button) => button.textContent === "recovery.newKey",
+  const done = Array.from(host.querySelectorAll("button")).find(
+    (button) => button.textContent === "common.done",
   )!;
-  expect(newKey.disabled).toBe(false);
+  expect(done.disabled).toBe(false);
+});
+
+it("reopens confirmed setup without revealing the key or asking for another acknowledgement", async () => {
+  mocks.setup.mockResolvedValue({
+    recovery_key: "saved-private-key",
+    confirmed: true,
+    destination: "local",
+  });
+  mocks.save.mockResolvedValue("/tmp/current.mtbackup");
+  mocks.create.mockResolvedValue({
+    archive_bytes: 1024,
+    preview: { messages: 2, created_at_ms: 1 },
+  });
+  await render(createElement(DataRecoverySettings, { open: true }));
+  expect(host.querySelector('[data-testid="recovery-key-saved"]')).toBeNull();
+  expect(host.textContent).not.toContain("saved-private-key");
+  expect(exportButton().disabled).toBe(false);
+  await act(async () => exportButton().click());
+  expect(mocks.confirmKey).not.toHaveBeenCalled();
+  expect(mocks.prepare).not.toHaveBeenCalled();
+  expect(mocks.create).toHaveBeenCalledWith("/tmp/current.mtbackup");
+});
+
+it("requires the one-time acknowledgement and does not create a backup when saving it fails", async () => {
+  mocks.confirmKey.mockRejectedValue(new Error("Could not save setup"));
+  await render(createElement(DataRecoverySettings, { open: true }));
+  expect(exportButton().disabled).toBe(true);
+  await act(async () =>
+    host
+      .querySelector<HTMLInputElement>('[data-testid="recovery-key-saved"]')!
+      .click(),
+  );
+  await act(async () => exportButton().click());
+  expect(host.textContent).toContain("Could not save setup");
+  expect(mocks.create).not.toHaveBeenCalled();
+  expect(mocks.save).not.toHaveBeenCalled();
+  expect(exportButton().disabled).toBe(false);
+});
+
+it("remembers the chosen destination before admitting a backup", async () => {
+  await openBackup();
+  await act(async () => exportButton().click());
+  expect(mocks.setDestination).toHaveBeenCalledWith("local");
+});
+
+it("does not admit backup creation after a key confirmation completes for an old owner", async () => {
+  const pending = deferred<void>();
+  mocks.confirmKey.mockReturnValue(pending.promise);
+  await openBackup();
+  await act(async () => exportButton().click());
+  mocks.state.generation++;
+  await act(async () => pending.resolve());
+  expect(mocks.save).not.toHaveBeenCalled();
+  expect(mocks.create).not.toHaveBeenCalled();
+});
+
+it("explains unavailable clipboard access without losing the key or crashing", async () => {
+  await render(createElement(DataRecoverySettings, { open: true }));
+  const copy = Array.from(host.querySelectorAll("button")).find(
+    (button) => button.textContent === "recovery.copyKey",
+  )!;
+  await act(async () => copy.click());
+  expect(host.textContent).toContain("recovery.keyCopyFailed");
+  expect(
+    host.querySelector('[data-testid="recovery-export-key"]')?.textContent,
+  ).toContain("aaaa-bbbb");
+});
+
+it("retains the previous destination when saving a destination fails", async () => {
+  mocks.setDestination.mockRejectedValue(
+    new Error("Could not save destination"),
+  );
+  await openBackup();
+  await act(async () => {
+    select().value = "drive";
+    select().dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(select().value).toBe("local");
+  expect(host.textContent).toContain("Could not save destination");
+  expect(exportButton().disabled).toBe(false);
 });

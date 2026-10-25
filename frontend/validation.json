@@ -956,6 +956,7 @@
     {
       "id": "frontend-google-drive-backup",
       "paths": [
+        "frontend/e2e/settings-categories.spec.ts",
         "frontend/src/features/recovery/",
         "frontend/src/lib/api/googleDrive.ts",
         "frontend/src/features/chat/DataRecoverySettings.tsx",
@@ -964,14 +965,21 @@
         "frontend/src/lib/api/recovery.ts",
         "frontend/e2e/recovery.spec.ts"
       ],
-      "frontend": ["src/features/recovery/GoogleDriveConnection.test.ts"],
+      "frontend": [
+        "src/features/recovery/GoogleDriveConnection.test.ts",
+        "src/features/chat/settingsRecoveryFlows.test.ts"
+      ],
       "capability": {
-        "summary": "Explicitly connect Google Drive, confirm a separate recovery key and upload or download encrypted archives through the existing recovery dialogs.",
+        "summary": "Connect Google Drive and save a recovery key once, then manually back up with native retained setup and restore through a single download-and-verify action.",
         "guide": "docs/backup-recovery.md#google-drive-backup-and-restore",
         "invariants": [
           {
-            "name": "Connecting and transferring require user actions; retiring a view disconnects its grant and ignores late results.",
+            "name": "Initial Google authorization and every backup require user actions; later views silently resume remembered grants, while retiring a view cancels only its operation connection and ignores late results.",
             "reference": "docs/backup-recovery.md#google-drive-security-and-boundaries"
+          },
+          {
+            "name": "Recovery keys are acknowledged once, hidden on later visits and reused natively; failed setup cannot create an unrecoverable backup.",
+            "reference": "docs/backup-recovery.md#create-a-backup"
           },
           {
             "name": "Cloud restoration uses the existing verified archive preview and explicit new-profile commit.",
@@ -1622,13 +1630,18 @@
     {
       "id": "frontend-google-drive-acceptance",
       "paths": [
+        "frontend/e2e/settings-categories.spec.ts",
         "frontend/src/features/recovery/",
         "frontend/src/lib/api/googleDrive.ts",
         "frontend/src/features/chat/DataRecoverySettings.tsx",
         "frontend/src/features/auth/RestoreBackup.tsx",
         "frontend/e2e/google-drive-backup.spec.ts"
       ],
-      "browser": ["e2e/google-drive-backup.spec.ts", "e2e/recovery.spec.ts"]
+      "browser": [
+        "e2e/google-drive-backup.spec.ts",
+        "e2e/recovery.spec.ts",
+        "e2e/settings-categories.spec.ts"
+      ]
     },
     {
       "id": "frontend-channel-join-history-acceptance",

@@ -1,4 +1,4 @@
-//! Browser-based desktop OAuth. Tokens stay in native memory only.
+//! Browser-based desktop OAuth and refresh; credentials never enter the webview.
 use super::client::http_client;
 use crate::commands::CommandError;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -56,20 +56,118 @@ fn authorization_url(client_id: &str, redirect: &str, state: &str, verifier: &st
         ("state", state),
         ("code_challenge", &challenge),
         ("code_challenge_method", "S256"),
-        ("prompt", "select_account"),
+        ("prompt", "consent select_account"),
+        ("access_type", "offline"),
     ]);
     url
 }
 #[derive(serde::Deserialize)]
-struct TokenResponse {
-    access_token: String,
+pub(super) struct TokenResponse {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_in: u64,
     token_type: String,
     scope: Option<String>,
 }
 
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GoogleOAuthTokens([redacted])")
+    }
+}
+
+fn checked_token(response: TokenResponse) -> Result<TokenResponse, CommandError> {
+    if response.access_token.is_empty()
+        || response.access_token.len() > 16 * 1024
+        || response.expires_in == 0
+        || response.expires_in > 86400
+        || response
+            .refresh_token
+            .as_ref()
+            .is_some_and(|token| token.is_empty() || token.len() > 16 * 1024)
+        || !response.token_type.eq_ignore_ascii_case("bearer")
+        || response
+            .scope
+            .as_ref()
+            .is_some_and(|scope| !scope.split_whitespace().any(|s| s == SCOPE))
+    {
+        return Err(auth_error());
+    }
+    Ok(response)
+}
+
+pub(super) fn client_id() -> &'static str {
+    option_env!("MESH_TALK_GOOGLE_CLIENT_ID").unwrap_or_default()
+}
+
+pub(super) async fn refresh(refresh_token: &str) -> Result<TokenResponse, CommandError> {
+    if !configured() {
+        return Err(CommandError::InvalidInput(
+            "Google Drive is not configured in this build".into(),
+        ));
+    }
+    refresh_with(
+        http_client()?,
+        "https://oauth2.googleapis.com/token",
+        client_id(),
+        option_env!("MESH_TALK_GOOGLE_CLIENT_SECRET"),
+        refresh_token,
+    )
+    .await
+}
+
+async fn refresh_with(
+    http: reqwest::Client,
+    endpoint: &str,
+    client_id: &str,
+    secret: Option<&str>,
+    refresh_token: &str,
+) -> Result<TokenResponse, CommandError> {
+    let mut form = vec![
+        ("client_id", client_id),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+    ];
+    if let Some(secret) = secret.filter(|secret| !secret.is_empty()) {
+        form.push(("client_secret", secret));
+    }
+    let response = http.post(endpoint).form(&form).send().await.map_err(|_| {
+        CommandError::Io(
+            "Could not reconnect to Google Drive. Check your connection and retry.".into(),
+        )
+    })?;
+    if !response.status().is_success() {
+        // Only Google's explicit invalid_grant means the saved authorization
+        // must be forgotten. Rate limits, timeouts and client configuration
+        // errors must not destroy a valid remembered connection.
+        if response.status() == reqwest::StatusCode::BAD_REQUEST {
+            #[derive(serde::Deserialize)]
+            struct OAuthFailure {
+                error: Option<String>,
+            }
+            let failure: OAuthFailure = super::client::json_response(response).await?;
+            if failure.error.as_deref() == Some("invalid_grant") {
+                return Err(CommandError::Authentication(
+                    "Google Drive access expired or was revoked. Connect Google Drive again."
+                        .into(),
+                ));
+            }
+            return Err(CommandError::InvalidInput(
+                "Google Drive could not reconnect. Check this build's Google configuration and retry.".into(),
+            ));
+        }
+        return Err(CommandError::Io(
+            "Google Drive is temporarily unavailable. Try again.".into(),
+        ));
+    }
+    checked_token(super::client::json_response(response).await?).map_err(|_| {
+        CommandError::Io("Google Drive returned an invalid connection response. Try again.".into())
+    })
+}
+
 pub(super) async fn authorize<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
-) -> Result<String, CommandError> {
+) -> Result<TokenResponse, CommandError> {
     let client_id = option_env!("MESH_TALK_GOOGLE_CLIENT_ID")
         .filter(|_| configured())
         .ok_or_else(|| {
@@ -97,7 +195,7 @@ async fn authorize_with(
     token_endpoint: &str,
     callback_timeout: Duration,
     open_browser: impl FnOnce(&Url) -> Result<(), CommandError>,
-) -> Result<String, CommandError> {
+) -> Result<TokenResponse, CommandError> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|_| CommandError::Io("Could not open Google sign-in callback".into()))?;
@@ -155,17 +253,27 @@ async fn authorize_with(
     if !response.status().is_success() {
         return Err(auth_error());
     }
-    let response: TokenResponse = super::client::json_response(response).await?;
-    if response.access_token.is_empty()
-        || !response.token_type.eq_ignore_ascii_case("bearer")
-        || response
-            .scope
-            .as_ref()
-            .is_some_and(|scope| !scope.split_whitespace().any(|s| s == SCOPE))
-    {
-        return Err(auth_error());
-    }
-    Ok(response.access_token)
+    checked_token(super::client::json_response(response).await?)
+}
+
+#[cfg(test)]
+pub(super) async fn refresh_for_test(
+    endpoint: &str,
+    token: &str,
+) -> Result<TokenResponse, CommandError> {
+    refresh_with(
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap(),
+        endpoint,
+        client_id(),
+        None,
+        token,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -212,6 +320,6 @@ mod tests {
             pairs["code_challenge"],
             "iMnq5o6zALKXGivsnlom_0F5_WYda32GHkxlV7mq7hQ"
         );
-        assert!(!pairs.contains_key("access_type"));
+        assert_eq!(pairs["access_type"], "offline");
     }
 }

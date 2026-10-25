@@ -29,7 +29,12 @@ test.beforeEach(async ({ page }) => {
         }
       ).__TAURI_INTERNALS__;
       const original = ipc.invoke;
+      let confirmed = false;
+      let destination = "local";
+      let remembered = false;
+      let signedIn = false;
       let cancelDownload: (() => void) | null = null;
+      let cancelUpload: (() => void) | null = null;
 
       (window as unknown as Record<string, unknown>).__driveCalls = [];
       ipc.invoke = async (command, args) => {
@@ -42,9 +47,24 @@ test.beforeEach(async ({ page }) => {
         if (command === "google_drive_disconnect") {
           cancelDownload?.();
           cancelDownload = null;
+          cancelUpload?.();
+          cancelUpload = null;
           return;
         }
-        if (command === "google_drive_connect") return;
+        if (command === "google_drive_connect") {
+          remembered = signedIn;
+          return;
+        }
+        if (command === "login") {
+          const result = await original(command, args);
+          signedIn = true;
+          return result;
+        }
+        if (command === "google_drive_resume") return remembered;
+        if (command === "google_drive_forget") {
+          remembered = false;
+          return;
+        }
         if (command === "google_drive_download") {
           if (
             (window as unknown as Record<string, unknown>).__driveHoldDownload
@@ -66,8 +86,22 @@ test.beforeEach(async ({ page }) => {
         if (command === "google_drive_progress")
           return { phase: "uploading", transferred: 1024, total: 2048 };
         if (command === "prepare_backup_key") return key;
+        if (command === "backup_setup")
+          return { recovery_key: key, confirmed, destination };
+        if (command === "confirm_backup_key") {
+          confirmed = true;
+          return;
+        }
+        if (command === "set_backup_destination") {
+          destination = String(args.destination);
+          return;
+        }
         if (command === "backup_status") return null;
         if (command === "google_drive_create_backup") {
+          if ((window as unknown as Record<string, unknown>).__driveHoldUpload)
+            return new Promise<void>((_resolve, reject) => {
+              cancelUpload = () => reject(new Error("Transfer cancelled"));
+            });
           if ((window as unknown as Record<string, unknown>).__driveFailUpload)
             throw new Error("Reconnect Google Drive and retry");
           return { recovery_key: key, preview, archive_bytes: 2048 };
@@ -89,9 +123,9 @@ test.beforeEach(async ({ page }) => {
     { key, preview },
   );
 });
-test("Drive export requires connection and a separately saved recovery key", async ({
+test("Drive export connects and saves a key once, then reopens ready to back up", async ({
   page,
-}) => {
+}, testInfo) => {
   await page.goto("/");
   await page.getByTestId("login-username").fill("tester");
   await page.getByTestId("login-password").fill("password123");
@@ -105,7 +139,12 @@ test("Drive export requires connection and a separately saved recovery key", asy
   await page.getByLabel("Backup destination").selectOption("drive");
   await expect(page.getByTestId("recovery-export")).toBeDisabled();
   await page.getByRole("button", { name: "Connect Google Drive" }).click();
-  await page.getByTestId("recovery-key-check").fill("22222222-77777777");
+  await expect(page.getByRole("dialog").last()).toHaveCSS("opacity", "1");
+  await page
+    .getByRole("dialog")
+    .last()
+    .screenshot({ path: testInfo.outputPath("drive-first-backup.png") });
+  await page.getByTestId("recovery-key-saved").check();
   await page.getByRole("button", { name: "Back up now", exact: true }).click();
   await expect(
     page.getByText("Encrypted backup saved to Google Drive"),
@@ -118,6 +157,34 @@ test("Drive export requires connection and a separately saved recovery key", asy
       ),
     )
     .toContain("google_drive_disconnect");
+  await page
+    .getByRole("button", { name: "Create encrypted backup" })
+    .last()
+    .click();
+  await expect(page.getByLabel("Backup destination")).toHaveValue("drive");
+  await expect(page.getByTestId("recovery-key-saved")).toHaveCount(0);
+  await expect(page.getByTestId("recovery-export-key")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Connect Google Drive" }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("dialog").last()).toHaveCSS("opacity", "1");
+  await page
+    .getByRole("dialog")
+    .last()
+    .screenshot({ path: testInfo.outputPath("drive-repeat-backup.png") });
+  await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  await expect(
+    page.getByText("Encrypted backup saved to Google Drive"),
+  ).toBeVisible();
+  const calls = await page.evaluate(
+    () => (window as unknown as { __driveCalls: string[] }).__driveCalls,
+  );
+  expect(
+    calls.filter((command) => command === "google_drive_connect"),
+  ).toHaveLength(1);
+  expect(
+    calls.filter((command) => command === "google_drive_create_backup"),
+  ).toHaveLength(2);
 });
 test("Drive recovery downloads, verifies, previews and explicitly restores", async ({
   page,
@@ -128,7 +195,6 @@ test("Drive recovery downloads, verifies, previews and explicitly restores", asy
     .click();
   await page.getByLabel("Backup source").selectOption("drive");
   await page.getByRole("button", { name: "Connect Google Drive" }).click();
-  await page.getByRole("button", { name: "Download selected backup" }).click();
   await page.getByTestId("restore-key").fill("wrong");
   await page.getByTestId("restore-inspect").click();
   await expect(page.getByRole("alert")).toContainText("Incorrect recovery key");
@@ -164,7 +230,7 @@ test("failed cloud upload keeps the recovery key and offers reconnect and retry"
     .click();
   await page.getByLabel("Backup destination").selectOption("drive");
   await page.getByRole("button", { name: "Connect Google Drive" }).click();
-  await page.getByTestId("recovery-key-check").fill("22222222-77777777");
+  await page.getByTestId("recovery-key-saved").check();
   await page.evaluate(() => {
     (window as unknown as Record<string, unknown>).__driveFailUpload = true;
   });
@@ -173,7 +239,8 @@ test("failed cloud upload keeps the recovery key and offers reconnect and retry"
   await expect(
     page.getByText("Encrypted backup saved to Google Drive"),
   ).toHaveCount(0);
-  await expect(page.getByTestId("recovery-export-key")).toContainText(key);
+  await expect(page.getByTestId("recovery-export-key")).toHaveCount(0);
+  await expect(page.getByText("Your recovery key is set up")).toBeVisible();
   await page
     .getByRole("button", { name: "Disconnect / change Google account" })
     .click();
@@ -199,7 +266,8 @@ test("cancelled download cannot publish a preview and can reconnect", async ({
   await page.evaluate(() => {
     (window as unknown as Record<string, unknown>).__driveHoldDownload = true;
   });
-  await page.getByRole("button", { name: "Download selected backup" }).click();
+  await page.getByTestId("restore-key").fill(key);
+  await page.getByTestId("restore-inspect").click();
   await page.getByRole("button", { name: "Cancel transfer" }).click();
   await expect(page.getByTestId("restore-inspect")).toBeDisabled();
   await expect(page.getByTestId("restore-preview")).toHaveCount(0);
@@ -207,8 +275,50 @@ test("cancelled download cannot publish a preview and can reconnect", async ({
   await page.evaluate(() => {
     (window as unknown as Record<string, unknown>).__driveHoldDownload = false;
   });
-  await page.getByRole("button", { name: "Download selected backup" }).click();
+  await page.getByTestId("restore-key").fill(key);
+  await page.getByTestId("restore-inspect").click();
+  await expect(page.getByTestId("restore-preview")).toContainText(
+    "12 messages",
+  );
+});
+
+test("cancelling an upload preserves setup and reconnects silently for a manual retry", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "history");
+  await page
+    .getByRole("button", { name: "Create encrypted backup" })
+    .last()
+    .click();
+  await page.getByLabel("Backup destination").selectOption("drive");
+  await page.getByRole("button", { name: "Connect Google Drive" }).click();
+  await page.getByTestId("recovery-key-saved").check();
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__driveHoldUpload = true;
+  });
+  await page.getByTestId("recovery-export").click();
+  await page.getByRole("button", { name: "Cancel transfer" }).click();
+  await expect(page.getByTestId("recovery-export")).toBeEnabled();
+  await expect(page.getByTestId("recovery-key-saved")).toHaveCount(0);
   await expect(
-    page.getByText("Backup downloaded. Enter its recovery key to verify it."),
+    page.getByRole("button", { name: "Connect Google Drive" }),
+  ).toHaveCount(0);
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__driveHoldUpload = false;
+  });
+  await page.getByTestId("recovery-export").click();
+  await expect(
+    page.getByText("Encrypted backup saved to Google Drive"),
   ).toBeVisible();
+  const calls = await page.evaluate(
+    () => (window as unknown as { __driveCalls: string[] }).__driveCalls,
+  );
+  expect(
+    calls.filter((command) => command === "google_drive_connect"),
+  ).toHaveLength(1);
 });

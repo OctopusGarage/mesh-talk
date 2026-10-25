@@ -145,8 +145,10 @@ _Avoid_: Message Yourself, self-chat, pinned contact or pinned conversation.
 See [Favorites](docs/favorites.md).
 
 **Recovery archive**:
-A user-created encrypted snapshot protected by a separate recovery key. Restore
-retains account identity but creates a new device identity.
+A user-created encrypted snapshot protected by a separate recovery key. Desktop
+backups reuse a key acknowledged once and retained in encrypted local-user storage;
+older archives still need their original keys. Restore retains account identity
+but creates a new device identity. See [backup and recovery](docs/backup-recovery.md).
 _Avoid_: device clone, device revocation, live synchronization.
 
 ## Networking and availability

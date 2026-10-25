@@ -116,7 +116,12 @@ async fn exchange(
     status: &str,
     body: &str,
     secret: Option<&str>,
-) -> (Result<String, CommandError>, TokenRequest, Url, String) {
+) -> (
+    Result<TokenResponse, CommandError>,
+    TokenRequest,
+    Url,
+    String,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
     let (opened, browser) = oneshot::channel();
@@ -145,23 +150,25 @@ async fn exchange(
 
 #[tokio::test]
 async fn authorize_binds_pkce_and_redirect_to_the_scoped_token_exchange() {
-    let body = format!(r#"{{"access_token":"{TOKEN}","token_type":"bEaReR","scope":"{SCOPE}"}}"#);
+    let body = format!(
+        r#"{{"access_token":"{TOKEN}","expires_in":3600,"token_type":"bEaReR","scope":"{SCOPE}"}}"#
+    );
     let (result, request, url, callback_response) =
         exchange("200 OK", &body, Some(CLIENT_SECRET)).await;
-    assert_eq!(result.unwrap(), TOKEN);
+    assert_eq!(result.unwrap().access_token, TOKEN);
     assert_eq!(
         url.origin().ascii_serialization(),
         "https://accounts.google.com"
     );
     assert_eq!(url.path(), "/o/oauth2/v2/auth");
     let parameters = query(&url);
-    assert_eq!(parameters.len(), 8);
+    assert_eq!(parameters.len(), 9);
     assert_eq!(parameters["client_id"], CLIENT_ID);
     assert_eq!(parameters["scope"], SCOPE);
     assert_eq!(parameters["response_type"], "code");
-    assert_eq!(parameters["prompt"], "select_account");
+    assert_eq!(parameters["prompt"], "consent select_account");
     assert_eq!(parameters["code_challenge_method"], "S256");
-    assert!(!parameters.contains_key("access_type"));
+    assert_eq!(parameters["access_type"], "offline");
     let redirect = Url::parse(&parameters["redirect_uri"]).unwrap();
     assert_eq!(redirect.scheme(), "http");
     assert_eq!(redirect.host_str(), Some("127.0.0.1"));
@@ -197,9 +204,9 @@ async fn authorize_binds_pkce_and_redirect_to_the_scoped_token_exchange() {
 
 #[tokio::test]
 async fn authorize_supports_public_clients_and_an_omitted_token_scope() {
-    let body = format!(r#"{{"access_token":"{TOKEN}","token_type":"Bearer"}}"#);
+    let body = format!(r#"{{"access_token":"{TOKEN}","expires_in":3600,"token_type":"Bearer"}}"#);
     let (result, request, _, _) = exchange("200 OK", &body, None).await;
-    assert_eq!(result.unwrap(), TOKEN);
+    assert_eq!(result.unwrap().access_token, TOKEN);
     assert_eq!(request.form.len(), 5);
     assert!(!request.form.contains_key("client_secret"));
 }
@@ -208,8 +215,9 @@ async fn authorize_supports_public_clients_and_an_omitted_token_scope() {
 async fn authorize_ignores_stale_unrelated_and_unreadable_callbacks() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
-    let body =
-        format!(r#"{{"access_token":"{TOKEN}","token_type":"Bearer","scope":"openid {SCOPE}"}}"#);
+    let body = format!(
+        r#"{{"access_token":"{TOKEN}","expires_in":3600,"token_type":"Bearer","scope":"openid {SCOPE}"}}"#
+    );
     let (opened, browser) = oneshot::channel();
     let authorization = authorize_with(
         CLIENT_ID,
@@ -253,7 +261,7 @@ async fn authorize_ignores_stale_unrelated_and_unreadable_callbacks() {
         )
     })
     .await;
-    assert_eq!(result.unwrap(), TOKEN);
+    assert_eq!(result.unwrap().access_token, TOKEN);
     assert_eq!(request.form["code"], CODE);
 }
 
@@ -306,22 +314,22 @@ async fn authorize_rejects_invalid_token_grants_without_exposing_credentials() {
     let cases = [
         (
             "200 OK",
-            r#"{"access_token":"","token_type":"Bearer"}"#,
+            r#"{"access_token":"","expires_in":3600,"token_type":"Bearer"}"#,
             true,
         ),
         (
             "200 OK",
-            r#"{"access_token":"fake-leaked-token","token_type":"Basic"}"#,
+            r#"{"access_token":"fake-leaked-token","expires_in":3600,"token_type":"Basic"}"#,
             true,
         ),
         (
             "200 OK",
-            r#"{"access_token":"fake-leaked-token","token_type":"Bearer","scope":"openid"}"#,
+            r#"{"access_token":"fake-leaked-token","expires_in":3600,"token_type":"Bearer","scope":"openid"}"#,
             true,
         ),
         (
             "200 OK",
-            r#"{"access_token":"fake-leaked-token","token_type":"Bearer","scope":""}"#,
+            r#"{"access_token":"fake-leaked-token","expires_in":3600,"token_type":"Bearer","scope":""}"#,
             true,
         ),
         ("200 OK", r#"{"access_token":"fake-leaked-token"}"#, false),
@@ -454,4 +462,92 @@ async fn authorize_bounds_an_incomplete_callback_request() {
         result.unwrap_err().to_string(),
         "Google sign-in timed out. Connect Google Drive again."
     );
+}
+
+#[tokio::test]
+async fn refresh_uses_the_saved_grant_without_browser_or_recovery_key() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+    let body = format!(
+        r#"{{"access_token":"{TOKEN}","token_type":"Bearer","expires_in":3600,"refresh_token":"rotated-refresh-grant","scope":"{SCOPE}"}}"#
+    );
+    let (result, request) = tokio::join!(
+        refresh_with(
+            test_client().unwrap(),
+            &endpoint,
+            CLIENT_ID,
+            Some(CLIENT_SECRET),
+            "saved-refresh-grant"
+        ),
+        token_reply(listener, "200 OK", &body)
+    );
+    let tokens = result.unwrap();
+    assert_eq!(tokens.access_token, TOKEN);
+    assert_eq!(
+        tokens.refresh_token.as_deref(),
+        Some("rotated-refresh-grant")
+    );
+    assert_eq!(request.form.len(), 4);
+    assert_eq!(request.form["grant_type"], "refresh_token");
+    assert_eq!(request.form["refresh_token"], "saved-refresh-grant");
+    assert_eq!(request.form["client_id"], CLIENT_ID);
+    assert_eq!(request.form["client_secret"], CLIENT_SECRET);
+    assert!(!request.form.contains_key("code"));
+    assert!(!request.headers.contains_key("authorization"));
+}
+
+#[tokio::test]
+async fn refresh_distinguishes_revoked_grants_from_retryable_provider_failure() {
+    for (status, authentication_failure) in [
+        ("400 Bad Request", true),
+        ("503 Service Unavailable", false),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let (result, _) = tokio::join!(
+            refresh_with(
+                test_client().unwrap(),
+                &endpoint,
+                CLIENT_ID,
+                None,
+                "saved-refresh-grant"
+            ),
+            token_reply(
+                listener,
+                status,
+                r#"{"error":"invalid_grant","error_description":"provider-secret-not-for-users"}"#
+            )
+        );
+        let error = result.unwrap_err();
+        assert_eq!(
+            matches!(error, CommandError::Auth(_)),
+            authentication_failure
+        );
+        assert!(!error.to_string().contains("provider-secret-not-for-users"));
+    }
+}
+
+#[tokio::test]
+async fn refresh_rejects_invalid_token_expiry_scope_and_type() {
+    for body in [
+        r#"{"access_token":"access","token_type":"Bearer","expires_in":0}"#,
+        r#"{"access_token":"access","token_type":"Bearer","expires_in":86401}"#,
+        r#"{"access_token":"access","token_type":"Bearer","expires_in":3600,"scope":"openid"}"#,
+        r#"{"access_token":"access","token_type":"Basic","expires_in":3600}"#,
+        r#"{"access_token":"access","token_type":"Bearer","expires_in":3600,"refresh_token":""}"#,
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let (result, _) = tokio::join!(
+            refresh_with(
+                test_client().unwrap(),
+                &endpoint,
+                CLIENT_ID,
+                None,
+                "saved-refresh-grant"
+            ),
+            token_reply(listener, "200 OK", body)
+        );
+        assert!(result.is_err());
+    }
 }
