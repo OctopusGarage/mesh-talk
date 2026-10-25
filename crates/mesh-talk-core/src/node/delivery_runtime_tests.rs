@@ -4969,7 +4969,9 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     // The immediate flush API is one bounded best-effort turn. Exercise the
     // retained production worker until the live fallback actually owns the bytes.
     let worker = tokio::spawn(a.clone().run_delivery_loop());
-    let custody = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    // This asserts eventual exact custody, not a five-second latency contract.
+    // Windows can spend two seconds rejecting each closed loopback endpoint.
+    let custody = tokio::time::timeout(super::route_timing::MAX_AUTHENTICATION_DEADLINE, async {
         while !relay.lock().unwrap().has(&outer_final) {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
@@ -8339,7 +8341,7 @@ async fn relay_receive_cadence_fixture(progressing_alternative: bool, reset: Rel
             .unwrap()
             .update(&unrelated, IpAddr::V4(Ipv4Addr::LOCALHOST), &b.user_id());
     }
-    let delayed_churn = if progressing_alternative {
+    let mut delayed_churn = if progressing_alternative {
         let recipient = b.clone();
         Some(tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -8430,6 +8432,31 @@ async fn relay_receive_cadence_fixture(progressing_alternative: bool, reset: Rel
     };
 
     let replacement_task = if progressing_alternative {
+        // The cadence/churn phase is complete. Retire its unreachable synthetic
+        // offices before independently checking permission and endpoint recovery;
+        // two refused Windows dials can consume that phase's entire four seconds.
+        if let Some(task) = delayed_churn.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        {
+            let mut roster = b.roster.lock().unwrap();
+            let churn = roster
+                .post_offices()
+                .into_iter()
+                .filter(|peer| {
+                    peer.public != live_proof.public() && peer.public != silent_proof.public()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                churn.len(),
+                2,
+                "both unrelated roster updates must have run"
+            );
+            for peer in churn {
+                roster.forget(&peer.public);
+            }
+        }
         // Move this same authenticated office to a new endpoint while receive
         // permission is suspended, then prove the owned worker resumes there.
         b.set_post_office_permissions(true, false);
