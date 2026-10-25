@@ -109,6 +109,12 @@ it("does not describe a missing origin proof as a user hiding their location", (
     }),
   );
   expect(html).toContain("No shared registration information");
+  expect(html).toContain(
+    "Shown only when the member shares registration information.",
+  );
+  expect(html).not.toContain(
+    "The member chose to share this registration office.",
+  );
   expect(html).not.toContain("origin unknown");
   expect(html).not.toContain("hidden by");
 });
