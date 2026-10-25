@@ -967,6 +967,14 @@ tombstones participate in the digest. Equal metadata with a missing blob remains
 incomplete and cannot report up to date. Interrupted transfers preserve the old
 accepted version. Startup removes only managed incomplete document chunks.
 
+Each external wake or periodic refresh compares every enabled domain in a fresh
+sweep once the previous sweep has finished. Completed-domain bits belong to that
+sweep; digests and capability cooldowns remain peer-scoped. Wakes during a partial
+page or sweep coalesce into one follow-up sweep without resetting its cursor or
+starving other domains. Starting a fresh sweep does not create a continuation
+when backoff prevents I/O. Mandatory metadata and optional documents share this
+existing owner and scheduling rule.
+
 Manifests carry at most 64 records per turn; chunks are at most 16 KiB and a turn
 transfers at most 12 MiB. Drafts are capped at 64 KiB, packs at 12 MiB and private
 avatars at 1 MiB; the store bounds ordinary records, read receipts and aggregate

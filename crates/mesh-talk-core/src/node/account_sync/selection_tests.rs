@@ -88,10 +88,41 @@ pub(super) async fn accept_legacy_account_request(
     listener: &tokio::net::TcpListener,
     node: &Arc<Node>,
 ) -> (SecureChannel<TcpStream>, Vec<u8>) {
+    accept_legacy_account_request_inner(listener, node, false).await
+}
+
+// Only the policy-invalidation fixture permits a connection to retire during
+// handshake or before its first request. No partial frame or request error is ignored.
+pub(super) async fn accept_legacy_request_after_policy_retirement(
+    listener: &tokio::net::TcpListener,
+    node: &Arc<Node>,
+) -> (SecureChannel<TcpStream>, Vec<u8>) {
+    accept_legacy_account_request_inner(listener, node, true).await
+}
+
+fn clean_legacy_probe_retirement(error: &crate::transport::TransportError) -> bool {
+    matches!(error, crate::transport::TransportError::Io(error)
+        if error.kind() == std::io::ErrorKind::UnexpectedEof
+            && error.to_string() == "transport closed at frame boundary")
+}
+
+async fn accept_legacy_account_request_inner(
+    listener: &tokio::net::TcpListener,
+    node: &Arc<Node>,
+    allow_retired_probe: bool,
+) -> (SecureChannel<TcpStream>, Vec<u8>) {
     loop {
         let (stream, _) = listener.accept().await.unwrap();
-        let mut channel = node.privacy_accept(stream).await.unwrap();
-        let bytes = channel.recv().await.unwrap();
+        let mut channel = match node.privacy_accept(stream).await {
+            Ok(channel) => channel,
+            Err(error) if allow_retired_probe && clean_legacy_probe_retirement(&error) => continue,
+            Err(error) => panic!("legacy fixture handshake failed: {error}"),
+        };
+        let bytes = match channel.recv().await {
+            Ok(bytes) => bytes,
+            Err(error) if allow_retired_probe && clean_legacy_probe_retirement(&error) => continue,
+            Err(error) => panic!("legacy fixture failed before its first request: {error}"),
+        };
         if matches!(
             AccountHistoryFrame::decode_versioned(&bytes),
             Some((
@@ -106,6 +137,65 @@ pub(super) async fn accept_legacy_account_request(
         }
         return (channel, bytes);
     }
+}
+
+#[tokio::test]
+async fn policy_fixture_accepts_a_valid_request_after_an_abandoned_noise_probe() {
+    let (_dir, source, receiver) = sibling_nodes();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let expected_account = source.account_id();
+    let server_source = source.clone();
+    let server = tokio::spawn(async move {
+        let (_, bytes) =
+            accept_legacy_request_after_policy_retirement(&listener, &server_source).await;
+        assert!(matches!(AccountHistoryFrame::decode(&bytes),
+            Some(AccountHistoryFrame::Request { account_id, .. }) if account_id == expected_account));
+    });
+    // Policy cancellation can retire a dial before or after Noise authentication.
+    drop(TcpStream::connect(address).await.unwrap());
+    let retired = receiver
+        .privacy_sync_dial(address, &source.identity.public())
+        .await
+        .unwrap();
+    drop(retired);
+    let mut valid = receiver
+        .privacy_sync_dial(address, &source.identity.public())
+        .await
+        .unwrap();
+    send_frame(
+        &mut valid,
+        AccountSyncVersion::V2,
+        &AccountHistoryFrame::Request {
+            version: 2,
+            account_id: source.account_id(),
+            cursor: None,
+            known_digest: [0; 32],
+            wanted: DeviceSyncPolicy::default(),
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn policy_fixture_retirement_rejects_truncated_frame_headers_and_payloads() {
+    for bytes in [&[0u8, 0][..], &[0, 0, 0, 4, 1][..]] {
+        let mut input = bytes;
+        let error = crate::transport::channel::read_frame(&mut input)
+            .await
+            .unwrap_err();
+        assert!(!clean_legacy_probe_retirement(&error));
+    }
+    let error = crate::transport::TransportError::Io(std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "incomplete payload",
+    ));
+    assert!(!clean_legacy_probe_retirement(&error));
 }
 
 // A malformed data fixture must complete capability negotiation first so the

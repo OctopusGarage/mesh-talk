@@ -130,6 +130,18 @@ impl Default for DocumentSyncCursor {
     }
 }
 impl DocumentSyncCursor {
+    /// Start one new comparison sweep after an external wake. A partial page or
+    /// cycle must finish first; its owner retains one coalesced follow-up wake.
+    pub(in crate::node) fn begin_refresh(&mut self) -> bool {
+        if self.pending || self.after.is_some() {
+            return false;
+        }
+        self.visited = 0;
+        self.settled = 0;
+        self.up_to_date = false;
+        true
+    }
+
     pub(in crate::node) fn mandatory() -> Self {
         Self {
             scope: DocumentSyncScope::Mandatory,
@@ -1198,6 +1210,47 @@ mod status_tests {
     use super::*;
     use crate::node::{DeviceSyncPolicy, SyncPhase};
     #[test]
+    fn refresh_preserves_partial_pages_and_cycles_and_retains_peer_hints() {
+        let mut cursor = DocumentSyncCursor::mandatory();
+        cursor.domain = AccountDocumentDomain::GroupInventory as usize;
+        cursor.visited = 1 << AccountDocumentDomain::GroupControl as usize;
+        cursor.settled = cursor.visited;
+        cursor.pending = true;
+        cursor.digests[cursor.domain] = [7; 32];
+        cursor.operation_digest = [8; 32];
+        cursor.group_retry_at = Some(Instant::now() + Duration::from_secs(3));
+        let retry = cursor.group_retry_at;
+        let visited = cursor.visited;
+        assert!(!cursor.begin_refresh());
+        assert_eq!(
+            cursor.visited, visited,
+            "a partial cycle retains its completed domains"
+        );
+        cursor.pending = false;
+        cursor.after = Some(AccountDocumentKey::DeviceHostname {
+            device_id: "a".repeat(32),
+        });
+        assert!(!cursor.begin_refresh());
+        assert!(
+            cursor.after.is_some(),
+            "a partial page retains its continuation key"
+        );
+        cursor.after = None;
+        cursor.up_to_date = true;
+        assert!(cursor.begin_refresh());
+        assert_eq!(cursor.visited, 0);
+        assert_eq!(cursor.settled, 0);
+        assert!(!cursor.pending && !cursor.up_to_date);
+        assert_eq!(
+            cursor.domain,
+            AccountDocumentDomain::GroupInventory as usize
+        );
+        assert_eq!(cursor.digests[cursor.domain], [7; 32]);
+        assert_eq!(cursor.operation_digest, [8; 32]);
+        assert_eq!(cursor.group_retry_at, retry);
+    }
+
+    #[test]
     fn document_status_keeps_upgrade_policy_and_digest_completion_distinct() {
         let policy = DeviceSyncPolicy {
             history: true,
@@ -1258,6 +1311,157 @@ mod control_policy_status_tests {
 #[cfg(test)]
 mod group_control_tests {
     use super::*;
+    #[tokio::test]
+    async fn fresh_refresh_during_backoff_does_not_create_a_no_io_continuation() {
+        let mut fixture = UpgradeFixture::new().await;
+        let mut cursor = DocumentSyncCursor::mandatory();
+        cursor.visited = cursor.scope.mask();
+        cursor.settled = cursor.visited;
+        cursor.retry_at = Some(Instant::now() + Duration::from_secs(5));
+        let retry = cursor.retry_at;
+        assert!(cursor.begin_refresh());
+        fixture
+            .target
+            .pull_account_documents_page(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert!(
+            !cursor.pending,
+            "a backoff-only turn must release its worker instead of self-requeueing"
+        );
+        assert_eq!(cursor.retry_at, retry);
+        assert_eq!(cursor.visited, 0);
+        fixture.servers.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn coalesced_refresh_wakes_cannot_restart_a_partial_mandatory_sweep() {
+        let mut fixture = UpgradeFixture::new().await;
+        let mut cursor = DocumentSyncCursor::mandatory();
+        for _ in 0..2 {
+            assert!(cursor.begin_refresh());
+            let mut pages = 0;
+            loop {
+                fixture
+                    .target
+                    .pull_account_documents_page(&fixture.peer, &mut cursor)
+                    .await
+                    .unwrap();
+                pages += 1;
+                if !cursor.pending {
+                    break;
+                }
+                let visited = cursor.visited;
+                let domain = cursor.domain;
+                // Many external notifications coalesce behind the same partial
+                // sweep; they cannot move it back to its first domain.
+                for _ in 0..8 {
+                    assert!(!cursor.begin_refresh());
+                }
+                assert_eq!(cursor.visited, visited);
+                assert_eq!(cursor.domain, domain);
+                assert!(
+                    pages < 4,
+                    "all three mandatory domains must progress within one bounded cycle"
+                );
+            }
+            assert_eq!(cursor.visited & cursor.scope.mask(), cursor.scope.mask());
+            assert_eq!(pages, 3);
+        }
+        fixture.servers.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn settled_mandatory_refresh_revisits_committed_results_after_a_precommit_page() {
+        let mut fixture = UpgradeFixture::new().await;
+        let group = fixture
+            .source
+            .create_channel("refresh result", vec![])
+            .await
+            .unwrap();
+        fixture.source.publish_account_group_access_for(group);
+        fixture.source.publish_account_group_operations_for(group);
+        let key = AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: fixture.source.user_id(),
+        };
+        let mut cursor = DocumentSyncCursor::mandatory();
+        for _ in 0..16 {
+            fixture
+                .target
+                .pull_account_documents_page(&fixture.peer, &mut cursor)
+                .await
+                .unwrap();
+            if !cursor.pending {
+                break;
+            }
+        }
+        assert!(!cursor.pending && cursor.after.is_none());
+        let before = fixture.target.account_document_meta(&key).unwrap();
+        // A request publication wake sees the source before its final effect.
+        cursor.begin_refresh();
+        fixture
+            .target
+            .pull_account_documents_page(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert_ne!(cursor.domain, AccountDocumentDomain::GroupControl as usize);
+        // Finish that refresh before the final publication wake. The old
+        // saturated cursor incorrectly declared completion after its first page.
+        for _ in 0..16 {
+            if !cursor.pending {
+                break;
+            }
+            fixture
+                .target
+                .pull_account_documents_page(&fixture.peer, &mut cursor)
+                .await
+                .unwrap();
+        }
+        assert!(!cursor.pending && cursor.after.is_none());
+        let id = fixture
+            .source
+            .new_account_group_operation_id(&fixture.source.account_id())
+            .unwrap();
+        fixture
+            .source
+            .submit_account_group_operation(
+                &fixture.source.account_id(),
+                id,
+                group,
+                crate::node::AccountGroupOperation::Rename {
+                    name: "committed refresh".into(),
+                },
+            )
+            .unwrap();
+        fixture.source.maintain_account_group_operation_effects();
+        let committed = fixture.source.account_document_meta(&key).unwrap();
+        assert_ne!(before.content_hash, committed.content_hash);
+        // A final commit wake must compare every mandatory domain even when
+        // its next page is not GroupControl.
+        cursor.begin_refresh();
+        for _ in 0..16 {
+            fixture
+                .target
+                .pull_account_documents_page(&fixture.peer, &mut cursor)
+                .await
+                .unwrap();
+            if !cursor.pending {
+                break;
+            }
+        }
+        assert_eq!(
+            fixture
+                .target
+                .account_document_meta(&key)
+                .unwrap()
+                .content_hash,
+            committed.content_hash,
+            "one refresh must import the committed source result without waiting for the periodic tick"
+        );
+        fixture.servers.shutdown().await;
+    }
+
     #[tokio::test]
     async fn shared_historical_digest_byte_never_allows_cross_domain_metadata() {
         for request_hostname in [false, true] {

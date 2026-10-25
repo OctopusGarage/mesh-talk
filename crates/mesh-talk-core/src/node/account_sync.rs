@@ -2256,13 +2256,17 @@ impl Node {
                             status.document_requires_upgrade = upgrade;
                             self.set_account_sync_status(id, status);
                     }
-                    if let Some(Ok((task, (id, peer, state)))) = result {
+                    if let Some(Ok((task, (id, peer, mut state)))) = result {
                         mandatory_owners.remove(&task);
                         mandatory_active.remove(&id);
                         let (policy, current_revision) = self.device_sync_policy_snapshot();
                         if current_revision != revision { enqueue_all = true; }
                         else {
-                            let continuation = mandatory_refresh.remove(&id) || state.pending;
+                            let refresh = mandatory_refresh.contains(&id);
+                            if refresh && state.begin_refresh() {
+                                mandatory_refresh.remove(&id);
+                            }
+                            let continuation = refresh || state.pending;
                             mandatory_statuses.insert(id.clone(), state.status(policy));
                             let mut status = self.account_sync_status.lock().expect("account sync status mutex not poisoned")
                                 .get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
@@ -2296,12 +2300,16 @@ impl Node {
                         let (policy, current_revision) = self.device_sync_policy_snapshot();
                         if current_revision != revision { enqueue_all = true; }
                         else {
+                            let refresh = pending_refresh.contains(&id);
+                            if refresh && state.documents.begin_refresh() {
+                                pending_refresh.remove(&id);
+                            }
                             optional_statuses.insert(id.clone(), state.documents.status(policy));
                             let (document_phase,document_error,document_requires_upgrade)=combined_document_status(optional_statuses.get(&id), mandatory_statuses.get(&id));
                             let mut status = DeviceSyncStatus { device_id: id.clone(), phase: SyncPhase::CatchingUp,
                                 pending_attachments: 0, legacy_file_metadata: false, error: None,document_phase,document_error,document_requires_upgrade };
                             let favorites_pending = state.favorite_next.is_some() || (state.favorites_supported && state.favorite_digest==[0;32] && state.favorite_error.is_none());
-                            let mut continuation = pending_refresh.remove(&id) || favorites_pending || state.documents.pending;
+                            let mut continuation = refresh || favorites_pending || state.documents.pending;
                             match result {
                                 Ok((next, digest, version)) => {
                                     status.legacy_file_metadata = version == AccountSyncVersion::V1;
@@ -2482,6 +2490,11 @@ impl Node {
                         && let Some(peer) = self.routing_peer(&id)
                         && peer.public == device.public
                     {
+                        if let Some(state) = mandatory_cursors.get_mut(&id)
+                            && !state.begin_refresh()
+                        {
+                            mandatory_refresh.insert(id.clone());
+                        }
                         mandatory_queue.push_back((id.clone(), peer));
                     }
                     if active.contains(&id) {
@@ -2522,6 +2535,11 @@ impl Node {
                             },
                         );
                         continue;
+                    }
+                    if let Some(state) = cursors.get_mut(&id)
+                        && !state.documents.begin_refresh()
+                    {
+                        pending_refresh.insert(id.clone());
                     }
                     queue.push_back((id, peer));
                 }
@@ -2622,8 +2640,11 @@ mod tests {
                 let mut previous_wanted = None;
                 loop {
                     let (mut channel, bytes) =
-                        selection_tests::accept_legacy_account_request(&listener, &server_remote)
-                            .await;
+                        selection_tests::accept_legacy_request_after_policy_retirement(
+                            &listener,
+                            &server_remote,
+                        )
+                        .await;
                     let Some(AccountHistoryFrame::Request {
                         account_id,
                         cursor,
@@ -2719,9 +2740,11 @@ mod tests {
                     .expect("server observes an invalidated follow-up request");
             })
             .await;
+            // Cancel the fixture receiver before dropping the worker's live
+            // channel; teardown EOF is not a legacy-protocol test outcome.
+            server.abort();
             worker.abort();
             let _ = worker.await;
-            server.abort();
             let error = server.await.unwrap_err();
             assert!(error.is_cancelled(), "{error}");
             outcome.expect("re-enabled appearance catches up after an interrupted category page");
