@@ -151,6 +151,14 @@ _Avoid_: device clone, device revocation, live synchronization.
 
 ## Networking and availability
 
+**Sticker media**:
+A single encrypted image attachment with a source identity and text fallback.
+Its exact content is bound by the attachment checksum. Receiving and retaining
+the image is independent from installing its source pack in the sticker picker.
+Legacy ID-only stickers remain dependent on installed artwork. See the
+[delivery contract](docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery).
+_Avoid_: installed pack, delivered image and locally available bytes as synonyms.
+
 **Host machine**:
 A physical or virtual computer that can run multiple participant processes with
 different device identities.

@@ -28,6 +28,174 @@ fn channel_file_evictions(
 }
 
 impl Node {
+    /// Whether exact incoming sticker offers still need their own completion.
+    pub(in crate::node) fn pending_sticker_aliases(&self, conversation: ConversationId) -> bool {
+        let sticker = self
+            .files
+            .lock()
+            .expect("files lock not poisoned")
+            .manifest(&conversation)
+            .is_some_and(|manifest| {
+                crate::file::sticker::is_sticker_name(manifest.name())
+                    && super::media_store::manifest_is_media(manifest)
+                    && manifest.protection().is_none()
+            });
+        if !sticker || self.expired_received_file(conversation) {
+            return false;
+        }
+        let store = self.delivery.lock().expect("delivery lock not poisoned");
+        store.cards_for_file(conversation).iter().any(|card| {
+            !store.file_completed(card.id)
+                && !store.manifest_event_erased(card.id)
+                && card
+                    .completion_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.owner_account == self.account_id())
+        })
+    }
+
+    /// Rebind retained original-author completion to an exact compatible sticker offer.
+    /// Cached bytes alone never establish signed chunk ancestry or recipient delivery.
+    pub(in crate::node) fn complete_sticker_aliases(&self, conversation: ConversationId) -> bool {
+        let manifest = {
+            let files = self.files.lock().expect("files lock not poisoned");
+            let Some(manifest) = files.manifest(&conversation) else {
+                return false;
+            };
+            if !crate::file::sticker::is_sticker_name(manifest.name())
+                || !super::media_store::manifest_is_media(manifest)
+                || manifest.protection().is_some()
+            {
+                return false;
+            }
+            manifest.clone()
+        };
+        let cards = {
+            let store = self.delivery.lock().expect("delivery lock not poisoned");
+            store
+                .cards_for_file(conversation)
+                .into_iter()
+                .map(|card| {
+                    let completion = store.file_completion(card.id);
+                    (card, completion)
+                })
+                .collect::<Vec<_>>()
+        };
+        if !cards.iter().any(|(_, completion)| completion.is_none())
+            || self.read_media(conversation).is_none()
+        {
+            return false;
+        }
+        let rows: std::collections::HashMap<_, _> = self
+            .retained_file_rows(conversation)
+            .into_iter()
+            .map(|row| (row.event_id, row))
+            .collect();
+        let retained = |card: &FileCard| {
+            let binding = card.completion_binding.as_ref()?;
+            if binding.owner_account != self.account_id()
+                || card.file_conversation != conversation
+                || card.chunk_count != manifest.chunk_count()
+                || self
+                    .delivery
+                    .lock()
+                    .expect("delivery lock not poisoned")
+                    .manifest_event_erased(card.id)
+            {
+                return None;
+            }
+            let proof = self.historical_author(&binding.source.ed25519_pub)?;
+            if proof.public() != binding.source || proof.account_cert != binding.certificate {
+                return None;
+            }
+            let row = rows.get(&card.id)?;
+            let stored = super::files::validated_manifest(&row.plaintext)?;
+            let deadline = crate::expiry::deadline(&row.plaintext);
+            if row.conversation != card.conversation
+                || row.from != binding.source.user_id()
+                || stored != manifest
+                || !super::files::same_file_transfer(&manifest, &stored)
+                || deadline.is_some_and(|time| time <= super::node::now_millis())
+            {
+                return None;
+            }
+            let log = self.log.lock().expect("log lock not poisoned");
+            let event = log.get(&card.id)?;
+            (event.kind == EventKind::FileManifest
+                && event.conversation_id
+                    == super::conversation::dm_conversation_id(
+                        &self.identity.public(),
+                        &binding.source,
+                    )
+                && event.author.ed25519_pub() == &binding.source.ed25519_pub
+                && event.verify_integrity()
+                && event.verify_signature())
+            .then_some(deadline)
+        };
+        // One authorized completed ancestor per scope is sufficient. Bound new
+        // completions per pass and validate retained rows once, not per alias pair.
+        let key = |card: &FileCard, deadline| {
+            let binding = card.completion_binding.as_ref().expect("validated binding");
+            (
+                card.conversation,
+                deadline,
+                binding.source.ed25519_pub,
+                binding.source.x25519_pub,
+            )
+        };
+        let mut ancestors = std::collections::HashMap::new();
+        for (card, completion) in &cards {
+            let Some(final_chunk) = completion else {
+                continue;
+            };
+            let Some(row) = rows.get(&card.id) else {
+                continue;
+            };
+            if card.completion_binding.is_none() {
+                continue;
+            }
+            let scope = key(card, crate::expiry::deadline(&row.plaintext));
+            if ancestors.contains_key(&scope) || retained(card).is_none() {
+                continue;
+            }
+            let binding = card.completion_binding.as_ref().expect("validated binding");
+            if self.historical_file_completion(conversation, *final_chunk, &binding.source) {
+                ancestors.insert(scope, (card, *final_chunk));
+            }
+        }
+        let mut candidates = Vec::new();
+        let mut proofs = Vec::new();
+        let mut pending: Vec<_> = cards
+            .iter()
+            .filter(|(_, completion)| completion.is_none())
+            .collect();
+        let offset = self
+            .file_pull_cursor
+            .fetch_add(256, std::sync::atomic::Ordering::Relaxed)
+            % pending.len();
+        pending.rotate_left(offset);
+        for (card, _) in pending.into_iter().take(256) {
+            let Some(deadline) = retained(card) else {
+                continue;
+            };
+            if let Some((prior, final_chunk)) = ancestors.get(&key(card, deadline))
+                && prior.completion_binding == card.completion_binding
+            {
+                candidates.push((card.clone(), *final_chunk));
+                proofs.push((card.id, (*prior).clone(), *final_chunk));
+            }
+        }
+        if candidates.is_empty() {
+            return false;
+        }
+        let completed =
+            self.commit_file_completion_with_ancestors(conversation, &candidates, &proofs);
+        if completed {
+            self.note_file_change();
+        }
+        completed
+    }
+
     /// Capture exact original-author ancestry before any saved content replaces chunks.
     pub(in crate::node) fn completion_candidates(
         &self,
@@ -78,6 +246,15 @@ impl Node {
         conversation: ConversationId,
         candidates: &[(FileCard, EventId)],
     ) -> bool {
+        self.commit_file_completion_with_ancestors(conversation, candidates, &[])
+    }
+
+    fn commit_file_completion_with_ancestors(
+        &self,
+        conversation: ConversationId,
+        candidates: &[(FileCard, EventId)],
+        ancestors: &[(EventId, FileCard, EventId)],
+    ) -> bool {
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
         if self.recover_delivery(&mut store).is_err() {
             return false;
@@ -85,6 +262,39 @@ impl Node {
         let mut committed = false;
         for (card, final_chunk) in candidates {
             if store.file_card(card.id) != Some(card) {
+                continue;
+            }
+            // Cache aliases depend on an exact retained completion. Recheck
+            // that dependency under the same lock as the new durable record.
+            let alias_retained = ancestors.is_empty() || {
+                let rows = self.received_files.lock().expect("files lock not poisoned");
+                rows.entry(card.id).is_some_and(|row| {
+                    let deadline = crate::expiry::deadline(&row.plaintext);
+                    !deadline.is_some_and(|time| time <= super::node::now_millis())
+                        && ancestors.iter().any(|(alias, prior, _)| {
+                            *alias == card.id
+                                && rows.entry(prior.id).is_some_and(|prior_row| {
+                                    crate::expiry::deadline(&prior_row.plaintext) == deadline
+                                })
+                        })
+                })
+            };
+            if !ancestors.is_empty()
+                && (!alias_retained
+                    || store.manifest_event_erased(card.id)
+                    || self
+                        .delivery_suspended
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    || !ancestors.iter().any(|(alias, prior, prior_chunk)| {
+                        *alias == card.id
+                            && prior.conversation == card.conversation
+                            && prior.completion_binding == card.completion_binding
+                            && prior_chunk == final_chunk
+                            && store.file_card(prior.id) == Some(prior)
+                            && store.file_completion(prior.id) == Some(*prior_chunk)
+                            && !store.manifest_event_erased(prior.id)
+                    }))
+            {
                 continue;
             }
             if store.complete_file(card.id, *final_chunk).is_err() {
@@ -440,6 +650,133 @@ impl Node {
 #[cfg(test)]
 mod replica_tests {
     use super::*;
+
+    #[test]
+    fn erased_ancestor_cannot_commit_a_prepared_alias_completion() {
+        use crate::discovery::Announce;
+        use crate::eventlog::Event;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let source = DeviceIdentity::generate();
+        let source_account = Account::generate();
+        let proof = Announce::new_with_account(&source, &source_account, "source", 4000);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let host = super::super::conversation::dm_conversation_id(
+            &source.public(),
+            &node.identity.public(),
+        );
+        let file = ConversationId::new([73; 32]);
+        let manifest = crate::file::FileManifest {
+            name: "empty.txt".into(),
+            size: 0,
+            mime: "text/plain".into(),
+            checksum: crate::file::file_checksum(&[]),
+            file_key: [3; 32],
+            file_conv: file,
+            chunk_count: 1,
+        };
+        let mut cards = Vec::new();
+        for sequence in 1..=2 {
+            let event = Event::new(
+                &source,
+                host,
+                sequence,
+                vec![],
+                sequence,
+                sequence,
+                EventKind::FileManifest,
+                crate::dm::seal(
+                    &source,
+                    &node.identity.public().x25519_pub,
+                    &manifest.encode(),
+                )
+                .unwrap(),
+            );
+            node.accept_manifest_event(
+                &event,
+                &proof,
+                super::super::received_log::ReceivedEntry {
+                    event_id: event.id,
+                    conversation: host,
+                    from: source.user_id(),
+                    wall_clock: sequence,
+                    plaintext: manifest.encode(),
+                },
+            )
+            .unwrap();
+            cards.push(
+                node.delivery
+                    .lock()
+                    .unwrap()
+                    .file_card(event.id)
+                    .unwrap()
+                    .clone(),
+            );
+        }
+        let final_chunk = EventId::new([74; 32]);
+        node.delivery
+            .lock()
+            .unwrap()
+            .complete_file(cards[0].id, final_chunk)
+            .unwrap();
+        let prepared = vec![(cards[1].id, cards[0].clone(), final_chunk)];
+        let target_row = node
+            .received_files
+            .lock()
+            .unwrap()
+            .entry(cards[1].id)
+            .unwrap()
+            .clone();
+        for deadline in [
+            super::super::node::now_millis() - 1,
+            super::super::node::now_millis() + 60_000,
+        ] {
+            node.received_files
+                .lock()
+                .unwrap()
+                .remove_where(|row| row.event_id == cards[1].id)
+                .unwrap();
+            let mut changed = target_row.clone();
+            changed.plaintext = crate::expiry::wrap(&changed.plaintext, Some(deadline));
+            node.received_files
+                .lock()
+                .unwrap()
+                .record_durable(&changed)
+                .unwrap();
+            assert!(!node.commit_file_completion_with_ancestors(
+                file,
+                &[(cards[1].clone(), final_chunk)],
+                &prepared
+            ));
+            assert!(!node.delivery.lock().unwrap().file_completed(cards[1].id));
+        }
+        node.received_files
+            .lock()
+            .unwrap()
+            .remove_where(|row| row.event_id == cards[1].id)
+            .unwrap();
+        node.received_files
+            .lock()
+            .unwrap()
+            .record_durable(&target_row)
+            .unwrap();
+        node.delivery
+            .lock()
+            .unwrap()
+            .erase_file(host, cards[0].id)
+            .unwrap();
+        assert!(!node.commit_file_completion_with_ancestors(
+            file,
+            &[(cards[1].clone(), final_chunk)],
+            &prepared
+        ));
+        assert!(!node.delivery.lock().unwrap().file_completed(cards[1].id));
+    }
 
     #[test]
     fn channel_file_budget_keeps_recent_complete_files_and_evicts_older_ones() {
