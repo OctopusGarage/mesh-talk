@@ -569,7 +569,10 @@
     "presetPending": "套用預設會更改下面列出嘅五項保護設定。逐項調整後會用「自訂」。",
     "protectionOn": "開啟",
     "protectionOff": "關閉",
-    "presetNotApplied": "揀咗嘅預設仲未套用。"
+    "presetNotApplied": "揀咗嘅預設仲未套用。",
+    "privacyEffectiveState": "下面嘅控制項顯示目前已儲存同生效嘅設定。揀選預設唔會即時改動設定，要套用先會生效。登入儲存同本機 Agent 接入會分開管理。",
+    "savedLoginEnabled": "已開啟保持登入。下次自動登入亦需要成功將登入憑證儲存喺呢部裝置。",
+    "savedLoginDisabled": "已關閉登入儲存，下次開啟時需要重新登入。"
   },
   "search": {
     "title": "搜尋訊息",
@@ -1159,7 +1162,27 @@
     "copied": "已複製",
     "copyFailed": "複製失敗，請選取上面嘅說明再手動複製。",
     "group": "群組",
-    "person": "聯絡人"
+    "person": "聯絡人",
+    "privacyStatusDescription": "本機 Agent 只可以喺服務運行期間存取明確獲授權嘅對話。裝置私隱預設唔會改動呢啲權限。",
+    "statusFailed": "暫時攞唔到 Agent 接入狀態",
+    "grantedConversations_one": "已授權 {{count}} 個對話",
+    "grantedConversations_other": "已授權 {{count}} 個對話",
+    "manageAccess": "管理 Agent 接入",
+    "duration": "授權有效期",
+    "oneHour": "一個鐘",
+    "persistent": "直到我手動關閉",
+    "expiresAt": "到期時間",
+    "expiredAt": "已於以下時間到期",
+    "expired": "授權已到期 · 續期先可以容許本機 Agent 接入",
+    "renew": "續期授權",
+    "durationHint": "揀選嘅有效期會喺啟用接入或者續期時套用。重新整理、重試同改動對話都唔會延長有效期。",
+    "activityTitle": "本機 Agent 介面",
+    "refreshActivity": "重新整理活動",
+    "activityDeliveryHint": "呢個本機介面最近接受嘅請求。接受請求唔代表已經送到收件人。",
+    "activityEmpty": "最近冇已接受嘅請求。",
+    "activityFailed": "載入唔到最近活動，請重新整理再試。",
+    "activityAccepted": "已接受",
+    "activityRetried": "已重試"
   },
   "messageFavorites": {
     "title": "收藏夾",
@@ -1297,5 +1320,15 @@
     "finding": "正喺度搵裝置…",
     "linking": "正連結呢部裝置…請保持兩邊應用程式開住。",
     "failed": "連結唔到呢部裝置。請保持來源應用程式開住，並使用新嘅配對碼。"
+  },
+  "securityVerification": {
+    "title": "驗證身分",
+    "description": "請輸入 Mesh-Talk 登入密碼嚟授權呢次操作。驗證只適用於今次操作。",
+    "continue": "驗證並繼續",
+    "backup": "建立加密備份",
+    "linking": "授權連結裝置",
+    "agent": "改動本機 Agent 接入權限",
+    "settings": "改動安全設定",
+    "savedLogin": "喺呢部裝置儲存登入憑證"
   }
 }

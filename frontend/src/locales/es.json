@@ -569,7 +569,10 @@
     "presetPending": "Al aplicar un preajuste se cambian las cinco protecciones que aparecen a continuación. Los cambios individuales usan Personalizado.",
     "protectionOn": "Activado",
     "protectionOff": "Desactivado",
-    "presetNotApplied": "El preajuste seleccionado aún no se ha aplicado."
+    "presetNotApplied": "El preajuste seleccionado aún no se ha aplicado.",
+    "privacyEffectiveState": "Los controles siguientes muestran la configuración guardada que está en vigor. Elegir un preajuste no cambia nada hasta que lo apliques. La sesión guardada y el acceso de agentes locales se gestionan por separado.",
+    "savedLoginEnabled": "Mantener la sesión está activado. El inicio automático también requiere que las credenciales se hayan guardado correctamente en este dispositivo.",
+    "savedLoginDisabled": "La sesión guardada está desactivada: tendrás que iniciar sesión la próxima vez."
   },
   "search": {
     "title": "Buscar mensajes",
@@ -1159,7 +1162,27 @@
     "copied": "Copiado",
     "copyFailed": "No se pudo copiar. Selecciona las instrucciones y cópialas manualmente.",
     "group": "Grupo",
-    "person": "Persona"
+    "person": "Persona",
+    "privacyStatusDescription": "Los agentes locales solo pueden acceder a las conversaciones autorizadas explícitamente mientras este servicio esté activo. Los preajustes de privacidad del dispositivo no cambian estos permisos.",
+    "statusFailed": "El estado del acceso de agentes no está disponible",
+    "grantedConversations_one": "{{count}} conversación autorizada",
+    "grantedConversations_other": "{{count}} conversaciones autorizadas",
+    "manageAccess": "Gestionar acceso de agentes",
+    "duration": "Duración de la autorización",
+    "oneHour": "Una hora",
+    "persistent": "Hasta que lo desactive",
+    "expiresAt": "Caduca el",
+    "expiredAt": "Caducó el",
+    "expired": "Autorización caducada · renuévala para permitir el acceso de agentes locales",
+    "renew": "Renovar autorización",
+    "durationHint": "La duración elegida se aplica al activar o renovar el acceso. Actualizar, reintentar o cambiar las conversaciones no amplía el plazo.",
+    "activityTitle": "Interfaz de agentes locales",
+    "refreshActivity": "Actualizar actividad",
+    "activityDeliveryHint": "Solicitudes recientes aceptadas por esta interfaz local. La aceptación no confirma la entrega al destinatario.",
+    "activityEmpty": "No hay solicitudes aceptadas recientes.",
+    "activityFailed": "No se pudo cargar la actividad reciente. Actualiza para reintentarlo.",
+    "activityAccepted": "Aceptada",
+    "activityRetried": "Reintentada"
   },
   "messageFavorites": {
     "title": "Favoritos",
@@ -1297,5 +1320,15 @@
     "finding": "Buscando dispositivos…",
     "linking": "Vinculando este dispositivo… Mantén abiertas ambas aplicaciones.",
     "failed": "No se pudo vincular este dispositivo. Mantén abierta la aplicación de origen y usa un código nuevo."
+  },
+  "securityVerification": {
+    "title": "Verifica tu identidad",
+    "description": "Introduce tu contraseña de Mesh-Talk para autorizar esta operación. La verificación solo se aplica a esta acción.",
+    "continue": "Verificar y continuar",
+    "backup": "Crear una copia de seguridad cifrada",
+    "linking": "Autorizar la vinculación de dispositivos",
+    "agent": "Cambiar el acceso de agentes locales",
+    "settings": "Cambiar la configuración de seguridad",
+    "savedLogin": "Guardar la sesión en este dispositivo"
   }
 }

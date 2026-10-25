@@ -1148,7 +1148,6 @@
   "agentAccess": {
     "privacyStatusDescription": "本地代理仅在服务运行时可访问明确授权的会话。设备隐私预设不会更改这些授权。",
     "statusFailed": "无法获取代理访问状态",
-    "grantedConversations": "已授权 {{count}} 个会话",
     "manageAccess": "管理代理访问权限",
     "title": "本地 Agent 接入",
     "description": "允许本机 Agent 使用当前登录账号发送文本和回复。",
@@ -1181,7 +1180,9 @@
     "activityEmpty": "近期没有已接受的请求。",
     "activityFailed": "无法加载近期活动。请刷新重试。",
     "activityAccepted": "已接受",
-    "activityRetried": "已重试"
+    "activityRetried": "已重试",
+    "grantedConversations_one": "已授权 {{count}} 个会话",
+    "grantedConversations_other": "已授权 {{count}} 个会话"
   },
   "messageFavorites": {
     "title": "收藏夹",

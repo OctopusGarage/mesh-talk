@@ -1148,7 +1148,6 @@
   "agentAccess": {
     "privacyStatusDescription": "本機代理僅在服務執行時可存取明確授權的對話。裝置隱私預設不會變更這些授權。",
     "statusFailed": "無法取得代理存取狀態",
-    "grantedConversations": "已授權 {{count}} 個對話",
     "manageAccess": "管理代理存取權限",
     "title": "本機 Agent 存取",
     "description": "允許本機 Agent 使用目前登入的帳號傳送文字及回覆。",
@@ -1181,7 +1180,9 @@
     "activityEmpty": "近期沒有已接受的請求。",
     "activityFailed": "無法載入近期活動。請重新整理後重試。",
     "activityAccepted": "已接受",
-    "activityRetried": "已重試"
+    "activityRetried": "已重試",
+    "grantedConversations_one": "已授權 {{count}} 個對話",
+    "grantedConversations_other": "已授權 {{count}} 個對話"
   },
   "messageFavorites": {
     "title": "收藏夾",

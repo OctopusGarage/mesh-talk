@@ -29,7 +29,8 @@
         "src/lib/api/localAgentAccess.test.ts",
         "src/lib/settingsTranslations.test.ts",
         "src/lib/privacyTranslations.test.ts",
-        "src/store/auth.test.ts"
+        "src/store/auth.test.ts",
+        "src/lib/localeParity.test.ts"
       ],
       "capability": {
         "summary": "Show acknowledged privacy and agent state and authorize only the exact pending sensitive operation through backend-requested identity verification.",
@@ -325,7 +326,8 @@
         "src/lib/contactVisibility.test.ts",
         "src/store/contactPolicy.test.ts",
         "src/lib/settingsTranslations.test.ts",
-        "src/features/chat/settings/SecuritySettings.test.ts"
+        "src/features/chat/settings/SecuritySettings.test.ts",
+        "src/lib/localeParity.test.ts"
       ],
       "capability": {
         "summary": "Expose acknowledged scope, explicit temporary/continuous duration, read-only expiry and safe recent activity for desktop local automation.",

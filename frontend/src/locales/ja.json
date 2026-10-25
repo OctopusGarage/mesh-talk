@@ -569,7 +569,10 @@
     "presetPending": "プリセットを適用すると、以下の5つの保護設定が変更されます。個別に変更すると「カスタム」になります。",
     "protectionOn": "オン",
     "protectionOff": "オフ",
-    "presetNotApplied": "選択したプリセットはまだ適用されていません。"
+    "presetNotApplied": "選択したプリセットはまだ適用されていません。",
+    "privacyEffectiveState": "以下のコントロールは、現在有効な保存済み設定を表示します。プリセットは選択しただけでは変更されず、適用する必要があります。ログイン情報の保存とローカルエージェント連携は個別に管理します。",
+    "savedLoginEnabled": "ログイン状態の保持がオンです。自動ログインには、この端末への認証情報の保存が成功している必要もあります。",
+    "savedLoginDisabled": "ログイン情報の保存はオフです。次回起動時にログインが必要です。"
   },
   "search": {
     "title": "メッセージを検索",
@@ -1159,7 +1162,27 @@
     "copied": "コピーしました",
     "copyFailed": "コピーできませんでした。上の案内を選択して手動でコピーしてください。",
     "group": "グループ",
-    "person": "連絡先"
+    "person": "連絡先",
+    "privacyStatusDescription": "ローカルエージェントは、このサービスの実行中に明示的に許可された会話だけにアクセスできます。端末のプライバシープリセットはこれらの権限を変更しません。",
+    "statusFailed": "エージェント連携の状態を取得できません",
+    "grantedConversations_one": "許可された会話：{{count}} 件",
+    "grantedConversations_other": "許可された会話：{{count}} 件",
+    "manageAccess": "エージェント連携を管理",
+    "duration": "許可の有効期間",
+    "oneHour": "1時間",
+    "persistent": "手動でオフにするまで",
+    "expiresAt": "有効期限",
+    "expiredAt": "期限切れ日時",
+    "expired": "期限切れ · 更新するとローカルエージェントを許可できます",
+    "renew": "許可を更新",
+    "durationHint": "選択した有効期間は、連携を有効にするか許可を更新すると適用されます。再読み込み、再試行、会話の変更では期限は延長されません。",
+    "activityTitle": "ローカルエージェント用インターフェース",
+    "refreshActivity": "利用履歴を更新",
+    "activityDeliveryHint": "このローカルインターフェースが最近受け付けたリクエストです。受け付けは相手への配信完了を意味しません。",
+    "activityEmpty": "最近受け付けたリクエストはありません。",
+    "activityFailed": "最近の利用履歴を読み込めませんでした。更新して再試行してください。",
+    "activityAccepted": "受け付け済み",
+    "activityRetried": "再試行"
   },
   "messageFavorites": {
     "title": "お気に入り",
@@ -1297,5 +1320,15 @@
     "finding": "端末を検索しています…",
     "linking": "この端末を連携しています…両方のアプリを開いたままにしてください。",
     "failed": "端末を連携できませんでした。連携元のアプリを開いたまま、新しいコードでお試しください。"
+  },
+  "securityVerification": {
+    "title": "本人確認",
+    "description": "この操作を許可するには、Mesh-Talkのパスワードを入力してください。確認結果は今回の操作にのみ適用されます。",
+    "continue": "確認して続行",
+    "backup": "暗号化バックアップを作成",
+    "linking": "端末のリンクを許可",
+    "agent": "ローカルエージェントのアクセス権を変更",
+    "settings": "セキュリティ設定を変更",
+    "savedLogin": "この端末にログイン情報を保存"
   }
 }
