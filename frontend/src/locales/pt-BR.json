@@ -957,6 +957,8 @@
       "current": "Você está usando a versão mais recente ({{version}}).",
       "available": "A versão {{version}} está disponível",
       "download": "Baixar atualização",
+      "preparing": "Preparando atualização…",
+      "fallback": "Baixando atualização completa…",
       "downloading": "Baixando e verificando",
       "cancel": "Cancelar download",
       "verified": "Download verificado e pronto para instalar",

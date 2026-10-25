@@ -85,6 +85,51 @@ an artificial biometric prompt. Restart resumes a session only according to the 
 signed in** and app-lock settings; updating never silently enables persistent login. Native
 replacement recovery does not imply rollback of an incompatible storage migration.
 
+### Incremental download preparation
+
+On macOS and Windows, patch-capable clients first look for an optional signed delta catalog
+in the selected release. Linux continues to download its full AppImage. Older clients keep
+using the unchanged compressed native updater names. The first patch-capable client arrives
+through the ordinary full update; subsequent updates can use its installed executable immediately.
+
+The catalog is authenticated with the existing updater public key and full logical target
+version before its declarations are parsed. It binds the release kind, OS/architecture,
+canonical compressed fallback, optional native target and at most two older executable bases.
+Release tooling reads at most 100 releases in 16 MiB of metadata and examines at most eight
+matching older candidates to find two authenticated bases. Prior payload downloads are bounded
+to 256 MiB and signatures to 16 KiB. Only a cryptographically valid legacy signature lacking
+a signed logical version is skipped as ineligible; other authentication failures stop the build.
+The host snapshots its own executable once; the renderer cannot select a base or a URL.
+A zstd prefix patch reconstructs exact published native installer bytes in private staging.
+The patch and reconstructed target must match their signed sizes and SHA-256 values, and the
+target must additionally pass the unchanged SDK signed-version check before installation.
+
+The optional macOS target stores the original tar bytes in a gzip level-0 stream. The optional
+Windows target uses an uncompressed NSIS installer containing the same application files.
+Clients never recreate archives, recompress installers or modify the running executable.
+Release tooling verifies representation equivalence and round-trips every emitted patch
+through the production decoder. Patch plus required catalog/signatures must save at least
+25% and 1 MiB against the ordinary **compressed** full download; otherwise no patch is offered.
+
+Local limits are 64 KiB for the catalog, 128 MiB for the executable base and zstd window,
+256 MiB for the patch and reconstructed target, and 60 seconds for reconstruction. One normal
+zstd frame is accepted; trailing frames/data are rejected. Preparation checks private staging
+space and runs reconstruction off the GUI thread with cancellation checks between chunks.
+Missing optional artifacts, an unsupported codec, an unrecognized/oversized base or target,
+insufficient savings, or an ordinary optional-metadata/patch network failure or reconstruction failure select the original
+independently signed compressed full update once. Temporary delta files are discarded first.
+Cancellation stops preparation, and catalog authentication, identity contradictions or final
+native signature failures stop the update. They never install failed bytes or silently downgrade.
+
+The UI distinguishes preparing the update from downloading a full fallback. Installation,
+authorization, draft/session guards, retries and restart remain the existing native flow.
+A successful full fallback is not evidence that an incremental update ran: native acceptance
+must record the actual patch route and transferred bytes, then verify the exact installed
+application, changed process and ready login state. Local fixtures and AI evaluation do not
+replace isolated native or trusted published-release acceptance. CI collects workspace coverage
+in each operating system's existing test pass; Linux's full-only branch cannot represent the
+macOS/Windows delta preparation paths.
+
 ### Free updater signing setup
 
 Generate a dedicated updater key pair once, outside the repository, using the installed Tauri CLI:
@@ -111,7 +156,7 @@ and its `.sig`. The same bytes are included in the platform ZIP and its checksum
 existing cosign/provenance gate verifies that ZIP; the aggregate verifier requires a complete
 updater platform matrix and byte-for-byte equality between embedded and standalone assets.
 Existing draft/source checks, immutability and explicit Stable publication remain required.
-This is a full-package update mechanism; no delta/patch delivery is implemented.
+The same signing key authenticates canonical full packages and optional incremental preparation; both reach the existing native installer.
 
 ## Download verification and installation
 

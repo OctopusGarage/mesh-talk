@@ -12,6 +12,9 @@ use super::{
     release_or_cancel, requested_release_from, selected_asset,
 };
 
+#[path = "delta_prepare.rs"]
+mod delta;
+
 struct StagedUpdate {
     update: Update,
     channel: UpdateChannel,
@@ -175,6 +178,8 @@ struct PreparationHost<'a, R: tauri::Runtime> {
     releases: &'a str,
     public_key: &'a str,
     supported: bool,
+    base_source: delta::BaseSource<'a>,
+    available_space: fn(&Path) -> std::io::Result<u64>,
 }
 
 #[tauri::command]
@@ -184,6 +189,7 @@ pub async fn prepare_update<R: tauri::Runtime>(
     update_channel: Option<UpdateChannel>,
     on_progress: Channel<DownloadProgress>,
 ) -> Result<DownloadedUpdate, String> {
+    let executable = std::env::current_exe().unwrap_or_default();
     prepare_from(
         PreparationHost {
             app: &app,
@@ -193,6 +199,11 @@ pub async fn prepare_update<R: tauri::Runtime>(
             releases: API_RELEASES,
             public_key: public_key(),
             supported: available(),
+            base_source: delta::BaseSource {
+                tag: env!("MESH_TALK_BUILD_TAG"),
+                executable: &executable,
+            },
+            available_space: |path| fs4::available_space(path),
         },
         version,
         update_channel,
@@ -236,26 +247,45 @@ async fn prepare_from<R: tauri::Runtime>(
     .await?;
     let (payload, signature) = assets(&release, std::env::consts::OS, std::env::consts::ARCH)
         .ok_or("This release needs a manual installation")?;
-    let signature = release_or_cancel(
-        signature_from(&host.signature_http, signature),
-        cancel.clone(),
-    )
-    .await?;
-    let update = signed_update(host.app, &version, payload, &signature, host.public_key)?;
     let directory = tempfile::tempdir().map_err(|_| "Could not prepare the update folder")?;
     let path = directory.path().join("payload");
-    let mut file = tokio::fs::File::create(&path)
-        .await
-        .map_err(|_| "Could not create the update file")?;
-    super::download_and_verify_with_client(
-        &host.payload_http,
+    let attempted = delta::prepare(
+        &host,
+        &release,
         payload,
-        &mut file,
+        directory.path(),
+        &host.base_source,
         &on_progress,
         cancel.clone(),
     )
     .await?;
-    drop(file);
+    let (update, file_name) = match attempted {
+        delta::Preparation::Ready(update, file_name) => (*update, file_name),
+        other => {
+            let phase = matches!(other, delta::Preparation::Fallback)
+                .then_some(super::DownloadPhase::Fallback);
+            let signature = release_or_cancel(
+                signature_from(&host.signature_http, signature),
+                cancel.clone(),
+            )
+            .await?;
+            let update = signed_update(host.app, &version, payload, &signature, host.public_key)?;
+            let mut file = tokio::fs::File::create(&path)
+                .await
+                .map_err(|_| "Could not create the update file")?;
+            super::download_in_phase(
+                &host.payload_http,
+                payload,
+                &mut file,
+                &on_progress,
+                cancel.clone(),
+                phase,
+            )
+            .await?;
+            drop(file);
+            (update, payload.name.clone())
+        }
+    };
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|_| "Could not read the downloaded update")?;
@@ -266,7 +296,7 @@ async fn prepare_from<R: tauri::Runtime>(
     }
     let result = DownloadedUpdate {
         path: path.to_string_lossy().into_owned(),
-        file_name: payload.name.clone(),
+        file_name,
         installable: true,
     };
     *STAGED.get().expect("initialized stage").lock().await = Some(StagedUpdate {

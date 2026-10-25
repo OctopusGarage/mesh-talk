@@ -3,6 +3,8 @@
 //! this build's OS and architecture before writing to Downloads.
 
 mod channel;
+mod delta_catalog;
+pub(crate) mod delta_codec;
 pub mod native;
 
 use std::{path::PathBuf, sync::OnceLock, time::Duration};
@@ -71,8 +73,17 @@ pub struct UpdateCheck {
     pub channel: UpdateChannel,
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadPhase {
+    Preparing,
+    Fallback,
+}
+
 #[derive(Clone, Serialize)]
 pub struct DownloadProgress {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<DownloadPhase>,
     pub downloaded: u64,
     pub total: u64,
 }
@@ -628,7 +639,18 @@ async fn download_and_verify_with_client(
     asset: &ReleaseAsset,
     file: &mut tokio::fs::File,
     on_progress: &Channel<DownloadProgress>,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    download_in_phase(client, asset, file, on_progress, cancel, None).await
+}
+
+async fn download_in_phase(
+    client: &reqwest::Client,
+    asset: &ReleaseAsset,
+    file: &mut tokio::fs::File,
+    on_progress: &Channel<DownloadProgress>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
+    phase: Option<DownloadPhase>,
 ) -> Result<(), String> {
     if *cancel.borrow() {
         return Err("Download canceled".into());
@@ -650,6 +672,7 @@ async fn download_and_verify_with_client(
     let mut downloaded = 0u64;
     let mut last_reported = std::time::Instant::now();
     let _ = on_progress.send(DownloadProgress {
+        phase,
         downloaded: 0,
         total: asset.size,
     });
@@ -672,6 +695,7 @@ async fn download_and_verify_with_client(
         hash.update(&chunk);
         if last_reported.elapsed() >= Duration::from_millis(200) || downloaded == asset.size {
             let _ = on_progress.send(DownloadProgress {
+                phase,
                 downloaded,
                 total: asset.size,
             });

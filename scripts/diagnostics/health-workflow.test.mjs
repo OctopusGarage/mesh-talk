@@ -45,6 +45,22 @@ test("Codecov receives the frontend and Rust coverage produced by CI", () => {
   assert.match(step, /files:.*src-tauri\/lcov\.info/, "Rust coverage must remain part of the upload");
 });
 
+test("native workspace test passes collect and upload their own platform coverage", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const steps = workflow.split(/^      - /m);
+  const install = steps.find(value => value.startsWith("name: Install cargo-llvm-cov\n"));
+  const native = steps.find(value => value.startsWith("name: Test (macOS + Windows)\n"));
+  const upload = steps.find(value => value.startsWith("name: Upload coverage to Codecov\n"));
+  assert.ok(install && native && upload);
+  assert.doesNotMatch(install, /if:/, "every native test platform needs the coverage tool");
+  assert.match(native, /cargo llvm-cov --workspace --lcov --output-path lcov\.info/, "the existing native test pass must produce coverage");
+  assert.deepEqual([...native.matchAll(/cargo test --workspace([^\n]*)/g)].map(match => match[1].trim()), ["--doc"], "preserve doctests without repeating unit/integration suites");
+  const loader = steps.find(value => value.startsWith("name: Diagnose Windows test loader\n"));
+  assert.match(loader, /target\/llvm-cov-target\/debug\/deps\/mesh_talk-\*\.exe/, "loader diagnostics must inspect the instrumented harness that failed");
+  assert.doesNotMatch(upload.split('        uses:')[0], /matrix\.os == 'ubuntu-latest' &&/, "native coverage must not be discarded by a Linux-only upload guard");
+  assert.match(upload, /'src-tauri\/lcov\.info'/, "native-only reports do not depend on Linux frontend artifacts");
+});
+
 test("health reports cheap formatting and frontend static failures before expensive suites", () => {
   const script = readFileSync(new URL("../check-health.sh", import.meta.url), "utf8");
   assert.ok(script.indexOf("cargo fmt --all -- --check") < script.indexOf('scripts/ai-eval-smoke.sh'));

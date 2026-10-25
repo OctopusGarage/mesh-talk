@@ -38,5 +38,18 @@ for platform in macos_arm64 macos_x86_64 windows_arm64 windows_x86_64 linux_aarc
       --deny-self-hosted-runners
 done
 
+# Optional delta roles and canonical standalone updater artifacts must carry the
+# same exact-source hosted provenance as their ZIP. The Python complete-set
+# verifier below rejects unknown names and binds every standalone byte to it.
+shopt -s nullglob
+standalone_assets=("$asset_dir"/mesh-talk-update_* "$asset_dir"/mesh-talk-update-raw_* "$asset_dir"/mesh-talk-patch_*)
+for asset in "${standalone_assets[@]}"; do
+  test -f "$asset" && test ! -L "$asset" && test -s "$asset"
+  gh attestation verify "$asset" --repo "$repository" \
+      --source-ref "$source_ref" --source-digest "$source_sha" \
+      --signer-workflow "$repository/.github/workflows/release.yml" \
+      --deny-self-hosted-runners
+done
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 python3 -B "$script_dir/verify_assets.py" "$asset_dir" --tag "$tag" --version "$version"
