@@ -567,6 +567,35 @@ async fn concurrent_signed_public_chunk_cannot_corrupt_a_same_account_file_resul
     file_result_roundtrip(3).await;
 }
 
+/// Static stage labels diagnose scheduling failures without printing file or intent data.
+fn file_result_timeout_stage(
+    fresh: &Node,
+    source: &Node,
+    account: &Account,
+    id: AccountGroupOperationId,
+    file: crate::eventlog::ConversationId,
+) -> &'static str {
+    if !fresh.account_group_operation_ready_for(
+        &source.identity.public(),
+        AccountGroupOperationKind::File,
+    ) {
+        return "result timeout: authenticated source File capability unavailable";
+    }
+    let Ok(Some(status)) = fresh.account_group_operation_status(&account.account_id(), id) else {
+        return "result timeout: operation status unavailable";
+    };
+    if status.phase != AccountGroupOperationPhase::Committed {
+        return "result timeout: operation has not committed";
+    }
+    let Some(progress) = fresh.file_progress(file) else {
+        return "result timeout: committed result has no installed file card";
+    };
+    if progress.done != progress.total {
+        return "result timeout: committed card awaits complete managed bytes";
+    }
+    "result timeout: complete managed bytes did not reach the preparation observation"
+}
+
 async fn file_result_roundtrip(mode: u8) {
     use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
@@ -633,8 +662,9 @@ async fn file_result_roundtrip(mode: u8) {
         left.cache_discovered_peers().unwrap();
     }
     for (target, listener) in [&source, &origin, &external].into_iter().zip(listeners) {
+        // The accept-loop owner already runs delivery; a second producer has
+        // its own scheduler and competes for the same bounded session pool.
         tasks.spawn(target.clone().run_accept_loop(listener));
-        tasks.spawn(target.clone().run_delivery_loop());
     }
     source.publish_account_group_access(&mut None);
     pull_group_control(&origin, &source, addresses[0]).await;
@@ -843,9 +873,26 @@ async fn file_result_roundtrip(mode: u8) {
     }
     // Import only role/directory observations before asking for A's immutable ID.
     // Production operation maintenance starts after the explicit local retry.
+    assert!(
+        !fresh.account_group_operation_ready_for(
+            &source.identity.public(),
+            AccountGroupOperationKind::File,
+        ),
+        "discovery and sibling certification alone cannot authorize the File protocol"
+    );
+    // Document installation wakes account work before the exchange finishes
+    // installing its authenticated capability receipt. Establish this fixture
+    // prerequisite before starting the worker, rather than racing its retry.
+    pull_group_control(&fresh, &source, addresses[0]).await;
+    assert!(
+        fresh.account_group_operation_ready_for(
+            &source.identity.public(),
+            AccountGroupOperationKind::File,
+        ),
+        "the actual authenticated capability exchange must precede result work"
+    );
     let fresh_clone = fresh.clone();
     tasks.spawn(async move { Box::pin(fresh_clone.run_accept_loop(listener)).await });
-    pull_group_control(&fresh, &source, addresses[0]).await;
     let fresh_raw = fresh_path.join("explicit.bin");
     std::fs::write(&fresh_raw, &bytes).unwrap();
     let retry = fresh
@@ -870,7 +917,12 @@ async fn file_result_roundtrip(mode: u8) {
             }
         })
         .await
-        .expect("the actual result fetch must enter managed cache preparation");
+        .unwrap_or_else(|_| {
+            panic!(
+                "{}",
+                file_result_timeout_stage(&fresh, &source, &account, id, file)
+            )
+        });
         tokio::time::timeout(Duration::from_secs(2), fresh.runtime_work.drain())
             .await
             .unwrap();
@@ -889,14 +941,27 @@ async fn file_result_roundtrip(mode: u8) {
     }
     let fresh_status = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let status = fresh.account_group_operation_status(&account.account_id(), id).unwrap().unwrap();
+            let status = fresh
+                .account_group_operation_status(&account.account_id(), id)
+                .unwrap()
+                .unwrap();
             if status.phase == AccountGroupOperationPhase::Committed
-                && fresh.file_progress(file).is_some_and(|progress| progress.done == progress.total) {
+                && fresh
+                    .file_progress(file)
+                    .is_some_and(|progress| progress.done == progress.total)
+            {
                 break status;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("fresh sibling must fetch the committed own-result bytes independently of optional attachments");
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "{}",
+            file_result_timeout_stage(&fresh, &source, &account, id, file)
+        )
+    });
     assert_eq!(fresh_status.primary_event, Some(event_id));
     assert!(
         fresh_status

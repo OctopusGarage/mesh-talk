@@ -363,8 +363,7 @@ async fn expired_pruned_original_cannot_become_a_nonexpiring_fresh_recall() {
             .unwrap();
         assert!(
             matches!(status.phase, AccountGroupOperationPhase::Rejected { .. }),
-            "an erased source deadline must never be interpreted as a verified nonexpiring message: {:?}",
-            status.phase
+            "an erased source deadline must never be interpreted as a verified nonexpiring message"
         );
     }
     assert_no_delete_or_pending_action(&source, group);
