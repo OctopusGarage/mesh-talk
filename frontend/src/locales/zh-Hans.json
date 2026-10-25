@@ -562,6 +562,7 @@
       "notifications": "通知与通话",
       "connection": "连接与投递",
       "privacy": "隐私与安全",
+      "integrations": "集成",
       "files": "文件与接收",
       "history": "历史记录与备份"
     },
@@ -1159,7 +1160,14 @@
     "copied": "已复制",
     "copyFailed": "复制失败，请选择上方说明并手动复制。",
     "group": "群聊",
-    "person": "联系人"
+    "person": "联系人",
+    "selectedCount": "已选择 {{count}} / 16",
+    "search": "搜索联系人和群组",
+    "selectedOnly": "仅显示已选",
+    "noMatches": "没有匹配的会话。",
+    "limitReached": "已达上限。请取消选择一个会话后再选择其他会话。",
+    "setupTitle": "连接你的智能体",
+    "setupHint": "将这些说明复制给本地智能体以建立连接。Mesh Talk 必须保持运行并处于解锁状态。"
   },
   "messageFavorites": {
     "title": "收藏夹",

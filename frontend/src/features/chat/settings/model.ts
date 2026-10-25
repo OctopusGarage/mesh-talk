@@ -4,6 +4,7 @@ export const SETTINGS_CATEGORIES = [
   "notifications",
   "connection",
   "privacy",
+  "integrations",
   "files",
   "history",
 ] as const;

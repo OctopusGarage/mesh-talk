@@ -11,11 +11,12 @@ settings to confirm the value before editing it again.
 
 | Category              | Controls                                                                                                   |
 | --------------------- | ---------------------------------------------------------------------------------------------------------- |
-| General               | Display language, launch at OS login, close to tray and scoped local agent access.                                 |
+| General               | Display language, launch at OS login, and close to tray.                                 |
 | Appearance            | Theme/library, available theme wallpapers and wallpaper visibility.                                        |
 | Notifications & calls | Notifications, message previews, experimental calling and ringtone.                                        |
 | Connection & delivery | Invisible mode, reply permissions, discovery scope, relay master/send/receive and preferred post office.   |
 | Privacy & security    | Privacy preset, idle/hidden locking, sensitive copy/clipboard, stay signed in and hidden contacts.  |
+| Integrations          | Scoped local agent access, allowed conversations and agent setup instructions.                            |
 | Files & receiving     | Attachment receiving default and download destination. Individual conversations retain their own override. |
 | History & backup      | Local retention, encrypted backup, last-backup metadata and restore guidance.                              |
 
@@ -49,15 +50,22 @@ see [backup and recovery](backup-recovery.md).
 
 ## Local agent access
 
-In **General**, choose the contacts or joined groups a local agent may send to,
-then enable **Local agent access**. The switch starts the desktop's existing
+In **Integrations**, expand **Allowed conversations** to choose the contacts or joined
+groups a local agent may send to, then enable **Local agent access**. The collapsed
+picker shows the selected count out of 16. Search contacts and groups or use
+**Selected only** to review and remove grants, including unavailable conversations.
+The list scrolls within a bounded area so large rosters do not grow the settings
+page. Search and filters never change saved permissions. Selecting or removing a
+conversation saves immediately; removing the final selection disables access.
+
+The switch starts the desktop's existing
 integration service with a loopback HTTP adapter. No CLI or additional download
 is needed. Agents can send text and replies; they cannot read chat history.
-Hidden contacts are omitted from new scope choices. Already granted conversations
-stay listed for explicit removal; hiding alone does not revoke an agent's access.
 
-**View agent instructions** expands a short bootstrap containing the live API help
-URL; **Copy instructions** copies the same text. Enabling also maintains a single
+**Copy instructions** is available directly under **Connect your agent** after
+access is enabled. **View agent instructions** expands the same short bootstrap
+containing the live API help URL and the managed-file explanation. Technical
+paths remain inside this disclosure. Enabling also maintains a single
 Mesh-Talk block in the displayed Codex user-level `AGENTS.md`. Disabling stops
 admission, removes the scoped credential and removes only that block, preserving
 other instructions. Saved choices belong to the signed-in account on this device.

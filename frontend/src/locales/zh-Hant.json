@@ -562,6 +562,7 @@
       "notifications": "通知與通話",
       "connection": "連線與投遞",
       "privacy": "隱私與安全",
+      "integrations": "整合",
       "files": "檔案與接收",
       "history": "歷史記錄與備份"
     },
@@ -1159,7 +1160,14 @@
     "copied": "已複製",
     "copyFailed": "複製失敗，請選取上方說明並手動複製。",
     "group": "群組",
-    "person": "聯絡人"
+    "person": "聯絡人",
+    "selectedCount": "已選擇 {{count}} / 16",
+    "search": "搜尋聯絡人和群組",
+    "selectedOnly": "只顯示已選",
+    "noMatches": "沒有符合的對話。",
+    "limitReached": "已達上限。請取消選擇一個對話後再選擇其他對話。",
+    "setupTitle": "連接你的智慧代理",
+    "setupHint": "將這些說明複製給本機智慧代理以建立連線。Mesh Talk 必須保持執行並處於解鎖狀態。"
   },
   "messageFavorites": {
     "title": "收藏夾",

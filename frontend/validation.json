@@ -260,9 +260,41 @@
       ]
     },
     {
+      "id": "frontend-settings-shell",
+      "paths": [
+        "frontend/src/features/chat/SettingsDialog.tsx",
+        "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/features/chat/settings/model.ts",
+        "frontend/src/features/chat/settings/model.test.ts",
+        "frontend/src/lib/settingsTranslations.test.ts",
+        "frontend/e2e/helpers/settings.ts",
+        "frontend/e2e/settings-categories.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/settings/model.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts",
+        "src/features/chat/settingsDialogSession.test.ts",
+        "src/lib/settingsTranslations.test.ts"
+      ],
+      "capability": {
+        "summary": "Navigate task-based settings with one mounted category and category-owned save feedback.",
+        "guide": "docs/settings.md",
+        "invariants": [
+          {
+            "name": "General contains routine app preferences; Integrations owns agent access, permissions and setup. Only the active category is mounted and all locales provide its navigation label.",
+            "reference": "docs/settings.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run affected settings-categories and local-agent-access browser scenarios at desktop and narrow widths in light and dark themes."
+      ]
+    },
+    {
       "id": "frontend-local-agent-access",
       "paths": [
         "frontend/src/features/chat/settings/LocalAgentSettings.tsx",
+        "frontend/src/features/chat/settings/AgentConversationPicker.tsx",
         "frontend/src/features/chat/settings/LocalAgentSettings.test.ts",
         "frontend/src/lib/api/localAgentAccess.ts",
         "frontend/src/lib/api/localAgentAccess.test.ts",
@@ -286,6 +318,10 @@
           },
           {
             "name": "Closed/replaced views cannot publish stale results and auxiliary file failures reload canonical readiness.",
+            "reference": "docs/settings.md#local-agent-access"
+          },
+          {
+            "name": "Integrations owns local agent setup and save feedback; conversation selection stays collapsed by default with a selected count, searchable bounded results and selected-only review; filtering preserves grants and the 16-conversation limit.",
             "reference": "docs/settings.md#local-agent-access"
           }
         ]
