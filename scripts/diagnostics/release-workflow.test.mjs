@@ -8,6 +8,13 @@ import test from "node:test";
 
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 
+test("Linux release builds retain the Ubuntu 22.04 runtime baseline across architectures", () => {
+  assert.equal(workflow.match(/runner: (\S+)\n\s+target: x86_64-unknown-linux-gnu/)?.[1], "ubuntu-22.04");
+  assert.equal(workflow.match(/runner: (\S+)\n\s+target: aarch64-unknown-linux-gnu/)?.[1], "ubuntu-22.04-arm");
+  assert.ok(/key: \$\{\{ matrix\.target \}\}-\$\{\{ matrix\.runner \}\}-cargo-/.test(workflow),
+    "compiled build scripts and native objects must not cross runner baselines");
+});
+
 test("release matrix builds native Windows and Linux ARM64 packages", () => {
   assert.match(workflow, /runner: windows-11-(?:vs2026-)?arm[\s\S]*?target: aarch64-pc-windows-msvc/);
   assert.match(workflow, /runner: ubuntu-22\.04-arm[\s\S]*?target: aarch64-unknown-linux-gnu/);
