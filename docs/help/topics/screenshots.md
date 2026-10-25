@@ -8,11 +8,11 @@ Choose an area, add annotations, and review the result in the composer before se
 2. Open **Screenshot** and choose the capture option, including hiding Mesh-Talk first if desired.
 3. Follow any operating-system permission or capture prompt.
 4. Select an area in the editor. Adjust its bounds and use the available drawing, text or mosaic tools as needed.
-5. Confirm the edit to put the image in the composer. Review the intended conversation and press **Enter** or choose **Send** when ready.
+5. Confirm the edit to copy the cropped, annotated image to the clipboard and put it in the composer. Review the intended conversation and press **Enter** or choose **Send** when ready.
 
 Enter also sends a staged screenshot if capture returns focus to the page background. Shift+Enter and input-method confirmation do not send it; focused controls and open dialogs keep their own keyboard behavior.
 
-Confirming an edit does not send it immediately. Cancel closes the editor without sending a screenshot. If sending fails, review the retained draft and error before retrying.
+Confirming an edit does not send it immediately. Cancel closes the editor without changing the clipboard or sending a screenshot. If clipboard copying fails, the editor keeps your selection and annotations so you can retry confirmation. If sending fails, review the retained draft and error before retrying.
 
 ## Platform behavior
 

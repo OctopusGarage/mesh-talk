@@ -240,15 +240,24 @@
     {
       "id": "frontend-screenshot-submission",
       "paths": [
+        "frontend/src/features/chat/ScreenshotEditor.tsx",
+        "frontend/src/features/chat/ScreenshotEditor.test.ts",
         "frontend/src/features/chat/Composer.tsx",
         "frontend/src/features/chat/ComposerScreenshot.test.ts",
         "frontend/e2e/screenshot-portable.spec.ts"
       ],
-      "frontend": ["src/features/chat/ComposerScreenshot.test.ts"],
+      "frontend": [
+        "src/features/chat/ComposerScreenshot.test.ts",
+        "src/features/chat/ScreenshotEditor.test.ts"
+      ],
       "capability": {
-        "summary": "Send a staged screenshot with Enter even when native capture leaves focus on the page background.",
+        "summary": "Copy the confirmed edited screenshot to the clipboard, stage the same PNG, and send explicitly even after native capture loses input focus.",
         "guide": "docs/help/topics/screenshots.md",
         "invariants": [
+          {
+            "name": "Confirmation copies the final PNG before staging; cancellation leaves the clipboard unchanged and copy failures retain the editor for retry",
+            "reference": "docs/help/topics/screenshots.md"
+          },
           {
             "name": "Background Enter sends only staged screenshots and preserves IME confirmation, Shift+Enter, focused controls and modal ownership",
             "reference": "docs/help/topics/screenshots.md"
@@ -256,7 +265,7 @@
         ]
       },
       "escalation": [
-        "Run screenshot browser scenarios in Chromium and WebKit; mocked focus loss does not establish native fullscreen restoration behavior."
+        "Run screenshot browser scenarios in Chromium and WebKit; mocked focus loss does not establish native fullscreen restoration behavior. Verify pasting a confirmed cropped/annotated PNG into another native app on supported desktop platforms."
       ]
     },
     {
@@ -1300,6 +1309,8 @@
     {
       "id": "frontend-screenshot-submission-acceptance",
       "paths": [
+        "frontend/src/features/chat/ScreenshotEditor.tsx",
+        "frontend/src/features/chat/ScreenshotEditor.test.ts",
         "frontend/src/features/chat/Composer.tsx",
         "frontend/src/features/chat/ComposerScreenshot.test.ts",
         "frontend/e2e/screenshot-portable.spec.ts"
