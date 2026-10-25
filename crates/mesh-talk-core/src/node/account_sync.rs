@@ -798,6 +798,67 @@ impl Node {
         version: AccountSyncVersion,
         source: Option<&Announce>,
     ) -> Result<(), NodeError> {
+        self.import_account_file_card_with_reference(record, version, source, None)
+    }
+
+    /// An explicit own-account send proves private authorship independently of
+    /// later group membership. It never creates public membership or signatures.
+    pub(in crate::node) fn import_explicit_account_group_file_card(
+        &self,
+        reference: &super::account_group::operations::journal::OperationReference,
+        event: &Event,
+        descriptor: &super::account_group::operations::file_preparation::GroupFileDescriptor,
+        source: &Announce,
+    ) -> Result<(), NodeError> {
+        use super::account_group::operations::{file_preparation::GroupFileLogical, journal};
+        let logical = GroupFileLogical::from_manifest(&descriptor.manifest)
+            .ok_or_else(|| NodeError::Authorization("invalid original File manifest".into()))?;
+        let logical_payload =
+            super::account_group::operations::file_preparation::GroupFilePayload {
+                logical,
+                descriptor: None,
+            };
+        if !descriptor.valid_for(reference, &logical_payload.logical)
+            || logical_payload.logical_operation().is_none_or(|body| {
+                journal::operation_digest(reference.group, &body) != reference.digest
+            })
+            || event.conversation_id != reference.group
+            || event.author.ed25519_pub() != &reference.executor.device.ed25519_pub
+        {
+            return Err(NodeError::Authorization(
+                "invalid original File copy binding".into(),
+            ));
+        }
+        let payload = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .serialize(&FileCardPayloadRef {
+                manifest: &descriptor.manifest,
+                proof: event,
+            })
+            .map_err(|_| NodeError::Channel("invalid original File copy encoding".into()))?;
+        let record = FileCardRecord {
+            host: *reference.group.as_bytes(),
+            peer_account: None,
+            from: reference.executor.device.user_id(),
+            wall_clock: event.wall_clock,
+            event_id: *event.id.as_bytes(),
+            payload,
+        };
+        self.import_account_file_card_with_reference(
+            &record,
+            AccountSyncVersion::V2,
+            Some(source),
+            Some(reference),
+        )
+    }
+
+    fn import_account_file_card_with_reference(
+        &self,
+        record: &FileCardRecord,
+        version: AccountSyncVersion,
+        source: Option<&Announce>,
+        explicit: Option<&super::account_group::operations::journal::OperationReference>,
+    ) -> Result<(), NodeError> {
         let host = ConversationId::new(record.host);
         let event_id = EventId::new(record.event_id);
         if let Some(other) = &record.peer_account {
@@ -809,18 +870,31 @@ impl Node {
                 ));
             }
         } else {
-            let allowed = source.map_or_else(
-                || {
-                    self.channels
-                        .lock()
-                        .expect("channels mutex not poisoned")
-                        .state(&host)
-                        .is_some_and(|state| {
-                            !state.pending_invite() && state.is_accepted_member(&self.user_id())
-                        })
-                },
-                |proof| self.account_private_channel_import_allowed(host, proof),
-            );
+            let allowed = if let Some(reference) = explicit {
+                reference.kind == super::AccountGroupOperationKind::File
+                    && reference.group == host
+                    && reference.valid(&self.account.public().ed25519_pub)
+                    && source.is_some_and(|proof| {
+                        proof.valid_presence()
+                            && !proof.post_office
+                            && proof.public() == reference.executor.device
+                            && proof.account_id().as_deref() == Some(self.account_id().as_str())
+                            && self.certified_sibling(&proof.public())
+                    })
+            } else {
+                source.map_or_else(
+                    || {
+                        self.channels
+                            .lock()
+                            .expect("channels mutex not poisoned")
+                            .state(&host)
+                            .is_some_and(|state| {
+                                !state.pending_invite() && state.is_accepted_member(&self.user_id())
+                            })
+                    },
+                    |proof| self.account_private_channel_import_allowed(host, proof),
+                )
+            };
             if !allowed {
                 return Err(NodeError::Authorization(
                     "file card requires accepted channel membership".into(),
@@ -1635,44 +1709,13 @@ impl Node {
             self.import_account_backfill(&direct)?;
             for record in page {
                 if let HistoryRecord::Channel(record) = record {
-                    let conversation = ConversationId::new(record.conversation);
-                    let event_id = EventId::new(record.event_id);
-                    if self.recipient_expired(&record.plaintext, event_id, record.wall_clock) {
-                        continue;
-                    }
-                    if self
-                        .account_suppression
-                        .lock()
-                        .expect("account suppression mutex not poisoned")
-                        .contains(conversation, event_id)
-                    {
-                        continue;
-                    }
-                    let mut received = self.received.lock().expect("received mutex not poisoned");
-                    if let Some(existing) = received.entry(event_id) {
-                        // The live receive and sender sidecar can timestamp the
-                        // same signed event differently. Preserve the local row
-                        // when its identity and plaintext already match.
-                        if existing.conversation == conversation
-                            && existing.from == record.from
-                            && existing.plaintext == record.plaintext
-                        {
-                            continue;
-                        }
-                        return Err(NodeError::Authorization(
-                            "channel history conflicts with local plaintext".into(),
-                        ));
-                    }
-                    received
-                        .record_durable(&super::received_log::ReceivedEntry {
-                            conversation,
-                            event_id,
-                            from: record.from.clone(),
-                            wall_clock: record.wall_clock,
-                            plaintext: record.plaintext.clone(),
-                        })
-                        .map_err(NodeError::Log)?;
-                    self.note_account_history_change();
+                    self.record_private_channel_plaintext(&super::received_log::ReceivedEntry {
+                        conversation: ConversationId::new(record.conversation),
+                        event_id: EventId::new(record.event_id),
+                        from: record.from.clone(),
+                        wall_clock: record.wall_clock,
+                        plaintext: record.plaintext.clone(),
+                    })?;
                 }
             }
         }
@@ -1683,6 +1726,52 @@ impl Node {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Explicit own-send completion is independent of optional history sharing.
+    /// Its caller verifies the original signed intent and exact public event.
+    pub(in crate::node) fn import_own_account_channel_copy(
+        &self,
+        row: &super::received_log::ReceivedEntry,
+    ) -> Result<(), NodeError> {
+        let _commit = self
+            .account_sync_commit
+            .lock()
+            .expect("account sync commit mutex");
+        self.record_private_channel_plaintext(row)
+    }
+
+    fn record_private_channel_plaintext(
+        &self,
+        row: &super::received_log::ReceivedEntry,
+    ) -> Result<(), NodeError> {
+        if self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
+            || self
+                .account_suppression
+                .lock()
+                .expect("account suppression mutex")
+                .contains(row.conversation, row.event_id)
+        {
+            return Ok(());
+        }
+        let mut received = self.received.lock().expect("received mutex");
+        if let Some(existing) = received.entry(row.event_id) {
+            // Preserve the live receiver's existing timestamp for the same body.
+            if existing.conversation == row.conversation
+                && existing.from == row.from
+                && existing.plaintext == row.plaintext
+            {
+                let retained = existing.clone();
+                return received.record_durable(&retained).map_err(NodeError::Log);
+            }
+            return Err(NodeError::Authorization(
+                "channel history conflicts with local plaintext".into(),
+            ));
+        }
+        received.record_durable(row).map_err(NodeError::Log)?;
+        drop(received);
+        self.note_account_history_change();
         Ok(())
     }
 
@@ -1919,6 +2008,7 @@ impl Node {
         let mut mandatory_statuses: HashMap<String, DocumentStatus> = HashMap::new();
         let mut attachment_owners: HashMap<tokio::task::Id, String> = HashMap::new();
         let mut attachments = tokio::task::JoinSet::new();
+        let mut operation_work_cursor: Option<super::AccountGroupOperationId> = None;
         let mut active_attachments = HashSet::new();
         let mut retry_attachment: HashMap<String, std::time::Instant> = HashMap::new();
         let mut unavailable: HashMap<(String, ConversationId), tokio::time::Instant> =
@@ -1959,6 +2049,54 @@ impl Node {
             self.migrate_channel_custody(&mut custody_migration);
             self.publish_account_group_access(&mut group_access_publication);
             self.publish_group_inventory(&mut inventory_publication);
+            // Explicit File copies and invitation capability/history preparation
+            // share the existing attachment slots. Optional archive policy cannot stop
+            // an already authorized account operation; control slots stay free.
+            if attachments.len() < ATTACHMENT_WORKERS {
+                let turn = self.account_group_data_work(operation_work_cursor);
+                operation_work_cursor = turn.after;
+                if turn.more {
+                    self.account_sync_notify.notify_one();
+                }
+                for job in turn.work {
+                    if attachments.len() >= ATTACHMENT_WORKERS {
+                        break;
+                    }
+                    let worker_key = job.worker_key();
+                    if active_attachments.contains(&worker_key)
+                        || retry_attachment
+                            .get(&worker_key)
+                            .is_some_and(|at| *at > std::time::Instant::now())
+                    {
+                        continue;
+                    }
+                    let id = worker_key;
+                    let file = job.conversation();
+                    let operation = job.id();
+                    let deadline = attachment_deadline(job.size());
+                    let node = self.clone();
+                    let Some(permit) = self.runtime_work.admit() else {
+                        return;
+                    };
+                    active_attachments.insert(id.clone());
+                    let owner = id.clone();
+                    let task = attachments.spawn(permit.track(async move {
+                        let result = tokio::time::timeout(
+                            deadline,
+                            node.execute_account_group_data_work(job),
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(NodeError::File(
+                                "account operation data exchange timed out".into(),
+                            ))
+                        })
+                        .map(|_| AttachmentOutcome::Complete);
+                        (id, file, false, result, Some(operation))
+                    }));
+                    attachment_owners.insert(task.id(), owner);
+                }
+            }
             while mandatory_active.len() < MANDATORY_WORKERS {
                 let Some((id, peer)) = mandatory_queue.pop_front() else {
                     break;
@@ -2218,7 +2356,7 @@ impl Node {
                                                 Ok(AttachmentOutcome::Complete)
                                             } else { Box::pin(node.pull_account_attachment_optional(&peer, file, version, checked, &mut unsupported)).await }
                                         }).await.unwrap_or_else(|_| Err(NodeError::File("account attachment exchange timed out".into())));
-                                        (id, file, unsupported, result)
+                                        (id, file, unsupported, result, None)
                                     }));
                                     attachment_owners.insert(task.id(), owner);
                                 }
@@ -2246,9 +2384,18 @@ impl Node {
                             active_attachments.remove(&id);
                             retry_attachment.insert(id, std::time::Instant::now() + RETRY_INTERVAL);
                     }
-                    if let Some(Ok((task, (id, file, unsupported, result)))) = result {
+                    if let Some(Ok((task, (id, file, unsupported, result, file_operation)))) = result {
                         attachment_owners.remove(&task);
                         active_attachments.remove(&id);
+                        if file_operation.is_some() {
+                            if result.is_ok() {
+                                retry_attachment.remove(&id);
+                            } else {
+                                retry_attachment.insert(id.clone(), std::time::Instant::now() + RETRY_INTERVAL);
+                            }
+                            self.account_sync_notify.notify_one();
+                            enqueue_all = true;
+                        } else {
                         if unsupported {
                             attachment_unsupported.insert(id.clone(), tokio::time::Instant::now() + ATTACHMENT_AVAILABILITY_TTL);
                         }
@@ -2272,6 +2419,7 @@ impl Node {
 
                             }
                             enqueue_all = true;
+                        }
                         }
                     }
                 }
@@ -2378,6 +2526,10 @@ impl Node {
                     queue.push_back((id, peer));
                 }
             }
+            // Self notifications may already be ready on every turn. Let the
+            // bounded data and public fanout tasks run before another synchronous
+            // maintenance/publication pass; a ready Notify is not a yield.
+            tokio::task::yield_now().await;
         }
     }
 

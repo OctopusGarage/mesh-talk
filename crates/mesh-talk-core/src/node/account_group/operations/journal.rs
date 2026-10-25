@@ -84,14 +84,38 @@ pub(in crate::node) fn operation_digest(
     let mut hash = Sha256::new();
     hash.update(b"mesh-talk-account-group-operation-body-v1");
     hash.update(group.as_bytes());
-    hash.update(serde_json::to_vec(operation).expect("operation body serializes"));
+    // The original device signs randomized file preparation separately. Logical
+    // retries bind stable content metadata, while every other operation retains
+    // its existing exact digest bytes.
+    let logical_file = match operation {
+        AccountGroupOperation::Send { message }
+            if message.kind == AccountGroupOperationKind::File =>
+        {
+            super::file_preparation::GroupFilePayload::decode(message.encoded_body())
+                .filter(|payload| message.staged_assets == [payload.logical.checksum])
+                .and_then(|payload| payload.logical_operation())
+        }
+        _ => None,
+    };
+    hash.update(
+        serde_json::to_vec(logical_file.as_ref().unwrap_or(operation))
+            .expect("operation body serializes"),
+    );
     hash.finalize().into()
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(in crate::node) struct GroupFileCopy {
+    pub descriptor: super::file_preparation::GroupFileDescriptor,
+    pub complete: bool,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Entry {
     pub reference: OperationReference,
     pub body: Option<AccountGroupOperation>,
     pub status: AccountGroupOperationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_copy: Option<GroupFileCopy>,
     pub source: bool,
     pub cancel: bool,
     pub sequence: u64,
@@ -123,14 +147,23 @@ struct Record {
     entry: Option<Entry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lookup: Option<Lookup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_preparation: Option<super::file_preparation::GroupFilePayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_assets: Option<super::file_preparation::GroupFileAssetsReceipt>,
 }
 pub(in crate::node) struct OperationJournal {
     file: EncryptedRecordLog<Vec<u8>>,
     pub(super) entries: BTreeMap<AccountGroupOperationId, Entry>,
     pub(super) lookups: BTreeMap<AccountGroupOperationId, Lookup>,
+    file_asset_receipts:
+        BTreeMap<AccountGroupOperationId, super::file_preparation::GroupFileAssetsReceipt>,
+    file_preparations: BTreeMap<AccountGroupOperationId, super::file_preparation::GroupFilePayload>,
     account: [u8; 32],
     device: PublicIdentity,
     sequence: u64,
+    // Scheduling progress only; reset on open and never encoded in journal rows.
+    source_ready_after: Option<AccountGroupOperationId>,
     // Derived from retained source terminal records; never a second job journal.
     fanout_groups: BTreeMap<[u8; 32], u64>,
     fanout_order: BTreeMap<u64, [u8; 32]>,
@@ -144,6 +177,305 @@ fn invalid() -> LogError {
     LogError::CorruptFile("invalid account group operation journal".into())
 }
 impl OperationJournal {
+    /// Select a bounded source execution turn without changing durable status.
+    pub(super) fn take_source_ready(
+        &mut self,
+        source: &PublicIdentity,
+        limit: usize,
+    ) -> Vec<Entry> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        // Only pending IDs are collected (bounded by MAX_PENDING), and only
+        // this turn's entries are cloned. Retained terminal history is skipped.
+        let ids: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.reference.executor.device == *source && !entry.terminal())
+            .map(|(id, _)| *id)
+            .collect();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let start = self
+            .source_ready_after
+            .map_or(0, |after| ids.partition_point(|id| *id <= after));
+        let ready: Vec<_> = (0..limit.min(ids.len()))
+            .map(|offset| {
+                let id = ids[(start + offset) % ids.len()];
+                self.entries
+                    .get(&id)
+                    .expect("selected pending entry")
+                    .clone()
+            })
+            .collect();
+        self.source_ready_after = ready.last().map(|entry| entry.reference.id);
+        ready
+    }
+    fn pending_count(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| !entry.terminal())
+            .count()
+            + self.lookups.len()
+            + self
+                .file_preparations
+                .keys()
+                .filter(|id| !self.entries.contains_key(id) && !self.lookups.contains_key(id))
+                .count()
+    }
+    #[cfg(test)]
+    pub(super) fn test_file_preparation_pressure(
+        &mut self,
+        limit: usize,
+        compact: bool,
+    ) -> Result<(), LogError> {
+        self.live_limit = limit;
+        if compact {
+            let rows = self.compacted_rows()?;
+            self.file.rewrite(&rows)?;
+            self.records = rows.len();
+            self.bytes = 22 + rows.iter().map(|row| row.len() + 40).sum::<usize>();
+        }
+        Ok(())
+    }
+    fn preparation_row(&self, payload: super::file_preparation::GroupFilePayload) -> Record {
+        Record {
+            account: self.account,
+            device: self.device.clone(),
+            entry: None,
+            lookup: None,
+            file_assets: payload
+                .descriptor
+                .as_ref()
+                .and_then(|descriptor| self.file_asset_receipts.get(&descriptor.id))
+                .cloned(),
+            file_preparation: Some(payload),
+        }
+    }
+    fn preparation_bytes(
+        &self,
+        payload: &super::file_preparation::GroupFilePayload,
+    ) -> Result<Vec<u8>, LogError> {
+        serde_json::to_vec(&self.preparation_row(payload.clone())).map_err(|_| invalid())
+    }
+    fn file_body_matches_preparation(
+        body: &AccountGroupOperation,
+        original: &super::file_preparation::GroupFilePayload,
+        require_descriptor: bool,
+    ) -> bool {
+        let AccountGroupOperation::Send { message } = body else {
+            return false;
+        };
+        let Some(payload) =
+            super::file_preparation::GroupFilePayload::decode(message.encoded_body())
+        else {
+            return false;
+        };
+        message.kind == AccountGroupOperationKind::File
+            && message.staged_assets == [original.logical.checksum]
+            && payload.logical == original.logical
+            && match payload.descriptor.as_ref() {
+                Some(descriptor) => original.descriptor.as_ref() == Some(descriptor),
+                None => !require_descriptor,
+            }
+    }
+    fn validate_preparation(
+        &self,
+        payload: &super::file_preparation::GroupFilePayload,
+    ) -> Result<AccountGroupOperationId, LogError> {
+        let descriptor = payload.descriptor.as_ref().ok_or_else(invalid)?;
+        let signature: [u8; 64] = descriptor
+            .signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| invalid())?;
+        let operation = payload.logical_operation().ok_or_else(invalid)?;
+        if !descriptor.id.matches_origin(&descriptor.creator.public())
+            || !descriptor.creator.verify()
+            || descriptor.creator.post_office
+            || descriptor
+                .creator
+                .account_cert
+                .as_ref()
+                .is_none_or(|cert| cert.account_ed25519_pub != self.account)
+            || descriptor.logical_digest != operation_digest(descriptor.group, &operation)
+            || !DeviceIdentity::verify(
+                &descriptor.creator.ed25519_pub,
+                &descriptor.message(),
+                &signature,
+            )
+            || super::file_preparation::GroupFileLogical::from_manifest(&descriptor.manifest)
+                .as_ref()
+                != Some(&payload.logical)
+            || payload.encode().is_none()
+        {
+            return Err(invalid());
+        }
+        if descriptor.creator.public() != self.device {
+            let entry = self.entries.get(&descriptor.id).ok_or_else(invalid)?;
+            if entry.reference.executor.device != self.device
+                || !descriptor.valid_for(&entry.reference, &payload.logical)
+            {
+                return Err(invalid());
+            }
+        }
+        if let Some(old) = self.file_preparations.get(&descriptor.id)
+            && old != payload
+        {
+            return Err(invalid());
+        }
+        if let Some(entry) = self.entries.get(&descriptor.id)
+            && (entry.reference.kind != AccountGroupOperationKind::File
+                || entry.reference.group != descriptor.group
+                || entry.reference.digest != descriptor.logical_digest
+                || entry
+                    .file_copy
+                    .as_ref()
+                    .is_some_and(|copy| payload.descriptor.as_ref() != Some(&copy.descriptor))
+                || entry.body.as_ref().is_some_and(|body| {
+                    !Self::file_body_matches_preparation(body, payload, entry.source)
+                }))
+        {
+            return Err(invalid());
+        }
+        if let Some(lookup) = self.lookups.get(&descriptor.id)
+            && (lookup.body.kind() != AccountGroupOperationKind::File
+                || lookup.group != descriptor.group
+                || lookup.digest != descriptor.logical_digest
+                || !Self::file_body_matches_preparation(&lookup.body, payload, false))
+        {
+            return Err(invalid());
+        }
+        Ok(descriptor.id)
+    }
+    fn install_preparation(
+        &mut self,
+        payload: super::file_preparation::GroupFilePayload,
+        assets: Option<super::file_preparation::GroupFileAssetsReceipt>,
+    ) -> Result<(), LogError> {
+        let id = self.validate_preparation(&payload)?;
+        if assets
+            .as_ref()
+            .is_some_and(|receipt| !receipt.valid_for(&payload))
+            || self.file_asset_receipts.contains_key(&id) && assets.is_none()
+        {
+            return Err(invalid());
+        }
+        let old_size = self
+            .file_preparations
+            .get(&id)
+            .map(|old| self.preparation_bytes(old).map(|bytes| bytes.len() + 40))
+            .transpose()?
+            .unwrap_or(0);
+        let mut row = self.preparation_row(payload.clone());
+        row.file_assets = assets.clone();
+        let size = serde_json::to_vec(&row).map_err(|_| invalid())?.len() + 40;
+        let next_live = self.live.saturating_sub(old_size).saturating_add(size);
+        if next_live > self.live_budget()
+            || !self.file_preparations.contains_key(&id)
+                && self.file_preparations.len() + self.entries.len() + self.lookups.len()
+                    >= MAX_ENTRIES
+        {
+            return Err(invalid());
+        }
+        self.live = next_live;
+        self.file_preparations.insert(id, payload);
+        if let Some(receipt) = assets {
+            self.file_asset_receipts.insert(id, receipt);
+        }
+        Ok(())
+    }
+    pub(super) fn preflight_file_preparation(&self) -> Result<(), LogError> {
+        // A canonical MGF1 body is at most60KiB; its JSON byte arrays
+        // expand at most fourfold, plus the existing scoped record envelope.
+        if self.live.saturating_add(60 * 1024 * 4 + 4096) > self.live_budget()
+            || self.pending_count() >= MAX_PENDING
+            || self.entries.len() + self.lookups.len() + self.file_preparations.len() >= MAX_ENTRIES
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(super) fn put_file_preparation(
+        &mut self,
+        payload: super::file_preparation::GroupFilePayload,
+    ) -> Result<(), LogError> {
+        self.put_file_preparation_inner(payload, None)
+    }
+    pub(super) fn put_file_asset_receipt(
+        &mut self,
+        payload: super::file_preparation::GroupFilePayload,
+        receipt: super::file_preparation::GroupFileAssetsReceipt,
+    ) -> Result<(), LogError> {
+        self.put_file_preparation_inner(payload, Some(receipt))
+    }
+    fn put_file_preparation_inner(
+        &mut self,
+        payload: super::file_preparation::GroupFilePayload,
+        assets: Option<super::file_preparation::GroupFileAssetsReceipt>,
+    ) -> Result<(), LogError> {
+        let id = self.validate_preparation(&payload)?;
+        if assets
+            .as_ref()
+            .is_some_and(|receipt| !receipt.valid_for(&payload))
+        {
+            return Err(invalid());
+        }
+        let assets = assets.or_else(|| self.file_asset_receipts.get(&id).cloned());
+        if self.file_preparations.contains_key(&id)
+            && assets.as_ref() == self.file_asset_receipts.get(&id)
+        {
+            return Ok(());
+        }
+        let mut row = self.preparation_row(payload.clone());
+        row.file_assets = assets.clone();
+        let bytes = serde_json::to_vec(&row).map_err(|_| invalid())?;
+        let size = bytes.len() + 40;
+        let old_size = self
+            .file_preparations
+            .get(&id)
+            .map(|old| self.preparation_bytes(old).map(|bytes| bytes.len() + 40))
+            .transpose()?
+            .unwrap_or(0);
+        if self.live.saturating_sub(old_size).saturating_add(size) > self.live_budget()
+            || !self.file_preparations.contains_key(&id)
+                && (self.file_preparations.len() + self.entries.len() + self.lookups.len()
+                    >= MAX_ENTRIES
+                    || self.pending_count() >= MAX_PENDING
+                        && !self.entries.contains_key(&id)
+                        && !self.lookups.contains_key(&id))
+        {
+            return Err(invalid());
+        }
+        if self.bytes.saturating_add(size) > 120 * 1024 * 1024
+            || self.records
+                >= (self.entries.len() + self.lookups.len() + self.file_preparations.len())
+                    .saturating_mul(2)
+                    .saturating_add(32)
+        {
+            let rows = self.compacted_rows()?;
+            self.file.rewrite(&rows)?;
+            self.records = rows.len();
+            self.bytes = 22 + rows.iter().map(|row| row.len() + 40).sum::<usize>();
+        }
+        self.file.append_durable(&bytes)?;
+        self.records += 1;
+        self.bytes += size;
+        self.install_preparation(payload, assets)
+    }
+    pub(super) fn file_asset_receipt(
+        &self,
+        id: AccountGroupOperationId,
+    ) -> Option<&super::file_preparation::GroupFileAssetsReceipt> {
+        self.file_asset_receipts.get(&id)
+    }
+    pub(super) fn file_preparation(
+        &self,
+        id: AccountGroupOperationId,
+    ) -> Option<&super::file_preparation::GroupFilePayload> {
+        self.file_preparations.get(&id)
+    }
     pub(in crate::node) fn open(
         dir: &Path,
         password: &str,
@@ -175,9 +507,12 @@ impl OperationJournal {
             file,
             entries: BTreeMap::new(),
             lookups: BTreeMap::new(),
+            file_preparations: BTreeMap::new(),
+            file_asset_receipts: BTreeMap::new(),
             account,
             device,
             sequence: 0,
+            source_ready_after: None,
             fanout_groups: BTreeMap::new(),
             fanout_order: BTreeMap::new(),
             records: rows.len(),
@@ -192,8 +527,8 @@ impl OperationJournal {
             if row.account != journal.account || row.device != journal.device {
                 return Err(invalid());
             }
-            match (row.entry, row.lookup) {
-                (Some(entry), None) => {
+            match (row.entry, row.lookup, row.file_preparation, row.file_assets) {
+                (Some(entry), None, None, None) => {
                     journal.validate(&entry)?;
                     if journal
                         .entries
@@ -203,7 +538,7 @@ impl OperationJournal {
                         journal.install(entry)?;
                     }
                 }
-                (None, Some(lookup)) => {
+                (None, Some(lookup), None, None) => {
                     journal.validate_lookup(&lookup)?;
                     if journal
                         .entries
@@ -217,6 +552,9 @@ impl OperationJournal {
                         journal.install_lookup(lookup)?;
                     }
                 }
+                (None, None, Some(payload), assets) => {
+                    journal.install_preparation(payload, assets)?
+                }
                 _ => return Err(invalid()),
             }
         }
@@ -228,6 +566,8 @@ impl OperationJournal {
             device: self.device.clone(),
             entry: Some(entry),
             lookup: None,
+            file_preparation: None,
+            file_assets: None,
         }
     }
     fn size(&self, entry: &Entry) -> Result<usize, LogError> {
@@ -281,6 +621,55 @@ impl OperationJournal {
     }
     fn validate(&self, entry: &Entry) -> Result<(), LogError> {
         let reference = &entry.reference;
+        if let Some(copy) = &entry.file_copy {
+            let logical =
+                super::file_preparation::GroupFileLogical::from_manifest(&copy.descriptor.manifest)
+                    .ok_or_else(invalid)?;
+            let payload = super::file_preparation::GroupFilePayload {
+                logical,
+                descriptor: Some(copy.descriptor.clone()),
+            };
+            if reference.kind != AccountGroupOperationKind::File
+                || entry.status.phase != AccountGroupOperationPhase::Committed
+                || entry.status.primary_event.is_none()
+                || !copy.descriptor.valid_for(reference, &payload.logical)
+                || payload.encode().is_none()
+                || self
+                    .file_preparations
+                    .get(&reference.id)
+                    .is_some_and(|original| original != &payload)
+                || entry
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| !Self::file_body_matches_preparation(body, &payload, false))
+            {
+                return Err(invalid());
+            }
+        }
+        if self
+            .entries
+            .get(&reference.id)
+            .and_then(|old| old.file_copy.as_ref())
+            .is_some_and(|old| {
+                entry.file_copy.as_ref().is_none_or(|copy| {
+                    copy.descriptor != old.descriptor || old.complete && !copy.complete
+                })
+            })
+        {
+            return Err(invalid());
+        }
+        if let Some(payload) = self.file_preparations.get(&reference.id) {
+            let descriptor = payload.descriptor.as_ref().ok_or_else(invalid)?;
+            if reference.kind != AccountGroupOperationKind::File
+                || reference.group != descriptor.group
+                || reference.digest != descriptor.logical_digest
+                || entry.body.as_ref().is_some_and(|body| {
+                    !Self::file_body_matches_preparation(body, payload, entry.source)
+                })
+            {
+                return Err(invalid());
+            }
+        }
         let account_id = crate::identity::account::AccountPublic {
             ed25519_pub: self.account,
         }
@@ -371,20 +760,57 @@ impl OperationJournal {
         self.entries.insert(entry.reference.id, entry);
         Ok(())
     }
+    pub(super) fn complete_file_copy(
+        &mut self,
+        reference: &OperationReference,
+        descriptor: &super::file_preparation::GroupFileDescriptor,
+    ) -> Result<(), LogError> {
+        let mut entry = self
+            .entries
+            .get(&reference.id)
+            .cloned()
+            .ok_or_else(invalid)?;
+        if !entry.reference.same(reference)
+            || entry.status.phase != AccountGroupOperationPhase::Committed
+        {
+            return Err(invalid());
+        }
+        let copy = entry.file_copy.as_mut().ok_or_else(invalid)?;
+        if &copy.descriptor != descriptor {
+            return Err(invalid());
+        }
+        if copy.complete {
+            return Ok(());
+        }
+        copy.complete = true;
+        self.put(entry)
+    }
+
+    fn pins_file_preparation(&self, file: ConversationId) -> bool {
+        self.file_preparations.iter().any(|(id, payload)| {
+            self.entries.get(id).is_none_or(|entry| !entry.terminal())
+                && payload
+                    .descriptor
+                    .as_ref()
+                    .and_then(|descriptor| {
+                        crate::node::files::validated_manifest(&descriptor.manifest)
+                    })
+                    .is_some_and(|manifest| manifest.file_conv() == file)
+        })
+    }
+
     pub(super) fn put(&mut self, mut entry: Entry) -> Result<(), LogError> {
         self.validate(&entry)?;
         let old = self.entries.get(&entry.reference.id);
         let old_lookup = self.lookups.get(&entry.reference.id);
-        let pending = self
-            .entries
-            .values()
-            .filter(|entry| !entry.terminal())
-            .count()
-            + self.lookups.len();
+        let pending = self.pending_count();
         if old.is_none()
             && old_lookup.is_none()
-            && (self.entries.len() + self.lookups.len() >= MAX_ENTRIES
-                || !entry.terminal() && pending >= MAX_PENDING)
+            && (self.entries.len() + self.lookups.len() + self.file_preparations.len()
+                >= MAX_ENTRIES
+                || !entry.terminal()
+                    && pending >= MAX_PENDING
+                    && !self.file_preparations.contains_key(&entry.reference.id))
         {
             return Err(invalid());
         }
@@ -429,6 +855,8 @@ impl OperationJournal {
             device: self.device.clone(),
             entry: None,
             lookup: Some(lookup),
+            file_preparation: None,
+            file_assets: None,
         }
     }
     fn lookup_size(&self, lookup: &Lookup) -> Result<usize, LogError> {
@@ -441,6 +869,16 @@ impl OperationJournal {
             + 80 * 1024)
     }
     fn validate_lookup(&self, lookup: &Lookup) -> Result<(), LogError> {
+        if let Some(payload) = self.file_preparations.get(&lookup.id) {
+            let descriptor = payload.descriptor.as_ref().ok_or_else(invalid)?;
+            if lookup.body.kind() != AccountGroupOperationKind::File
+                || lookup.group != descriptor.group
+                || lookup.digest != descriptor.logical_digest
+                || !Self::file_body_matches_preparation(&lookup.body, payload, false)
+            {
+                return Err(invalid());
+            }
+        }
         if lookup.id.as_bytes() == &[0; 32]
             || lookup.digest != operation_digest(lookup.group, &lookup.body)
             || lookup.status.id != lookup.id
@@ -476,6 +914,12 @@ impl OperationJournal {
                     .cloned()
                     .map(|lookup| serde_json::to_vec(&self.lookup_row(lookup))),
             )
+            .chain(
+                self.file_preparations
+                    .values()
+                    .cloned()
+                    .map(|payload| serde_json::to_vec(&self.preparation_row(payload))),
+            )
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| invalid())
     }
@@ -486,14 +930,10 @@ impl OperationJournal {
         }
         let old = self.lookups.get(&lookup.id);
         if old.is_none()
-            && (self.entries.len() + self.lookups.len() >= MAX_ENTRIES
-                || self
-                    .entries
-                    .values()
-                    .filter(|entry| !entry.terminal())
-                    .count()
-                    + self.lookups.len()
-                    >= MAX_PENDING)
+            && (self.entries.len() + self.lookups.len() + self.file_preparations.len()
+                >= MAX_ENTRIES
+                || self.pending_count() >= MAX_PENDING
+                    && !self.file_preparations.contains_key(&lookup.id))
         {
             return Err(invalid());
         }
@@ -558,6 +998,21 @@ impl OperationJournal {
                 Err(invalid())
             };
         }
+        if reference.kind == AccountGroupOperationKind::File {
+            let Some(AccountGroupOperation::Send { message }) = entry.body.as_ref() else {
+                return Err(invalid());
+            };
+            let payload = super::file_preparation::GroupFilePayload::decode(message.encoded_body())
+                .ok_or_else(invalid)?;
+            let descriptor = payload
+                .descriptor
+                .filter(|descriptor| descriptor.valid_for(reference, &payload.logical))
+                .ok_or_else(invalid)?;
+            entry.file_copy = Some(GroupFileCopy {
+                descriptor,
+                complete: true,
+            });
+        }
         entry.status.phase = AccountGroupOperationPhase::Committed;
         entry.status.primary_event = events
             .iter()
@@ -565,7 +1020,10 @@ impl OperationJournal {
             .find(|event| {
                 matches!(
                     event.kind,
-                    crate::eventlog::EventKind::Message | crate::eventlog::EventKind::FileManifest
+                    crate::eventlog::EventKind::Message
+                        | crate::eventlog::EventKind::FileManifest
+                        | crate::eventlog::EventKind::React
+                        | crate::eventlog::EventKind::Delete
                 )
             })
             .map(|event| event.id);
@@ -580,6 +1038,15 @@ impl OperationJournal {
 }
 
 impl Node {
+    pub(in crate::node) fn account_group_file_preparation_pinned(
+        &self,
+        file: ConversationId,
+    ) -> bool {
+        self.group_operations
+            .lock()
+            .expect("group operation journal mutex")
+            .pins_file_preparation(file)
+    }
     #[cfg(test)]
     pub(in crate::node) fn fail_account_group_operation_journal_appends_for_test(
         &self,
@@ -652,6 +1119,76 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn source_ready_turns_reach_ninth_pending_without_rewriting_status_or_foreign_work() {
+        use std::collections::{BTreeMap, BTreeSet};
+        let (_dir, node, account, template, _) = fixture();
+        let mut journal = node.group_operations.lock().unwrap();
+        let mut expected = BTreeSet::new();
+        for index in 0..11 {
+            let mut entry = template.clone();
+            let mut executor = entry.reference.executor.clone();
+            if index == 9 {
+                executor.device = DeviceIdentity::generate().public();
+                executor.lifetime.member = executor.device.clone();
+                entry.source = false;
+            }
+            entry.reference = OperationReference::new(
+                &node,
+                node.new_account_group_operation_id(&account.account_id())
+                    .unwrap(),
+                template.reference.group,
+                template.body.as_ref().unwrap(),
+                executor,
+            );
+            entry.status.id = entry.reference.id;
+            if index == 10 {
+                entry.status.phase = AccountGroupOperationPhase::Cancelled;
+            } else if index < 9 {
+                expected.insert(entry.reference.id);
+            }
+            journal.put(entry).unwrap();
+        }
+        let before: BTreeMap<_, _> = journal
+            .entries
+            .iter()
+            .map(|(id, entry)| (*id, serde_json::to_vec(entry).unwrap()))
+            .collect();
+        let revision = (journal.sequence, journal.records, journal.bytes);
+        assert!(
+            journal
+                .take_source_ready(&node.identity.public(), 0)
+                .is_empty()
+        );
+        let first = journal.take_source_ready(&node.identity.public(), 8);
+        let second = journal.take_source_ready(&node.identity.public(), 8);
+        assert_eq!(first.len(), 8);
+        assert_eq!(second.len(), 8);
+        let observed: BTreeSet<_> = first
+            .iter()
+            .chain(&second)
+            .map(|entry| entry.reference.id)
+            .collect();
+        assert_eq!(
+            observed, expected,
+            "a waiting first cohort must not permanently exclude the ninth source request"
+        );
+        assert!(
+            first.iter().chain(&second).all(|entry| !entry.terminal()
+                && entry.reference.executor.device == node.identity.public())
+        );
+        assert_eq!(
+            (journal.sequence, journal.records, journal.bytes),
+            revision,
+            "turn selection must be transient, without a new durable status or original ID"
+        );
+        let after: BTreeMap<_, _> = journal
+            .entries
+            .iter()
+            .map(|(id, entry)| (*id, serde_json::to_vec(entry).unwrap()))
+            .collect();
+        assert_eq!(after, before);
+    }
     fn fixture() -> (tempfile::TempDir, Arc<Node>, Account, Entry, Event) {
         let dir = tempfile::tempdir().unwrap();
         let account = Account::generate();
@@ -709,6 +1246,7 @@ mod tests {
             primary_event: None,
         };
         let entry = Entry {
+            file_copy: None,
             reference,
             body: Some(operation),
             status,

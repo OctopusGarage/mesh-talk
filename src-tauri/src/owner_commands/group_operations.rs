@@ -11,6 +11,7 @@ use mesh_talk_core::{
     node::{
         AccountGroupOperation, AccountGroupOperationId, AccountGroupOperationKind,
         AccountGroupOperationPhase, AccountGroupOperationQuery, AccountGroupOperationStatus,
+        AccountGroupStickerInput, AccountGroupTextInput, MessageProtection,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -220,6 +221,153 @@ pub async fn owner_submit_account_group_control(
                         id,
                         group,
                         operation,
+                        |commit| admission.authorize_accept(runtime, commit),
+                    )
+                    .map(Into::into)
+                    .map_err(CommandError::from)
+            })
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn owner_submit_account_group_text(
+    owner: String,
+    expected_account: String,
+    operation_id: String,
+    channel_id: String,
+    text: String,
+    reply_to: Option<String>,
+    expires_at_ms: Option<u64>,
+    protection: Option<MessageProtection>,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<AccountGroupOperationInfo, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let id = AccountGroupOperationId::from_hex(&operation_id)?;
+                let group = parse_channel_id(&channel_id)?;
+                let reply_to = reply_to.as_deref().map(parse_id).transpose()?;
+                runtime
+                    .handle()
+                    .submit_account_group_text_if(
+                        &expected_account,
+                        id,
+                        group,
+                        AccountGroupTextInput {
+                            text: text.into_bytes(),
+                            reply_to,
+                            expires_at_ms,
+                            protection,
+                        },
+                        |commit| admission.authorize_accept(runtime, commit),
+                    )
+                    .map(Into::into)
+                    .map_err(CommandError::from)
+            })
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn owner_submit_account_group_file<R: tauri::Runtime>(
+    owner: String,
+    expected_account: String,
+    operation_id: String,
+    channel_id: String,
+    path: String,
+    media: bool,
+    progress_key: Option<String>,
+    expires_at_ms: Option<u64>,
+    protection: Option<MessageProtection>,
+    handle: tauri::AppHandle<R>,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<AccountGroupOperationInfo, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    let cleanup = handle.clone();
+    let mut progress = crate::events::ProgressThrottle::new(
+        handle,
+        progress_key.unwrap_or_else(|| operation_id.clone()),
+        "prepare",
+    );
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                admission.checked(runtime, || {
+                    if runtime.account_id() != expected_account {
+                        return Err(CommandError::Authorization("account changed".into()));
+                    }
+                    Ok(())
+                })?;
+                let id = AccountGroupOperationId::from_hex(&operation_id)?;
+                let group = parse_channel_id(&channel_id)?;
+                let kind = if media {
+                    mesh_talk_core::file::FileKind::Media
+                } else {
+                    mesh_talk_core::file::FileKind::File
+                };
+                let status = runtime
+                    .handle()
+                    .submit_account_group_file_if(
+                        &expected_account,
+                        id,
+                        group,
+                        std::path::Path::new(&path),
+                        kind,
+                        expires_at_ms,
+                        protection,
+                        move |p| progress.emit(p.done, p.total),
+                        |commit| admission.authorize_accept(runtime, commit),
+                    )
+                    .await
+                    .map_err(CommandError::from)?;
+                // Pending and uncertain submissions keep the original managed path for retry.
+                if matches!(
+                    status.phase,
+                    AccountGroupOperationPhase::Committed
+                        | AccountGroupOperationPhase::Cancelled
+                        | AccountGroupOperationPhase::Rejected { .. }
+                ) {
+                    crate::chat_commands::cleanup_pasted_file(&cleanup, &path);
+                }
+                Ok(status.into())
+            })
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn owner_submit_account_group_sticker(
+    owner: String,
+    expected_account: String,
+    operation_id: String,
+    channel_id: String,
+    sticker_id: String,
+    fallback: String,
+    expires_at_ms: Option<u64>,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<AccountGroupOperationInfo, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                let id = AccountGroupOperationId::from_hex(&operation_id)?;
+                let group = parse_channel_id(&channel_id)?;
+                runtime
+                    .handle()
+                    .submit_account_group_sticker_if(
+                        &expected_account,
+                        id,
+                        group,
+                        AccountGroupStickerInput {
+                            sticker_id,
+                            fallback: fallback.into_bytes(),
+                            expires_at_ms,
+                        },
                         |commit| admission.authorize_accept(runtime, commit),
                     )
                     .map(Into::into)

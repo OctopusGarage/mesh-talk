@@ -1,3 +1,8 @@
+import {
+  canParticipateChannel,
+  isChannelInvitation,
+} from "./channelPermissions";
+import { PendingGroupControls } from "./GroupControlStatus";
 import { ConversationBio } from "./ConversationHeaders";
 import { useMessageCollection } from "./favorites/useMessageCollection";
 import {
@@ -378,35 +383,23 @@ export function ConversationView() {
   const activeChannel = isChannel
     ? channels.find((channel) => channel.channel_id === active.id)
     : undefined;
-  const sharedReference = activeChannel?.shared_reference === true;
+  const accountAccess = activeChannel?.account_access;
+  const accountRoleKnown = accountAccess !== undefined;
+  const sharedReference =
+    activeChannel?.shared_reference === true &&
+    (!accountAccess || accountAccess.role === "unknown");
   const previousAccount = activeChannel?.previous_account;
-  const archived =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.archived,
-    );
-  const dissolved =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.dissolved,
-    );
-  const left =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.left,
-    );
-  const pendingInvite =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.pending_invite,
-    );
-  const readOnly =
-    !!previousAccount ||
-    sharedReference ||
-    archived ||
-    dissolved ||
-    left ||
-    pendingInvite;
+  const archived = !accountRoleKnown && activeChannel?.archived === true;
+  const dissolved = accountRoleKnown
+    ? accountAccess?.role === "dissolved"
+    : activeChannel?.dissolved === true;
+  const left = accountRoleKnown
+    ? accountAccess?.role === "left"
+    : activeChannel?.left === true;
+  const pendingInvite = isChannel && isChannelInvitation(activeChannel);
+  const accessPending =
+    accountRoleKnown && (!accountAccess || accountAccess.role === "unknown");
+  const readOnly = isChannel && !canParticipateChannel(activeChannel);
   // Reaction `who` is keyed by account id for account conversations, device user-id for channels.
   const selfReactionId = isChannel ? myId : myAccountId;
   // Alias (if set) overrides the conversation's announced name in the header + composer.
@@ -482,6 +475,7 @@ export function ConversationView() {
             id={active.id}
             name={headerName}
             memberCount={activeChannel?.member_count ?? members.length}
+            accountAccess={accountAccess}
             sharedReference={sharedReference}
             previousAccount={!!previousAccount}
             archived={archived}
@@ -830,6 +824,11 @@ export function ConversationView() {
         </AnimatePresence>
       </div>
 
+      {isChannel && (
+        <div className="mx-auto max-h-56 w-full max-w-[820px] overflow-y-auto px-5">
+          <PendingGroupControls group={active.id} />
+        </div>
+      )}
       <TransferBar transferKey={active.id} />
 
       <Dialog
@@ -891,11 +890,14 @@ export function ConversationView() {
                 ? activeChannel?.legacy_membership
                   ? "conversation.legacySharedReferenceHint"
                   : "conversation.sharedReferenceHint"
-                : dissolved
-                  ? "conversation.dissolvedChannelHint"
-                  : left
-                    ? "conversation.leftChannelHint"
-                    : "conversation.archivedChannelHint",
+                : accessPending
+                  ? "conversation.groupAccessPending"
+                  : dissolved
+                    ? "conversation.dissolvedChannelHint"
+                    : left
+                      ? "conversation.leftChannelHint"
+                      : "conversation.archivedChannelHint",
+            accessPending ? { defaultValue: "Updating group access…" } : {},
           )}
         </div>
       ) : !draftsLoaded ? (

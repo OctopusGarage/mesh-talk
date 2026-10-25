@@ -16,13 +16,31 @@
         "crates/mesh-talk-core/src/node/channels.rs",
         "crates/mesh-talk-core/src/node/join_history.rs",
         "crates/mesh-talk-core/src/node/account_sync/wake.rs",
-        "crates/mesh-talk-core/src/node/account_sync/fanout.rs"
+        "crates/mesh-talk-core/src/node/account_sync/fanout.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_message.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_message_action.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_owner_control.rs",
+        "crates/mesh-talk-core/src/node/channels/owner_control.rs",
+        "crates/mesh-talk-core/src/node/channels/account_invitation.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_invitation.rs",
+        "crates/mesh-talk-core/src/node/channel_account_controls.rs",
+        "crates/mesh-talk-core/src/node/outgoing_message.rs",
+        "crates/mesh-talk-core/src/node/message_actions.rs",
+        "crates/mesh-talk-core/src/node/reaction_store.rs",
+        "crates/mesh-talk-core/src/node/reactions.rs",
+        "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_file.rs",
+        "crates/mesh-talk-core/src/node/channels/account_self_control.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_self_control.rs",
+        "crates/mesh-talk-core/src/eventlog/persist.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
             "node::account_group::",
+            "node::reaction_store::",
+            "node::message_actions::",
             "node::account_documents::store::tests::",
             "node::account_documents::tests::group_control_signed_heads_and_metadata_reject_forged_or_malformed_records",
             "node::account_documents::tests::group_control_terminal_sources_keep_other_members_but_dissolution_overrides_stale_roles",
@@ -56,7 +74,21 @@
             "node::delivery_store::tests::group_control_rejects_malformed_policy_and_nonempty_dissolution",
             "node::delivery_store::tests::group_control_rejects_valid_payload_bound_to_another_kind_or_digest",
             "node::delivery_store::tests::group_control_requires_exact_original_request_wrappers",
-            "node::account_sync::fanout::tests::"
+            "node::account_sync::fanout::tests::",
+            "node::delivery_store::group_message::tests::",
+            "node::delivery_store::group_owner_control::tests::",
+            "node::delivery_store::tests::preexisting_group_request_bincode_bytes_remain_compatible",
+            "node::node::tests::removing_account_removes_linked_devices_in_one_epoch_and_rechecks_stale_enrollment",
+            "node::node::tests::removing_account_uses_durable_bindings_and_controls_when_projection_is_deferred",
+            "node::channel_account_controls::tests::inherited_owner_removes_account_and_transfers_account_authority",
+            "node::delivery_store::group_file::tests::",
+            "node::channels::account_self_control::tests::",
+            "node::channels::account_invitation::tests::",
+            "node::delivery_store::group_invitation::tests::",
+            "node::delivery_store::group_self_control::tests::",
+            "node::channel::tests::modern_account_departure_retains_only_the_original_sources_retry_route_on_replay",
+            "node::channel::tests::modern_owner_or_unregistered_leave_never_creates_a_departure_route",
+            "node::channel::tests::a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route"
           ]
         }
       ],
@@ -64,6 +96,30 @@
         "summary": "Apply one account group role across certified devices while preserving public signer authority and explicit execution availability.",
         "guide": "docs/module-boundaries.md#account-and-device-ownership",
         "invariants": [
+          {
+            "name": "Account-target owner controls retain the original signed input and complete accepted/invited lifetime witness; causal replay validates the saved parent view before append, while old delivery bincode discriminants and field shapes remain unchanged.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Executor selection prioritizes current execution readiness and operation capability over local preference; private authority arriving before its public causal state leaves the same original intent retryable and commits at most once after reconciliation.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Startup and running message-action recovery validate the saved causal view and source-sealed payload before append, persist exact recall sidecars before terminal completion, and preserve cancellation/idempotency independently of evicted target metadata.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Private explicit channel reactions retain original source/effect identity through compatible encrypted migration and bound executor certificates; views combine verified account devices, preserve causal account lifetimes through adoption, repair unambiguous legacy rows, and keep unknown authors distinct.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Original group File preparation retains one signed manifest and ciphertext through retries; actual synchronized bytes precede source execution, pending preparations pin the existing cache, and monotonic local copy completion prevents deliberate reclamation from restarting downloads.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Modern self controls bind the original account intent to its exact grant incarnation and saved causal view; valid departure retains only the original source retry route and projects Left over stale sibling membership observations.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
           {
             "name": "Group access and source observations capture privacy and identity state before the event-log mutex; log-held projection never reacquires privacy, roster or host-session locks.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
@@ -844,7 +900,7 @@
         "guide": "docs/backup-recovery.md",
         "invariants": [
           {
-            "name": "Schema 4 appends bounded Favorites and retained-file tags while preserving schema 1–3 compatibility and existing archive authentication",
+            "name": "Schema 4 appends bounded Favorites and retained-file tags while preserving schema 1\u20133 compatibility and existing archive authentication",
             "reference": "docs/backup-recovery.md#snapshot-compatibility"
           },
           {

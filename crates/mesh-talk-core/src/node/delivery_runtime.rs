@@ -910,62 +910,63 @@ impl Node {
             return Ok(());
         }
         loop {
-            let notification = store
-                .pending_transactions()
-                .first()
-                .and_then(|tx| match tx {
-                    DeliveryTransaction::Incoming {
-                        sender,
-                        original,
-                        received,
-                        ..
-                    } => Some((
-                        sender.clone(),
-                        original.conversation_id,
-                        (**received).clone(),
-                        false,
-                        true,
-                    )),
-                    DeliveryTransaction::IncomingManifest {
-                        sender,
-                        original,
-                        received,
-                        ..
-                    } => Some((
-                        sender.clone(),
-                        original.conversation_id,
-                        (**received).clone(),
-                        true,
-                        true,
-                    )),
-                    DeliveryTransaction::OutgoingManifest { received, .. } => Some((
-                        self.identity.public(),
-                        received.conversation,
-                        (**received).clone(),
-                        true,
-                        false,
-                    )),
-                    DeliveryTransaction::ChannelOutgoing { events, sent, .. }
-                        if events.last().is_some_and(|event| {
-                            event.kind == crate::eventlog::EventKind::FileManifest
-                        }) =>
-                    {
-                        Some((
+            let notification =
+                store
+                    .pending_transactions()
+                    .first()
+                    .and_then(|tx| match tx.body() {
+                        DeliveryTransaction::Incoming {
+                            sender,
+                            original,
+                            received,
+                            ..
+                        } => Some((
+                            sender.clone(),
+                            original.conversation_id,
+                            (**received).clone(),
+                            false,
+                            true,
+                        )),
+                        DeliveryTransaction::IncomingManifest {
+                            sender,
+                            original,
+                            received,
+                            ..
+                        } => Some((
+                            sender.clone(),
+                            original.conversation_id,
+                            (**received).clone(),
+                            true,
+                            true,
+                        )),
+                        DeliveryTransaction::OutgoingManifest { received, .. } => Some((
                             self.identity.public(),
-                            sent.conversation,
-                            super::received_log::ReceivedEntry {
-                                event_id: tx.id(),
-                                conversation: sent.conversation,
-                                from: self.user_id(),
-                                wall_clock: sent.wall_clock,
-                                plaintext: sent.plaintext.clone(),
-                            },
+                            received.conversation,
+                            (**received).clone(),
                             true,
                             false,
-                        ))
-                    }
-                    _ => None,
-                });
+                        )),
+                        DeliveryTransaction::ChannelOutgoing { events, sent, .. }
+                            if events.last().is_some_and(|event| {
+                                event.kind == crate::eventlog::EventKind::FileManifest
+                            }) =>
+                        {
+                            Some((
+                                self.identity.public(),
+                                sent.conversation,
+                                super::received_log::ReceivedEntry {
+                                    event_id: tx.id(),
+                                    conversation: sent.conversation,
+                                    from: self.user_id(),
+                                    wall_clock: sent.wall_clock,
+                                    plaintext: sent.plaintext.clone(),
+                                },
+                                true,
+                                false,
+                            ))
+                        }
+                        _ => None,
+                    });
             // Channel manifests already carry their complete plaintext in the WAL.
             // Retain their signed chunk scope before retiring that transaction; a
             // failed scope/sidecar write remains recoverable after acceptance.
@@ -974,7 +975,7 @@ impl Node {
                     store.pending_transactions().first().map(|tx| tx.body()),
                     Some(DeliveryTransaction::ChannelOutgoing { .. })
                 )
-                && let Some(manifest) = crate::file::decode_manifest(&entry.plaintext)
+                && let Some(manifest) = super::files::validated_manifest(&entry.plaintext)
             {
                 self.remember_sent_manifest_scope(
                     manifest.file_conv(),
@@ -991,13 +992,18 @@ impl Node {
                         DeliveryTransaction::Outgoing { .. }
                         | DeliveryTransaction::OutgoingManifest { .. }
                         | DeliveryTransaction::ChannelOutgoing { .. }
-                        | DeliveryTransaction::ChannelControl { .. } => true,
+                        | DeliveryTransaction::ChannelControl { .. }
+                        | DeliveryTransaction::AccountSelfControl { .. }
+                        | DeliveryTransaction::AccountOwnerControl { .. }
+                        | DeliveryTransaction::ChannelMessageAction { .. } => true,
                         DeliveryTransaction::Incoming { sender, .. }
                         | DeliveryTransaction::IncomingManifest { sender, .. } => {
                             !self.certified_sibling(sender)
                         }
                         DeliveryTransaction::Requested { .. }
-                        | DeliveryTransaction::GroupRequested { .. } => false,
+                        | DeliveryTransaction::GroupRequested { .. }
+                        | DeliveryTransaction::AccountGroupFile { .. }
+                        | DeliveryTransaction::AccountInvitation { .. } => false,
                     });
             let transaction_id = store.pending_transactions().first().map(|tx| tx.id());
             if let Some(
@@ -1037,7 +1043,9 @@ impl Node {
                     .pending_transactions()
                     .first()
                     .and_then(|tx| match tx.body() {
-                        DeliveryTransaction::ChannelControl { events } => {
+                        DeliveryTransaction::ChannelControl { events }
+                        | DeliveryTransaction::AccountSelfControl { events, .. }
+                        | DeliveryTransaction::AccountOwnerControl { events, .. } => {
                             events.first().map(|event| event.conversation_id)
                         }
                         _ => None,
@@ -1045,12 +1053,29 @@ impl Node {
             let installed = {
                 let mut ratchet = self.dm_ratchet.lock().expect("ratchet lock not poisoned");
                 let mut log = self.log.lock().expect("log lock not poisoned");
+                if let Some(tx) = store.pending_transactions().first() {
+                    store.validate_message_action_transaction(tx, &log, &self.identity)?;
+                }
                 let mut received = self.received.lock().expect("received lock not poisoned");
                 let mut sent = self.sentlog.lock().expect("sent lock not poisoned");
                 let mut files = self.received_files.lock().expect("files lock not poisoned");
+                let recall = store
+                    .pending_transactions()
+                    .first()
+                    .and_then(|tx| match tx.body() {
+                        DeliveryTransaction::ChannelMessageAction { recall, .. } => recall.clone(),
+                        _ => None,
+                    });
                 let mut complete =
                     |operation: &super::account_group::operations::journal::OperationReference,
                      events: &[Event]| {
+                        // Startup and running recovery use the same binding and
+                        // durable sidecar rule before completing the original ID.
+                        super::account_group::operations::persist_action_recall_completion(
+                            operation,
+                            recall.as_ref(),
+                            &mut self.recalls.lock().expect("recalls lock"),
+                        )?;
                         self.complete_account_group_operation(operation, events)
                     };
                 store.recover_next_with_group_operations(
@@ -1095,7 +1120,7 @@ impl Node {
             if removed && let Some((sender, original_conv, entry, file, incoming)) = notification {
                 self.note_account_history_change();
                 if file {
-                    if let Some(manifest) = crate::file::decode_manifest(&entry.plaintext) {
+                    if let Some(manifest) = super::files::validated_manifest(&entry.plaintext) {
                         let fresh = {
                             let mut book = self.files.lock().expect("files lock not poisoned");
                             let fresh = !book.is_emitted(&entry.event_id);

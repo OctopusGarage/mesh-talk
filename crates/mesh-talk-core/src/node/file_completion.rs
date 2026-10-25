@@ -310,6 +310,9 @@ impl Node {
         {
             return false;
         }
+        if self.account_group_file_preparation_pinned(conversation) {
+            return false;
+        }
         if !committed && !self.untracked_file_reclaimable(conversation, &store) {
             return false;
         }
@@ -373,7 +376,9 @@ impl Node {
             .file_convs();
         let mut replicas = Vec::new();
         for file in file_convs {
-            if !self.is_channel_file_replica(file) {
+            if self.account_group_file_preparation_pinned(file)
+                || !self.is_channel_file_replica(file)
+            {
                 continue;
             }
             let rows = self.retained_file_rows(file);

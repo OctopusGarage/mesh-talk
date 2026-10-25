@@ -159,3 +159,29 @@ it("uses known reference member count without inventing presence or old lifecycl
   expect(html).not.toContain("Updating");
   expect(html).not.toContain("Dissolved");
 });
+
+it.each(["waiting_for_device", "requires_upgrade", "reconciling"] as const)(
+  "shows compact account execution readiness for %s without calling membership informational",
+  (kind) => {
+    const html = renderToStaticMarkup(
+      createElement(ChannelHeader, {
+        id: "group",
+        name: "Study",
+        memberCount: 2,
+        sharedReference: true,
+        archived: false,
+        dissolved: false,
+        left: false,
+        pendingInvite: true,
+        accountAccess: {
+          account_id: "local-account",
+          role: "member",
+          execution: { kind },
+        },
+      }),
+    );
+    expect(html).toContain('data-testid="group-execution-readiness"');
+    expect(html).not.toContain("Shared group information");
+    expect(html).not.toContain("Pending invitation");
+  },
+);

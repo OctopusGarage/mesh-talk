@@ -1,8 +1,19 @@
 //! Account-owned operation admission and body-free lifecycle queries.
+mod action_preparation;
+pub(in crate::node) use action_preparation::persist_action_recall_completion;
 mod execution;
+pub(in crate::node) mod file_preparation;
+mod file_work;
+mod message_copy;
+mod preparation;
+mod source_work;
+pub use preparation::{AccountGroupStickerInput, AccountGroupTextInput};
 pub(in crate::node) mod journal;
 pub(in crate::node) mod wire;
 use super::*;
+use crate::node::channels::{
+    account_self_control::AccountSelfControlInput, owner_control::OwnerControlInput,
+};
 use crate::{
     channel::HistoryPolicy,
     node::{
@@ -93,6 +104,53 @@ pub enum AccountGroupOperation {
     LeaveAccount,
 }
 impl AccountGroupOperation {
+    fn message_action_input(&self) -> Option<crate::node::message_actions::MessageActionInput> {
+        use crate::node::message_actions::MessageActionInput;
+        match self {
+            Self::React {
+                target,
+                emoji,
+                remove,
+            } => Some(MessageActionInput::React {
+                target: *target,
+                emoji: emoji.clone(),
+                remove: *remove,
+            }),
+            Self::Recall { target } => Some(MessageActionInput::Recall { target: *target }),
+            _ => None,
+        }
+    }
+    fn invitation_input(
+        &self,
+    ) -> Option<crate::node::channels::account_invitation::InvitationInput> {
+        match self {
+            Self::Invite { target_account_id } => {
+                Some(crate::node::channels::account_invitation::InvitationInput {
+                    target_account_id: target_account_id.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+    fn self_control_input(&self) -> Option<AccountSelfControlInput> {
+        match self {
+            Self::AcceptInvitation => Some(AccountSelfControlInput::Accept),
+            Self::DeclineInvitation => Some(AccountSelfControlInput::Decline),
+            Self::LeaveAccount => Some(AccountSelfControlInput::Leave),
+            _ => None,
+        }
+    }
+    fn owner_control_input(&self) -> Option<OwnerControlInput> {
+        match self {
+            Self::RemoveAccount { target_account_id } => {
+                Some(OwnerControlInput::RemoveAccount(target_account_id.clone()))
+            }
+            Self::TransferOwnership { target_account_id } => {
+                Some(OwnerControlInput::Transfer(target_account_id.clone()))
+            }
+            _ => None,
+        }
+    }
     fn simple_control(&self) -> Option<SimpleControl> {
         match self {
             Self::Rename { name } => Some(SimpleControl::Rename(name.clone())),
@@ -107,6 +165,32 @@ impl AccountGroupOperation {
             Self::SetHistoryPolicy { .. } | Self::Dissolve => true,
             _ => false,
         }
+    }
+    fn valid_execution_payload(&self) -> bool {
+        if let Some(input) = self.invitation_input() {
+            return input.canonical();
+        }
+        if self.self_control_input().is_some() {
+            return true;
+        }
+        if self.message_action_input().is_some() {
+            return serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= wire::MAX_BODY);
+        }
+        if let Self::Send { message } = self {
+            if message.kind == AccountGroupOperationKind::File {
+                return file_preparation::GroupFilePayload::decode(message.encoded_body())
+                    .is_some_and(|payload| message.staged_assets == [payload.logical.checksum])
+                    && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= wire::MAX_BODY);
+            }
+            return message.staged_assets.is_empty()
+                && PreparedAccountGroupMessage::from_plaintext(
+                    message.kind,
+                    message.encoded_body.clone(),
+                )
+                .is_some();
+        }
+        self.owner_control_input()
+            .map_or_else(|| self.valid_simple_control(), |input| input.canonical())
     }
     pub fn kind(&self) -> AccountGroupOperationKind {
         match self {
@@ -143,6 +227,71 @@ pub enum AccountGroupOperationKind {
     HistoryPolicy,
     LeaveAccount,
 }
+impl AccountGroupOperationKind {
+    /// Stable capability positions are independent of serde's enum layout.
+    pub(in crate::node) const fn capability_bit(self) -> u16 {
+        1 << match self {
+            Self::Text => 0,
+            Self::Sticker => 1,
+            Self::File => 2,
+            Self::Reaction => 3,
+            Self::Recall => 4,
+            Self::Invite => 5,
+            Self::AcceptInvitation => 6,
+            Self::DeclineInvitation => 7,
+            Self::Rename => 8,
+            Self::RemoveAccount => 9,
+            Self::TransferOwnership => 10,
+            Self::Dissolve => 11,
+            Self::HistoryPolicy => 12,
+            Self::LeaveAccount => 13,
+        }
+    }
+
+    /// An older operation-v1 completion advertised exactly these controls.
+    pub(in crate::node) const fn legacy_capabilities() -> u16 {
+        Self::Rename.capability_bit()
+            | Self::HistoryPolicy.capability_bit()
+            | Self::Dissolve.capability_bit()
+    }
+
+    pub(in crate::node) const fn supported_here(self) -> bool {
+        matches!(
+            self,
+            Self::Text
+                | Self::Sticker
+                | Self::File
+                | Self::Rename
+                | Self::HistoryPolicy
+                | Self::Dissolve
+                | Self::RemoveAccount
+                | Self::TransferOwnership
+                | Self::Reaction
+                | Self::Recall
+                | Self::Invite
+                | Self::AcceptInvitation
+                | Self::DeclineInvitation
+                | Self::LeaveAccount
+        )
+    }
+
+    pub(in crate::node) fn admits_role(self, role: AccountGroupRole) -> bool {
+        match self {
+            Self::Text | Self::Sticker | Self::File | Self::Reaction | Self::Recall => {
+                matches!(role, AccountGroupRole::Member | AccountGroupRole::Owner)
+            }
+            Self::AcceptInvitation | Self::DeclineInvitation => role == AccountGroupRole::Invited,
+            Self::LeaveAccount => role == AccountGroupRole::Member,
+            Self::Invite
+            | Self::Rename
+            | Self::RemoveAccount
+            | Self::TransferOwnership
+            | Self::Dissolve
+            | Self::HistoryPolicy => role == AccountGroupRole::Owner,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountGroupOperationRejection {
@@ -258,6 +407,19 @@ impl Node {
             },
             operation @ (AccountGroupOperation::SetHistoryPolicy { .. }
             | AccountGroupOperation::Dissolve) => operation,
+            operation @ (AccountGroupOperation::Send { .. }
+            | AccountGroupOperation::React { .. }
+            | AccountGroupOperation::Recall { .. }
+            | AccountGroupOperation::Invite { .. }
+            | AccountGroupOperation::RemoveAccount { .. }
+            | AccountGroupOperation::TransferOwnership { .. }
+            | AccountGroupOperation::AcceptInvitation
+            | AccountGroupOperation::DeclineInvitation
+            | AccountGroupOperation::LeaveAccount)
+                if operation.valid_execution_payload() =>
+            {
+                operation
+            }
             _ => {
                 return Err(NodeError::InvalidInput(
                     "account group operation kind unavailable".into(),
@@ -309,6 +471,11 @@ impl Node {
                 result = Some(status);
                 return Ok(());
             }
+            if id.matches_origin(&self.identity.public())
+                && let AccountGroupOperation::Send { message } = &operation
+            {
+                message.validate_new_admission()?;
+            }
             let status = AccountGroupOperationStatus {
                 id,
                 account_id: self.account_id(),
@@ -349,23 +516,44 @@ impl Node {
                 return Ok(());
             }
             let access = self.account_group_access(group)?;
-            if access.role != AccountGroupRole::Owner {
+            if !operation.kind().admits_role(access.role) {
                 return Err(NodeError::Authorization(
-                    "account is not the group owner".into(),
+                    "account is not authorized for this group operation".into(),
                 ));
             }
             let mut sources: Vec<_> = access
                 .sources
                 .into_iter()
-                .filter(|source| source.role == AccountGroupRole::Owner)
+                .filter(|source| operation.kind().admits_role(source.role))
                 .collect();
+            if operation.self_control_input().is_some() {
+                sources.retain(|source| source.authority.authority.is_some());
+                if sources.is_empty() {
+                    return Err(NodeError::Channel(
+                        "group account-membership format update required for this operation".into(),
+                    ));
+                }
+            }
+            if let AccountGroupOperation::Recall { target } = &operation {
+                let author = self
+                    .account_group_original_message_author(group, *target)
+                    .ok_or_else(|| {
+                        NodeError::Channel("original message author is reconciling".into())
+                    })?;
+                if author.ed25519_pub() == &self.identity.public().ed25519_pub {
+                    self.account_group_action_target(
+                        group,
+                        &crate::node::message_actions::MessageActionInput::Recall {
+                            target: *target,
+                        },
+                    )?;
+                }
+                sources.retain(|source| &source.device.ed25519_pub == author.ed25519_pub());
+            }
             sources.sort_by_key(|source| {
                 (
+                    !self.account_group_source_ready_for(source, operation.kind()),
                     source.device != self.identity.public(),
-                    !matches!(
-                        source.execution,
-                        AccountGroupExecution::ViaDevice(_) | AccountGroupExecution::Local
-                    ),
                     source.device.user_id(),
                 )
             });
@@ -373,9 +561,27 @@ impl Node {
                 .into_iter()
                 .next()
                 .ok_or_else(|| NodeError::Channel("owner source is reconciling".into()))?;
-            let ready = self.account_group_operation_ready(&executor.device);
+            let ready = self.account_group_source_ready_for(&executor, operation.kind());
             let reference =
                 journal::OperationReference::new(self, id, group, &operation, executor.clone());
+            if let AccountGroupOperation::Send { message } = &operation
+                && message.kind == AccountGroupOperationKind::File
+            {
+                let payload = file_preparation::GroupFilePayload::decode(message.encoded_body())
+                    .ok_or_else(|| {
+                        NodeError::InvalidInput("invalid original File intent".into())
+                    })?;
+                if payload
+                    .descriptor
+                    .as_ref()
+                    .is_none_or(|descriptor| !descriptor.valid_for(&reference, &payload.logical))
+                {
+                    return Err(NodeError::InvalidInput(
+                        "invalid original File preparation".into(),
+                    ));
+                }
+            }
+
             if !self.preflight_group_operation_request(RequestProjection {
                 reference: reference.clone(),
                 body: Some(operation.clone()),
@@ -401,6 +607,7 @@ impl Node {
                 .lock()
                 .expect("group operation journal mutex")
                 .put(journal::Entry {
+                    file_copy: None,
                     reference,
                     body: Some(operation.clone()),
                     status: status.clone(),
@@ -559,58 +766,129 @@ impl Node {
         &self,
         group: crate::eventlog::ConversationId,
     ) -> OperationProjection {
-        let journal = self
-            .group_operations
-            .lock()
-            .expect("operation journal mutex");
-        let mut entries: Vec<_> = journal
-            .entries
-            .values()
-            .filter(|entry| entry.reference.group == group)
-            .collect();
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.sequence));
-        let requests = entries
+        // Never retain the journal while querying capability or public-log owners.
+        let (pending, results, lookups) = {
+            let journal = self
+                .group_operations
+                .lock()
+                .expect("operation journal mutex");
+            let mut entries: Vec<_> = journal
+                .entries
+                .values()
+                .filter(|entry| entry.reference.group == group)
+                .collect();
+            entries.sort_by_key(|entry| std::cmp::Reverse(entry.sequence));
+            // The journal admits at most 128 pending intents. Do not clone all
+            // retained terminal history or unrelated plaintext for a wire page.
+            let pending: Vec<_> = entries
+                .iter()
+                .filter(|entry| !entry.source && !entry.terminal())
+                .take(128)
+                .map(|entry| (*entry).clone())
+                .collect();
+            let results: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry.source)
+                .take(16)
+                .map(|entry| {
+                    (
+                        entry.reference.clone(),
+                        entry.status.clone(),
+                        entry.file_copy.as_ref().map(|copy| copy.descriptor.clone()),
+                    )
+                })
+                .collect();
+            let lookups: Vec<_> = journal
+                .lookups
+                .values()
+                .filter(|lookup| lookup.group == group)
+                .take(8)
+                .map(|lookup| {
+                    (
+                        lookup.id,
+                        lookup.group,
+                        lookup.body.kind(),
+                        lookup.digest,
+                        lookup.cancel,
+                    )
+                })
+                .collect();
+            (pending, results, lookups)
+        };
+        let requests = pending
             .iter()
-            .filter(|entry| !entry.source && !entry.terminal())
-            .take(8)
-            .map(|entry| RequestProjection {
-                reference: entry.reference.clone(),
-                body: entry.body.clone(),
-                cancel: entry.cancel,
-                nonce: self.operation_query_nonce(entry.reference.id),
+            .filter_map(|entry| {
+                let ready = self.account_group_operation_ready_for(
+                    &entry.reference.executor.device,
+                    entry.reference.kind,
+                );
+                (ready || entry.cancel).then(|| RequestProjection {
+                    reference: entry.reference.clone(),
+                    body: if ready { entry.body.clone() } else { None },
+                    cancel: entry.cancel,
+                    nonce: self.operation_query_nonce(entry.reference.id),
+                })
             })
+            .take(8)
             .collect();
-        let mut results: Vec<_> = entries.iter().filter(|entry| entry.source).collect();
-        // A status query touches the original source journal entry. Its exact
-        // terminal result must remain publishable while other work is pending.
-        results.sort_by_key(|entry| std::cmp::Reverse(entry.sequence));
         let results = results
             .into_iter()
-            .take(16)
-            .map(|entry| ResultProjection {
-                reference: entry.reference.clone(),
-                status: entry.status.clone(),
+            .map(|(reference, status, file_descriptor)| {
+                let mut message_event =
+                    self.account_group_committed_message_event(&reference, &status);
+                let file_descriptor = if reference.kind == AccountGroupOperationKind::File {
+                    match (message_event.as_ref(), file_descriptor) {
+                        (Some(_), Some(descriptor)) => Some(descriptor),
+                        _ => {
+                            message_event = None;
+                            None
+                        }
+                    }
+                } else {
+                    file_descriptor
+                };
+                let recall_mark = message_event
+                    .as_ref()
+                    .and_then(|event| self.account_group_committed_recall_mark(&reference, event));
+                ResultProjection {
+                    file_descriptor,
+                    recall_mark,
+                    reference,
+                    status,
+                    message_event,
+                }
             })
             .collect();
-        let lookups = journal
-            .lookups
-            .values()
-            .filter(|entry| entry.group == group)
+        let lookups = lookups
+            .iter()
             .take(8)
-            .map(|entry| LookupProjection {
-                id: entry.id,
-                group,
-                kind: entry.body.kind(),
-                digest: entry.digest,
-                cancel: entry.cancel,
-                nonce: self.operation_query_nonce(entry.id),
+            .map(|(id, group, kind, digest, cancel)| LookupProjection {
+                id: *id,
+                group: *group,
+                kind: *kind,
+                digest: *digest,
+                cancel: *cancel,
+                nonce: self.operation_query_nonce(*id),
             })
             .collect();
-        OperationProjection {
+        let mut projection = OperationProjection {
             requests,
             results,
             lookups,
+        };
+        // A touched source result is first; older terminal results remain in the
+        // durable journal and can be republished by their original status query.
+        // Reuse the existing frame admission allowance for its bounded envelope.
+        while !projection.results.is_empty()
+            && wire::OperationFrame::new(self, group, u64::MAX, projection.clone())
+                .encode()
+                .len()
+                .saturating_add(512)
+                > wire::MAX_HEAD
+        {
+            projection.results.pop();
         }
+        projection
     }
     pub(in crate::node) fn operation_groups(&self) -> Vec<[u8; 32]> {
         let journal = self
@@ -641,8 +919,23 @@ impl Node {
         nonce[8..].copy_from_slice(&counter.to_be_bytes());
         nonce
     }
-    fn account_group_operation_ready(&self, device: &PublicIdentity) -> bool {
-        device == &self.identity.public()
+    fn account_group_source_ready_for(
+        &self,
+        source: &AccountGroupSource,
+        kind: AccountGroupOperationKind,
+    ) -> bool {
+        matches!(
+            source.execution,
+            AccountGroupExecution::Local | AccountGroupExecution::ViaDevice(_)
+        ) && self.account_group_operation_ready_for(&source.device, kind)
+    }
+
+    pub(in crate::node) fn account_group_operation_ready_for(
+        &self,
+        device: &PublicIdentity,
+        kind: AccountGroupOperationKind,
+    ) -> bool {
+        device == &self.identity.public() && kind.supported_here()
             || self
                 .group_operation_versions
                 .lock()
@@ -650,6 +943,7 @@ impl Node {
                 .get(&device.user_id())
                 .is_some_and(|support| {
                     support.public == *device
+                        && support.kinds & kind.capability_bit() != 0
                         && support.observed_at.elapsed() < std::time::Duration::from_secs(60)
                 })
     }

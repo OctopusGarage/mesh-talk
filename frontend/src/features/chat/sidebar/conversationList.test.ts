@@ -165,3 +165,62 @@ it.each([false, true])(
     expect(actual.channelRows[0].subtitle).toBe("3 members");
   },
 );
+
+it.each(["owner", "member"] as const)(
+  "preserves verified %s participation while its execution is reconciling",
+  (role) => {
+    const list = conversationList(
+      [],
+      [
+        channel("shared", {
+          shared_reference: true,
+          dissolved: true,
+          archived: true,
+          left: true,
+          pending_invite: true,
+          account_access: {
+            account_id: "my-account",
+            role,
+            execution: { kind: "reconciling" },
+          },
+        }),
+      ],
+      {},
+      i18n.getFixedT("en"),
+    );
+    expect(list.channelRows[0]).toMatchObject({
+      subtitle: "3 members",
+      prioritizeSubtitle: false,
+    });
+  },
+);
+it.each([
+  ["invited", "Invitation pending"],
+  ["left", "Left channel"],
+  ["dissolved", "Dissolved channel"],
+  ["unknown", "Updating group access…"],
+] as const)(
+  "uses the authoritative account %s state over physical group flags",
+  (role, subtitle) => {
+    const list = conversationList(
+      [],
+      [
+        channel("shared", {
+          shared_reference: true,
+          archived: true,
+          account_access: {
+            account_id: "my-account",
+            role,
+            execution: { kind: "reconciling" },
+          },
+        }),
+      ],
+      {},
+      i18n.getFixedT("en"),
+    );
+    expect(list.channelRows[0]).toMatchObject({
+      subtitle,
+      prioritizeSubtitle: true,
+    });
+  },
+);

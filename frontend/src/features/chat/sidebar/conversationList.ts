@@ -1,3 +1,7 @@
+import {
+  canParticipateChannel,
+  isChannelInvitation,
+} from "../channelPermissions";
 import type { TFunction } from "i18next";
 import type {
   AccountInfo,
@@ -75,6 +79,33 @@ export function conversationList(
   }
   for (const c of channels) {
     const id = c.channel_id;
+    const participant = canParticipateChannel(c);
+    const access = c.account_access;
+    const roleKnown = access !== undefined;
+    const accessPending = roleKnown && (!access || access.role === "unknown");
+    const referenceOnly = c.shared_reference && !roleKnown;
+    const dissolved = roleKnown ? access?.role === "dissolved" : c.dissolved;
+    const archived = !roleKnown && c.archived;
+    const left = roleKnown ? access?.role === "left" : c.left;
+    const lifecycleCaption = c.previous_account
+      ? t("conversation.previousAccountChannel")
+      : participant
+        ? null
+        : accessPending
+          ? t("conversation.groupAccessPending", {
+              defaultValue: "Updating group access…",
+            })
+          : referenceOnly
+            ? t("conversation.sharedReference")
+            : dissolved
+              ? t("conversation.dissolvedChannel")
+              : archived
+                ? t("conversation.archivedChannel")
+                : left
+                  ? t("conversation.leftChannel")
+                  : isChannelInvitation(c)
+                    ? t("conversation.pendingInvite")
+                    : null;
     const row: ConversationListRow = {
       id,
       channel: true,
@@ -85,27 +116,10 @@ export function conversationList(
         name: favorites[id]?.custom_alias || c.name,
       },
       pinned: !c.previous_account && (favorites[id]?.pinned ?? false),
-      subtitle: c.previous_account
-        ? t("conversation.previousAccountChannel")
-        : c.shared_reference
-          ? t("conversation.sharedReference")
-          : c.dissolved
-            ? t("conversation.dissolvedChannel")
-            : c.archived
-              ? t("conversation.archivedChannel")
-              : c.left
-                ? t("conversation.leftChannel")
-                : c.pending_invite
-                  ? t("conversation.pendingInvite")
-                  : t("conversation.members", { count: c.member_count }),
-      prioritizeSubtitle: !!(
-        c.previous_account ||
-        c.shared_reference ||
-        c.dissolved ||
-        c.archived ||
-        c.left ||
-        c.pending_invite
-      ),
+      subtitle:
+        lifecycleCaption ??
+        t("conversation.members", { count: c.member_count }),
+      prioritizeSubtitle: lifecycleCaption !== null,
     };
     if (c.previous_account && !favorites[id]?.hidden) {
       previousAccountRows.push(row);

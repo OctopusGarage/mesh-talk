@@ -1,3 +1,5 @@
+import { GroupControlStatus } from "./GroupControlStatus";
+import { useGroupControlOperation } from "./useGroupControlOperation";
 import { canManageChannel } from "./channelPermissions";
 import { FavoritesDialog } from "./favorites/FavoritesDialog";
 import { useEffect, useMemo, useState } from "react";
@@ -123,6 +125,7 @@ export function Sidebar() {
   // Inline rename dialog state (a contact id + a draft alias). Kept local/primitive.
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const renameOperation = useGroupControlOperation(renameId);
   // The own-profile dialog (avatar + display name editing), opened from the identity header.
   const [profileOpen, setProfileOpen] = useState(false);
   // The Wi-Fi network (SSID) we're on — Mesh-Talk is LAN-scoped, so show which network the
@@ -192,7 +195,13 @@ export function Sidebar() {
       const owned = ownedChannel(renameId);
       if (owned) {
         const next = renameDraft.trim();
-        if (next && next !== owned.name) void renameChannel(renameId, next);
+        if (next && next !== owned.name) {
+          void renameOperation.run(
+            () => renameChannel(renameId, next),
+            () => setRenameId(null),
+          );
+          return;
+        }
       } else {
         void setAlias(renameId, renameDraft);
       }
@@ -581,6 +590,7 @@ export function Sidebar() {
           </DialogHeader>
           <Input
             autoFocus
+            disabled={renameOperation.busy}
             value={renameDraft}
             onChange={(e) => setRenameDraft(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && commitRename()}
@@ -590,11 +600,17 @@ export function Sidebar() {
                 : t("sidebar.aliasPlaceholder")
             }
           />
+          <GroupControlStatus
+            outcome={renameOperation.outcome}
+            cancelRequested={renameOperation.cancelRequested}
+          />
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setRenameId(null)}>
               {t("common.cancel")}
             </Button>
-            <Button onClick={commitRename}>{t("common.save")}</Button>
+            <Button disabled={renameOperation.busy} onClick={commitRename}>
+              {t("common.save")}
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

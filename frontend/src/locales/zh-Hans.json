@@ -282,6 +282,10 @@
     "peerChecked": "已检查可连接的成员",
     "peerCheckedDetail": "上次检查可连接的成员：{{time}}。离线成员可能还有其他消息。",
     "moreUnread": "还有更多未读消息",
+    "groupWaitingForDevice": "等待关联设备",
+    "groupRequiresUpgrade": "更新关联设备后即可发送",
+    "groupReconciling": "正在更新群组访问权限…",
+    "groupAccessPending": "正在更新群组访问权限…",
     "sharedReference": "共享的群组信息",
     "sharedReferenceHint": "这些群组信息由已关联设备共享。发送消息和管理成员需要本设备获得经过验证的群组状态。",
     "legacySharedReferenceHint": "此群组使用较早的成员格式。发送消息需要更新群组格式与账号成员资格；这些信息不授予成员资格。",
@@ -935,7 +939,9 @@
     "devices": "设备（{{count}} 台）",
     "deviceIdentity": "设备 {{id}}",
     "addLinkedDevice": "添加关联设备",
-    "referencePartial": "仅显示已知成员。受大小限制，此共享成员列表并不完整。"
+    "referencePartial": "仅显示已知成员。受大小限制，此共享成员列表并不完整。",
+    "detailsReconciling": "正在核对群资料，当前显示最后确认的策略。",
+    "historyUnavailable": "尚未取得群历史记录策略。请保持一台关联设备在线，然后重试。"
   },
   "createChannel": {
     "trigger": "新建频道",
@@ -1365,5 +1371,22 @@
     "agent": "更改本地智能体访问权限",
     "settings": "更改安全设置",
     "savedLogin": "在此设备上保存登录凭据"
+  },
+  "groupOperation": {
+    "reaction": "更新表情回应",
+    "recall": "撤回消息",
+    "waiting": "正在等待你的一台关联设备执行此账号操作。",
+    "pending": "账号操作正在处理中。",
+    "unconfirmed": "结果尚未确认。请先检查此操作，再重试。",
+    "cancelling": "已请求取消。操作仍可能提交成功。",
+    "cancelled": "账号操作已取消。",
+    "failed": "账号操作未能完成。请刷新账号权限后重试。",
+    "cancel": "请求取消",
+    "details": "技术详情",
+    "title": "最近的群组操作",
+    "refresh": "检查状态",
+    "committed": "账号操作已完成。",
+    "upgrade": "请更新关联设备以继续此操作。",
+    "actionRequired": "请检查群组访问权限后再继续此操作。"
   }
 }

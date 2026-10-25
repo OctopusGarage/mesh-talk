@@ -285,6 +285,94 @@ fn wake_routes(peer: &PeerRecord) -> Vec<std::net::SocketAddr> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn imported_signed_sibling_document_notifies_locally_without_originating_wake() {
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        use crate::node::account_documents::{AccountDocumentKey, DocumentConversation};
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let source_identity = DeviceIdentity::generate();
+        let source_public = source_identity.public();
+        let source_proof =
+            crate::discovery::Announce::new_with_account(&source_identity, &account, "source", 1);
+        let source_dir = dir.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let (source, _, _) = crate::node::test_support::node_with_files(
+            &source_dir,
+            source_identity,
+            Account::from_secret_bytes(account.secret_bytes()),
+            &source_proof,
+        );
+        let identity = DeviceIdentity::generate();
+        let proof =
+            crate::discovery::Announce::new_with_account(&identity, &account, "receiver", 1);
+        let (node, _, _) =
+            crate::node::test_support::node_with_files(dir.path(), identity, account, &proof);
+        node.account_devices
+            .lock()
+            .unwrap()
+            .insert(crate::node::account_devices::AccountDevice {
+                public: source_public.clone(),
+                certificate: node.account.certify(&source_public.ed25519_pub),
+            })
+            .unwrap();
+        let key = AccountDocumentKey::Draft {
+            conversation: DocumentConversation::Account("a".repeat(32)),
+        };
+        let payload = b"signed sibling draft".to_vec();
+        let meta = source
+            .put_account_document_if(key.clone(), payload.clone(), None, |write| write())
+            .unwrap();
+        let mut status = initial_sync_status(source.user_id());
+        status.document_phase = SyncPhase::UpToDate;
+        node.account_sync_status
+            .lock()
+            .unwrap()
+            .insert(source.user_id(), status);
+        let documents = node.subscribe_account_documents();
+        let ui = node.subscribe_ui_changes();
+        let before = node.account_wake.revision.load(Ordering::Acquire);
+        let revision = node.device_sync_policy_snapshot().1;
+        node.commit_imported_document_for_test(meta, payload.clone(), revision, source_public)
+            .await
+            .unwrap();
+        assert_eq!(
+            node.account_document(&key).unwrap().unwrap().payload(),
+            payload
+        );
+        assert!(
+            documents.has_changed().unwrap(),
+            "import must notify local document readers"
+        );
+        assert!(ui.has_changed().unwrap(), "import must notify the local UI");
+        assert_eq!(
+            node.device_sync_status()
+                .into_iter()
+                .find(|s| s.device_id == source.user_id())
+                .unwrap()
+                .document_phase,
+            SyncPhase::CatchingUp
+        );
+        assert_eq!(
+            node.account_wake.revision.load(Ordering::Acquire),
+            before,
+            "an incoming sibling row must not originate another publisher wake"
+        );
+        node.put_account_document_if(
+            AccountDocumentKey::Draft {
+                conversation: DocumentConversation::Account("b".repeat(32)),
+            },
+            b"locally authored draft".to_vec(),
+            None,
+            |write| write(),
+        )
+        .unwrap();
+        assert!(
+            node.account_wake.revision.load(Ordering::Acquire) > before,
+            "locally authored publication must still wake certified siblings"
+        );
+    }
+
     #[test]
     fn local_wake_revisions_are_concurrent_and_saturate_without_wrapping() {
         let dir = tempfile::tempdir().unwrap();

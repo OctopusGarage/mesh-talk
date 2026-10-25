@@ -193,14 +193,22 @@ async fn removing_account_uses_durable_bindings_and_controls_when_projection_is_
         .set_allowed(&account.account_id(), false)
         .await
         .unwrap();
-    owner.pending_channel_plaintext.lock().unwrap().retry_at =
-        Some(std::time::Instant::now() + Duration::from_secs(30));
+    let plaintext_retry = Some(std::time::Instant::now() + Duration::from_secs(30));
+    owner.pending_channel_plaintext.lock().unwrap().retry_at = plaintext_retry;
     owner
         .remove_channel_account_members_if(channel, &account.account_id(), |commit| commit())
         .await
         .unwrap();
-    // Plaintext persistence is blocked, so the older book may still show peers.
-    assert_eq!(owner.channel_members(channel).len(), 3);
+    // Canonical membership refresh is independent of the paused plaintext
+    // retry; removed accounts must disappear without waiting for body writes.
+    assert_eq!(
+        owner.channel_members(channel),
+        vec![owner.identity.public()]
+    );
+    assert_eq!(
+        owner.pending_channel_plaintext.lock().unwrap().retry_at,
+        plaintext_retry
+    );
     {
         let log = owner.log.lock().unwrap();
         let events = log.events(&channel);

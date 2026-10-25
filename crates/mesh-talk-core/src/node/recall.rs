@@ -134,6 +134,17 @@ impl RecallLog {
             .unwrap_or_default()
     }
 
+    pub(in crate::node) fn mark(
+        &self,
+        conversation: &ConversationId,
+        target: EventId,
+    ) -> Option<&RecallMark> {
+        self.by_conversation
+            .get(conversation)?
+            .iter()
+            .find(|mark| mark.target == target)
+    }
+
     /// Own recall tombstones retained for a portable snapshot.
     pub(crate) fn snapshot_marks(&self) -> Vec<RecallMark> {
         let mut marks: Vec<_> = self.by_conversation.values().flatten().cloned().collect();

@@ -7,7 +7,7 @@ use crate::{discovery::Announce, identity::device::DeviceIdentity, node::Account
 use sha2::{Digest, Sha256};
 
 pub(in crate::node) const MAX_HEAD: usize = 4 * 1024 * 1024;
-const MAX_BODY: usize = 256 * 1024;
+pub(super) const MAX_BODY: usize = 256 * 1024;
 const MAX_REFERENCE: usize = 16 * 1024;
 const MAX_STATUS: usize = 64 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
@@ -21,6 +21,90 @@ pub(in crate::node) struct RequestProjection {
 pub(in crate::node) struct ResultProjection {
     pub reference: OperationReference,
     pub status: AccountGroupOperationStatus,
+    /// The original signed ciphertext, never a second plaintext result body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_event: Option<crate::eventlog::Event>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_descriptor: Option<super::file_preparation::GroupFileDescriptor>,
+    /// The original source's durable tombstone, without a recalled message body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_mark: Option<crate::node::recall::RecallMark>,
+}
+impl ResultProjection {
+    pub(super) fn valid_message_event(&self) -> bool {
+        if let Some(mark) = &self.recall_mark
+            && (self.reference.kind != AccountGroupOperationKind::Recall
+                || self.message_event.is_none()
+                || mark.conversation != self.reference.group
+                || operation_digest(
+                    mark.conversation,
+                    &AccountGroupOperation::Recall {
+                        target: mark.target,
+                    },
+                ) != self.reference.digest
+                || self.message_event.as_ref().is_none_or(|event| {
+                    event.wall_clock.saturating_sub(mark.wall_clock)
+                        > crate::node::recall::RECALL_WINDOW_MS
+                }))
+        {
+            return false;
+        }
+        if let Some(descriptor) = &self.file_descriptor {
+            let Some(logical) =
+                super::file_preparation::GroupFileLogical::from_manifest(&descriptor.manifest)
+            else {
+                return false;
+            };
+            let payload = super::file_preparation::GroupFilePayload {
+                logical,
+                descriptor: None,
+            };
+            if self.reference.kind != AccountGroupOperationKind::File
+                || self.message_event.is_none()
+                || !descriptor.valid_for(&self.reference, &payload.logical)
+                || payload.logical_operation().is_none_or(|body| {
+                    operation_digest(self.reference.group, &body) != self.reference.digest
+                })
+            {
+                return false;
+            }
+        }
+        self.message_event.as_ref().is_none_or(|event| {
+            matches!(
+                self.reference.kind,
+                AccountGroupOperationKind::Text
+                    | AccountGroupOperationKind::Sticker
+                    | AccountGroupOperationKind::File
+                    | AccountGroupOperationKind::Reaction
+                    | AccountGroupOperationKind::Recall
+            ) && self.status.phase == AccountGroupOperationPhase::Committed
+                && self.status.primary_event == Some(event.id)
+                && self.status.committed_events.contains(&event.id)
+                && event.conversation_id == self.reference.group
+                && match self.reference.kind {
+                    AccountGroupOperationKind::File => {
+                        self.file_descriptor.is_some()
+                            && event.kind == crate::eventlog::EventKind::FileManifest
+                    }
+                    AccountGroupOperationKind::Reaction => {
+                        event.kind == crate::eventlog::EventKind::React
+                    }
+                    AccountGroupOperationKind::Recall => {
+                        self.recall_mark.is_some()
+                            && event.kind == crate::eventlog::EventKind::Delete
+                    }
+                    _ => event.kind == crate::eventlog::EventKind::Message,
+                }
+                && event.author.ed25519_pub() == &self.reference.executor.device.ed25519_pub
+                && event.seq > 0
+                && event.lamport > 0
+                && !event.parents.is_empty()
+                && event.is_canonical()
+                && event.verify_integrity()
+                && event.verify_signature()
+                && crate::node::session::event_fits_frame(event)
+        })
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(in crate::node) struct LookupProjection {
@@ -129,6 +213,7 @@ impl OperationFrame {
         for result in &frame.projection.results {
             let status = &result.status;
             if !valid_reference(&result.reference)
+                || !result.valid_message_event()
                 || result.reference.executor.device != frame.proof.public()
                 || status.id != result.reference.id
                 || status.group != frame.group

@@ -108,6 +108,9 @@ impl From<mesh_talk_core::node::HistoryEntry> for HistoryItem {
 /// Aggregated reaction for display.
 #[derive(Serialize)]
 pub struct ReactionInfo {
+    /// Certified current-account ownership for channels; legacy and account DMs omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_me: Option<bool>,
     pub target: String, // hex EventId
     pub emoji: String,
     pub who: Vec<String>,

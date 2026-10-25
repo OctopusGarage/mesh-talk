@@ -7,7 +7,48 @@ use super::{
 use crate::node::delivery_store::{DeliveryTransaction, RequestRecord};
 use std::{collections::BTreeSet, sync::Arc};
 
+fn requested_effect(
+    reference: &journal::OperationReference,
+    effect: DeliveryTransaction,
+    message_id: EventId,
+) -> DeliveryTransaction {
+    DeliveryTransaction::GroupRequested {
+        operation: reference.clone(),
+        transaction: Box::new(DeliveryTransaction::Requested {
+            request: RequestRecord {
+                request_id: *reference.id.as_bytes(),
+                digest: reference.digest,
+                destination: crate::node::MessageDestination::Channel(reference.group),
+                message_id,
+                accepted_at_ms: crate::node::node::now_millis(),
+            },
+            transaction: Box::new(effect),
+        }),
+    }
+}
+
 impl Node {
+    #[cfg(test)]
+    pub(in crate::node) fn group_operation_journal_revision_for_test(
+        &self,
+        id: AccountGroupOperationId,
+    ) -> Option<u64> {
+        self.group_operations
+            .lock()
+            .unwrap()
+            .entries
+            .get(&id)
+            .map(|entry| entry.sequence)
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn admit_account_group_request_for_test(
+        &self,
+        request: RequestProjection,
+    ) -> Result<(), NodeError> {
+        self.admit_source_group_request(request)
+    }
+
     #[cfg(test)]
     pub(in crate::node) async fn maintain_account_group_operations(self: &Arc<Self>) {
         for group in self.maintain_account_group_operation_effects() {
@@ -69,6 +110,7 @@ impl Node {
                             AccountGroupOperationPhase::AwaitingAcceptance,
                         );
                         let _ = journal.put(Entry {
+                            file_copy: None,
                             reference: request.reference,
                             body: request.body,
                             status,
@@ -80,7 +122,12 @@ impl Node {
                 }
             }
             for result in frame.projection.results {
-                self.import_group_operation_result(result);
+                if self
+                    .import_group_operation_result(result, &frame.proof)
+                    .is_err()
+                {
+                    processed = false;
+                }
             }
             for lookup in frame.projection.lookups {
                 let mut journal = self
@@ -108,18 +155,11 @@ impl Node {
                     .insert(key, hash);
             }
         }
-        let ready: Vec<_> = self
+        let ready = self
             .group_operations
             .lock()
             .expect("group operation journal mutex")
-            .entries
-            .values()
-            .filter(|entry| {
-                entry.reference.executor.device == self.identity.public() && !entry.terminal()
-            })
-            .take(8)
-            .cloned()
-            .collect();
+            .take_source_ready(&self.identity.public(), 8);
         let mut fanout = BTreeSet::new();
         for entry in ready {
             let request = RequestProjection {
@@ -178,10 +218,56 @@ impl Node {
                 "invalid operation executor".into(),
             ));
         }
+        let action_input = request
+            .body
+            .as_ref()
+            .and_then(AccountGroupOperation::message_action_input);
+        let file_payload = request.body.as_ref().and_then(|body| match body {
+            AccountGroupOperation::Send { message }
+                if message.kind == AccountGroupOperationKind::File =>
+            {
+                super::file_preparation::GroupFilePayload::decode(message.encoded_body())
+            }
+            _ => None,
+        });
+        // Cache checks acquire their own journal/log guards before membership
+        // and delivery. Bulk transfer is owned by the existing attachment lane.
+        let file_ready = file_payload.as_ref().is_some_and(|payload| {
+            self.account_group_file_assets_ready(&request.reference, payload)
+        });
+        let existing_source = self
+            .group_operations
+            .lock()
+            .expect("operation journal mutex")
+            .entries
+            .get(&request.reference.id)
+            .is_some_and(|entry| entry.source);
+        let mut action_metadata_unavailable = false;
+        let action_target = if request.cancel || existing_source {
+            None
+        } else if let Some(input) = &action_input {
+            match self.account_group_action_target(request.reference.group, input) {
+                Ok(target) => target,
+                Err(NodeError::InvalidInput(_)) => {
+                    action_metadata_unavailable = true;
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
         let _membership = self
             .channel_membership_commit
             .lock()
             .expect("membership commit mutex");
+        let owner_input = request
+            .body
+            .as_ref()
+            .and_then(AccountGroupOperation::owner_control_input);
+        let owner_proofs = owner_input
+            .as_ref()
+            .map(|_| self.owner_control_proof_snapshot());
         let mut delivery = self.delivery.lock().expect("delivery mutex");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
@@ -199,10 +285,11 @@ impl Node {
                 return Ok(()); // The canonical source result remains the only result for this ID.
             }
             if entry.source {
-                if request.cancel && !entry.terminal() {
-                    entry.cancel = true;
-                    entry.status.phase = AccountGroupOperationPhase::CancellationRequested;
+                if !request.cancel || entry.terminal() || entry.cancel {
+                    return Ok(());
                 }
+                entry.cancel = true;
+                entry.status.phase = AccountGroupOperationPhase::CancellationRequested;
                 return self
                     .group_operations
                     .lock()
@@ -226,8 +313,14 @@ impl Node {
             if access.role == AccountGroupRole::Unknown {
                 return Err(NodeError::Channel("group authority is reconciling".into()));
             }
-            if access.role != AccountGroupRole::Owner
-                || source.is_none_or(|source| source.role != AccountGroupRole::Owner)
+            // A private authority observation can precede its public causal
+            // events. Keep the original intent retryable until this source
+            // can evaluate that view; capability support alone is insufficient.
+            if source.is_some_and(|source| source.execution == AccountGroupExecution::Reconciling) {
+                return Err(NodeError::Channel("group authority is reconciling".into()));
+            }
+            if !request.reference.kind.admits_role(access.role)
+                || source.is_none_or(|source| !request.reference.kind.admits_role(source.role))
             {
                 phase = AccountGroupOperationPhase::Rejected {
                     reason: AccountGroupOperationRejection::NotAuthorized,
@@ -241,7 +334,7 @@ impl Node {
                 };
             }
             if request.body.as_ref().is_none_or(|body| {
-                !body.valid_simple_control()
+                !body.valid_execution_payload()
                     || body.kind() != request.reference.kind
                     || journal::operation_digest(request.reference.group, body)
                         != request.reference.digest
@@ -249,6 +342,201 @@ impl Node {
                 phase = AccountGroupOperationPhase::Rejected {
                     reason: AccountGroupOperationRejection::InvalidPayload,
                 };
+            } else if let Some(AccountGroupOperation::Send { message }) = request.body.as_ref() {
+                // Remote intents enter the same expiry policy as local sends.
+                // Existing admitted IDs returned above retain their outcome.
+                if message
+                    .expires_at_ms()
+                    .is_some_and(|deadline| deadline <= self.expiry_now())
+                {
+                    phase = AccountGroupOperationPhase::Rejected {
+                        reason: AccountGroupOperationRejection::Expired,
+                    };
+                } else if message.validate_new_admission().is_err() {
+                    phase = AccountGroupOperationPhase::Rejected {
+                        reason: AccountGroupOperationRejection::InvalidPayload,
+                    };
+                }
+            }
+        }
+        if phase == AccountGroupOperationPhase::Accepted
+            && let (Some(input), Some(proofs)) = (owner_input, owner_proofs)
+        {
+            let log = self.log.lock().expect("log mutex");
+            let projection = crate::node::channel::ChannelBook::project_membership(
+                request.reference.group,
+                &log.events(&request.reference.group),
+            );
+            match self.prepare_owner_control(
+                request.reference.group,
+                &log,
+                &projection,
+                &input,
+                &proofs,
+            ) {
+                Ok(Some(prepared)) => {
+                    let message_id = prepared.event.id;
+                    let transaction = requested_effect(
+                        &request.reference,
+                        DeliveryTransaction::AccountOwnerControl {
+                            input,
+                            witness: prepared.witness,
+                            events: vec![prepared.event],
+                        },
+                        message_id,
+                    );
+                    if delivery
+                        .preflight_group_control_transaction(&transaction, &log)
+                        .is_err()
+                    {
+                        phase = AccountGroupOperationPhase::Rejected {
+                            reason: AccountGroupOperationRejection::ResourceLimit,
+                        };
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    phase = AccountGroupOperationPhase::Rejected {
+                        reason: AccountGroupOperationRejection::InvalidTarget,
+                    };
+                }
+            }
+        }
+        if phase == AccountGroupOperationPhase::Accepted
+            && let Some(input) = request
+                .body
+                .as_ref()
+                .and_then(AccountGroupOperation::self_control_input)
+        {
+            let log = self.log.lock().expect("log mutex");
+            let projection = crate::node::channel::ChannelBook::project_membership(
+                request.reference.group,
+                &log.events(&request.reference.group),
+            );
+            match self.prepare_account_self_control_locked(
+                request.reference.group,
+                &log,
+                &projection,
+                input,
+                &self.own_group_proof(),
+            ) {
+                Ok(prepared) => {
+                    let id = prepared.event.id;
+                    let transaction = requested_effect(
+                        &request.reference,
+                        DeliveryTransaction::AccountSelfControl {
+                            input,
+                            witness: prepared.witness,
+                            events: vec![prepared.event],
+                        },
+                        id,
+                    );
+                    if delivery
+                        .preflight_group_self_control_transaction(&transaction, &log)
+                        .is_err()
+                    {
+                        phase = AccountGroupOperationPhase::Rejected {
+                            reason: AccountGroupOperationRejection::ResourceLimit,
+                        };
+                    }
+                }
+                Err(_) => {
+                    phase = AccountGroupOperationPhase::Rejected {
+                        reason: AccountGroupOperationRejection::MembershipChanged,
+                    };
+                }
+            }
+        }
+        if phase == AccountGroupOperationPhase::Accepted && action_metadata_unavailable {
+            phase = AccountGroupOperationPhase::Rejected {
+                reason: AccountGroupOperationRejection::InvalidTarget,
+            };
+        }
+        if phase == AccountGroupOperationPhase::Accepted
+            && let Some(input) = action_input
+        {
+            let now = self.expiry_now();
+            if action_preparation::action_target_expired(action_target.as_ref(), now) {
+                phase = AccountGroupOperationPhase::Rejected {
+                    reason: AccountGroupOperationRejection::Expired,
+                };
+            } else {
+                let log = self.log.lock().expect("log mutex");
+                let projection = crate::node::channel::ChannelBook::project_membership(
+                    request.reference.group,
+                    &log.events(&request.reference.group),
+                );
+                match self.prepare_channel_message_action_locked(
+                    request.reference.group,
+                    &log,
+                    &projection,
+                    &input,
+                    crate::node::message_actions::MessageActionAdmission {
+                        own: self.own_group_proof(),
+                        target: action_target,
+                        admitted_at_ms: now,
+                    },
+                ) {
+                    Ok(prepared) => {
+                        let id = prepared.event.id;
+                        let transaction = requested_effect(
+                            &request.reference,
+                            DeliveryTransaction::ChannelMessageAction {
+                                input,
+                                witness: prepared.witness,
+                                events: vec![prepared.event],
+                                recall: prepared.recall,
+                            },
+                            id,
+                        );
+                        if delivery
+                            .preflight_group_message_action(&transaction, &log, &self.identity)
+                            .is_err()
+                        {
+                            phase = AccountGroupOperationPhase::Rejected {
+                                reason: AccountGroupOperationRejection::ResourceLimit,
+                            };
+                        }
+                    }
+                    Err(_) => {
+                        phase = AccountGroupOperationPhase::Rejected {
+                            reason: AccountGroupOperationRejection::InvalidTarget,
+                        }
+                    }
+                }
+            }
+        }
+        if phase == AccountGroupOperationPhase::Accepted
+            && let Some(payload) = file_payload
+        {
+            if payload.descriptor.as_ref().is_none_or(|descriptor| {
+                !descriptor.valid_for(&request.reference, &payload.logical)
+            }) {
+                phase = AccountGroupOperationPhase::Rejected {
+                    reason: AccountGroupOperationRejection::InvalidPayload,
+                };
+            } else if !file_ready {
+                let status = self.operation_status_for(
+                    &request.reference,
+                    AccountGroupOperationPhase::AwaitingAcceptance,
+                );
+                self.group_operations
+                    .lock()
+                    .expect("operation journal mutex")
+                    .put(Entry {
+                        file_copy: None,
+                        reference: request.reference,
+                        body: request.body,
+                        status,
+                        source: false,
+                        cancel: false,
+                        sequence: 0,
+                    })
+                    .map_err(NodeError::Log)?;
+                self.account_sync_notify.notify_one();
+                return Err(NodeError::File(
+                    "original File assets are reconciling".into(),
+                ));
             }
         }
         let status = self.operation_status_for(&request.reference, phase);
@@ -256,6 +544,7 @@ impl Node {
             .lock()
             .expect("group operation journal mutex")
             .put(Entry {
+                file_copy: None,
                 reference: request.reference,
                 body: request.body,
                 status,
@@ -269,11 +558,84 @@ impl Node {
         &self,
         id: AccountGroupOperationId,
     ) -> Result<Option<ConversationId>, NodeError> {
+        self.execute_source_control_with_invitation(id, None)
+    }
+
+    pub(super) fn execute_source_control_with_invitation(
+        &self,
+        id: AccountGroupOperationId,
+        mut invitation_assets: Option<crate::node::channels::account_invitation::InvitationAssets>,
+    ) -> Result<Option<ConversationId>, NodeError> {
+        let file_snapshot = {
+            let journal = self
+                .group_operations
+                .lock()
+                .expect("operation journal mutex");
+            journal
+                .entries
+                .get(&id)
+                .filter(|entry| {
+                    !entry.terminal()
+                        && !entry.cancel
+                        && entry.reference.kind == AccountGroupOperationKind::File
+                })
+                .and_then(|entry| {
+                    let AccountGroupOperation::Send { message } = entry.body.as_ref()? else {
+                        return None;
+                    };
+                    let payload =
+                        super::file_preparation::GroupFilePayload::decode(message.encoded_body())?;
+                    Some((
+                        entry.reference.clone(),
+                        payload,
+                        journal.file_asset_receipt(id)?.clone(),
+                    ))
+                })
+        };
+        let file_snapshot = file_snapshot.filter(|(reference, payload, _)| {
+            self.account_group_file_assets_ready(reference, payload)
+        });
+        let action_snapshot = self
+            .group_operations
+            .lock()
+            .expect("operation journal mutex")
+            .entries
+            .get(&id)
+            .filter(|entry| !entry.terminal() && !entry.cancel)
+            .and_then(|entry| {
+                entry
+                    .body
+                    .as_ref()
+                    .and_then(AccountGroupOperation::message_action_input)
+                    .map(|input| (entry.reference.group, input))
+            });
+        let action_target = match action_snapshot {
+            Some((group, input)) => self.account_group_action_target(group, &input),
+            None => Ok(None),
+        };
+        let needs_owner_proofs = self
+            .group_operations
+            .lock()
+            .expect("group operation journal mutex")
+            .entries
+            .get(&id)
+            .and_then(|entry| entry.body.as_ref())
+            .is_some_and(|body| body.owner_control_input().is_some());
+        let owner_proofs = needs_owner_proofs.then(|| self.owner_control_proof_snapshot());
         let _membership = self
             .channel_membership_commit
             .lock()
             .expect("membership commit mutex");
         let mut delivery = self.delivery.lock().expect("delivery mutex");
+        if self.runtime_work.is_closed()
+            || self
+                .delivery_suspended
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(NodeError::Authorization(
+                "account source runtime is retired".into(),
+            ));
+        }
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
         let Some(mut entry) = self
@@ -289,6 +651,14 @@ impl Node {
         if !entry.source || entry.terminal() {
             return Ok(None);
         }
+        // The existing bounded data worker verifies the invitee capability and
+        // seals optional history before entering these synchronous guards.
+        if entry.reference.kind == AccountGroupOperationKind::Invite
+            && invitation_assets.is_none()
+            && !entry.cancel
+        {
+            return Ok(None);
+        }
         if entry.cancel {
             entry.status =
                 self.operation_status_for(&entry.reference, AccountGroupOperationPhase::Cancelled);
@@ -299,24 +669,50 @@ impl Node {
                 .map_err(NodeError::Log)?;
             return Ok(None);
         }
-        let Some(control) = entry
-            .body
-            .as_ref()
-            .and_then(AccountGroupOperation::simple_control)
-        else {
+        let (action_target, rejection) = match action_target {
+            Ok(target) => {
+                let reason =
+                    action_preparation::action_target_expired(target.as_ref(), self.expiry_now())
+                        .then_some(AccountGroupOperationRejection::Expired);
+                (target, reason)
+            }
+            Err(NodeError::InvalidInput(_)) => {
+                (None, Some(AccountGroupOperationRejection::InvalidTarget))
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(reason) = rejection {
+            entry.status = self.operation_status_for(
+                &entry.reference,
+                AccountGroupOperationPhase::Rejected { reason },
+            );
+            self.group_operations
+                .lock()
+                .expect("operation journal mutex")
+                .put(entry)
+                .map_err(NodeError::Log)?;
+            return Ok(None);
+        }
+        let Some(body) = entry.body.as_ref() else {
             return Ok(None);
         };
         let access = self.account_group_access(entry.reference.group)?;
         if access.role == AccountGroupRole::Unknown {
             return Ok(None);
         }
-        if access.role != AccountGroupRole::Owner
+        if access.sources.iter().any(|source| {
+            source.device == self.identity.public()
+                && source.execution == AccountGroupExecution::Reconciling
+        }) {
+            return Ok(None);
+        }
+        if !entry.reference.kind.admits_role(access.role)
             || access
                 .sources
                 .iter()
                 .find(|source| source.device == self.identity.public())
                 .is_none_or(|source| {
-                    source.role != AccountGroupRole::Owner
+                    !entry.reference.kind.admits_role(source.role)
                         || source.lifetime != entry.reference.executor.lifetime
                         || source.authority != entry.reference.executor.authority
                 })
@@ -334,6 +730,19 @@ impl Node {
                 .map_err(NodeError::Log)?;
             return Ok(None);
         }
+        if matches!(
+            body,
+            AccountGroupOperation::Send { .. } | AccountGroupOperation::Invite { .. }
+        ) {
+            self.process_channel(entry.reference.group);
+        }
+        // Match the ordinary sender's membership→delivery→book→log order and
+        // reuse its current sender-key state; the public projection has no keys.
+        let book = matches!(
+            body,
+            AccountGroupOperation::Send { .. } | AccountGroupOperation::Invite { .. }
+        )
+        .then(|| self.channels.lock().expect("channels mutex"));
         let log = self.log.lock().expect("log mutex");
         let projection = crate::node::channel::ChannelBook::project_membership(
             entry.reference.group,
@@ -348,12 +757,13 @@ impl Node {
             &self.own_group_proof(),
         );
         if current_source.is_none_or(|source| {
-            source.role != AccountGroupRole::Owner
+            !entry.reference.kind.admits_role(source.role)
                 || source.device != entry.reference.executor.device
                 || source.lifetime != entry.reference.executor.lifetime
                 || source.authority != entry.reference.executor.authority
         }) {
             drop(log);
+            drop(book);
             entry.status = self.operation_status_for(
                 &entry.reference,
                 AccountGroupOperationPhase::Rejected {
@@ -367,12 +777,230 @@ impl Node {
                 .map_err(NodeError::Log)?;
             return Ok(None);
         }
-        let effect =
-            self.prepare_simple_channel_control(entry.reference.group, &log, &projection, control)?;
+        let prepared = match body {
+            AccountGroupOperation::Send { message } => {
+                if message
+                    .expires_at_ms()
+                    .is_some_and(|deadline| deadline <= self.expiry_now())
+                {
+                    drop(log);
+                    drop(book);
+                    entry.status = self.operation_status_for(
+                        &entry.reference,
+                        AccountGroupOperationPhase::Rejected {
+                            reason: AccountGroupOperationRejection::Expired,
+                        },
+                    );
+                    self.group_operations
+                        .lock()
+                        .expect("group operation journal mutex")
+                        .put(entry)
+                        .map_err(NodeError::Log)?;
+                    return Ok(None);
+                }
+                let state = book
+                    .as_ref()
+                    .and_then(|book| book.state(&entry.reference.group))
+                    .ok_or_else(|| {
+                        NodeError::Channel("group sender state is reconciling".into())
+                    })?;
+                if !self.channel_identity_is_current_in(state, &projection)
+                    || state.pending_invite()
+                    || state.is_dissolved()
+                    || projection.state.as_ref().is_none_or(|public| {
+                        public.epoch() != state.epoch() || public.members() != state.members()
+                    })
+                {
+                    return Err(NodeError::Channel(
+                        "group sender state is reconciling".into(),
+                    ));
+                }
+                if message.kind == AccountGroupOperationKind::File {
+                    let (_, payload, ready) = file_snapshot.ok_or_else(|| {
+                        NodeError::File("original File assets are reconciling".into())
+                    })?;
+                    let descriptor = payload
+                        .descriptor
+                        .as_ref()
+                        .filter(|descriptor| {
+                            descriptor.valid_for(&entry.reference, &payload.logical)
+                        })
+                        .ok_or_else(|| {
+                            NodeError::Authorization("invalid original File preparation".into())
+                        })?;
+                    let (effect, id) = self.prepare_channel_outgoing_locked(
+                        entry.reference.group,
+                        descriptor.manifest.clone(),
+                        crate::eventlog::EventKind::FileManifest,
+                        &log,
+                        state,
+                    )?;
+                    Some((
+                        DeliveryTransaction::AccountGroupFile {
+                            witness: Box::new(crate::node::delivery_store::GroupFileWitness {
+                                own: self.own_group_proof(),
+                                payload,
+                                ready,
+                            }),
+                            transaction: Box::new(effect),
+                        },
+                        id,
+                    ))
+                } else {
+                    Some(self.prepare_channel_outgoing_locked(
+                        entry.reference.group,
+                        message.encoded_body().to_vec(),
+                        crate::eventlog::EventKind::Message,
+                        &log,
+                        state,
+                    )?)
+                }
+            }
+            AccountGroupOperation::Invite { .. } => {
+                use crate::node::channels::account_invitation::{
+                    InvitationPreparation, InvitationWitness,
+                };
+                let input = body.invitation_input().expect("selected invitation input");
+                let assets = invitation_assets.take().ok_or_else(|| {
+                    NodeError::Channel("invitation capability is reconciling".into())
+                })?;
+                let state = book
+                    .as_ref()
+                    .and_then(|book| book.state(&entry.reference.group))
+                    .ok_or_else(|| {
+                        NodeError::Channel("group sender state is reconciling".into())
+                    })?;
+                let (parents, _) = log
+                    .prepare(&entry.reference.group)
+                    .map_err(NodeError::Log)?;
+                self.prepare_account_invitation_locked(InvitationPreparation {
+                    group: entry.reference.group,
+                    log: &log,
+                    state,
+                    projection: &projection,
+                    input: &input,
+                    witness: InvitationWitness {
+                        own: self.own_group_proof(),
+                        target: assets.target,
+                        incarnation: assets.incarnation,
+                        parents,
+                        recipients: projection
+                            .state
+                            .as_ref()
+                            .ok_or_else(|| {
+                                NodeError::Channel("group authority is reconciling".into())
+                            })?
+                            .members()
+                            .to_vec(),
+                    },
+                    history: assets.history,
+                })?
+                .map(|prepared| {
+                    (
+                        DeliveryTransaction::AccountInvitation {
+                            input,
+                            witness: prepared.witness,
+                            transaction: Box::new(prepared.transaction),
+                        },
+                        prepared.invitation,
+                    )
+                })
+            }
+            _ if body.self_control_input().is_some() => {
+                let input = body
+                    .self_control_input()
+                    .expect("selected account self-control");
+                let prepared = self.prepare_account_self_control_locked(
+                    entry.reference.group,
+                    &log,
+                    &projection,
+                    input,
+                    &self.own_group_proof(),
+                )?;
+                let id = prepared.event.id;
+                Some((
+                    DeliveryTransaction::AccountSelfControl {
+                        input,
+                        witness: prepared.witness,
+                        events: vec![prepared.event],
+                    },
+                    id,
+                ))
+            }
+            _ if body.message_action_input().is_some() => {
+                let input = body
+                    .message_action_input()
+                    .expect("selected message action");
+                let prepared = self.prepare_channel_message_action_locked(
+                    entry.reference.group,
+                    &log,
+                    &projection,
+                    &input,
+                    crate::node::message_actions::MessageActionAdmission {
+                        own: self.own_group_proof(),
+                        target: action_target,
+                        admitted_at_ms: self.expiry_now(),
+                    },
+                )?;
+                let id = prepared.event.id;
+                let effect = DeliveryTransaction::ChannelMessageAction {
+                    input,
+                    witness: prepared.witness,
+                    events: vec![prepared.event],
+                    recall: prepared.recall,
+                };
+                Some((effect, id))
+            }
+            _ if body.owner_control_input().is_some() => {
+                let input = body.owner_control_input().expect("selected owner control");
+                let Some(proofs) = owner_proofs.as_ref() else {
+                    return Ok(None);
+                };
+                self.prepare_owner_control(
+                    entry.reference.group,
+                    &log,
+                    &projection,
+                    &input,
+                    proofs,
+                )?
+                .map(|prepared| {
+                    let id = prepared.event.id;
+                    (
+                        DeliveryTransaction::AccountOwnerControl {
+                            input,
+                            witness: prepared.witness,
+                            events: vec![prepared.event],
+                        },
+                        id,
+                    )
+                })
+            }
+            _ => {
+                let control = body.simple_control().ok_or_else(|| {
+                    NodeError::InvalidInput("account group operation kind unavailable".into())
+                })?;
+                self.prepare_simple_channel_control(
+                    entry.reference.group,
+                    &log,
+                    &projection,
+                    control,
+                )?
+                .map(|effect| {
+                    let id = effect.id;
+                    (
+                        DeliveryTransaction::ChannelControl {
+                            events: vec![effect],
+                        },
+                        id,
+                    )
+                })
+            }
+        };
         // Noop completion also depends on a durable canonical parent view.
         log.sync().map_err(NodeError::Log)?;
-        drop(log);
-        let Some(effect) = effect else {
+        let Some((effect, message_id)) = prepared else {
+            drop(log);
+            drop(book);
             self.group_operations
                 .lock()
                 .expect("group operation journal mutex")
@@ -380,61 +1008,143 @@ impl Node {
                 .map_err(NodeError::Log)?;
             return Ok(None);
         };
-        let now = crate::node::node::now_millis();
-        let transaction = DeliveryTransaction::GroupRequested {
-            operation: entry.reference.clone(),
-            transaction: Box::new(DeliveryTransaction::Requested {
-                request: RequestRecord {
-                    request_id: *id.as_bytes(),
-                    digest: entry.reference.digest,
-                    destination: crate::node::MessageDestination::Channel(entry.reference.group),
-                    message_id: effect.id,
-                    accepted_at_ms: now,
-                },
-                transaction: Box::new(DeliveryTransaction::ChannelControl {
-                    events: vec![effect],
-                }),
-            }),
-        };
+        let transaction = requested_effect(&entry.reference, effect, message_id);
+        if matches!(
+            transaction.body(),
+            DeliveryTransaction::ChannelMessageAction { .. }
+        ) {
+            delivery
+                .preflight_group_message_action(&transaction, &log, &self.identity)
+                .map_err(NodeError::Log)?;
+        }
+        if matches!(
+            transaction.body(),
+            DeliveryTransaction::AccountSelfControl { .. }
+        ) {
+            delivery
+                .preflight_group_self_control_transaction(&transaction, &log)
+                .map_err(NodeError::Log)?;
+        }
+        if entry.reference.kind == AccountGroupOperationKind::Invite {
+            delivery
+                .preflight_group_invitation_transaction(&transaction, &log)
+                .map_err(NodeError::Log)?;
+        }
+        if entry.reference.kind == AccountGroupOperationKind::File {
+            delivery
+                .preflight_group_file_transaction(&transaction, &log)
+                .map_err(NodeError::Log)?;
+        }
+        drop(log);
+        drop(book);
         delivery.begin(transaction).map_err(NodeError::Log)?;
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
         Ok(Some(entry.reference.group))
     }
-    fn import_group_operation_result(&self, result: ResultProjection) {
+    #[cfg(test)]
+    pub(in crate::node) fn import_group_operation_result_for_test(
+        &self,
+        result: ResultProjection,
+        source_proof: &crate::discovery::Announce,
+    ) -> Result<bool, NodeError> {
+        let id = result.reference.id;
+        self.import_group_operation_result(result, source_proof)?;
+        Ok(self
+            .group_operations
+            .lock()
+            .expect("operation journal mutex")
+            .entries
+            .get(&id)
+            .is_some_and(|entry| entry.file_copy.is_some()))
+    }
+
+    fn import_group_operation_result(
+        &self,
+        result: ResultProjection,
+        source_proof: &crate::discovery::Announce,
+    ) -> Result<(), NodeError> {
+        let body = {
+            let journal = self
+                .group_operations
+                .lock()
+                .expect("group operation journal mutex");
+            if let Some(old) = journal.entries.get(&result.reference.id) {
+                if old.source || !old.reference.same(&result.reference) || old.terminal() {
+                    return Ok(());
+                }
+            } else if let Some(lookup) = journal.lookups.get(&result.reference.id)
+                && (lookup.group != result.reference.group
+                    || lookup.digest != result.reference.digest)
+            {
+                return Ok(());
+            }
+            journal
+                .entries
+                .get(&result.reference.id)
+                .and_then(|entry| entry.body.clone())
+                .or_else(|| {
+                    journal
+                        .lookups
+                        .get(&result.reference.id)
+                        .map(|lookup| lookup.body.clone())
+                })
+        };
+        let file_copy = if result.reference.kind == AccountGroupOperationKind::File
+            && result.status.phase == AccountGroupOperationPhase::Committed
+        {
+            if result.file_descriptor.is_none() && result.message_event.is_none() {
+                None
+            } else {
+                let descriptor = result
+                    .file_descriptor
+                    .as_ref()
+                    .filter(|_| result.message_event.is_some())
+                    .ok_or_else(|| {
+                        NodeError::Authorization("partial original File result metadata".into())
+                    })?;
+                let logical =
+                    super::file_preparation::GroupFileLogical::from_manifest(&descriptor.manifest)
+                        .ok_or_else(|| {
+                            NodeError::Authorization("invalid original File metadata".into())
+                        })?;
+                let payload = super::file_preparation::GroupFilePayload {
+                    logical,
+                    descriptor: Some(descriptor.clone()),
+                };
+                Some(journal::GroupFileCopy {
+                    descriptor: descriptor.clone(),
+                    complete: self
+                        .account_group_file_cached_assets_ready(&result.reference, &payload),
+                })
+            }
+        } else {
+            None
+        };
+
+        // Persist the original private body before terminal adoption trims it.
+        // Failure retains the intent and causes this exact source frame to retry.
+        self.import_account_group_message_copy(&result, body.as_ref(), source_proof)?;
+        self.import_account_group_action_copy(&result, body.as_ref(), source_proof)?;
         let mut journal = self
             .group_operations
             .lock()
             .expect("group operation journal mutex");
-        if let Some(old) = journal.entries.get(&result.reference.id) {
-            if old.source || !old.reference.same(&result.reference) {
-                return;
-            }
-            if old.terminal() {
-                return;
-            }
-        } else if let Some(lookup) = journal.lookups.get(&result.reference.id)
-            && (lookup.group != result.reference.group || lookup.digest != result.reference.digest)
+        if let Some(old) = journal.entries.get(&result.reference.id)
+            && (old.source || !old.reference.same(&result.reference) || old.terminal())
         {
-            return;
+            return Ok(());
         }
-        let body = journal
-            .entries
-            .get(&result.reference.id)
-            .and_then(|entry| entry.body.clone())
-            .or_else(|| {
-                journal
-                    .lookups
-                    .get(&result.reference.id)
-                    .map(|lookup| lookup.body.clone())
-            });
-        let _ = journal.adopt(Entry {
-            reference: result.reference,
-            body,
-            status: result.status,
-            source: false,
-            cancel: false,
-            sequence: 0,
-        });
+        journal
+            .adopt(Entry {
+                file_copy,
+                reference: result.reference,
+                body,
+                status: result.status,
+                source: false,
+                cancel: false,
+                sequence: 0,
+            })
+            .map_err(NodeError::Log)
     }
 }

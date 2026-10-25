@@ -678,6 +678,100 @@ locks, including through identity-resolution helpers. Sync projections already
 acquire privacy state before the event log; reversing that order can deadlock
 both account reconciliation and delivery, then block desktop session queries.
 
+Account-target owner controls share the channel owner's pure preparation rule
+with direct mutations. Preparation captures current signed bindings before the
+event log, freezes every accepted and invited physical lifetime (including
+unresolved bindings), and binds modern targets to their grant incarnation.
+Legacy removal closes all certified devices and invitations for the selected
+account; account transfer chooses a deterministic accepted device only where the
+legacy wire protocol requires one. Existing explicit device-transfer callers
+retain their device selection.
+
+The delivery journal appends a new owner-control variant without changing old
+bincode discriminants or field layouts. Its structural check binds the original
+account input and exact effect. Before replay appends that effect, causal
+validation reconstructs its saved parent view and checks the complete witness
+and public authority. Current peer labels, later account adoption and later
+grants cannot retarget an already prepared effect. Source acceptance preflights
+the complete envelope against the existing journal and transaction budgets.
+
+Executor selection requires both a supported operation kind and a current,
+executable source view before preferring the local device. A private authority
+observation can arrive before its public causal events: a reconciling source
+retains the original intent until that public view is available. It must not
+interpret missing causal state as an invalid target or exhausted resources,
+rewrite the signed executor reference, or allocate a replacement operation ID.
+
+Message actions share a pure source preparation rule and an appended delivery
+transaction. Recall selects the original author device, validates the target
+group and retained source expiry at first admission, and records the exact local
+recall mark before durable terminal completion. Expired intents that have not
+entered the effect WAL settle as expired; accepted WAL effects replay their
+saved causal view and clock. Startup and running recovery both validate the
+source's sealed payload before appending the event and share the recall-sidecar
+completion rule. Cancellation and terminal duplicates do not require evicted
+target metadata. Missing expiry evidence never means verified absence of expiry.
+
+The existing reaction projection owns private explicit group-action copies,
+retaining original full source identity and public effect IDs independently of
+optional archive download. Its explicit `MTREAC` to `MTREA2` migration preserves
+legacy DM records through encrypted, synced, atomic replacement. Channel rows
+share the same compaction and pruning owner, with an 8 MiB live-byte budget and
+100,000 distinct source/target/emoji keys; failed admission never evicts an active
+projection. Stored effects retain their original physical author and signature.
+Views reduce certified siblings under one account principal, so a sibling can
+remove the account’s existing reaction without adding a second reacting member.
+Modern public effects use their causal account binding; private explicit copies
+retain the authenticated executor certificate in an appended record variant.
+Unknown or ambiguous authors remain separate device principals until verified
+evidence arrives. Device adoption must not reassign an earlier account’s action,
+and duplicate public/private copies must not increase the reaction count.
+
+The peer directory preserves account-transition ambiguity in its version-three
+snapshot. Earlier snapshots cannot prove which account owned an unbound
+historical action; their loaded identities remain ambiguous for that fallback.
+This does not revoke current device certificates or override an effect's saved
+causal binding. Fresh version-three records distinguish known unchanged bindings
+from old snapshots that already discarded an earlier account.
+
+Explicit group files reuse the existing file preparation, delivery journal and
+account attachment workers. One original operation retains its signed manifest,
+random file identity and ciphertext through retries and executor changes in
+availability. A source may accept execution only after verified ciphertext is
+durable; optional archive and attachment preferences do not suppress the
+account's explicitly requested send. Existing recipient consent, expiry, recall
+and erase rules continue to govern file release.
+The operation journal retains the original result descriptor and a monotonic
+local completion marker independently of rotating source heads. Unfinished
+preparation pins its existing cache; completed copies may be reclaimed by the
+ordinary file owner without automatically downloading them again. This metadata
+does not create another queue, transport or public membership grant.
+
+Modern invitation acceptance and account departure share pure preparation and
+causal delivery replay with direct channel operations. Their appended journal
+envelope preserves old transaction encodings and binds the original account
+intent to its exact grant incarnation. A valid departure retains only the
+original source's bounded public retry route; rejoining cannot revive an older
+departure route. A revoked grant continues to project the account as left even
+when an offline sibling still advertises an older member observation.
+
+Account invitations share their existing signed invitation, authority grant and
+optional encrypted history batch with direct callers. Capability verification
+and history preparation use the existing bounded account data workers before
+membership and delivery guards. The appended invitation envelope binds its
+original target account, full device proof, grant incarnation and causal parent
+view; its request identity selects the first invitation event, while recovery
+retains every event in the unchanged batch.
+
+Explicit invitation refusal uses a versioned nonempty `ChannelLeave` payload
+bound to one pending grant incarnation. Existing empty acceptance and departure
+encodings remain unchanged. Older clients ignore this new refusal until they
+upgrade. A refusal reserves the acceptance epoch as well as revoking the grant,
+so a concurrent acceptance cannot reuse keys exposed by a partial accepted view.
+That reservation never activates membership or emits acceptance or content keys.
+Observed acceptance prevents a later refusal; a later invitation with a different
+incarnation remains independent.
+
 Directory reconciliation and observed history policy are descriptive metadata,
 separate from account permission and execution readiness. Reference list/member
 projections preserve the last coherent source observation, disclose unresolved

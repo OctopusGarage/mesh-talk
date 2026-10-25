@@ -1,4 +1,6 @@
-import { canManageChannel } from "./channelPermissions";
+import { GroupControlStatus, PendingGroupControls } from "./GroupControlStatus";
+import { useGroupControlOperation } from "./useGroupControlOperation";
+import { canManageChannel, canParticipateChannel } from "./channelPermissions";
 import {
   channelMemberAccounts,
   channelInviteAccounts,
@@ -55,6 +57,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     members: ChannelMemberInfo[];
     owner: string;
     can_manage?: boolean;
+    account_access?: import("@/lib/types").AccountGroupAccessInfo | null;
     owner_account_id?: string | null;
   } | null>(null);
   const storedSnapshotRef = useRef({
@@ -77,14 +80,22 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     s.channels?.find((item) => item.channel_id === channelId),
   );
   const sharedReference = channel?.shared_reference === true;
+  const accountAccess =
+    liveSnapshot?.account_access !== undefined
+      ? liveSnapshot.account_access
+      : channel?.account_access;
+  const referenceOnly =
+    sharedReference && (!accountAccess || accountAccess.role === "unknown");
   const authority = {
     ...channel,
     owner: channelOwner,
+    account_access: accountAccess,
     can_manage: liveSnapshot?.can_manage ?? channel?.can_manage,
     owner_account_id:
-      liveSnapshot?.owner_account_id !== undefined
+      (liveSnapshot?.owner_account_id !== undefined
         ? liveSnapshot.owner_account_id
-        : channel?.owner_account_id,
+        : channel?.owner_account_id) ??
+      (accountAccess?.role === "owner" ? accountAccess.account_id : null),
   };
   const peers = useChat((s) => s.peers);
   const accounts = useChat((s) => s.accounts);
@@ -109,22 +120,23 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const [profileTarget, setProfileTarget] =
     useState<MemberProfileTarget | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const operation = useGroupControlOperation(channelId);
+  const busy = operation.busy;
   const [pendingRemoval, setPendingRemoval] = useState<{
     channelId: string;
     id: string;
     name: string;
     account: boolean;
   } | null>(null);
-  const [removing, setRemoving] = useState(false);
+  const removing = busy;
   const [pendingTransfer, setPendingTransfer] = useState<{
     channelId: string;
     id: string;
     name: string;
   } | null>(null);
-  const [transferring, setTransferring] = useState(false);
+  const transferring = busy;
   const [confirmLeave, setConfirmLeave] = useState<string | null>(null);
-  const [leaving, setLeaving] = useState(false);
+  const leaving = busy;
   const [activitySnapshot, setActivitySnapshot] = useState<{
     channelId: string;
     entries: ChannelActivityInfo[];
@@ -160,6 +172,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             members: info.members,
             owner: info.owner,
             can_manage: info.can_manage,
+            account_access: info.account_access,
             owner_account_id: info.owner_account_id,
           });
       },
@@ -191,12 +204,13 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const confirmRemoval = async () => {
     if (!pendingRemoval || pendingRemoval.channelId !== channelId || removing)
       return;
-    setRemoving(true);
-    const removed = await (
-      pendingRemoval.account ? removeMemberAccount : removeMember
-    )(pendingRemoval.id);
-    setRemoving(false);
-    if (removed) setPendingRemoval(null);
+    await operation.run(
+      () =>
+        (pendingRemoval.account ? removeMemberAccount : removeMember)(
+          pendingRemoval.id,
+        ),
+      () => setPendingRemoval(null),
+    );
   };
   const confirmTransfer = async () => {
     if (
@@ -205,20 +219,17 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
       transferring
     )
       return;
-    setTransferring(true);
-    const transferred = await transferChannelOwner(pendingTransfer.id);
-    setTransferring(false);
-    if (transferred) setPendingTransfer(null);
+    await operation.run(
+      () => transferChannelOwner(pendingTransfer.id),
+      () => setPendingTransfer(null),
+    );
   };
   const finishLeave = async () => {
     if (confirmLeave !== channelId || leaving) return;
-    setLeaving(true);
-    const left = await leaveChannel();
-    setLeaving(false);
-    if (left) {
+    await operation.run(leaveChannel, () => {
       setConfirmLeave(null);
       setOpen(false);
-    }
+    });
   };
 
   const statusFor = (accountId: string | null | undefined) =>
@@ -318,22 +329,6 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
           </Button>
         )}
         {/* Only the owner may remove members — the core rejects a non-owner's kick. */}
-        {isOwner && !memberIsOwner && !m.pending && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-11 w-11 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
-            title={t("members.transferOwner")}
-            aria-label={`${t("members.transferOwner")} ${name}`}
-            disabled={transferring || removing}
-            onClick={() =>
-              channelId &&
-              setPendingTransfer({ channelId, id: m.user_id, name })
-            }
-          >
-            <Crown className="h-4 w-4" />
-          </Button>
-        )}
         {isOwner && !memberIsOwner && allowRemoval && (
           <Button
             variant="ghost"
@@ -364,7 +359,6 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
       <Dialog
         open={open}
         onOpenChange={(next) => {
-          if (busy) return;
           setOpen(next);
           if (!next) setConfirming(null);
         }}
@@ -379,12 +373,12 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               {t("members.dissolveConfirm")}
             </DialogDescription>
           </DialogHeader>
+          <GroupControlStatus
+            outcome={operation.outcome}
+            cancelRequested={operation.cancelRequested}
+          />
           <div className="flex justify-end gap-2">
-            <Button
-              variant="ghost"
-              disabled={busy}
-              onClick={() => setConfirming(null)}
-            >
+            <Button variant="ghost" onClick={() => setConfirming(null)}>
               {t("common.cancel")}
             </Button>
             <Button
@@ -394,14 +388,13 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               onClick={() => {
                 if (active?.kind !== "channel" || active.id !== confirming)
                   return;
-                setBusy(true);
-                void dissolveChannel(active.id).then((success) => {
-                  if (success) {
+                void operation.run(
+                  () => dissolveChannel(active.id),
+                  () => {
                     setOpen(false);
                     setConfirming(null);
-                  }
-                  setBusy(false);
-                });
+                  },
+                );
               }}
             >
               {t("members.dissolve")}
@@ -455,7 +448,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
           </DialogTitle>
           <DialogDescription>
             {t(
-              sharedReference
+              referenceOnly
                 ? "conversation.sharedReference"
                 : "members.description",
             )}
@@ -527,14 +520,26 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
           )}
         </DialogHeader>
 
-        {!sharedReference && open && channelId && (
+        <GroupControlStatus
+          outcome={operation.outcome}
+          cancelRequested={operation.cancelRequested}
+        />
+        {channelId && (
+          <PendingGroupControls group={channelId} excludeId={operation.id} />
+        )}
+        {!referenceOnly && open && channelId && (
           <ChannelHistorySettings
             channelId={channelId}
             channelOwner={channelOwner}
             canManage={isOwner}
-            selfAccepted={members.some(
-              (member) => member.user_id === myId && !member.pending,
-            )}
+            selfAccepted={
+              accountAccess !== undefined
+                ? accountAccess?.role === "owner" ||
+                  accountAccess?.role === "member"
+                : members.some(
+                    (member) => member.user_id === myId && !member.pending,
+                  )
+            }
             myId={myId}
             dissolved={dissolved}
           />
@@ -677,6 +682,30 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                     )}
                     {!hasDeviceDetails &&
                       deviceControls(m, name, !group.accountId)}
+                    {isOwner &&
+                      !memberIsOwner &&
+                      group.accountId &&
+                      group.devices.some((device) => !device.pending) && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-11 w-11 shrink-0 text-muted-foreground"
+                          title={t("members.transferOwner")}
+                          aria-label={`${t("members.transferOwner")} ${name}`}
+                          data-testid={`member-transfer-account-${group.accountId}`}
+                          disabled={busy}
+                          onClick={() =>
+                            channelId &&
+                            setPendingTransfer({
+                              channelId,
+                              id: group.accountId!,
+                              name,
+                            })
+                          }
+                        >
+                          <Crown className="h-4 w-4" />
+                        </Button>
+                      )}
                     {isOwner && !memberIsOwner && group.accountId && (
                       <Button
                         variant="ghost"
@@ -771,7 +800,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             {t("members.dissolve")}
           </Button>
         )}
-        {!sharedReference && pendingRemoval?.channelId === channelId && (
+        {!referenceOnly && pendingRemoval?.channelId === channelId && (
           <div className="space-y-3 rounded-lg border border-destructive/30 p-3">
             <p className="break-words text-sm" role="status">
               {t("members.confirmRemove", { name: pendingRemoval.name })}
@@ -794,7 +823,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             </div>
           </div>
         )}
-        {!sharedReference && pendingTransfer?.channelId === channelId && (
+        {!referenceOnly && pendingTransfer?.channelId === channelId && (
           <div className="space-y-3 rounded-lg border p-3">
             <p className="break-words text-sm" role="status">
               {t("members.confirmTransfer", { name: pendingTransfer.name })}
@@ -830,7 +859,8 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               renderItem={(p) => (
                 <button
                   key={p.user_id}
-                  onClick={() => addMember(p.user_id)}
+                  disabled={busy}
+                  onClick={() => void operation.run(() => addMember(p.user_id))}
                   data-testid={`member-invite-${p.user_id}`}
                   className="flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left hover:bg-accent/50"
                 >
@@ -908,7 +938,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
           </div>
         )}
         <div className="border-t pt-3">
-          {sharedReference ? (
+          {referenceOnly ? (
             <p className="text-xs text-muted-foreground">
               {t(
                 channel?.legacy_membership
@@ -924,7 +954,9 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             <p className="text-xs text-muted-foreground">
               {t("members.transferBeforeLeave")}
             </p>
-          ) : channelId !== null && confirmLeave === channelId ? (
+          ) : accountAccess !== undefined &&
+            !canParticipateChannel(authority) ? null : channelId !== null &&
+            confirmLeave === channelId ? (
             <div className="space-y-3">
               <p className="text-sm" role="status">
                 {t("members.confirmLeave")}

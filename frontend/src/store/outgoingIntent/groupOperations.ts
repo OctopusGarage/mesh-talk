@@ -7,6 +7,7 @@ import { captureChatOwner } from "../ownership";
 import {
   createGroupOperationCoordinator,
   type GroupOperationOutcome,
+  type GroupOperationRequest,
 } from "../accountGroupOperations";
 import type {
   OutgoingIntentContext,
@@ -151,4 +152,17 @@ export async function cancelGroupOperationIntent(
   id: string,
 ): Promise<GroupOperationOutcome> {
   return coordinator(set, get).cancel(id);
+}
+
+/** The existing bounded coordinator owns all group mutation observation. */
+export async function submitGroupMessageIntent(
+  set: Set,
+  get: Get,
+  request: GroupOperationRequest,
+  existingId?: string,
+): Promise<GroupOperationOutcome> {
+  const operations = coordinator(set, get);
+  return existingId
+    ? operations.resume(existingId, request.invoke)
+    : operations.submit(request);
 }

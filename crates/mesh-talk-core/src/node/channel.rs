@@ -381,7 +381,11 @@ impl ChannelBook {
         let mut prior: Option<ChannelState> = None;
         let mut ownership = None;
         let mut departures: Vec<(String, EventId)> = Vec::new();
+        // A modern departure belongs to the revoked account-grant lifetime.
+        // A later invitation supersedes its old outbound retry permission.
+        let mut departure_accounts: HashMap<String, [u8; 32]> = HashMap::new();
         for event in events {
+            let mut account_departure = None;
             if before == Some(event.id) {
                 break;
             }
@@ -538,12 +542,23 @@ impl ChannelBook {
                             authority
                                 .original_device_proofs()
                                 .into_iter()
+                                .chain(authority.invited_device_proofs())
                                 .find(|proof| proof.user_id == author)
                         });
-                        if let Some(proof) = proof
-                            && authority.is_member(&proof.public(), &proof)
-                        {
-                            valid = authority.leave_account(event, &proof, by_id).is_ok();
+                        if let Some(proof) = proof {
+                            let result = if !event.ciphertext.is_empty() {
+                                authority.decline_account(event, &proof, by_id)
+                            } else if authority.is_member(&proof.public(), &proof) {
+                                authority.leave_account(event, &proof, by_id)
+                            } else {
+                                Err(super::channel_account_authority::AuthorityError::Invalid)
+                            };
+                            valid = result.is_ok();
+                            if matches!(result, Ok(true)) {
+                                account_departure = proof.account_cert.as_ref().map(|cert| {
+                                    (author.clone(), event.id, cert.account_ed25519_pub)
+                                });
+                            }
                         }
                     } else if event.ciphertext.is_empty()
                         && let Some(state) = prior.as_mut()
@@ -624,6 +639,19 @@ impl ChannelBook {
                     .all(|parent| authorized.contains(parent))
             {
                 authorized.insert(event.id);
+                if let Some((device, departure, account)) = account_departure {
+                    departures.push((device.clone(), departure));
+                    departure_accounts.insert(device, account);
+                }
+                // Do not carry an earlier self-departure route into a new
+                // incarnation, even if a later owner removal leaves us absent.
+                let rejoined: HashSet<_> = departure_accounts
+                    .iter()
+                    .filter(|(_, account)| authority.account_grant(account).is_some())
+                    .map(|(device, _)| device.clone())
+                    .collect();
+                departure_accounts.retain(|device, _| !rejoined.contains(device));
+                departures.retain(|(device, _)| !rejoined.contains(device));
             }
             if let Some(state) = prior.as_ref() {
                 if event.kind == EventKind::MembershipChange {
@@ -958,6 +986,15 @@ impl ChannelBook {
                     events.get(*cursor).map(|event| event.id),
                     by_id,
                 );
+                if projection.authority.current_event().is_some() {
+                    // Rebuild modern retry permission from this canonical cut.
+                    // A historical boolean cannot survive rejoin/new revocation.
+                    self.departed.retain(|(group, _)| *group != channel_id);
+                    for (device, departure) in &projection.departures {
+                        self.applied_leaves.insert(*departure);
+                        self.departed.insert((channel_id, device.clone()));
+                    }
+                }
                 if let Some(mut projected) = projection.state
                     && (projected.is_member(&me.public().user_id())
                         || self.states.contains_key(&channel_id))
@@ -1336,6 +1373,197 @@ mod tests {
     use crate::eventlog::event::{Event, EventKind};
     use crate::eventlog::store::EventLog;
     use crate::eventlog::sync::reconcile;
+
+    #[test]
+    fn modern_account_departure_retains_only_the_original_sources_retry_route_on_replay() {
+        let mut f = crate::node::channels::account_self_control::tests::fixture(false);
+        let leave = Event::new(
+            &f.member,
+            f.group,
+            1,
+            vec![f.events.last().unwrap().id],
+            3,
+            3,
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        f.events.push(leave.clone());
+        let projection = f.projection();
+        assert!(projection.authorized.contains(&leave.id));
+        assert!(
+            !projection
+                .state
+                .as_ref()
+                .unwrap()
+                .is_member(&f.member.user_id())
+        );
+        let mut book = ChannelBook::new();
+        book.process(&f.member, f.group, &f.events.iter().collect::<Vec<_>>());
+        assert!(
+            book.departure_link(&f.member.user_id(), &f.owner.user_id()),
+            "a genuine modern account departure must keep its original source outbound control route"
+        );
+        assert_eq!(
+            book.pending_departures(&f.member.user_id()),
+            vec![(f.group, vec![f.owner.public()])]
+        );
+        let mut reopened = ChannelBook::new();
+        reopened.process(&f.member, f.group, &f.events.iter().collect::<Vec<_>>());
+        assert!(reopened.departure_link(&f.member.user_id(), &f.owner.user_id()));
+        assert!(
+            !reopened.departure_link(&f.owner.user_id(), &f.member.user_id()),
+            "a remaining member must never admit the departed source through this route"
+        );
+    }
+
+    #[test]
+    fn modern_owner_or_unregistered_leave_never_creates_a_departure_route() {
+        for owner in [false, true] {
+            let mut f = crate::node::channels::account_self_control::tests::fixture(false);
+            let outsider = DeviceIdentity::generate();
+            let source = if owner { &f.owner } else { &outsider };
+            let leave = Event::new(
+                source,
+                f.group,
+                if owner { 3 } else { 1 },
+                vec![f.events.last().unwrap().id],
+                3,
+                3,
+                EventKind::ChannelLeave,
+                vec![],
+            );
+            f.events.push(leave.clone());
+            assert!(!f.projection().authorized.contains(&leave.id));
+            let mut book = ChannelBook::new();
+            book.process(source, f.group, &f.events.iter().collect::<Vec<_>>());
+            assert!(!book.departure_link(&source.user_id(), &f.owner.user_id()));
+            assert!(book.pending_departures(&source.user_id()).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route() {
+        use crate::node::channel_account_authority::{AccountAuthorityControl, AccountGrant};
+        let mut f = crate::node::channels::account_self_control::tests::fixture(false);
+        let previous_authority = f.events[1].id;
+        let original_control = AccountAuthorityControl::decode(&f.events[1].ciphertext).unwrap();
+        let leave = Event::new(
+            &f.member,
+            f.group,
+            1,
+            vec![previous_authority],
+            3,
+            3,
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        f.events.push(leave);
+        let mut live = ChannelBook::new();
+        live.process(&f.member, f.group, &f.events.iter().collect::<Vec<_>>());
+        let departed = f.projection();
+        let state = departed.state.as_ref().unwrap();
+        let invite = Event::new(
+            &f.owner,
+            f.group,
+            3,
+            vec![f.events.last().unwrap().id],
+            4,
+            4,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: state.name().into(),
+                members: vec![f.owner.public(), f.member.public()],
+                epoch: state.epoch() + 1,
+                owner: f.owner.user_id(),
+            }
+            .encode_invitation(),
+        );
+        let grant = AccountGrant {
+            incarnation: [3; 16],
+            pending: true,
+            original: f.proof.clone(),
+            membership_event: invite.id,
+            acceptance_event: None,
+        };
+        let owner_grant = original_control.grants[0].clone();
+        let control = AccountAuthorityControl {
+            version: 1,
+            previous: Some(previous_authority),
+            issuer: original_control.issuer.clone(),
+            owner_account: f.owner_account.public().ed25519_pub,
+            grants: vec![owner_grant.clone(), grant.clone()],
+            revoked: vec![],
+            legacy_bindings: vec![],
+            account_signature: vec![],
+        };
+        let authority = Event::new(
+            &f.owner,
+            f.group,
+            4,
+            vec![invite.id],
+            5,
+            5,
+            EventKind::ChannelAccountAuthority,
+            control.signed_encode(f.group, &f.owner_account),
+        );
+        let accept = Event::new(
+            &f.member,
+            f.group,
+            2,
+            vec![authority.id],
+            6,
+            6,
+            EventKind::ChannelAccept,
+            vec![],
+        );
+        f.events.extend([invite, authority, accept]);
+        assert!(
+            f.projection()
+                .state
+                .as_ref()
+                .unwrap()
+                .is_accepted_member(&f.member.user_id()),
+            "a real new grant incarnation must be active before owner revocation"
+        );
+        live.process(&f.member, f.group, &f.events.iter().collect::<Vec<_>>());
+        let revoke = AccountAuthorityControl {
+            version: 1,
+            previous: f.projection().authority.current_event(),
+            issuer: original_control.issuer,
+            owner_account: f.owner_account.public().ed25519_pub,
+            grants: vec![owner_grant],
+            revoked: vec![grant.id().unwrap()],
+            legacy_bindings: vec![],
+            account_signature: vec![],
+        };
+        let removal = Event::new(
+            &f.owner,
+            f.group,
+            5,
+            vec![f.events.last().unwrap().id],
+            7,
+            7,
+            EventKind::ChannelAccountAuthority,
+            revoke.signed_encode(f.group, &f.owner_account),
+        );
+        f.events.push(removal.clone());
+        assert!(f.projection().authorized.contains(&removal.id));
+        assert!(
+            !f.projection()
+                .state
+                .as_ref()
+                .unwrap()
+                .is_member(&f.member.user_id())
+        );
+        live.process(&f.member, f.group, &f.events.iter().collect::<Vec<_>>());
+        assert!(!live.departure_link(&f.member.user_id(), &f.owner.user_id()));
+        let mut replayed = ChannelBook::new();
+        replayed.process(&f.member, f.group, &f.events.iter().collect::<Vec<_>>());
+        assert!(
+            !replayed.departure_link(&f.member.user_id(), &f.owner.user_id()),
+            "the source authored no departure in this new grant lifetime"
+        );
+    }
 
     fn append(
         log: &mut EventLog,

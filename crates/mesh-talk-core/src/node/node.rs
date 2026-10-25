@@ -226,6 +226,8 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) control_fanout_start_test_hook: BlockingTestHook,
     #[cfg(test)]
+    pub(in crate::node) group_file_asset_recv_test_hook: BlockingTestHook,
+    #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
     #[cfg(test)]
     pub(in crate::node) profile_read_hook: BlockingTestHook,
@@ -266,6 +268,7 @@ pub struct Node {
         Mutex<super::account_transition_store::AccountTransitionStore>,
     pub(in crate::node) account_documents:
         Mutex<super::account_documents::store::AccountDocumentStore>,
+    pub(in crate::node) group_file_prepare_gate: Arc<tokio::sync::Mutex<()>>,
     pub(in crate::node) group_operations:
         Mutex<super::account_group::operations::journal::OperationJournal>,
     pub(in crate::node) account_document_updates: tokio::sync::watch::Sender<u64>,
@@ -276,7 +279,7 @@ pub struct Node {
         Mutex<HashMap<super::AccountGroupOperationId, (u64, std::time::Instant)>>,
     pub(in crate::node) operation_seen: Mutex<HashMap<String, [u8; 32]>>,
     pub(in crate::node) group_operation_versions:
-        Mutex<HashMap<String, super::account_documents::sync::GroupProtocolSupport>>,
+        Mutex<HashMap<String, super::account_documents::sync::GroupOperationSupport>>,
     pub(in crate::node) account_suppression: Mutex<super::account_suppression::AccountSuppression>,
     pub(in crate::node) favorites: Mutex<super::favorites::FavoriteStore>,
     pub(in crate::node) favorite_media: super::media_store::MediaStore,
@@ -587,7 +590,7 @@ impl Node {
             &dir.join("account-profiles.log"),
             password,
         )?);
-        let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recovery_origins = origin_res
@@ -614,18 +617,42 @@ impl Node {
             &account.account_id(),
         )?;
         delivery.validate_owner(&identity.public(), &account.account_id())?;
-        while delivery
-            .recover_next_with_group_operations(
-                &mut dm_ratchet,
-                &mut log,
-                &mut sentlog,
-                &mut received,
-                Some(&mut received_files),
-                Some(&mut channel_senders),
-                Some(&mut |reference, events| group_operations.complete(reference, events)),
-            )?
-            .is_some()
-        {}
+        loop {
+            if let Some(tx) = delivery.pending_transactions().first() {
+                delivery.validate_message_action_transaction(tx, &log, &identity)?;
+            }
+            let recall = delivery
+                .pending_transactions()
+                .first()
+                .and_then(|tx| match tx.body() {
+                    super::delivery_store::DeliveryTransaction::ChannelMessageAction {
+                        recall,
+                        ..
+                    } => recall.clone(),
+                    _ => None,
+                });
+            if delivery
+                .recover_next_with_group_operations(
+                    &mut dm_ratchet,
+                    &mut log,
+                    &mut sentlog,
+                    &mut received,
+                    Some(&mut received_files),
+                    Some(&mut channel_senders),
+                    Some(&mut |reference, events| {
+                        super::account_group::operations::persist_action_recall_completion(
+                            reference,
+                            recall.as_ref(),
+                            &mut recalls,
+                        )?;
+                        group_operations.complete(reference, events)
+                    }),
+                )?
+                .is_none()
+            {
+                break;
+            }
+        }
         received_files
             .remove_where(|entry| delivery.file_erased(entry.conversation, entry.event_id))?;
         let delivery_control_ids = delivery.control_ids();
@@ -821,6 +848,8 @@ impl Node {
             #[cfg(test)]
             control_fanout_start_test_hook: Mutex::new(None),
             #[cfg(test)]
+            group_file_asset_recv_test_hook: Mutex::new(None),
+            #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
             #[cfg(test)]
             profile_read_hook: Mutex::new(None),
@@ -844,6 +873,7 @@ impl Node {
             account_devices: Mutex::new(account_devices),
             account_transitions: Mutex::new(account_transitions),
             account_documents: Mutex::new(account_documents),
+            group_file_prepare_gate: Arc::new(tokio::sync::Mutex::new(())),
             group_operations: Mutex::new(group_operations),
             account_document_updates,
             account_group_versions: Mutex::new(HashMap::new()),
@@ -1217,6 +1247,30 @@ impl Node {
         ciphertext: Vec<u8>,
         required_profile_parent: Option<EventId>,
     ) -> Result<(u64, EventId), NodeError> {
+        self.append_event_checked(channel, kind, ciphertext, required_profile_parent, |_| {
+            Ok(())
+        })
+    }
+
+    pub(in crate::node) fn append_event_if(
+        &self,
+        channel: ConversationId,
+        kind: EventKind,
+        ciphertext: Vec<u8>,
+        check: impl FnOnce(&super::delivery_store::DeliveryStore) -> Result<(), NodeError>,
+    ) -> Result<u64, NodeError> {
+        self.append_event_checked(channel, kind, ciphertext, None, check)
+            .map(|(seq, _)| seq)
+    }
+
+    fn append_event_checked(
+        &self,
+        channel: ConversationId,
+        kind: EventKind,
+        ciphertext: Vec<u8>,
+        required_profile_parent: Option<EventId>,
+        check: impl FnOnce(&super::delivery_store::DeliveryStore) -> Result<(), NodeError>,
+    ) -> Result<(u64, EventId), NodeError> {
         if self
             .channels
             .lock()
@@ -1236,6 +1290,7 @@ impl Node {
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
+        check(&delivery)?;
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut log = self.log.lock().expect("log mutex not poisoned");
         let (mut parents, lamport) = log.prepare(&channel).map_err(NodeError::Log)?;

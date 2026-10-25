@@ -14,12 +14,78 @@ vi.mock("@/lib/events", () => ({
   },
 }));
 
-import { useChat, convKey } from "./chat";
+import { useChat, convKey, reactionFromMe } from "./chat";
 import { emptyReception } from "./reception";
+import type { AccountGroupOperationStatus } from "@/lib/types";
 import { SEND_INTENT_CAP } from "./outgoingIntent";
 import { useAuth } from "./auth";
 import { useTransfers } from "./transfers";
 import { useAvatars } from "./avatars";
+
+function committedGroupMessage(
+  id: string,
+  group: string,
+  eventId: string,
+  kind: AccountGroupOperationStatus["kind"] = "text",
+): AccountGroupOperationStatus {
+  return {
+    id,
+    account_id: "myacct",
+    group,
+    kind,
+    phase: { kind: "committed" },
+    primary_event: eventId,
+    committed_events: [eventId],
+    executions: [
+      {
+        device_id: "source-device",
+        phase: { kind: "committed" },
+        committed_events: [eventId],
+      },
+    ],
+  };
+}
+
+function controlCommands(
+  extra: (command: string) => unknown = () => undefined,
+) {
+  invoke.mockImplementation(
+    (
+      command: string,
+      args: {
+        operationId?: string;
+        channelId?: string;
+        operation?: { kind: string };
+      },
+    ) => {
+      if (command === "owner_new_account_group_operation_id")
+        return Promise.resolve("control-op");
+      if (command === "owner_submit_account_group_control") {
+        const kind =
+          args.operation!.kind === "react"
+            ? "reaction"
+            : args.operation!.kind === "set_history_policy"
+              ? "history_policy"
+              : args.operation!.kind;
+        return Promise.resolve(
+          committedGroupMessage(
+            args.operationId!,
+            args.channelId!,
+            "control-event",
+            kind as AccountGroupOperationStatus["kind"],
+          ),
+        );
+      }
+      if (command === "owner_node_identity")
+        return Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+        });
+      return Promise.resolve(extra(command) ?? []);
+    },
+  );
+}
 
 it("coalesces roster invalidations and preserves readiness after an older failure", async () => {
   let reject!: (e: Error) => void;
@@ -198,65 +264,72 @@ it("refreshes channel member snapshots for group avatars", async () => {
 
 it("reports a failed member removal to the dialog", async () => {
   invoke.mockImplementation((command: string) =>
-    command === "remove_channel_member"
-      ? Promise.reject(new Error("offline"))
-      : Promise.resolve([]),
+    command === "owner_new_account_group_operation_id"
+      ? Promise.resolve("control-op")
+      : Promise.reject({ kind: "authorization", message: "not permitted" }),
   );
   useChat.setState({
     active: { kind: "channel", id: "team", name: "Team" },
+    members: [{ user_id: "peer", account_id: "peer-account", name: "Alice" }],
   });
-  expect(await useChat.getState().removeMember("peer")).toBe(false);
-  expect(useChat.getState().error).toContain("offline");
+  const outcome = await useChat.getState().removeMember("peer");
+  expect(outcome.kind).toBe("not_admitted");
+  expect("error" in outcome && outcome.error).toMatchObject({
+    message: "not permitted",
+  });
 });
 
 it("updates the open channel owner after transfer", async () => {
-  invoke.mockImplementation((command: string) => {
-    if (command === "owner_node_identity")
-      return Promise.resolve({
-        owner: "host",
-        device_id: "me",
-        account_id: "myacct",
-      });
-    if (command === "channel_members")
-      return Promise.resolve({
-        owner: "peer",
-        members: [{ user_id: "peer", name: "Alice" }],
-      });
-    return Promise.resolve([]);
-  });
+  controlCommands((command) =>
+    command === "channel_members"
+      ? {
+          owner: "peer",
+          members: [
+            { user_id: "peer", account_id: "peer-account", name: "Alice" },
+          ],
+        }
+      : undefined,
+  );
   useChat.setState({
     active: { kind: "channel", id: "team", name: "Team" },
     channelOwner: "me",
+    members: [{ user_id: "peer", account_id: "peer-account", name: "Alice" }],
   });
-  expect(await useChat.getState().transferChannelOwner("peer")).toBe(true);
+  expect(
+    (await useChat.getState().transferChannelOwner("peer-account")).kind,
+  ).toBe("committed");
   expect(useChat.getState().channelOwner).toBe("peer");
+  expect(invoke).toHaveBeenCalledWith("owner_submit_account_group_control", {
+    owner: "host",
+    expectedAccount: "myacct",
+    operationId: "control-op",
+    channelId: "team",
+    operation: {
+      kind: "transfer_ownership",
+      target_account_id: "peer-account",
+    },
+  });
 });
 
 it("closes the active channel after a successful leave", async () => {
-  invoke.mockImplementation((command: string) => {
-    if (command === "owner_node_identity")
-      return Promise.resolve({
-        owner: "host",
-        device_id: "me",
-        account_id: "myacct",
-      });
-    return Promise.resolve([]);
-  });
+  controlCommands();
   useChat.setState({
     active: { kind: "channel", id: "team", name: "Team" },
     unread: { "channel:team": 2 },
   });
-  expect(await useChat.getState().leaveChannel()).toBe(true);
+  expect((await useChat.getState().leaveChannel()).kind).toBe("committed");
   expect(useChat.getState().active).toBeNull();
   expect(useChat.getState().unread["channel:team"]).toBeUndefined();
 });
 
 it("does not clear another channel's members when a leave finishes late", async () => {
-  let finishLeave!: () => void;
+  let finish!: (value: AccountGroupOperationStatus) => void;
   invoke.mockImplementation((command: string) => {
-    if (command === "leave_channel")
-      return new Promise<void>((resolve) => {
-        finishLeave = resolve;
+    if (command === "owner_new_account_group_operation_id")
+      return Promise.resolve("leave-op");
+    if (command === "owner_submit_account_group_control")
+      return new Promise((resolve) => {
+        finish = resolve;
       });
     if (command === "owner_node_identity")
       return Promise.resolve({
@@ -273,13 +346,21 @@ it("does not clear another channel's members when a leave finishes late", async 
     unread: { "channel:first": 2 },
   });
   const leaving = useChat.getState().leaveChannel();
+  await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
   useChat.setState({
     active: { kind: "channel", id: "second", name: "Second" },
     members: [{ user_id: "second-member", name: "Second member" }],
     channelOwner: "second-owner",
   });
-  finishLeave();
-  expect(await leaving).toBe(true);
+  finish(
+    committedGroupMessage(
+      "leave-op",
+      "first",
+      "control-event",
+      "leave_account",
+    ),
+  );
+  expect((await leaving).kind).toBe("committed");
   expect(useChat.getState().active?.id).toBe("second");
   expect(useChat.getState().members[0]?.user_id).toBe("second-member");
   expect(useChat.getState().channelOwner).toBe("second-owner");
@@ -287,7 +368,7 @@ it("does not clear another channel's members when a leave finishes late", async 
 });
 
 it("refreshes a pending invitation after acceptance", async () => {
-  invoke.mockImplementation((command: string) => {
+  controlCommands((command: string) => {
     if (command === "owner_node_identity")
       return Promise.resolve({
         owner: "host",
@@ -325,10 +406,16 @@ it("refreshes a pending invitation after acceptance", async () => {
     members: [{ user_id: "me", name: "tester", pending: true }],
     channelOwner: "peer",
   });
-  expect(await useChat.getState().acceptChannelInvite()).toBe(true);
-  expect(invoke).toHaveBeenCalledWith("accept_channel_invite", {
-    channelId: "team",
-  });
+  expect((await useChat.getState().acceptChannelInvite()).kind).toBe(
+    "committed",
+  );
+  expect(invoke).toHaveBeenCalledWith(
+    "owner_submit_account_group_control",
+    expect.objectContaining({
+      channelId: "team",
+      operation: { kind: "accept_invitation" },
+    }),
+  );
   expect(useChat.getState().channels[0]?.pending_invite).toBe(false);
   expect(useChat.getState().members[0]?.pending).toBe(false);
 });
@@ -571,6 +658,8 @@ const reset = () =>
     bootRequest: 0,
     startupId: null,
     intents: {},
+    groupOperations: {},
+    groupOperationIssue: undefined,
     deleted: {},
     statusBusy: false,
     historyRequests: {},
@@ -842,7 +931,7 @@ it("dissolves only the selected channel and refreshes its roster", async () => {
       { channel_id: "other", name: "Other", owner: "me", member_count: 2 },
     ],
   });
-  invoke.mockImplementation((command: string) => {
+  controlCommands((command: string) => {
     if (command === "list_channels")
       return Promise.resolve([
         {
@@ -863,10 +952,16 @@ it("dissolves only the selected channel and refreshes its roster", async () => {
     return Promise.resolve([]);
   });
 
-  expect(await useChat.getState().dissolveChannel("team")).toBe(true);
-  expect(invoke).toHaveBeenCalledWith("dissolve_channel", {
-    channelId: "team",
-  });
+  expect((await useChat.getState().dissolveChannel("team")).kind).toBe(
+    "committed",
+  );
+  expect(invoke).toHaveBeenCalledWith(
+    "owner_submit_account_group_control",
+    expect.objectContaining({
+      channelId: "team",
+      operation: { kind: "dissolve" },
+    }),
+  );
   expect(
     useChat.getState().channels.map((channel) => channel.dissolved),
   ).toEqual([true, undefined]);
@@ -881,26 +976,31 @@ it("keeps a channel writable when dissolution is rejected", async () => {
   });
   invoke.mockRejectedValue(new Error("owner only"));
 
-  expect(await useChat.getState().dissolveChannel("team")).toBe(false);
+  const outcome = await useChat.getState().dissolveChannel("team");
+  expect(outcome.kind).toBe("not_admitted");
   expect(useChat.getState().channels[0].dissolved).toBeUndefined();
-  expect(useChat.getState().error).toContain("owner only");
+  expect("error" in outcome && outcome.error).toMatchObject({
+    message: "owner only",
+  });
 });
 
 it("does not send dissolution without a signed-in owner", async () => {
   useAuth.setState({ user: null });
 
-  expect(await useChat.getState().dissolveChannel("team")).toBe(false);
+  expect((await useChat.getState().dissolveChannel("team")).kind).toBe("stale");
   expect(invoke).not.toHaveBeenCalled();
 });
 
 it("does not update a replacement account after dissolution completes", async () => {
-  let finish!: () => void;
+  let finish!: (value: AccountGroupOperationStatus) => void;
   invoke.mockImplementation((command: string) =>
-    command === "dissolve_channel"
-      ? new Promise<void>((resolve) => {
-          finish = resolve;
-        })
-      : Promise.resolve([]),
+    command === "owner_new_account_group_operation_id"
+      ? Promise.resolve("dissolve-op")
+      : command === "owner_submit_account_group_control"
+        ? new Promise<AccountGroupOperationStatus>((resolve) => {
+            finish = resolve;
+          })
+        : Promise.resolve([]),
   );
   useChat.setState({
     channels: [
@@ -909,12 +1009,15 @@ it("does not update a replacement account after dissolution completes", async ()
   });
 
   const pending = useChat.getState().dissolveChannel("team");
+  await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
   useAuth.setState({
     user: { id: "replacement", username: "bob", display_name: "Bob" },
   });
-  finish();
+  finish(
+    committedGroupMessage("dissolve-op", "team", "control-event", "dissolve"),
+  );
 
-  expect(await pending).toBe(false);
+  expect((await pending).kind).toBe("stale");
   expect(useChat.getState().channels[0].dissolved).toBeUndefined();
   expect(invoke).not.toHaveBeenCalledWith("list_channels");
 });
@@ -1321,20 +1424,26 @@ describe("send", () => {
   });
 
   it("channel acceptance settles only the exact matching local placeholder", async () => {
-    const finish: Array<(id: string) => void> = [];
-    invoke.mockImplementation((cmd: string) =>
-      cmd === "owner_enqueue_channel_text"
-        ? new Promise<string>((resolve) => {
-            finish.push(resolve);
-          })
-        : Promise.resolve([]),
-    );
+    const finish: Array<(eventId: string) => void> = [];
+    let minted = 0;
+    invoke.mockImplementation((cmd: string, args: { operationId?: string }) => {
+      if (cmd === "owner_new_account_group_operation_id")
+        return Promise.resolve(`operation-${++minted}`);
+      if (cmd === "owner_submit_account_group_text")
+        return new Promise<AccountGroupOperationStatus>((resolve) => {
+          finish.push((eventId) =>
+            resolve(committedGroupMessage(args.operationId!, "group", eventId)),
+          );
+        });
+      return Promise.resolve([]);
+    });
     useChat.setState({
       active: { kind: "channel", id: "group", name: "Group" },
     });
     const first = useChat.getState().send("same", null);
     const second = useChat.getState().send("same", null);
     const remaining = useChat.getState().messages["channel:group"][1].clientId;
+    await vi.waitFor(() => expect(finish).toHaveLength(2));
     finish[0]("event-a");
     await first;
     expect(useChat.getState().messages["channel:group"]).toHaveLength(2);
@@ -1443,9 +1552,18 @@ describe("send", () => {
     invoke.mockImplementation((cmd: string) =>
       cmd === "owner_enqueue_text"
         ? Promise.resolve("own-id")
-        : cmd === "owner_enqueue_channel_sticker"
-          ? Promise.resolve("channel-sticker")
-          : Promise.resolve([]),
+        : cmd === "owner_new_account_group_operation_id"
+          ? Promise.resolve("sticker-operation")
+          : cmd === "owner_submit_account_group_sticker"
+            ? Promise.resolve(
+                committedGroupMessage(
+                  "sticker-operation",
+                  "group",
+                  "channel-sticker",
+                  "sticker",
+                ),
+              )
+            : Promise.resolve([]),
     );
     useChat.setState({
       active: { kind: "account", id: "myacct", name: "Own" },
@@ -1836,19 +1954,40 @@ describe("toggleReaction", () => {
       remove: false,
     });
   });
-  it("matches the DEVICE id for channel conversations", async () => {
-    useChat.setState({
-      active: { kind: "channel", id: "c1", name: "C" },
-      reactions: { "channel:c1": [{ target: "t1", emoji: "👍", who: ["me"] }] },
-    });
-    await useChat.getState().toggleReaction("t1", "👍");
-    expect(invoke).toHaveBeenCalledWith("react_channel", {
-      channelId: "c1",
-      target: "t1",
-      emoji: "👍",
-      remove: true,
-    });
-  });
+  it.each([
+    { from_me: true, who: ["offline-sibling"], remove: true },
+    { from_me: false, who: ["me"], remove: false },
+    { who: ["me"], remove: true },
+  ])(
+    "submits channel reaction ownership through durable account control: %j",
+    async ({ remove, ...reaction }) => {
+      controlCommands();
+      const reload = vi
+        .spyOn(useChat.getState(), "reload")
+        .mockResolvedValue(true);
+      useChat.setState({
+        active: { kind: "channel", id: "c1", name: "C" },
+        reactions: {
+          "channel:c1": [{ target: "t1", emoji: "👍", ...reaction }],
+        },
+      });
+      await useChat.getState().toggleReaction("t1", "👍");
+      expect(invoke).toHaveBeenCalledWith(
+        "owner_submit_account_group_control",
+        {
+          owner: "host",
+          expectedAccount: "myacct",
+          operationId: "control-op",
+          channelId: "c1",
+          operation: { kind: "react", target: "t1", emoji: "👍", remove },
+        },
+      );
+      expect(
+        invoke.mock.calls.some(([command]) => command === "react_channel"),
+      ).toBe(false);
+      reload.mockRestore();
+    },
+  );
 });
 
 describe("incoming events", () => {
@@ -4084,11 +4223,22 @@ it("retains bubble retry ownership for immediate protected text admission with i
   });
   let attempts = 0;
   invoke.mockImplementation((cmd: string) =>
-    cmd === "owner_enqueue_channel_text"
-      ? ++attempts === 1
-        ? Promise.reject(new Error("offline"))
-        : Promise.resolve("protected-retry")
-      : Promise.resolve([]),
+    cmd === "owner_new_account_group_operation_id"
+      ? Promise.resolve("protected-operation")
+      : cmd === "owner_submit_account_group_text"
+        ? ++attempts === 1
+          ? Promise.reject({
+              kind: "invalid-input",
+              message: "transport frame too large",
+            })
+          : Promise.resolve(
+              committedGroupMessage(
+                "protected-operation",
+                "channel",
+                "protected-retry",
+              ),
+            )
+        : Promise.resolve([]),
   );
   expect(
     useChat.getState().admitText("retry secret", "parent", null, "click"),
@@ -4106,7 +4256,7 @@ it("retains bubble retry ownership for immediate protected text admission with i
   await useChat.getState().retry(failed.clientId!);
   expect(
     invoke.mock.calls
-      .filter(([command]) => command === "owner_enqueue_channel_text")
+      .filter(([command]) => command === "owner_submit_account_group_text")
       .map(([, args]) => args),
   ).toEqual([
     expect.objectContaining({
@@ -4656,3 +4806,513 @@ it("discards staged sticker bytes after the account owner changes", async () => 
   expect(useChat.getState().intents).toEqual({});
   usePacks.setState({ packs: [] });
 });
+describe("account group operation runtime", () => {
+  const operationId = "ab".repeat(32);
+  const conversation = { kind: "channel", id: "team", name: "Team" } as const;
+  function status(
+    phase: AccountGroupOperationStatus["phase"],
+  ): AccountGroupOperationStatus {
+    return {
+      id: operationId,
+      account_id: "myacct",
+      group: "team",
+      kind: "text",
+      phase,
+      primary_event: phase.kind === "committed" ? "public-event" : null,
+      committed_events: phase.kind === "committed" ? ["public-event"] : [],
+      executions:
+        phase.kind === "committed"
+          ? [
+              {
+                device_id: "source-device",
+                phase,
+                committed_events: ["public-event"],
+              },
+            ]
+          : [],
+    };
+  }
+  function fixture() {
+    let account = "myacct";
+    let observed: AccountGroupOperationStatus | null = status({
+      kind: "accepted",
+    });
+    let readStatus = () => Promise.resolve(observed);
+    let readHistory = () => Promise.resolve<unknown[]>([]);
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "owner_node_identity")
+        return {
+          owner: "host",
+          device_id: "me",
+          account_id: account,
+          supports_push_state: true,
+        };
+      if (command === "owner_new_account_group_operation_id")
+        return operationId;
+      if (command === "owner_submit_account_group_text")
+        return status({ kind: "accepted" });
+      if (command === "owner_account_group_operation_status")
+        return readStatus();
+      if (command === "owner_list_account_group_operations") return [];
+      if (command === "owner_cancel_account_group_operation")
+        return status({ kind: "cancelled" });
+      if (command === "channel_history") return readHistory();
+      if (command === "channel_members")
+        return { owner: "source-device", members: [] };
+      return [];
+    });
+    return {
+      observed: (next: AccountGroupOperationStatus | null) => {
+        observed = next;
+      },
+      readStatus: (next: typeof readStatus) => {
+        readStatus = next;
+      },
+      readHistory: (next: typeof readHistory) => {
+        readHistory = next;
+      },
+      account: (next: string) => {
+        account = next;
+      },
+      push: () =>
+        captured.current!.onStateChanged({
+          owner: "host",
+          account_id: account,
+          device_id: "me",
+          kind: "state",
+        }),
+    };
+  }
+  it("settles accepted work through the existing ticker only after the source commits its public event", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const stop = useChat.getState().start();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      useChat.setState({ active: conversation });
+      await useChat.getState().send("hello", null);
+      expect(useChat.getState().messages["channel:team"][0]).toMatchObject({
+        id: null,
+        pending: true,
+      });
+      f.observed(status({ kind: "committed" }));
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(useChat.getState().messages["channel:team"]).toEqual([
+        expect.objectContaining({
+          id: "public-event",
+          who: "source-device",
+          pending: false,
+        }),
+      ]);
+      expect(
+        useChat.getState().messages["channel:team"][0].delivery,
+      ).toBeUndefined();
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  });
+  it("reloads and re-settles an exact canonical public event when terminal metadata lacks its source", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const stop = useChat.getState().start();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      useChat.setState({ active: conversation });
+      await useChat.getState().send("hello", null);
+      let finish!: (rows: unknown[]) => void;
+      f.readHistory(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      f.observed({ ...status({ kind: "committed" }), executions: [] });
+      f.push();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(finish).toBeTypeOf("function");
+      expect(useChat.getState().messages["channel:team"][0].id).toBeNull();
+      finish([
+        {
+          id: "public-event",
+          who: "canonical-source",
+          from_me: true,
+          text: "canonical",
+          wall_clock: Date.now(),
+          reply_to: null,
+        },
+      ]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState().messages["channel:team"]).toEqual([
+        expect.objectContaining({
+          id: "public-event",
+          who: "canonical-source",
+          text: "canonical",
+          pending: false,
+        }),
+      ]);
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  });
+  it("coalesces repeated validated pushes and ignores a deferred old-account terminal after restart", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    let stop = useChat.getState().start();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      useChat.setState({ active: conversation });
+      await useChat.getState().send("old account body", null);
+      let finish!: (value: AccountGroupOperationStatus) => void;
+      f.readStatus(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      for (let i = 0; i < 100; i++) f.push();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        invoke.mock.calls.filter(
+          ([command]) => command === "owner_account_group_operation_status",
+        ),
+      ).toHaveLength(1);
+      stop();
+      f.account("new-account");
+      stop = useChat.getState().start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState().myAccountId).toBe("new-account");
+      expect(useChat.getState().groupOperations).toEqual({});
+      finish(status({ kind: "committed" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState().groupOperations).toEqual({});
+      expect(useChat.getState().intents).toEqual({});
+      expect(useChat.getState().messages).toEqual({});
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  });
+  it("re-settles an inactive terminal message when canonical history becomes available on reopening", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const stop = useChat.getState().start();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      useChat.setState({ active: conversation });
+      await useChat.getState().send("hello", null);
+      useChat.setState({
+        active: { kind: "account", id: "friend", name: "Friend" },
+      });
+      f.observed({ ...status({ kind: "committed" }), executions: [] });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(
+        Object.values(useChat.getState().intents)[0].message.id,
+      ).toBeNull();
+      f.readHistory(async () => [
+        {
+          id: "public-event",
+          who: "canonical-source",
+          from_me: true,
+          text: "canonical",
+          wall_clock: Date.now(),
+          reply_to: null,
+        },
+      ]);
+      await useChat.getState().open(conversation);
+      expect(useChat.getState().messages["channel:team"]).toEqual([
+        expect.objectContaining({
+          id: "public-event",
+          who: "canonical-source",
+          text: "canonical",
+          pending: false,
+        }),
+      ]);
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  });
+  it("retires group metadata when the same runtime adopts a different account", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const stop = useChat.getState().start();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      useChat.setState({ active: conversation });
+      await useChat.getState().send("hello", null);
+      useChat.setState({ groupOperationIssue: "capacity" });
+      f.account("replacement-account");
+      await useChat.getState().refreshRoster();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState().myAccountId).toBe("replacement-account");
+      expect(useChat.getState().groupOperations).toEqual({});
+      expect(useChat.getState().groupOperationIssue).toBeUndefined();
+      expect(useChat.getState().intents).toEqual({});
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  });
+  it("ignores a canonical recovery reload released after its account retires", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    let stop = useChat.getState().start();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      useChat.setState({ active: conversation });
+      await useChat.getState().send("hello", null);
+      let finish!: (rows: unknown[]) => void;
+      f.readHistory(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      f.observed({ ...status({ kind: "committed" }), executions: [] });
+      f.push();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(finish).toBeTypeOf("function");
+      stop();
+      f.account("replacement-account");
+      stop = useChat.getState().start();
+      await vi.advanceTimersByTimeAsync(0);
+      finish([
+        {
+          id: "public-event",
+          who: "old-source",
+          from_me: true,
+          text: "old body",
+          wall_clock: Date.now(),
+        },
+      ]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState().messages).toEqual({});
+      expect(useChat.getState().intents).toEqual({});
+      expect(useChat.getState().groupOperations).toEqual({});
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  });
+  it("drops operation tickets and issues when locking or retiring a run", async () => {
+    vi.useFakeTimers();
+    fixture();
+    const stop = useChat.getState().start();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      useChat.setState({ active: conversation });
+      await useChat.getState().send("hello", null);
+      useChat.setState({ groupOperationIssue: "observation_failed" });
+      stop();
+      expect(useChat.getState().groupOperations).toEqual({});
+      expect(useChat.getState().groupOperationIssue).toBeUndefined();
+      useChat.setState({
+        groupOperations: {
+          [operationId]: {
+            id: operationId,
+            account_id: "myacct",
+            group: "team",
+            kind: "text",
+            stage: "unconfirmed",
+            observation: 0,
+          },
+        },
+        groupOperationIssue: "capacity",
+      });
+      useChat.getState().resetForLock();
+      expect(useChat.getState().groupOperations).toEqual({});
+      expect(useChat.getState().groupOperationIssue).toBeUndefined();
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
+  });
+  it("exposes cancellation through the same coordinator and removes only the matching pending bubble", async () => {
+    fixture();
+    useChat.setState({ active: conversation });
+    await useChat.getState().send("hello", null);
+    expect(
+      (await useChat.getState().cancelGroupOperation(operationId)).kind,
+    ).toBe("cancelled");
+    expect(useChat.getState().intents).toEqual({});
+    expect(useChat.getState().messages["channel:team"]).toEqual([]);
+  });
+});
+
+describe("account group message controls", () => {
+  it.each(["reaction", "recall"] as const)(
+    "keeps accepted %s pending until commitment",
+    async (kind) => {
+      const reload = vi
+        .spyOn(useChat.getState(), "reload")
+        .mockResolvedValue(true);
+      const accepted: AccountGroupOperationStatus = {
+        ...committedGroupMessage("original-control", "group", "event", kind),
+        phase: { kind: "accepted" },
+        primary_event: null,
+        committed_events: [],
+        executions: [],
+      };
+      invoke.mockImplementation((command: string) =>
+        Promise.resolve(
+          command === "owner_new_account_group_operation_id"
+            ? "original-control"
+            : accepted,
+        ),
+      );
+      useChat.setState({
+        active: { kind: "channel", id: "group", name: "Group" },
+      });
+      if (kind === "reaction")
+        await useChat.getState().toggleReaction("original-target", "👍");
+      else await useChat.getState().recallMessage("original-target");
+      expect(
+        useChat.getState().groupOperations?.["original-control"]?.status?.phase
+          .kind,
+      ).toBe("accepted");
+      expect(reload).not.toHaveBeenCalled();
+      expect(invoke).toHaveBeenCalledWith(
+        "owner_submit_account_group_control",
+        expect.objectContaining({
+          owner: "host",
+          expectedAccount: "myacct",
+          operationId: "original-control",
+          operation:
+            kind === "recall"
+              ? { kind: "recall", target: "original-target" }
+              : {
+                  kind: "react",
+                  target: "original-target",
+                  emoji: "👍",
+                  remove: false,
+                },
+        }),
+      );
+      useChat.getState().onGroupOperationTerminal?.({
+        ...accepted,
+        phase: { kind: "committed" },
+      });
+      expect(reload).toHaveBeenCalledOnce();
+      reload.mockRestore();
+    },
+  );
+  it("uses explicit native ownership before legacy identifiers", () => {
+    expect(
+      reactionFromMe(
+        { target: "t", emoji: "👍", who: ["sibling"], from_me: true },
+        "me",
+      ),
+    ).toBe(true);
+    expect(
+      reactionFromMe(
+        { target: "t", emoji: "👍", who: ["me"], from_me: false },
+        "me",
+      ),
+    ).toBe(false);
+    expect(
+      reactionFromMe({ target: "t", emoji: "👍", who: ["me"] }, "me"),
+    ).toBe(true);
+  });
+});
+
+it.each(["switch_group", "change_account", "retire_session"] as const)(
+  "suppresses terminal message refresh after %s",
+  (change) => {
+    const reload = vi
+      .spyOn(useChat.getState(), "reload")
+      .mockResolvedValue(true);
+    useChat.setState({
+      active: { kind: "channel", id: "group", name: "Group" },
+    });
+    const status = committedGroupMessage(
+      "original",
+      "group",
+      "event",
+      "recall",
+    );
+    if (change === "switch_group")
+      useChat.setState({
+        active: { kind: "channel", id: "other", name: "Other" },
+      });
+    else if (change === "change_account")
+      useChat.setState({ myAccountId: "other-account" });
+    else useAuth.setState({ user: null });
+    useChat.getState().onGroupOperationTerminal?.(status);
+    expect(reload).not.toHaveBeenCalled();
+    reload.mockRestore();
+  },
+);
+
+it("preserves the account DM recall command", async () => {
+  invoke.mockResolvedValue(undefined);
+  useChat.setState({
+    active: { kind: "account", id: "friend", name: "Friend" },
+  });
+  const reload = vi.spyOn(useChat.getState(), "reload").mockResolvedValue(true);
+  await useChat.getState().recallMessage("original-target");
+  expect(invoke).toHaveBeenCalledWith("recall_message", {
+    convId: "friend",
+    target: "original-target",
+    isChannel: false,
+  });
+  expect(
+    invoke.mock.calls.some(
+      ([command]) => command === "owner_submit_account_group_control",
+    ),
+  ).toBe(false);
+  reload.mockRestore();
+});
+
+it.each(["react", "recall"] as const)(
+  "does not submit %s after its session retires while minting",
+  async (kind) => {
+    let finish!: (id: string) => void;
+    invoke.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    useChat.setState({
+      active: { kind: "channel", id: "group", name: "Group" },
+    });
+    const pending =
+      kind === "react"
+        ? useChat.getState().toggleReaction("target", "👍")
+        : useChat.getState().recallMessage("target");
+    useChat.getState().resetForLock();
+    finish("original");
+    await pending;
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(useChat.getState().groupOperations).toEqual({});
+  },
+);
+
+it.each(["react", "recall"] as const)(
+  "retains uncertain %s acceptance under its original ticket",
+  async (kind) => {
+    const reload = vi
+      .spyOn(useChat.getState(), "reload")
+      .mockResolvedValue(true);
+    invoke.mockImplementation((command: string) =>
+      command === "owner_new_account_group_operation_id"
+        ? Promise.resolve("original")
+        : Promise.reject(new Error("lost response")),
+    );
+    useChat.setState({
+      active: { kind: "channel", id: "group", name: "Group" },
+    });
+    if (kind === "react")
+      await useChat.getState().toggleReaction("target", "👍");
+    else await useChat.getState().recallMessage("target");
+    expect(useChat.getState().groupOperations?.original).toMatchObject({
+      id: "original",
+      stage: "unconfirmed",
+    });
+    expect(reload).not.toHaveBeenCalled();
+    expect(useChat.getState().error).toBeNull();
+    reload.mockRestore();
+  },
+);

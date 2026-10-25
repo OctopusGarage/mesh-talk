@@ -103,11 +103,18 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     use crate::{discovery::Announce, node::account_devices::AccountDevice};
     use std::{net::IpAddr, time::Duration};
     use tokio::net::TcpListener;
+    // Match the history worker's optional scope: disabling History must not
+    // redirect this custody check into mandatory inventory/control exchanges.
+    let custody_cursor = || {
+        let mut cursor = sync::DocumentSyncCursor::optional();
+        cursor.domain = AccountDocumentDomain::ChannelCustody as usize;
+        cursor
+    };
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let other = Account::generate();
     let a = node(&dir.path().join("a"), &account);
-    let sibling = node(&dir.path().join("sibling"), &account);
+    let mut sibling = node(&dir.path().join("sibling"), &account);
     let bob = node(&dir.path().join("bob"), &other);
     for (left, right) in [(&a, &sibling), (&sibling, &a)] {
         left.account_devices
@@ -137,7 +144,9 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
                 );
             }
         }
-        servers.push(tokio::spawn(current.clone().run_accept_loop(listener)));
+        servers.push(Some(tokio::spawn(
+            current.clone().run_accept_loop(listener),
+        )));
     }
     let channel = a
         .create_channel(
@@ -147,7 +156,10 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         .await
         .unwrap();
     if !external_online {
-        servers[2].abort();
+        let server = servers[2].take().unwrap();
+        server.abort();
+        let _ = server.await;
+        bob.runtime_work.drain().await;
         a.roster.lock().unwrap().forget(&bob.identity.public());
     }
     a.send_channel_message(channel, b"synthetic custody fixture")
@@ -166,14 +178,16 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             holder: bob.user_id(),
         };
         let before = a.account_document_meta(&key).unwrap();
-        a.account_documents
-            .lock()
-            .unwrap()
-            .remove_blob_for_test(before.content_hash);
-        let reopened =
-            AccountDocumentStore::open(&dir.path().join("a"), "pw", &account.public().ed25519_pub)
-                .unwrap();
-        *a.account_documents.lock().unwrap() = reopened;
+        {
+            let mut documents = a.account_documents.lock().unwrap();
+            documents.remove_blob_for_test(before.content_hash);
+            *documents = AccountDocumentStore::open(
+                &dir.path().join("a"),
+                "pw",
+                &account.public().ed25519_pub,
+            )
+            .unwrap();
+        }
         assert_eq!(
             a.channel_custody_count(channel, event),
             None,
@@ -188,7 +202,10 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         );
         assert!(a.account_document(&key).unwrap().is_some());
         assert_eq!(a.channel_custody_count(channel, event), Some(1));
-        servers[2].abort();
+        let server = servers[2].take().unwrap();
+        server.abort();
+        let _ = server.await;
+        bob.runtime_work.drain().await;
         a.roster.lock().unwrap().forget(&bob.identity.public());
         sibling
             .roster
@@ -196,7 +213,6 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .unwrap()
             .forget(&bob.identity.public());
     }
-    let worker = tokio::spawn(sibling.clone().run_account_history_loop());
     tokio::time::timeout(Duration::from_secs(8), async {
         while !sibling
             .channel_history(channel, 10)
@@ -216,7 +232,28 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         }
     })
     .await;
-    if !external_online && actual.is_ok() {
+    assert!(
+        actual.is_ok(),
+        "authenticated external custody must converge before restart: count={:?}, channels={:?}, own_history={}, observations={:?}, sync={:?}",
+        sibling.channel_custody_count(channel, event),
+        sibling.list_channels(),
+        sibling
+            .channel_history(channel, 10)
+            .iter()
+            .any(|row| row.id == event && row.from_me),
+        sibling
+            .channel_custody_observations(channel, event)
+            .iter()
+            .map(|meta| (
+                meta,
+                sibling
+                    .account_document(&meta.key)
+                    .map(|document| document.map(|document| document.payload().len())),
+            ))
+            .collect::<Vec<_>>(),
+        sibling.device_sync_status(),
+    );
+    if !external_online {
         sibling
             .set_device_sync_category(SyncCategory::History, false)
             .unwrap();
@@ -246,8 +283,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             "incoming foreign history is never own custody"
         );
         let source_peer = sibling.routing_peer(&a.user_id()).unwrap();
-        let mut cursor =
-            sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        let mut cursor = custody_cursor();
         sibling
             .pull_account_documents_page(&source_peer, &mut cursor)
             .await
@@ -260,8 +296,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         sibling
             .set_device_sync_category(SyncCategory::History, true)
             .unwrap();
-        let mut cursor =
-            sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        let mut cursor = custody_cursor();
         sibling
             .pull_account_documents_page(&source_peer, &mut cursor)
             .await
@@ -281,6 +316,9 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         // Model complete durable ciphertext loss on the synthetic holder. A real
         // authenticated negative probe uses the exact runtime recheck operation.
         bob_server.abort();
+        let _ = bob_server.await;
+        bob.runtime_work.close();
+        bob.runtime_work.drain().await;
         let secret = bob.identity.secret_bytes();
         let lost = node_with_identity(
             &dir.path().join("bob-lost"),
@@ -304,8 +342,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         a.recheck_channel_custody_peer(channel, event, &bob_peer)
             .await;
         assert_eq!(a.channel_custody_count(channel, event), Some(0));
-        let mut cursor =
-            sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        let mut cursor = custody_cursor();
         sibling
             .pull_account_documents_page(&source_peer, &mut cursor)
             .await
@@ -336,18 +373,23 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             Some(0),
             "an old journal positive cannot resurrect the newer shared negative"
         );
+        // Join producers and admitted blocking writes before reopening this profile.
+        let server = servers[1].take().unwrap();
+        sibling.runtime_work.close();
+        server.abort();
+        let _ = server.await;
+        sibling.runtime_work.drain().await;
         let secret = sibling.identity.secret_bytes();
-        let negative_reopened = node_with_identity(
+        sibling = node_with_identity(
             &dir.path().join("sibling"),
             &account,
             DeviceIdentity::from_secret_bytes(secret.0, secret.1),
         );
         assert_eq!(
-            negative_reopened.channel_custody_count(channel, event),
+            sibling.channel_custody_count(channel, event),
             Some(0),
             "the negative survives a fresh encrypted-store open"
         );
-        drop(negative_reopened);
         a.retry_one_channel_custody(
             0,
             &mut std::collections::HashMap::new(),
@@ -373,19 +415,29 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             "a fresh authenticated probe repairs the negative; receiver={:?}",
             lost.list_channels()
         );
-        let mut cursor =
-            sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
+        let mut cursor = custody_cursor();
         sibling
             .pull_account_documents_page(&source_peer, &mut cursor)
             .await
             .unwrap();
         assert_eq!(sibling.channel_custody_count(channel, event), Some(1));
         final_expected = 1;
+        lost.runtime_work.close();
         lost_server.abort();
+        let _ = lost_server.await;
+        lost.runtime_work.drain().await;
     }
-    worker.abort();
-    for server in servers {
+    for current in [&a, &sibling, &bob] {
+        current.runtime_work.close();
+    }
+    for server in servers.iter().flatten() {
         server.abort();
+    }
+    for server in servers.into_iter().flatten() {
+        let _ = server.await;
+    }
+    for current in [&a, &sibling, &bob] {
+        current.runtime_work.drain().await;
     }
     let secret = sibling.identity.secret_bytes();
     let reopened = node_with_identity(
@@ -402,11 +454,6 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         a.channel_custody_count(channel, event),
         Some(final_expected),
         "sender siblings do not count as another member account; sibling status={:?}",
-        sibling.channel_custody_count(channel, event)
-    );
-    assert!(
-        actual.is_ok(),
-        "authenticated external custody must converge on sibling: {:?}",
         sibling.channel_custody_count(channel, event)
     );
 }
@@ -4678,7 +4725,7 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
 }
 
 #[tokio::test]
-async fn group_inventory_v4_cooldown_keeps_v1_v2_v3_and_never_probes_disabled_domains() {
+async fn group_inventory_v4_cooldown_preserves_fallback_while_v5_interruptions_retry() {
     use crate::{
         discovery::roster::PeerRecord,
         node::{
@@ -4737,7 +4784,10 @@ async fn group_inventory_v4_cooldown_keeps_v1_v2_v3_and_never_probes_disabled_do
                             break;
                         };
                         let request: wire::DocumentRequest = serde_json::from_slice(&body).unwrap();
-                        observed.lock().unwrap().push(request.version);
+                        observed
+                            .lock()
+                            .unwrap()
+                            .push((request.domain, request.version));
                         if request.version >= 4 {
                             break;
                         }
@@ -4776,43 +4826,76 @@ async fn group_inventory_v4_cooldown_keeps_v1_v2_v3_and_never_probes_disabled_do
                     .await
                     .is_err()
             );
-            assert_eq!(versions.lock().unwrap().last(), Some(&expected));
+            assert_eq!(
+                versions.lock().unwrap().last().map(|(_, version)| *version),
+                Some(expected)
+            );
         }
         assert!(cursor.status(target.device_sync_policy()).2);
+        // An interrupted v5 request has a short retry interval; unlike the
+        // rejected v4 inventory domain it is not an authenticated downgrade.
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         let mut hostname_rejections = 0;
         for _ in 0..16 {
-            if target
-                .pull_account_documents_page(&peer, &mut cursor)
-                .await
-                .is_err()
-            {
-                hostname_rejections += 1;
+            if let Err(error) = target.pull_account_documents_page(&peer, &mut cursor).await {
+                let (domain, version) = *versions.lock().unwrap().last().unwrap();
+                assert_eq!(version, 5);
+                if domain == AccountDocumentDomain::DeviceHostname {
+                    hostname_rejections += 1;
+                }
+                assert!(matches!(
+                    domain,
+                    AccountDocumentDomain::DeviceHostname | AccountDocumentDomain::GroupControl
+                ));
+                assert!(
+                    matches!(error,
+                        NodeError::Session(crate::node::session::SessionError::Transport(
+                            crate::transport::TransportError::Io(error)
+                        )) if error.kind() == std::io::ErrorKind::UnexpectedEof
+                    ),
+                    "only the fixture's deliberate v5 transport closure is retryable"
+                );
             }
         }
         assert_eq!(
             hostname_rejections, 1,
             "unsupported hostname metadata has its own cooldown"
         );
-        let versions = versions.lock().unwrap().clone();
+        let requests = versions.lock().unwrap().clone();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(domain, _)| *domain == AccountDocumentDomain::DeviceHostname)
+                .count(),
+            if optional_off { 1 } else { 2 },
+            "hostname metadata retains its independent long cooldown and ordinary pooled-session retry"
+        );
+        assert!(
+            requests
+                .iter()
+                .filter(|(domain, _)| *domain == AccountDocumentDomain::GroupControl)
+                .count()
+                >= 2,
+            "the separate group-control transport interruption must retry promptly"
+        );
+        let versions: Vec<_> = requests.into_iter().map(|(_, version)| version).collect();
         assert_eq!(
             versions.iter().filter(|version| **version == 4).count(),
             1,
             "optional rejection has its own negative cooldown"
         );
-        assert_eq!(
-            versions.iter().filter(|version| **version == 5).count(),
-            if optional_off { 2 } else { 3 },
-            "group control and hostname retain independently scoped v5 cooldowns"
+        assert!(
+            versions.iter().filter(|version| **version == 5).count() >= 2,
+            "a closed v5 transport must be retried without a five-minute upgrade claim"
         );
         if optional_off {
-            assert_eq!(
-                versions,
-                vec![5, 4, 5],
+            assert!(
+                versions.iter().all(|version| matches!(version, 4 | 5)),
                 "disabled optional domains cannot be attempted after selector wraps"
             );
             assert!(
-                !cursor.pending,
-                "no eligible work must not create an immediate retry spin"
+                !cursor.up_to_date,
+                "interrupted mandatory state must not claim synchronization is complete"
             );
             assert!(target.account_document(&key()).unwrap().is_none());
         } else {

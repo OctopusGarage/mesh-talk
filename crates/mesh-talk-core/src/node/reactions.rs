@@ -6,6 +6,16 @@ use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};
 use crate::identity::device::PublicIdentity;
 use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 
+#[cfg(test)]
+thread_local! {
+    static REACTION_PROJECTION_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+pub(in crate::node) fn take_reaction_projection_work_for_test() -> (usize, usize) {
+    REACTION_PROJECTION_WORK.with(|work| work.replace((0, 0)))
+}
+
 impl Node {
     /// Aggregated reactions in the DM with `peer` (derives the conversation id).
     pub fn reactions_dm(&self, peer: &PublicIdentity) -> Vec<ReactionView> {
@@ -292,71 +302,233 @@ impl Node {
     /// event with the conversation crypto, merges our own (un-openable) DM reactions,
     /// and folds them per `(target, emoji)`.
     pub fn reactions(&self, conv: ConversationId) -> Vec<ReactionView> {
-        let self_uid = self.identity.public().user_id();
         let content_gate = self.channel_content_gate(conv);
-        let react_events: Vec<Event> = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&conv)
-                .into_iter()
-                .filter(|e| {
-                    e.kind == EventKind::React
-                        && content_gate.as_ref().is_none_or(|ids| ids.contains(&e.id))
-                })
-                .cloned()
-                .collect()
+        let state = self
+            .channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .state(&conv)
+            .map(|state| state.members().to_vec());
+        let private = self
+            .my_dm_reactions
+            .lock()
+            .expect("reaction projection mutex")
+            .channel_entries_with_account(conv);
+        let bound: std::collections::HashMap<_, _> = private
+            .iter()
+            .filter_map(|(source, effect, _, _, account)| {
+                account.map(|account| ((*effect, source.ed25519_pub), account))
+            })
+            .collect();
+        // Capture verified directory evidence before the log guard. Current
+        // self/sibling identity is never evidence for a historical reaction.
+        let proofs = if state.is_some() {
+            self.historical_peer_proofs()
+        } else {
+            self.historical_dm_peers()
         };
-        let is_channel = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.state(&conv).is_some()
-        };
-        let mut decoded: Vec<(String, u64, ReactionPayload)> = Vec::new();
-        for event in &react_events {
-            let plaintext = if is_channel {
-                let Some(sealed) = crate::node::channel::SealedPayload::decode(&event.ciphertext)
-                else {
-                    continue;
-                };
-                let author_uid = event.author.user_id();
-                let book = self.channels.lock().expect("channels mutex not poisoned");
-                book.state(&conv)
-                    .and_then(|s| {
-                        s.members()
-                            .iter()
-                            .find(|m| m.user_id() == author_uid)
-                            .map(|m| m.x25519_pub)
-                    })
-                    .and_then(|author_x| sealed.open(&self.identity, &author_x))
-            } else {
-                let author_uid = event.author.user_id();
-                let sender_x25519 = self
-                    .historical_dm_peers()
-                    .into_iter()
-                    .map(|proof| proof.public())
-                    .find(|public| {
-                        public.user_id() == author_uid
-                            && dm_conversation_id(&self.identity.public(), public) == conv
-                    })
-                    .map(|public| public.x25519_pub);
-                sender_x25519
-                    .and_then(|x| crate::dm::open(&self.identity, &x, &event.ciphertext).ok())
-            };
-            if let Some(p) = plaintext.and_then(|b| ReactionPayload::decode(&b)) {
-                decoded.push((event.author.user_id(), event.wall_clock, p));
+        let mut accounts: std::collections::HashMap<_, std::collections::BTreeSet<[u8; 32]>> =
+            std::collections::HashMap::new();
+        for proof in &proofs {
+            if proof.valid_presence()
+                && !proof.post_office
+                && let Some(certificate) = &proof.account_cert
+            {
+                accounts
+                    .entry((proof.ed25519_pub, proof.x25519_pub))
+                    .or_default()
+                    .insert(certificate.account_ed25519_pub);
             }
         }
-        // Merge our own DM reactions for this conversation (not in the openable log).
-        if !is_channel {
-            for ((c, _, _), (w, p)) in self
-                .my_dm_reactions
-                .lock()
-                .expect("my_dm_reactions mutex not poisoned")
-                .iter()
-            {
-                if *c == conv {
-                    decoded.push((self_uid.clone(), *w, p.clone()));
+        for patch in self.account_binding_patches() {
+            for transition in patch.transitions {
+                if transition.verify() {
+                    let roots = accounts
+                        .entry((transition.public.ed25519_pub, transition.public.x25519_pub))
+                        .or_default();
+                    roots.insert(transition.previous_certificate.account_ed25519_pub);
+                    roots.insert(transition.current_certificate.account_ed25519_pub);
                 }
             }
         }
+        let ambiguous: std::collections::HashSet<_> = self
+            .privacy
+            .state
+            .read()
+            .expect("privacy state mutex")
+            .as_ref()
+            .map(|state| state.proofs.ambiguous_historical_accounts())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|public| (public.ed25519_pub, public.x25519_pub))
+            .collect();
+        let account_id =
+            |ed25519_pub| crate::identity::account::AccountPublic { ed25519_pub }.account_id();
+        let principal = |source: &PublicIdentity, account: Option<String>| {
+            account
+                .or_else(|| {
+                    accounts
+                        .get(&(source.ed25519_pub, source.x25519_pub))
+                        .filter(|roots| {
+                            roots.len() == 1
+                                && !ambiguous.contains(&(source.ed25519_pub, source.x25519_pub))
+                        })
+                        .and_then(|roots| roots.first().copied())
+                        .map(account_id)
+                })
+                .unwrap_or_else(|| source.user_id())
+        };
+        let events = {
+            let log = self.log.lock().expect("log mutex not poisoned");
+            let events = log.events(&conv);
+            let modern = state.is_some()
+                && events
+                    .iter()
+                    .any(|event| event.kind == EventKind::ChannelAccountAuthority);
+            events
+                .into_iter()
+                .filter(|event| {
+                    event.kind == EventKind::React
+                        && content_gate
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(&event.id))
+                })
+                .map(|event| {
+                    // Only modern groups have historical account authority to
+                    // replay. Legacy and DM reads stay linear in stored effects.
+                    if !modern {
+                        return (event.clone(), None, None);
+                    }
+                    let mut ancestors = std::collections::HashMap::new();
+                    let mut pending = event.parents.clone();
+                    while let Some(id) = pending.pop() {
+                        #[cfg(test)]
+                        REACTION_PROJECTION_WORK.with(|work| {
+                            let (visits, projections) = work.get();
+                            work.set((visits + 1, projections));
+                        });
+                        if ancestors.contains_key(&id) {
+                            continue;
+                        }
+                        if let Some(parent) =
+                            log.get(&id).filter(|parent| parent.conversation_id == conv)
+                        {
+                            pending.extend(parent.parents.iter().copied());
+                            ancestors.insert(id, parent);
+                        }
+                    }
+                    #[cfg(test)]
+                    REACTION_PROJECTION_WORK.with(|work| {
+                        let (visits, projections) = work.get();
+                        work.set((visits, projections + 1));
+                    });
+                    let projection = super::channel::ChannelBook::project_membership(
+                        conv,
+                        &ancestors.values().copied().collect::<Vec<_>>(),
+                    );
+                    let source = projection.state.as_ref().and_then(|state| {
+                        state
+                            .members()
+                            .iter()
+                            .find(|member| member.ed25519_pub == *event.author.ed25519_pub())
+                            .cloned()
+                    });
+                    let account = if projection.authority.current_event().is_some() {
+                        source
+                            .as_ref()
+                            .and_then(|source| {
+                                projection
+                                    .state
+                                    .as_ref()?
+                                    .member_account_id(&source.user_id())
+                            })
+                            .map(str::to_owned)
+                    } else {
+                        None
+                    };
+                    (event.clone(), source, account)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut decoded = Vec::new();
+        for (event, causal_source, causal_account) in events {
+            if state.is_some() {
+                let source = causal_source
+                    .or_else(|| {
+                        state
+                            .as_ref()?
+                            .iter()
+                            .find(|member| member.ed25519_pub == *event.author.ed25519_pub())
+                            .cloned()
+                    })
+                    .or_else(|| {
+                        proofs
+                            .iter()
+                            .find(|proof| proof.ed25519_pub == *event.author.ed25519_pub())
+                            .map(|proof| proof.public())
+                    });
+                let Some(source) = source else {
+                    continue;
+                };
+                let plaintext = crate::node::channel::SealedPayload::decode(&event.ciphertext)
+                    .and_then(|sealed| sealed.open(&self.identity, &source.x25519_pub));
+                if let Some(payload) = plaintext.and_then(|bytes| ReactionPayload::decode(&bytes)) {
+                    decoded.push((
+                        principal(
+                            &source,
+                            bound
+                                .get(&(event.id, source.ed25519_pub))
+                                .copied()
+                                .map(account_id)
+                                .or(causal_account),
+                        ),
+                        event.wall_clock,
+                        payload,
+                    ));
+                }
+            } else {
+                let sender = proofs.iter().map(|proof| proof.public()).find(|source| {
+                    source.ed25519_pub == *event.author.ed25519_pub()
+                        && dm_conversation_id(&self.identity.public(), source) == conv
+                });
+                if let Some(payload) = sender
+                    .and_then(|source| {
+                        crate::dm::open(&self.identity, &source.x25519_pub, &event.ciphertext).ok()
+                    })
+                    .and_then(|bytes| ReactionPayload::decode(&bytes))
+                {
+                    decoded.push((event.author.user_id(), event.wall_clock, payload));
+                }
+            }
+        }
+        if state.is_none() {
+            for ((conversation, _, _), (wall, payload)) in self
+                .my_dm_reactions
+                .lock()
+                .expect("reaction projection mutex")
+                .iter()
+            {
+                if *conversation == conv {
+                    decoded.push((self.user_id(), *wall, payload.clone()));
+                }
+            }
+        }
+        decoded.extend(
+            private
+                .into_iter()
+                .map(|(source, effect, wall, payload, account)| {
+                    (
+                        principal(
+                            &source,
+                            account
+                                .or_else(|| bound.get(&(effect, source.ed25519_pub)).copied())
+                                .map(account_id),
+                        ),
+                        wall,
+                        payload,
+                    )
+                }),
+        );
         aggregate(&decoded)
     }
 

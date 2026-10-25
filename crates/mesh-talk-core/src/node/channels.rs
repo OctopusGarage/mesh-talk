@@ -1,5 +1,8 @@
 //! Channel lifecycle: create, membership, sender-key distribution, and sends. Split out of node.rs (one `impl Node` block per domain).
 
+pub(in crate::node) mod account_invitation;
+pub(in crate::node) mod account_self_control;
+pub(in crate::node) mod owner_control;
 mod simple_control;
 pub(in crate::node) use simple_control::{SimpleControl, normalize_simple_name};
 
@@ -157,7 +160,7 @@ impl Node {
         self.channel_identity_is_current_in(state, &current)
     }
 
-    fn channel_identity_is_current_in(
+    pub(in crate::node) fn channel_identity_is_current_in(
         &self,
         state: &ChannelState,
         current: &ChannelMembershipProjection,
@@ -1413,12 +1416,26 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        let own_proof = self.own_group_proof();
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
+            if self
+                .account_group_projection(channel)
+                .authority
+                .current_event()
+                .is_some()
+            {
+                distribution = Some(self.apply_account_self_control(
+                    channel,
+                    account_self_control::AccountSelfControlInput::Leave,
+                    &own_proof,
+                )?);
+                return Ok(());
+            }
             let members = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
                 let state = book
@@ -1458,12 +1475,26 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        let own_proof = self.own_group_proof();
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
+            if self
+                .account_group_projection(channel)
+                .authority
+                .current_event()
+                .is_some()
+            {
+                distribution = Some(self.apply_account_self_control(
+                    channel,
+                    account_self_control::AccountSelfControlInput::Accept,
+                    &own_proof,
+                )?);
+                return Ok(());
+            }
             let members = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
                 let state = book

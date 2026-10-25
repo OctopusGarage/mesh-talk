@@ -21,6 +21,12 @@ const { chatState, authState, avatars, dialog, channelApi, bindingChanges } =
     chatState: {
       runEpoch: 1,
       identityEpoch: 1,
+      groupOperations: {} as Record<
+        string,
+        import("@/store/accountGroupOperations").GroupOperationTicket
+      >,
+      cancelGroupOperation: vi.fn(async () => ({ kind: "pending" })),
+      refreshGroupOperations: vi.fn(async () => {}),
       refreshRoster: vi.fn(async () => {}),
       accounts: [] as Array<{
         account_id: string;
@@ -50,11 +56,19 @@ const { chatState, authState, avatars, dialog, channelApi, bindingChanges } =
       favorites: {},
       myId: "owner-device",
       myAccountId: "owner-account",
-      addMember: vi.fn(async () => true),
-      removeMemberAccount: vi.fn(async () => true),
-      transferChannelOwner: vi.fn(async () => true),
-      removeMember: vi.fn(async () => true),
-      dissolveChannel: vi.fn(async () => true),
+      addMember: vi.fn(async (): Promise<unknown> => ({ kind: "committed" })),
+      removeMemberAccount: vi.fn(async (): Promise<unknown> => ({
+        kind: "committed",
+      })),
+      transferChannelOwner: vi.fn(async (): Promise<unknown> => ({
+        kind: "committed",
+      })),
+      removeMember: vi.fn(async (): Promise<unknown> => ({
+        kind: "committed",
+      })),
+      dissolveChannel: vi.fn(async (): Promise<unknown> => ({
+        kind: "committed",
+      })),
       open: vi.fn(),
     },
     avatars: { "peer-account": "data:image/png;base64,AAAA" } as Record<
@@ -149,6 +163,12 @@ const defaultPeers = chatState.peers.map((peer) => ({ ...peer }));
 const defaultActive = { ...chatState.active };
 
 beforeEach(() => {
+  (
+    globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
+  chatState.groupOperations = {};
+  chatState.cancelGroupOperation.mockClear();
+  chatState.refreshGroupOperations.mockClear();
   chatState.members = defaultMembers.map((member) => ({ ...member }));
   chatState.channelOwner = "owner-device";
   chatState.channels = [];
@@ -158,11 +178,17 @@ beforeEach(() => {
   chatState.accounts = [];
   chatState.myId = "owner-device";
   chatState.myAccountId = "owner-account";
-  chatState.addMember.mockReset().mockResolvedValue(true);
-  chatState.removeMemberAccount.mockReset().mockResolvedValue(true);
-  chatState.removeMember.mockReset().mockResolvedValue(true);
-  chatState.transferChannelOwner.mockReset().mockResolvedValue(true);
-  chatState.dissolveChannel.mockReset().mockResolvedValue(true);
+  chatState.addMember.mockReset().mockResolvedValue({ kind: "committed" });
+  chatState.removeMemberAccount
+    .mockReset()
+    .mockResolvedValue({ kind: "committed" });
+  chatState.removeMember.mockReset().mockResolvedValue({ kind: "committed" });
+  chatState.transferChannelOwner
+    .mockReset()
+    .mockResolvedValue({ kind: "committed" });
+  chatState.dissolveChannel
+    .mockReset()
+    .mockResolvedValue({ kind: "committed" });
   chatState.open.mockReset();
   bindingChanges.mockClear();
   dialog.onOpenChange = null;
@@ -235,7 +261,7 @@ it("keeps unbound devices separate even when their display names match", () => {
   expect(html.match(/data-member-row=/g) ?? []).toHaveLength(2);
 });
 
-it("removes an account through one atomic action and transfers to an exact accepted device", async () => {
+it("removes an account through one atomic action and transfers to a verified member account", async () => {
   chatState.members = [
     ...defaultMembers,
     { user_id: "peer-device", account_id: "peer-account", name: "Alice" },
@@ -265,7 +291,7 @@ it("removes an account through one atomic action and transfers to an exact accep
         ?.querySelector('[title="Transfer ownership"]'),
     ).toBeNull();
     const transfer = container.querySelector<HTMLButtonElement>(
-      '[data-testid="member-device-peer-linked"] [title="Transfer ownership"]',
+      '[data-testid="member-transfer-account-peer-account"]',
     )!;
     await act(async () => transfer.click());
     const transferConfirm = Array.from(
@@ -273,7 +299,7 @@ it("removes an account through one atomic action and transfers to an exact accep
     ).find((button) => button.textContent === "Transfer ownership")!;
     await act(async () => transferConfirm.click());
     expect(chatState.transferChannelOwner).toHaveBeenCalledExactlyOnceWith(
-      "peer-linked",
+      "peer-account",
     );
     await act(async () =>
       container
@@ -583,7 +609,7 @@ it("does not offer dissolution after the channel is closed", () => {
 it("requires confirmation and closes the dialog after successful dissolution", async () => {
   const container = document.createElement("div");
   const root = createRoot(container);
-  chatState.dissolveChannel.mockResolvedValue(true);
+  chatState.dissolveChannel.mockResolvedValue({ kind: "committed" });
   try {
     await act(async () => root.render(createElement(MembersDialog)));
     await act(async () =>
@@ -614,7 +640,10 @@ it("requires confirmation and closes the dialog after successful dissolution", a
 it("keeps confirmation available after a failed dissolution", async () => {
   const container = document.createElement("div");
   const root = createRoot(container);
-  chatState.dissolveChannel.mockResolvedValue(false);
+  chatState.dissolveChannel.mockResolvedValue({
+    kind: "not_admitted",
+    error: new Error("not authorized"),
+  });
   try {
     await act(async () => root.render(createElement(MembersDialog)));
     await act(async () =>
@@ -735,10 +764,10 @@ it("does not show the previous channel's activity while the new channel loads", 
   }
 });
 
-it("blocks closing confirmation while dissolution is pending", async () => {
+it("allows manual dismissal while dissolution remains pending without requesting cancellation", async () => {
   const container = document.createElement("div");
   const root = createRoot(container);
-  let finish!: (success: boolean) => void;
+  let finish!: (success: unknown) => void;
   chatState.dissolveChannel.mockImplementation(
     () =>
       new Promise((resolve) => {
@@ -764,8 +793,16 @@ it("blocks closing confirmation while dissolution is pending", async () => {
     act(() => dialog.onOpenChange!(false));
     expect(
       container.querySelector('[data-testid="dissolve-channel-confirm"]'),
-    ).not.toBeNull();
-    await act(async () => finish(false));
+    ).toBeNull();
+    expect(chatState.cancelGroupOperation).not.toHaveBeenCalled();
+    await act(async () =>
+      finish({
+        kind: "pending",
+        id: "background-op",
+        status: { phase: { kind: "waiting_for_executor" } },
+      }),
+    );
+    expect(chatState.dissolveChannel).toHaveBeenCalledOnce();
     act(() => dialog.onOpenChange!(false));
     expect(
       container.querySelector('[data-testid="dissolve-channel-trigger"]'),
@@ -1012,6 +1049,176 @@ it("lets the local device revoke an exception while manual share-off hides tempo
     await act(async () => root.render(createElement(MembersDialog)));
     expect(container.textContent).not.toContain("Resume data protection");
     expect(container.textContent).toContain("Resume sharing");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("labels the owner account on a shared sibling reference even when the original owner device is absent", () => {
+  chatState.myId = "linked-owner-device";
+  chatState.channelOwner = "old-owner-device";
+  chatState.channels = [
+    {
+      channel_id: "channel",
+      name: "Group",
+      member_count: 2,
+      owner: "old-owner-device",
+      shared_reference: true,
+      account_access: {
+        account_id: "owner-account",
+        role: "owner",
+        execution: { kind: "waiting_for_device" },
+      },
+    },
+  ];
+  chatState.members = [
+    { user_id: "linked-owner-device", account_id: "owner-account", name: "Me" },
+  ];
+  const html = renderToStaticMarkup(createElement(MembersDialog));
+  expect(html.match(/data-testid="member-owner-badge"/g)).toHaveLength(1);
+  expect(html).toContain(
+    "Transfer ownership to another member before you leave this channel.",
+  );
+  expect(html).not.toContain("Membership and sending stay on the device");
+  expect(html).not.toContain("Disable replica");
+});
+
+it("uses refreshed account ownership when the local signer and source owner device differ", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  chatState.myId = "linked-owner-device";
+  chatState.channelOwner = "old-owner-device";
+  chatState.members = [
+    { user_id: "linked-owner-device", account_id: "owner-account", name: "Me" },
+  ];
+  chatState.channels = [
+    {
+      channel_id: "channel",
+      name: "Group",
+      member_count: 2,
+      owner: "old-owner-device",
+      shared_reference: true,
+      account_access: {
+        account_id: "owner-account",
+        role: "member",
+        execution: { kind: "waiting_for_device" },
+      },
+    },
+  ];
+  channelApi.channelMembers.mockResolvedValue({
+    owner: "old-owner-device",
+    owner_account_id: null,
+    can_manage: false,
+    history_policy: "off",
+    members: chatState.members,
+    account_access: {
+      account_id: "owner-account",
+      role: "owner",
+      execution: { kind: "waiting_for_device" },
+    },
+  });
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    expect(
+      container.querySelector('[data-testid="member-owner-badge"]'),
+    ).toBeNull();
+    await act(async () => dialog.onOpenChange?.(true));
+    expect(
+      container.querySelectorAll('[data-testid="member-owner-badge"]'),
+    ).toHaveLength(1);
+    expect(
+      container.querySelector('[data-testid="dissolve-channel-trigger"]'),
+    ).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    vi.unstubAllGlobals();
+  }
+});
+
+it("keeps dissolution confirmation open after accepted pending work", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  chatState.dissolveChannel.mockResolvedValueOnce({
+    kind: "pending",
+    id: "op",
+    status: { phase: { kind: "waiting_for_executor" } },
+  });
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="dissolve-channel-trigger"]',
+        )!
+        .click(),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="dissolve-channel-confirm"]',
+        )!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="dissolve-channel-confirm"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain("your linked devices");
+  } finally {
+    await act(async () => root.unmount());
+    vi.unstubAllGlobals();
+  }
+});
+
+it("offers an account transfer on a shared owner sibling and retains its pending confirmation", async () => {
+  chatState.myId = "linked-owner-device";
+  chatState.channelOwner = "source-device";
+  chatState.channels = [
+    {
+      channel_id: "channel",
+      name: "Group",
+      member_count: 2,
+      owner: "source-device",
+      shared_reference: true,
+      account_access: {
+        account_id: "owner-account",
+        role: "owner",
+        execution: { kind: "waiting_for_device" },
+      },
+    },
+  ];
+  chatState.members = [
+    { user_id: "linked-owner-device", account_id: "owner-account", name: "Me" },
+    { user_id: "peer-device", account_id: "peer-account", name: "Alice" },
+  ];
+  chatState.transferChannelOwner.mockResolvedValueOnce({
+    kind: "pending",
+    id: "transfer-op",
+    status: { phase: { kind: "waiting_for_executor" } },
+  });
+  const host = document.createElement("div");
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () =>
+      host
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="member-transfer-account-peer-account"]',
+        )!
+        .click(),
+    );
+    await act(async () =>
+      [...host.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Transfer ownership")!
+        .click(),
+    );
+    expect(chatState.transferChannelOwner).toHaveBeenCalledExactlyOnceWith(
+      "peer-account",
+    );
+    expect(host.textContent).toContain("Make Alice the channel owner?");
+    expect(host.textContent).toContain("your linked devices");
+    expect(host.textContent).not.toContain("Disable replica");
   } finally {
     await act(async () => root.unmount());
   }

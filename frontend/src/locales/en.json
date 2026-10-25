@@ -282,6 +282,10 @@
     "peerChecked": "Checked an available member",
     "peerCheckedDetail": "Last checked a reachable member: {{time}}. Offline members may have more messages.",
     "moreUnread": "More unread messages",
+    "groupWaitingForDevice": "Waiting for a linked device",
+    "groupRequiresUpgrade": "Update a linked device to send",
+    "groupReconciling": "Updating group access…",
+    "groupAccessPending": "Updating group access…",
     "sharedReference": "Shared group information",
     "sharedReferenceHint": "This group information was shared by a linked device. Messaging and membership controls require verified group state on this device.",
     "legacySharedReferenceHint": "This group uses an earlier membership format. Messaging requires a group-format and account-membership update; this information does not grant membership.",
@@ -935,7 +939,9 @@
     "devices": "Devices ({{count}})",
     "deviceIdentity": "Device {{id}}",
     "addLinkedDevice": "Add linked device",
-    "referencePartial": "Only known members are shown. This shared roster is partial because of size limits."
+    "referencePartial": "Only known members are shown. This shared roster is partial because of size limits.",
+    "detailsReconciling": "Group details are being reconciled. The last confirmed policy is shown.",
+    "historyUnavailable": "The group history policy is not available yet. Keep a linked device online, then retry."
   },
   "createChannel": {
     "trigger": "New channel",
@@ -1365,5 +1371,22 @@
     "agent": "Change local agent access",
     "settings": "Change security settings",
     "savedLogin": "Save login on this device"
+  },
+  "groupOperation": {
+    "reaction": "Update reaction",
+    "recall": "Recall message",
+    "waiting": "Waiting for one of your linked devices to execute this account action.",
+    "pending": "The account action is pending.",
+    "unconfirmed": "The result is unconfirmed. Check this operation before retrying.",
+    "cancelling": "Cancellation requested. The action may still commit.",
+    "cancelled": "The account action was cancelled.",
+    "failed": "The account action could not complete. Refresh account access and try again.",
+    "cancel": "Request cancellation",
+    "details": "Technical details",
+    "title": "Recent group actions",
+    "refresh": "Check status",
+    "committed": "The account action completed.",
+    "upgrade": "Update a linked device to continue this action.",
+    "actionRequired": "Review group access before this action can continue."
   }
 }

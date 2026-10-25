@@ -734,3 +734,88 @@ it("binds group creation to the captured owner and account", async () => {
     memberIds: ["peer"],
   });
 });
+
+it("submits text and sticker group operations with owner/account identity and original operation IDs", async () => {
+  const status = {
+    id: "operation",
+    phase: { kind: "accepted" },
+    primary_event: null,
+  };
+  invoke.mockResolvedValue(status);
+  expect(
+    await chat.submitAccountGroupText(
+      "owner",
+      "account",
+      "operation",
+      "group",
+      "hello",
+      "reply",
+      123,
+    ),
+  ).toBe(status);
+  expect(invoke).toHaveBeenLastCalledWith("owner_submit_account_group_text", {
+    owner: "owner",
+    expectedAccount: "account",
+    operationId: "operation",
+    channelId: "group",
+    text: "hello",
+    replyTo: "reply",
+    expiresAtMs: 123,
+  });
+  expect(
+    await chat.submitAccountGroupSticker(
+      "owner",
+      "account",
+      "operation",
+      "group",
+      "heart",
+      "❤️",
+      123,
+    ),
+  ).toBe(status);
+  expect(invoke).toHaveBeenLastCalledWith(
+    "owner_submit_account_group_sticker",
+    {
+      owner: "owner",
+      expectedAccount: "account",
+      operationId: "operation",
+      channelId: "group",
+      stickerId: "heart",
+      fallback: "❤️",
+      expiresAtMs: 123,
+    },
+  );
+});
+
+it("submits raw File account operation arguments without discarding pending lifecycle", async () => {
+  const pending = {
+    id: "original",
+    phase: { kind: "waiting_for_executor" },
+    primary_event: null,
+  };
+  invoke.mockResolvedValue(pending);
+  expect(
+    await chat.submitAccountGroupFile(
+      "owner",
+      "account",
+      "original",
+      "group",
+      "/tmp/source.png",
+      true,
+      "client",
+      123,
+      "authenticate",
+    ),
+  ).toBe(pending);
+  expect(invoke).toHaveBeenLastCalledWith("owner_submit_account_group_file", {
+    owner: "owner",
+    expectedAccount: "account",
+    operationId: "original",
+    channelId: "group",
+    path: "/tmp/source.png",
+    media: true,
+    progressKey: "client",
+    expiresAtMs: 123,
+    protection: "authenticate",
+  });
+});

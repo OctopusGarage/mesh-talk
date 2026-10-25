@@ -124,6 +124,101 @@ impl GroupProofSnapshot {
     }
 }
 
+/// Recover a terminal modern account observation from validated public grant and
+/// revocation provenance, even when this device never published a private head.
+/// All identity inputs are the already captured pre-log snapshot.
+fn revoked_account_source(
+    group: ConversationId,
+    log: &PersistentEventLog,
+    projection: &crate::node::channel::ChannelMembershipProjection,
+    own: &crate::identity::device::PublicIdentity,
+    proof: &crate::discovery::Announce,
+    proofs: &GroupProofSnapshot,
+) -> Option<(AccountGroupSource, EventId)> {
+    use crate::node::channel_account_authority::{AccountAuthorityControl, AccountGrant};
+    type RevokedGrantCandidate = ((u64, EventId, [u8; 16]), AccountGrant);
+    let state = projection.state.as_ref()?;
+    projection.authority.current_event()?;
+    if state.id() != group
+        || proof.public() != *own
+        || !proofs.binding_current(proof)
+        || projection
+            .authority
+            .account_grant(&proofs.account_public)
+            .is_some()
+    {
+        return None;
+    }
+    let revoked: HashSet<_> = projection
+        .authority
+        .revoked()
+        .into_iter()
+        .filter(|id| id.account_pub == proofs.account_public)
+        .collect();
+    let revocation = projection
+        .authority
+        .revocation_events(&proofs.account_public)
+        .into_iter()
+        .filter_map(|id| log.get(&id))
+        .filter(|event| event.conversation_id == group && projection.authorized.contains(&event.id))
+        .max_by_key(|event| (event.lamport, event.id))?;
+    let mut previous: Option<RevokedGrantCandidate> = None;
+    for event in log.events(&group) {
+        if event.kind != EventKind::ChannelAccountAuthority
+            || !projection.authorized.contains(&event.id)
+        {
+            continue;
+        }
+        let Some(control) = AccountAuthorityControl::decode(&event.ciphertext) else {
+            continue;
+        };
+        for grant in control.grants {
+            let Some(id) = grant.id().filter(|id| revoked.contains(id)) else {
+                continue;
+            };
+            let Some(membership) = log.get(&grant.membership_event).filter(|event| {
+                event.conversation_id == group
+                    && event.kind == EventKind::MembershipChange
+                    && projection.authorized.contains(&event.id)
+            }) else {
+                continue;
+            };
+            if grant
+                .acceptance_event
+                .is_some_and(|id| !projection.authorized.contains(&id) || log.get(&id).is_none())
+            {
+                continue;
+            }
+            let key = (membership.lamport, membership.id, id.incarnation);
+            if previous.as_ref().is_none_or(|(old, _)| key > *old) {
+                previous = Some((key, grant));
+            }
+        }
+    }
+    let (_, grant) = previous?;
+    Some((
+        AccountGroupSource {
+            device: own.clone(),
+            role: if state.is_dissolved() {
+                AccountGroupRole::Dissolved
+            } else {
+                AccountGroupRole::Left
+            },
+            lifetime: MembershipLifetime {
+                member: grant.original.public(),
+                membership: grant.membership_event,
+                acceptance: grant.acceptance_event,
+            },
+            authority: AuthorityExpectation {
+                authority: projection.authority.current_event(),
+                epoch: state.epoch(),
+            },
+            execution: AccountGroupExecution::Local,
+        },
+        revocation.id,
+    ))
+}
+
 impl Node {
     fn account_group_proof_snapshot(&self) -> GroupProofSnapshot {
         let (memory, live) = {
@@ -376,7 +471,7 @@ impl Node {
             AccountGroupExecution::Reconciling
         }
     }
-    pub(super) fn public_account_group_source(
+    pub(in crate::node) fn public_account_group_source(
         _group: ConversationId,
         projection: &crate::node::channel::ChannelMembershipProjection,
         device: &PublicIdentity,
@@ -503,7 +598,9 @@ impl Node {
         let state = projection.state.as_ref()?;
         let own = self.identity.public();
         let own_proof = self.own_group_proof();
+        let revoked = revoked_account_source(group, log, projection, &own, &own_proof, proofs);
         let source = Self::public_account_group_source(group, projection, &own, &own_proof)
+            .or_else(|| revoked.as_ref().map(|(source, _)| source.clone()))
             .or_else(|| {
                 let mut source = prior?.source.clone();
                 source.role = if state.is_dissolved() {
@@ -631,6 +728,9 @@ impl Node {
         let mut ids = vec![source.lifetime.membership];
         ids.extend(source.lifetime.acceptance);
         ids.extend(projection.ownership);
+        if !state.is_dissolved() {
+            ids.extend(revoked.as_ref().map(|(_, event)| *event));
+        }
         if state.is_dissolved() {
             ids.extend(
                 log.events(&group)

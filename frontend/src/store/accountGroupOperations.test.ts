@@ -341,3 +341,61 @@ it("does not let a competing retry remove an outstanding original invocation", a
   expect((await original).kind).toBe("committed");
   expect(f.tickets.get(id)?.status?.phase.kind).toBe("committed");
 });
+
+it("links reserved message ownership before the first mutation and stops if linking fails", async () => {
+  const f = fixture();
+  let linked: string | undefined;
+  const invoke = vi.fn(async () => {
+    expect(linked).toBe(id);
+    return status({ kind: "accepted" });
+  });
+  await f.coordinator.submit({
+    group,
+    kind: "rename",
+    invoke,
+    onReserved: (operationId) => {
+      expect(f.tickets.has(operationId)).toBe(true);
+      linked = operationId;
+      return true;
+    },
+  });
+  expect(invoke).toHaveBeenCalledTimes(1);
+  const blocked = fixture();
+  expect(
+    (
+      await blocked.coordinator.submit({
+        group,
+        kind: "rename",
+        invoke,
+        onReserved: () => false,
+      })
+    ).kind,
+  ).toBe("stale");
+  expect(invoke).toHaveBeenCalledTimes(1);
+  expect(blocked.tickets.size).toBe(0);
+});
+
+it("reissues cancellation once a long submission admits and again during refresh", async () => {
+  const f = fixture();
+  const pending = deferred<AccountGroupOperationStatus>();
+  const submission = f.coordinator.submit({
+    group,
+    kind: "rename",
+    invoke: () => pending.promise,
+  });
+  await Promise.resolve();
+  f.commands.cancel.mockRejectedValueOnce(new Error("not admitted yet"));
+  expect((await f.coordinator.cancel(id)).kind).toBe("unconfirmed");
+  pending.resolve(status({ kind: "accepted" }));
+  await submission;
+  expect(f.commands.cancel).toHaveBeenCalledTimes(2);
+  expect(f.tickets.get(id)?.status?.phase.kind).toBe("cancellation_requested");
+  await f.coordinator.refresh();
+  expect(f.commands.cancel).toHaveBeenCalledTimes(3);
+  expect(f.commands.cancel).toHaveBeenLastCalledWith(
+    "local-owner",
+    account,
+    id,
+  );
+  expect(f.terminal).not.toHaveBeenCalled();
+});

@@ -2071,6 +2071,45 @@ fn typed_rename_control_enters_the_bound_effect_wal() {
 }
 
 #[test]
+fn preexisting_group_request_bincode_bytes_remain_compatible() {
+    let fixture = group_control_fixture();
+    let transaction = group_control_transaction(&fixture, fixture.effect.clone());
+    let DeliveryTransaction::GroupRequested {
+        operation,
+        transaction: inner,
+    } = &transaction
+    else {
+        unreachable!();
+    };
+    let DeliveryTransaction::Requested {
+        request,
+        transaction: effect,
+    } = inner.as_ref()
+    else {
+        unreachable!();
+    };
+    let DeliveryTransaction::ChannelControl { events } = effect.as_ref() else {
+        unreachable!();
+    };
+    // These are the published pre-extension enum discriminants and field
+    // sequence, independent of the current DeliveryTransaction serializer.
+    let mut legacy = 7u32.to_le_bytes().to_vec();
+    legacy.extend(bincode::serialize(operation).unwrap());
+    legacy.extend(4u32.to_le_bytes());
+    legacy.extend(bincode::serialize(request).unwrap());
+    legacy.extend(6u32.to_le_bytes());
+    legacy.extend(bincode::serialize(events).unwrap());
+    assert_eq!(bincode::serialize(&transaction).unwrap(), legacy);
+    let decoded = bincode::deserialize::<DeliveryTransaction>(&legacy).unwrap();
+    let mut store = group_control_store(&fixture);
+    store.begin(decoded).unwrap();
+    drop(store);
+    let reopened = group_control_store(&fixture);
+    assert_eq!(reopened.pending_transactions().len(), 1);
+    assert_eq!(reopened.pending_transactions()[0].id(), fixture.effect.id);
+}
+
+#[test]
 fn group_control_without_completion_adapter_does_not_install_or_retire() {
     let fixture = group_control_fixture();
     let mut store = group_control_store(&fixture);

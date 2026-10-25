@@ -731,7 +731,12 @@ pub async fn channel_reactions(
     let channel = parse_channel_id(&channel_id)?;
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(to_reaction_infos(rt.channel_reactions(channel)))
+    // Only the authenticated account principal proves account ownership.
+    // Unknown/adopted historical physical authors remain explicitly unowned.
+    Ok(to_reaction_infos(
+        rt.channel_reactions(channel),
+        Some(rt.account_id()),
+    ))
 }
 
 #[cfg(test)]

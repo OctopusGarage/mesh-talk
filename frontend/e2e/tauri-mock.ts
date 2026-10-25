@@ -10,6 +10,8 @@ import type {
 } from "../src/lib/api/accountDocuments";
 import { test as base, expect } from "@playwright/test";
 import type {
+  AccountGroupOperationKind,
+  AccountGroupOperationStatus,
   ChannelHistoryPolicy,
   PeerInfo,
   PresenceInfo,
@@ -998,6 +1000,63 @@ export const test = base.extend({
 
       let backupConfirmed = false;
       let backupDestination = "local";
+      let nextGroupOperation = 0;
+      const groupOperations = new Map<
+        string,
+        { request: string; status: AccountGroupOperationStatus }
+      >();
+      function groupAccount(args: Record<string, unknown>) {
+        if (
+          nativeLocked ||
+          args.owner !== contactOwner ||
+          args.expectedAccount !== SELF.account
+        )
+          throw {
+            kind: "authorization",
+            message: "Account or session changed",
+          };
+      }
+      function submitGroupOperation(
+        args: Record<string, unknown>,
+        kind: AccountGroupOperationKind,
+        effect: () => string | null,
+      ) {
+        groupAccount(args);
+        const key = `${SELF.account}:${args.operationId}`;
+        const { progressKey: _progress, ...input } = args;
+        const request = JSON.stringify(input);
+        const previous = groupOperations.get(key);
+        if (previous) {
+          if (previous.request !== request)
+            throw { kind: "invalid-input", message: "Operation ID conflict" };
+          return structuredClone(previous.status);
+        }
+        const event = effect();
+        const committed_events = event ? [event] : [];
+        const status: AccountGroupOperationStatus = {
+          id: String(args.operationId),
+          account_id: SELF.account,
+          group: String(args.channelId),
+          kind,
+          phase: { kind: "committed" },
+          committed_events,
+          primary_event: event,
+          executions: [
+            {
+              device_id: SELF.device,
+              phase: { kind: "committed" },
+              committed_events,
+            },
+          ],
+        };
+        groupOperations.set(key, { request, status });
+        return structuredClone(status);
+      }
+      function memberAccount(device: string) {
+        return device === SELF.device
+          ? SELF.account
+          : peers.find((peer) => peer.user_id === device)?.account_id;
+      }
       const responses: Record<string, (a: Record<string, unknown>) => unknown> =
         {
           owner_node_identity: (a) => ({
@@ -1040,6 +1099,182 @@ export const test = base.extend({
               const status = delivery[String(a.account)]?.[id];
               return status ? [{ id, status }] : [];
             }),
+          owner_new_account_group_operation_id: (a) => {
+            groupAccount(a);
+            return (++nextGroupOperation).toString(16).padStart(64, "0");
+          },
+          owner_submit_account_group_text: (a) =>
+            submitGroupOperation(
+              a,
+              "text",
+              () => responses.owner_enqueue_channel_text(a) as string,
+            ),
+          owner_submit_account_group_sticker: (a) =>
+            submitGroupOperation(
+              a,
+              "sticker",
+              () => responses.owner_enqueue_channel_sticker(a) as string,
+            ),
+          owner_submit_account_group_file: (a) =>
+            submitGroupOperation(a, "file", () => {
+              // The existing file preparation mock owns the canonical manifest/history row.
+              const prepared = responses.owner_enqueue_channel_file(a) as {
+                id: string;
+                fileConv: string;
+              };
+              const row = msgs[`ch:${a.channelId}`].find(
+                (row) => row.id === prepared.id,
+              );
+              if (!row?.file || row.file.file_conv !== prepared.fileConv)
+                throw new Error(
+                  "File metadata must be durable before commitment",
+                );
+              return prepared.id;
+            }),
+          owner_submit_account_group_control: (a) => {
+            const operation = a.operation as Record<string, unknown>;
+            const kind =
+              operation.kind === "react"
+                ? "reaction"
+                : operation.kind === "set_history_policy"
+                  ? "history_policy"
+                  : operation.kind;
+            return submitGroupOperation(
+              a,
+              kind as AccountGroupOperationKind,
+              () => {
+                const channel = channels.find(
+                  (channel) => channel.channel_id === a.channelId,
+                );
+                if (!channel) throw new Error("Unknown channel");
+                switch (operation.kind) {
+                  case "rename":
+                    channel.name = String(operation.name);
+                    break;
+                  case "transfer_ownership": {
+                    const member = channelMembers.find(
+                      (member) =>
+                        memberAccount(member.user_id) ===
+                        operation.target_account_id,
+                    );
+                    if (!member) throw new Error("Unknown account member");
+                    channelOwner = member.user_id;
+                    channel.owner = channelOwner;
+                    break;
+                  }
+                  case "accept_invitation":
+                    channel.pending_invite = false;
+                    channelMembers[0].pending = false;
+                    break;
+                  case "decline_invitation":
+                    channel.pending_invite = false;
+                    channel.left = true;
+                    break;
+                  case "leave_account":
+                    channel.left = true;
+                    break;
+                  case "dissolve":
+                    channel.dissolved = true;
+                    break;
+                  case "set_history_policy":
+                    channelHistoryPolicies[String(a.channelId)] =
+                      operation.policy as ChannelHistoryPolicy;
+                    break;
+                  case "invite": {
+                    const peer = peers.find(
+                      (peer) => peer.account_id === operation.target_account_id,
+                    );
+                    if (!peer) throw new Error("Unknown invited account");
+                    if (
+                      !channelMembers.some(
+                        (member) =>
+                          memberAccount(member.user_id) === peer.account_id,
+                      )
+                    )
+                      channelMembers.push({
+                        user_id: peer.user_id,
+                        name: peer.name,
+                        pending: true,
+                      });
+                    break;
+                  }
+                  case "remove_account": {
+                    for (
+                      let index = channelMembers.length - 1;
+                      index >= 0;
+                      index--
+                    )
+                      if (
+                        memberAccount(channelMembers[index].user_id) ===
+                        operation.target_account_id
+                      )
+                        channelMembers.splice(index, 1);
+                    channel.member_count = channelMembers.filter(
+                      (member) => !member.pending,
+                    ).length;
+                    break;
+                  }
+                  case "react":
+                    toggleReact(
+                      `ch:${a.channelId}`,
+                      String(operation.target),
+                      String(operation.emoji),
+                      Boolean(operation.remove),
+                      SELF.device,
+                    );
+                    break;
+                  case "recall":
+                    recallMessage(
+                      `ch:${a.channelId}`,
+                      String(operation.target),
+                    );
+                    break;
+                  default:
+                    throw new Error("Unsupported typed group operation");
+                }
+                return null;
+              },
+            );
+          },
+          owner_account_group_operation_status: (a) => {
+            groupAccount(a);
+            return structuredClone(
+              groupOperations.get(`${SELF.account}:${a.operationId}`)?.status ??
+                null,
+            );
+          },
+          owner_list_account_group_operations: (a) => {
+            groupAccount(a);
+            return [...groupOperations.values()]
+              .map((entry) => entry.status)
+              .filter(
+                (status) =>
+                  status.account_id === SELF.account &&
+                  (!a.channelId || status.group === a.channelId) &&
+                  (!a.pendingOnly ||
+                    !["committed", "rejected", "cancelled"].includes(
+                      status.phase.kind,
+                    )) &&
+                  (!a.after || status.id > String(a.after)),
+              )
+              .sort((left, right) => left.id.localeCompare(right.id))
+              .slice(0, Number(a.limit ?? 100))
+              .map((status) => structuredClone(status));
+          },
+          owner_cancel_account_group_operation: (a) => {
+            groupAccount(a);
+            const entry = groupOperations.get(
+              `${SELF.account}:${a.operationId}`,
+            );
+            if (!entry) throw new Error("Operation not admitted");
+            if (
+              !["committed", "rejected", "cancelled"].includes(
+                entry.status.phase.kind,
+              )
+            )
+              entry.status.phase = { kind: "cancellation_requested" };
+            return structuredClone(entry.status);
+          },
           owner_enqueue_channel_text: (a) => {
             recordSend(
               `ch:${a.channelId}`,
@@ -1207,7 +1442,10 @@ export const test = base.extend({
               channelHistoryPolicies[String(a.channelId)] ??
               "last_ten_within_three_days",
             owner: channelOwner,
-            members: channelMembers,
+            members: channelMembers.map((member) => ({
+              ...member,
+              account_id: memberAccount(member.user_id) ?? null,
+            })),
           }),
           channel_activity: () => [],
 

@@ -409,6 +409,13 @@ impl Node {
         self.account_document_updates.subscribe()
     }
     fn documents_changed(&self) {
+        self.documents_imported();
+        self.note_account_local_change();
+    }
+    /// Incoming rows dirty local readers and reconciliation without claiming a
+    /// new local publication. Relaying a sibling import as a publisher wake
+    /// would turn mandatory metadata reconciliation into a feedback loop.
+    fn documents_imported(&self) {
         for status in self
             .account_sync_status
             .lock()
@@ -423,7 +430,6 @@ impl Node {
             .send_modify(|r| *r = r.wrapping_add(1));
         self.account_sync_notify.notify_one();
         self.note_ui_change();
-        self.note_account_local_change();
     }
     pub fn put_account_document_if(
         &self,

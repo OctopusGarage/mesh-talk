@@ -20,6 +20,35 @@ pub(in crate::node) struct GroupProtocolSupport {
     pub public: crate::identity::device::PublicIdentity,
     pub observed_at: Instant,
 }
+/// Operation support is action-specific; old v1 peers implement only the
+/// original three controls even though they authenticate the same probe nonce.
+pub(in crate::node) struct GroupOperationSupport {
+    pub public: crate::identity::device::PublicIdentity,
+    pub observed_at: Instant,
+    pub kinds: u16,
+}
+fn local_operation_capabilities() -> u16 {
+    use crate::node::AccountGroupOperationKind::*;
+    [
+        Text,
+        Sticker,
+        File,
+        Reaction,
+        Recall,
+        Invite,
+        AcceptInvitation,
+        DeclineInvitation,
+        Rename,
+        RemoveAccount,
+        TransferOwnership,
+        Dissolve,
+        HistoryPolicy,
+        LeaveAccount,
+    ]
+    .into_iter()
+    .filter(|kind| kind.supported_here())
+    .fold(0, |mask, kind| mask | kind.capability_bit())
+}
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum DocumentSyncScope {
     #[default]
@@ -312,6 +341,14 @@ impl Node {
         {
             return false;
         }
+        if let Some(asset) = request
+            .operation
+            .as_ref()
+            .filter(|probe| probe.supported())
+            .and_then(|probe| probe.asset.as_ref())
+        {
+            return self.serve_group_operation_asset(channel, asset).await;
+        }
         let (policy, revision) = self.device_sync_policy_snapshot();
         let enabled = document_enabled(request.domain, policy);
         let domain = request.domain;
@@ -329,6 +366,7 @@ impl Node {
         let operation = operation.map(|probe| OperationCapability {
             version: 1,
             nonce: probe.nonce,
+            supported_kinds: Some(local_operation_capabilities()),
         });
         let Ok((items, digest)) = self
             .account_blocking(move |node| {
@@ -374,21 +412,46 @@ impl Node {
             }
         }
         let work = async {
-            for meta in selected {
-                let key = meta.key.clone();
-                let expected = meta.clone();
-                let Ok(payload) = self
+            let mut emitted_bytes = 0usize;
+            let mut last_emitted = None;
+            for (emitted_rows, selected_meta) in selected.into_iter().enumerate() {
+                let key = selected_meta.key;
+                let remaining = MAX_PAGE_BYTES.saturating_sub(emitted_bytes);
+                let Ok(current) = self
                     .account_blocking(move |node| {
                         let store = node.account_documents.lock().expect("documents mutex");
-                        if store.meta(&key).as_ref() != Some(&expected) {
+                        // Publication of another role row must not abort a stable
+                        // operation result later in this bounded page. Select the
+                        // current signed metadata and its matching bytes together.
+                        let meta = store.meta(&key).ok_or_else(failure)?;
+                        if meta.content_len as usize > remaining {
+                            return Ok(None);
+                        }
+                        let payload = store.get(&key).map_err(NodeError::Log)?;
+                        if !meta.tombstone && payload.is_none() {
                             return Err(failure());
                         }
-                        store.get(&key).map_err(NodeError::Log)
+                        Ok(Some((meta, payload)))
                     })
                     .await
                 else {
                     return false;
                 };
+                let Some((meta, payload)) = current else {
+                    // A valid first row always fits the page by its owning key
+                    // limit. Never emit an empty page with a non-advancing cursor.
+                    if last_emitted.is_none() {
+                        return false;
+                    }
+                    next = last_emitted.clone();
+                    break;
+                };
+                if emitted_rows >= 64 {
+                    next = last_emitted.clone();
+                    break;
+                }
+                emitted_bytes += meta.content_len as usize;
+                last_emitted = Some(meta.key.clone());
                 let body = serde_json::to_vec(&meta).expect("document metadata serializes");
                 if self
                     .send_account_frame(
@@ -633,6 +696,7 @@ impl Node {
                 rand_core::OsRng.fill_bytes(&mut nonce);
             }
             Some(OperationProbe {
+                asset: None,
                 version: 1,
                 nonce,
                 after: match &cursor.after {
@@ -1032,9 +1096,14 @@ impl Node {
                                 .expect("operation versions mutex")
                                 .insert(
                                     peer.public.user_id(),
-                                    GroupProtocolSupport {
+                                    GroupOperationSupport {
                                         public: peer.public.clone(),
                                         observed_at: Instant::now(),
+                                        kinds: complete
+                                            .operation
+                                            .as_ref()
+                                            .expect("matched operation capability")
+                                            .capabilities(),
                                     },
                                 );
                         }
@@ -1075,6 +1144,17 @@ impl Node {
             }
         }
     }
+    #[cfg(test)]
+    pub(in crate::node) async fn commit_imported_document_for_test(
+        self: &Arc<Self>,
+        meta: AccountDocumentMeta,
+        payload: Vec<u8>,
+        revision: u64,
+        peer: crate::identity::device::PublicIdentity,
+    ) -> Result<(), NodeError> {
+        self.commit_imported_document(meta, payload, revision, peer)
+            .await
+    }
     async fn commit_imported_document(
         self: &Arc<Self>,
         meta: AccountDocumentMeta,
@@ -1102,7 +1182,7 @@ impl Node {
                 .merge(meta, &payload)
                 .map_err(NodeError::Log)?;
             if changed {
-                node.documents_changed();
+                node.documents_imported();
                 if private_control {
                     node.delivery_status_notify.notify_waiters();
                     node.note_account_history_change();
@@ -1253,6 +1333,200 @@ mod group_control_tests {
     }
 
     #[tokio::test]
+    async fn stable_operation_result_survives_an_unrelated_selected_role_change() {
+        use crate::{
+            channel::HistoryPolicy,
+            node::{
+                AccountGroupOperation, AccountGroupOperationPhase, AccountGroupRole, SyncCategory,
+            },
+        };
+        let mut fixture = UpgradeFixture::new().await;
+        fixture
+            .target
+            .set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+        let first = fixture
+            .source
+            .create_channel("first selected group", vec![])
+            .await
+            .unwrap();
+        let second = fixture
+            .source
+            .create_channel("second selected group", vec![])
+            .await
+            .unwrap();
+        fixture
+            .source
+            .maintain_account_channels(
+                &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
+            )
+            .await;
+        fixture.source.publish_account_group_access(&mut None);
+        let selected = fixture.source.account_documents.lock().unwrap().list_scope(
+            AccountDocumentDomain::GroupControl,
+            None,
+            64,
+            false,
+        );
+        assert_eq!(selected.len(), 2);
+        let first_key = selected[0].key.clone();
+        let second_key = selected[1].key.clone();
+        let lower_group = match &first_key {
+            AccountDocumentKey::GroupControl { channel, .. }
+                if *channel == hex::encode(first.as_bytes()) =>
+            {
+                first
+            }
+            AccountDocumentKey::GroupControl { channel, .. }
+                if *channel == hex::encode(second.as_bytes()) =>
+            {
+                second
+            }
+            _ => panic!("expected a real selected group role"),
+        };
+        let changed_group = if lower_group == first { second } else { first };
+        let account_id = fixture.source.account_id();
+        let operation_id = fixture
+            .source
+            .new_account_group_operation_id(&account_id)
+            .unwrap();
+        fixture
+            .source
+            .submit_account_group_operation(
+                &account_id,
+                operation_id,
+                lower_group,
+                AccountGroupOperation::SetHistoryPolicy {
+                    policy: HistoryPolicy::LastTen,
+                },
+            )
+            .unwrap();
+        fixture.source.maintain_account_group_operations().await;
+        let committed = fixture
+            .source
+            .account_group_operation_status(&account_id, operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.phase, AccountGroupOperationPhase::Committed);
+        assert_eq!(committed.committed_events.len(), 1);
+        fixture.source.publish_account_group_access(&mut None);
+        fixture
+            .source
+            .publish_account_group_operations_for(lower_group);
+        let operation_key = AccountDocumentKey::GroupOperation {
+            channel: hex::encode(lower_group.as_bytes()),
+            source_device: fixture.source.user_id(),
+        };
+        let original_operation = fixture
+            .source
+            .account_document_meta(&operation_key)
+            .unwrap();
+        let selected_second = fixture.source.account_document_meta(&second_key).unwrap();
+        let (blocked, blocked_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let blocked = Arc::new(std::sync::Mutex::new(Some(blocked)));
+        let release_rx = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+        let exact_peer = fixture.target.identity.public();
+        *fixture.source.account_session_test_hook.lock().unwrap() =
+            Some(Arc::new(move |peer, frame| {
+                let blocked = blocked.clone();
+                let release_rx = release_rx.clone();
+                let first_key = first_key.clone();
+                let exact_peer = exact_peer.clone();
+                Box::pin(async move {
+                    if peer != exact_peer {
+                        return;
+                    }
+                    let AccountHistoryFrame::DocumentHeader { body } = frame else {
+                        return;
+                    };
+                    let meta: AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
+                    if meta.key != first_key {
+                        return;
+                    }
+                    let signal = blocked.lock().unwrap().take();
+                    if let Some(signal) = signal {
+                        signal.send(()).unwrap();
+                        let release = release_rx.lock().unwrap().take().unwrap();
+                        release.await.unwrap();
+                    }
+                })
+            }));
+        let target = fixture.target.clone();
+        let peer = fixture.peer.clone();
+        let pulling = tokio::spawn(async move {
+            target
+                .pull_document_exchange(&peer, &mut DocumentSyncCursor::default())
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), blocked_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        fixture
+            .source
+            .dissolve_channel(changed_group)
+            .await
+            .unwrap();
+        fixture
+            .source
+            .publish_account_group_access_for(changed_group);
+        let updated = fixture.source.account_document_meta(&second_key).unwrap();
+        assert!(updated.revision > selected_second.revision);
+        assert_ne!(updated.content_hash, selected_second.content_hash);
+        assert_eq!(
+            fixture
+                .source
+                .account_document_meta(&operation_key)
+                .unwrap(),
+            original_operation,
+            "the real unrelated dissolve must leave the original committed operation document unchanged"
+        );
+        release.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), pulling)
+            .await
+            .unwrap()
+            .unwrap();
+        *fixture.source.account_session_test_hook.lock().unwrap() = None;
+        result.expect("a stable signed operation result must survive an unrelated selected role-row replacement");
+        fixture.target.maintain_account_group_operation_effects();
+        let imported = fixture
+            .target
+            .account_group_operation_status(&account_id, operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(imported.phase, AccountGroupOperationPhase::Committed);
+        assert_eq!(imported.committed_events, committed.committed_events);
+        assert_eq!(
+            fixture
+                .target
+                .account_document_meta(&operation_key)
+                .unwrap(),
+            original_operation
+        );
+        // A second, ordinary page learns the newer negative observation. The
+        // stable earlier page cannot override this later signed source revision.
+        fixture
+            .target
+            .pull_document_exchange(&fixture.peer, &mut DocumentSyncCursor::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.target.account_document_meta(&second_key).unwrap(),
+            updated
+        );
+        assert_eq!(
+            fixture
+                .target
+                .account_group_access(changed_group)
+                .unwrap()
+                .role,
+            AccountGroupRole::Dissolved
+        );
+        fixture.servers.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn a_changed_role_page_retries_without_claiming_the_authenticated_source_is_unsupported()
     {
         use crate::node::AccountGroupRole;
@@ -1350,12 +1624,12 @@ mod group_control_tests {
             "the actual dissolve must replace the second selected role observation"
         );
         release.send(()).unwrap();
-        let (result, mut cursor) = tokio::time::timeout(Duration::from_secs(5), pulling)
+        let (result, cursor) = tokio::time::timeout(Duration::from_secs(5), pulling)
             .await
             .unwrap()
             .unwrap();
         *fixture.source.account_session_test_hook.lock().unwrap() = None;
-        assert!(result.is_err() || cursor.pending);
+        result.expect("a changed selected role must refresh to its current signed observation");
         assert!(
             !cursor.group_upgrade && !cursor.requires_upgrade,
             "a changed page after a valid signed role header is not authenticated unsupported evidence"
@@ -1373,7 +1647,7 @@ mod group_control_tests {
                 .unwrap()
                 .meta(&first_key)
                 .is_some(),
-            "a fully received independently valid role observation survives the interrupted page"
+            "the first independently valid role observation remains available"
         );
         assert!(
             fixture
@@ -1382,29 +1656,306 @@ mod group_control_tests {
                 .lock()
                 .unwrap()
                 .meta(&second_key)
-                .is_none(),
-            "the changed row was never received and cannot be installed from the stale selection"
+                .is_some_and(|meta| meta == updated),
+            "the changed row must refresh to the current negative observation before completion"
         );
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let _ = fixture
-                    .target
-                    .pull_account_documents_page(&fixture.peer, &mut cursor)
-                    .await;
-                if fixture
-                    .target
-                    .account_group_access(changed_group)
-                    .unwrap()
-                    .role
-                    == AccountGroupRole::Dissolved
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("a stable replacement role must converge promptly after the page retry");
+        assert_eq!(
+            fixture
+                .target
+                .account_group_access(changed_group)
+                .unwrap()
+                .role,
+            AccountGroupRole::Dissolved
+        );
+        fixture
+            .target
+            .pull_document_exchange(&fixture.peer, &mut DocumentSyncCursor::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .target
+                .account_group_access(changed_group)
+                .unwrap()
+                .role,
+            AccountGroupRole::Dissolved
+        );
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn selected_row_growth_truncates_at_the_last_emitted_key() {
+        use crate::node::SyncCategory;
+        let mut fixture = UpgradeFixture::new().await;
+        for node in [&fixture.source, &fixture.target] {
+            node.set_device_sync_category(SyncCategory::Appearance, true)
+                .unwrap();
+        }
+        let first = AccountDocumentKey::CustomizationPack {
+            pack_id: "a-selected".into(),
+        };
+        let second = AccountDocumentKey::CustomizationPack {
+            pack_id: "b-growing".into(),
+        };
+        fixture
+            .source
+            .put_account_document_if(first.clone(), vec![1], None, |commit| commit())
+            .unwrap();
+        let old = fixture
+            .source
+            .put_account_document_if(second.clone(), vec![2], None, |commit| commit())
+            .unwrap();
+        let (blocked, blocked_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let blocked = Arc::new(std::sync::Mutex::new(Some(blocked)));
+        let release_rx = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+        let first_key = first.clone();
+        let exact_peer = fixture.target.identity.public();
+        *fixture.source.account_session_test_hook.lock().unwrap() =
+            Some(Arc::new(move |peer, frame| {
+                let blocked = blocked.clone();
+                let release_rx = release_rx.clone();
+                let first_key = first_key.clone();
+                let exact_peer = exact_peer.clone();
+                Box::pin(async move {
+                    if peer != exact_peer {
+                        return;
+                    }
+                    let AccountHistoryFrame::DocumentHeader { body } = frame else {
+                        return;
+                    };
+                    let meta: AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
+                    if meta.key != first_key {
+                        return;
+                    }
+                    let signal = blocked.lock().unwrap().take();
+                    if let Some(signal) = signal {
+                        signal.send(()).unwrap();
+                        let release = release_rx.lock().unwrap().take().unwrap();
+                        release.await.unwrap();
+                    }
+                })
+            }));
+        let target = fixture.target.clone();
+        let peer = fixture.peer.clone();
+        let pulling = tokio::spawn(async move {
+            let mut cursor =
+                DocumentSyncCursor::for_domain(AccountDocumentDomain::CustomizationPack);
+            let result = target.pull_document_exchange(&peer, &mut cursor).await;
+            (result, cursor)
+        });
+        tokio::time::timeout(Duration::from_secs(5), blocked_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let grown = fixture
+            .source
+            .put_account_document_if(
+                second.clone(),
+                vec![7; MAX_PAGE_BYTES],
+                Some(old.version()),
+                |commit| commit(),
+            )
+            .unwrap();
+        release.send(()).unwrap();
+        let (result, mut cursor) = tokio::time::timeout(Duration::from_secs(5), pulling)
+            .await
+            .unwrap()
+            .unwrap();
+        *fixture.source.account_session_test_hook.lock().unwrap() = None;
+        result.expect(
+            "growth must truncate safely before the refreshed row exceeds the actual page budget",
+        );
+        assert_eq!(cursor.after, Some(first.clone()));
+        assert!(cursor.pending && !cursor.up_to_date);
+        assert_eq!(
+            fixture
+                .target
+                .account_document(&first)
+                .unwrap()
+                .unwrap()
+                .payload(),
+            &[1]
+        );
+        assert!(fixture.target.account_document_meta(&second).is_none());
+        fixture
+            .target
+            .pull_document_exchange(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert!(cursor.after.is_none());
+        assert_eq!(
+            fixture.target.account_document_meta(&second).unwrap(),
+            grown
+        );
+        let document = fixture.target.account_document(&second).unwrap().unwrap();
+        assert_eq!(document.payload().len(), MAX_PAGE_BYTES);
+        assert!(document.payload().iter().all(|byte| *byte == 7));
+        fixture.servers.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_full_page_first_row_is_emitted_before_any_continuation() {
+        use crate::node::SyncCategory;
+        let mut fixture = UpgradeFixture::new().await;
+        for node in [&fixture.source, &fixture.target] {
+            node.set_device_sync_category(SyncCategory::Appearance, true)
+                .unwrap();
+        }
+        let first = AccountDocumentKey::CustomizationPack {
+            pack_id: "a-full-page".into(),
+        };
+        let second = AccountDocumentKey::CustomizationPack {
+            pack_id: "b-next-page".into(),
+        };
+        fixture
+            .source
+            .put_account_document_if(first.clone(), vec![9; MAX_PAGE_BYTES], None, |commit| {
+                commit()
+            })
+            .unwrap();
+        fixture
+            .source
+            .put_account_document_if(second.clone(), vec![3], None, |commit| commit())
+            .unwrap();
+        let mut cursor = DocumentSyncCursor::for_domain(AccountDocumentDomain::CustomizationPack);
+        fixture
+            .target
+            .pull_document_exchange(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert_eq!(
+            cursor.after,
+            Some(first.clone()),
+            "a nonempty continuation must name the row actually emitted"
+        );
+        let document = fixture.target.account_document(&first).unwrap().unwrap();
+        assert_eq!(document.payload().len(), MAX_PAGE_BYTES);
+        assert!(fixture.target.account_document_meta(&second).is_none());
+        fixture
+            .target
+            .pull_document_exchange(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert!(cursor.after.is_none());
+        assert_eq!(
+            fixture
+                .target
+                .account_document(&second)
+                .unwrap()
+                .unwrap()
+                .payload(),
+            &[3]
+        );
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn a_selected_row_replaced_by_a_signed_tombstone_refreshes_without_payload() {
+        use crate::node::SyncCategory;
+        let mut fixture = UpgradeFixture::new().await;
+        for node in [&fixture.source, &fixture.target] {
+            node.set_device_sync_category(SyncCategory::Appearance, true)
+                .unwrap();
+        }
+        let first = AccountDocumentKey::CustomizationPack {
+            pack_id: "a-retained".into(),
+        };
+        let second = AccountDocumentKey::CustomizationPack {
+            pack_id: "b-removed".into(),
+        };
+        fixture
+            .source
+            .put_account_document_if(first.clone(), vec![1], None, |commit| commit())
+            .unwrap();
+        let old = fixture
+            .source
+            .put_account_document_if(second.clone(), vec![2], None, |commit| commit())
+            .unwrap();
+        let (blocked, blocked_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let blocked = Arc::new(std::sync::Mutex::new(Some(blocked)));
+        let release_rx = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+        let first_key = first.clone();
+        let exact_peer = fixture.target.identity.public();
+        *fixture.source.account_session_test_hook.lock().unwrap() =
+            Some(Arc::new(move |peer, frame| {
+                let blocked = blocked.clone();
+                let release_rx = release_rx.clone();
+                let first_key = first_key.clone();
+                let exact_peer = exact_peer.clone();
+                Box::pin(async move {
+                    if peer != exact_peer {
+                        return;
+                    }
+                    let AccountHistoryFrame::DocumentHeader { body } = frame else {
+                        return;
+                    };
+                    let meta: AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
+                    if meta.key != first_key {
+                        return;
+                    }
+                    let signal = blocked.lock().unwrap().take();
+                    if let Some(signal) = signal {
+                        signal.send(()).unwrap();
+                        let release = release_rx.lock().unwrap().take().unwrap();
+                        release.await.unwrap();
+                    }
+                })
+            }));
+        let target = fixture.target.clone();
+        let peer = fixture.peer.clone();
+        let pulling = tokio::spawn(async move {
+            target
+                .pull_document_exchange(
+                    &peer,
+                    &mut DocumentSyncCursor::for_domain(AccountDocumentDomain::CustomizationPack),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), blocked_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let tombstone = fixture
+            .source
+            .remove_account_document_if(second.clone(), Some(old.version()), |commit| commit())
+            .unwrap();
+        assert!(tombstone.tombstone);
+        assert_eq!(tombstone.content_len, 0);
+        release.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), pulling)
+            .await
+            .unwrap()
+            .unwrap();
+        *fixture.source.account_session_test_hook.lock().unwrap() = None;
+        result
+            .expect("a selected row removed mid-page must refresh to its current signed tombstone");
+        assert_eq!(
+            fixture
+                .target
+                .account_document(&first)
+                .unwrap()
+                .unwrap()
+                .payload(),
+            &[1]
+        );
+        assert_eq!(
+            fixture.target.account_document_meta(&second).unwrap(),
+            tombstone
+        );
+        assert!(fixture.target.account_document(&second).unwrap().is_none());
+        fixture
+            .target
+            .pull_document_exchange(
+                &fixture.peer,
+                &mut DocumentSyncCursor::for_domain(AccountDocumentDomain::CustomizationPack),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.target.account_document_meta(&second).unwrap(),
+            tombstone
+        );
+        assert!(fixture.target.account_document(&second).unwrap().is_none());
         fixture.servers.shutdown().await;
     }
     struct UpgradeFixture {
@@ -1485,9 +2036,59 @@ mod group_control_tests {
                 .lock()
                 .unwrap()
                 .get(&fixture.source.user_id())
-                .is_some_and(|support| support.public == fixture.source.identity.public()),
+                .is_some_and(|support| support.public == fixture.source.identity.public()
+                    && support.kinds == local_operation_capabilities()),
             "an operation-capable authenticated exchange must establish its own support evidence"
         );
+        fixture.servers.shutdown().await;
+    }
+    #[tokio::test]
+    async fn legacy_operation_completion_proves_only_original_control_kinds() {
+        let mut fixture = UpgradeFixture::new().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut peer = fixture.peer.clone();
+        peer.addr = listener.local_addr().unwrap();
+        let source = fixture.source.clone();
+        let server = tokio::spawn(async move {
+            let (mut channel, request) = receive_document_request(&source, listener).await;
+            let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+            let complete = serde_json::json!({ "enabled":true, "domain":"group_control",
+                "next":null, "digest":([0u8;32]), "operation": {
+                    "version":1, "nonce":request.pointer("/operation/nonce").unwrap() } });
+            channel
+                .send(
+                    &AccountHistoryFrame::DocumentsComplete {
+                        body: serde_json::to_vec(&complete).unwrap(),
+                    }
+                    .encode_version(AccountSyncVersion::V2)
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        fixture
+            .target
+            .pull_document_exchange(&peer, &mut DocumentSyncCursor::default())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        {
+            let supports = fixture.target.group_operation_versions.lock().unwrap();
+            let support = supports.get(&fixture.source.user_id()).unwrap();
+            assert_eq!(support.public, fixture.source.identity.public());
+            assert_eq!(
+                support.kinds,
+                crate::node::AccountGroupOperationKind::legacy_capabilities()
+            );
+            assert_eq!(
+                support.kinds & crate::node::AccountGroupOperationKind::Text.capability_bit(),
+                0
+            );
+            assert_ne!(
+                support.kinds & crate::node::AccountGroupOperationKind::Rename.capability_bit(),
+                0
+            );
+        }
         fixture.servers.shutdown().await;
     }
     /// Speak the access-only v5 JSON dialect over a real authenticated Noise
@@ -1592,9 +2193,10 @@ mod group_control_tests {
             .unwrap()
             .insert(
                 fixture.source.user_id(),
-                GroupProtocolSupport {
+                GroupOperationSupport {
                     public: fixture.source.identity.public(),
                     observed_at: Instant::now(),
+                    kinds: crate::node::AccountGroupOperationKind::legacy_capabilities(),
                 },
             );
     }

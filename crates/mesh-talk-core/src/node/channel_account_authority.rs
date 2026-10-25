@@ -21,6 +21,23 @@ pub(crate) struct AccountGrantId {
     pub account_pub: [u8; 32],
     pub incarnation: [u8; 16],
 }
+/// Explicit self-decline of one invitation incarnation. Older empty-only
+/// ChannelLeave reducers reject this payload rather than treating it as leave.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AccountDeclinePayload {
+    pub version: u8,
+    pub grant: AccountGrantId,
+}
+impl AccountDeclinePayload {
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        frame(b"MTCD1", self)
+    }
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        let payload: Self = unframe(b"MTCD1", bytes)?;
+        (payload.version == 1).then_some(payload)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AccountGrant {
     pub incarnation: [u8; 16],
@@ -133,13 +150,23 @@ pub(crate) struct AccountAuthority {
     originals: Vec<Announce>,
     device_grants: HashMap<([u8; 32], [u8; 32]), AccountGrantId>,
     activated: HashSet<AccountGrantId>,
+    // Every authenticated acceptance matters to a later decline's causal view,
+    // including a concurrent acceptance that was already idempotent on replay.
+    acceptance_events: HashMap<AccountGrantId, HashSet<EventId>>,
+    // Reserve the acceptance epoch for a declined incarnation without activating
+    // it. A later full view must not reuse a partial Accept view's content epoch.
+    declined_epoch_reservations: HashSet<AccountGrantId>,
     origins: HashMap<AccountGrantId, EventId>,
     inherited: HashMap<([u8; 32], [u8; 32]), (AccountGrantId, EventId)>,
 }
 impl AccountAuthority {
     pub(crate) fn key_epoch(&self) -> Option<u64> {
         self.base_epoch?
-            .checked_add(self.added_grants.len() as u64)?
+            .checked_add(
+                self.added_grants
+                    .union(&self.declined_epoch_reservations)
+                    .count() as u64,
+            )?
             .checked_add(self.revoked.len() as u64)
     }
     pub(crate) fn original_device_proofs(&self) -> Vec<Announce> {
@@ -332,12 +359,21 @@ impl AccountAuthority {
         ) {
             return Err(AuthorityError::Stale);
         }
-        if !grant.pending || self.activated.contains(&id) {
+        if !grant.pending {
             return Ok(false);
         }
-        self.key_epoch()
-            .and_then(|epoch| epoch.checked_add(1))
-            .ok_or(AuthorityError::Unsupported)?;
+        if !self.activated.contains(&id) {
+            self.key_epoch()
+                .and_then(|epoch| epoch.checked_add(1))
+                .ok_or(AuthorityError::Unsupported)?;
+        }
+        self.acceptance_events
+            .entry(id)
+            .or_default()
+            .insert(event.id);
+        if self.activated.contains(&id) {
+            return Ok(false);
+        }
         self.activated.insert(id);
         self.added_grants.insert(id);
         Ok(true)
@@ -376,6 +412,73 @@ impl AccountAuthority {
             .ok_or(AuthorityError::Unsupported)?;
         self.revoked.entry(id).or_insert(event.id);
         self.grants.remove(&id.account_pub);
+        Ok(true)
+    }
+    /// Revoke only an incarnation that was still pending in this action's own
+    /// causal view. Concurrent Accept cannot defeat decline or reuse its epoch.
+    pub(crate) fn decline_account(
+        &mut self,
+        event: &Event,
+        proof: &Announce,
+        graph: &EventGraph<'_>,
+    ) -> Result<bool, AuthorityError> {
+        let payload =
+            AccountDeclinePayload::decode(&event.ciphertext).ok_or(AuthorityError::Invalid)?;
+        if self.channel != Some(event.conversation_id)
+            || event.kind != EventKind::ChannelLeave
+            || !valid_event(event)
+            || !proof.valid_presence()
+            || proof.post_office
+            || event.author.ed25519_pub() != &proof.ed25519_pub
+            || Some(payload.grant.account_pub) == self.owner
+        {
+            return Err(AuthorityError::Invalid);
+        }
+        let grant = self
+            .proof_grant(&proof.public(), proof)
+            .ok_or(AuthorityError::Invalid)?;
+        if !grant.pending || grant.id() != Some(payload.grant) {
+            return Err(AuthorityError::Invalid);
+        }
+        if !descends(
+            event.id,
+            self.grant_origin(payload.grant)
+                .ok_or(AuthorityError::MissingAncestry)?,
+            graph,
+        ) || self
+            .inherited
+            .get(&(proof.ed25519_pub, proof.x25519_pub))
+            .is_some_and(|(_, binding)| !descends(event.id, *binding, graph))
+        {
+            return Err(AuthorityError::MissingAncestry);
+        }
+        if let Some(accepted) = self.acceptance_events.get(&payload.grant) {
+            let mut pending = event.parents.clone();
+            let mut visited = HashSet::new();
+            while let Some(id) = pending.pop() {
+                if accepted.contains(&id) {
+                    return Err(AuthorityError::Invalid);
+                }
+                if visited.insert(id)
+                    && let Some(parent) = graph.get(&id)
+                {
+                    pending.extend(parent.parents.iter().copied());
+                }
+            }
+        }
+        let increment = if self.added_grants.contains(&payload.grant)
+            || self.declined_epoch_reservations.contains(&payload.grant)
+        {
+            1
+        } else {
+            2
+        };
+        self.key_epoch()
+            .and_then(|epoch| epoch.checked_add(increment))
+            .ok_or(AuthorityError::Unsupported)?;
+        self.declined_epoch_reservations.insert(payload.grant);
+        self.revoked.entry(payload.grant).or_insert(event.id);
+        self.grants.remove(&payload.grant.account_pub);
         Ok(true)
     }
     fn validate_self_action(
@@ -668,7 +771,7 @@ impl AccountAuthority {
             tombstones.entry(*id).or_insert(event.id);
         }
         let base = self.base_epoch.unwrap_or(legacy.epoch);
-        base.checked_add(added.len() as u64)
+        base.checked_add(added.union(&self.declined_epoch_reservations).count() as u64)
             .and_then(|epoch| epoch.checked_add(tombstones.len() as u64))
             .ok_or(AuthorityError::Unsupported)?;
         if !stale {
@@ -1606,6 +1709,151 @@ mod tests {
             state
                 .leave_account(&legitimate_leave, &proof, &graph)
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn pending_decline_epoch_reservation_overflow_is_atomic() {
+        let f = crate::node::channels::account_self_control::tests::fixture(true);
+        let grant = f.witness().grant;
+        let mut state = f.projection().authority;
+        state.base_epoch = Some(u64::MAX - 1);
+        let decline = Event::new(
+            &f.member,
+            f.group,
+            1,
+            vec![f.events.last().unwrap().id],
+            3,
+            3,
+            EventKind::ChannelLeave,
+            AccountDeclinePayload { version: 1, grant }.encode(),
+        );
+        let mut events = f.events.clone();
+        events.push(decline.clone());
+        let graph = events.iter().map(|event| (event.id, event)).collect();
+        assert_eq!(
+            state.decline_account(&decline, &f.proof, &graph),
+            Err(AuthorityError::Unsupported)
+        );
+        assert_eq!(state.key_epoch(), Some(u64::MAX - 1));
+        assert!(state.revoked.is_empty() && state.declined_epoch_reservations.is_empty());
+        assert!(
+            state
+                .invitation_for_device(&f.member.public(), &f.proof)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn declined_incarnation_cannot_resurrect_or_revoke_a_later_invitation() {
+        let f = crate::node::channels::account_self_control::tests::fixture(true);
+        let original_id = f.witness().grant;
+        let original = AccountAuthorityControl::decode(&f.events[1].ciphertext).unwrap();
+        let mut state = f.projection().authority;
+        let decline = Event::new(
+            &f.member,
+            f.group,
+            1,
+            vec![f.events[1].id],
+            3,
+            3,
+            EventKind::ChannelLeave,
+            AccountDeclinePayload {
+                version: 1,
+                grant: original_id,
+            }
+            .encode(),
+        );
+        let fresh_root = Event::new(
+            &f.owner,
+            f.group,
+            3,
+            vec![decline.id],
+            4,
+            4,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "reinvite".into(),
+                members: vec![f.owner.public(), f.member.public()],
+                epoch: 2,
+                owner: f.owner.user_id(),
+            }
+            .encode_invitation(),
+        );
+        let mut fresh = original.clone();
+        fresh.previous = Some(f.events[1].id);
+        fresh.legacy_bindings.clear();
+        let fresh_member = fresh
+            .grants
+            .iter_mut()
+            .find(|grant| grant.id() == Some(original_id))
+            .unwrap();
+        fresh_member.incarnation = [99; 16];
+        fresh_member.membership_event = fresh_root.id;
+        let fresh_id = fresh_member.id().unwrap();
+        let fresh_event = Event::new(
+            &f.owner,
+            f.group,
+            4,
+            vec![fresh_root.id],
+            5,
+            5,
+            EventKind::ChannelAccountAuthority,
+            fresh.signed_encode(f.group, &f.owner_account),
+        );
+        let mut stale = original.clone();
+        stale.previous = Some(f.events[1].id);
+        stale.legacy_bindings.clear();
+        let stale_event = Event::new(
+            &f.owner,
+            f.group,
+            5,
+            vec![fresh_event.id],
+            6,
+            6,
+            EventKind::ChannelAccountAuthority,
+            stale.signed_encode(f.group, &f.owner_account),
+        );
+        let mut events = f.events.clone();
+        events.extend([
+            decline.clone(),
+            fresh_root.clone(),
+            fresh_event.clone(),
+            stale_event.clone(),
+        ]);
+        let graph = events.iter().map(|event| (event.id, event)).collect();
+        state.decline_account(&decline, &f.proof, &graph).unwrap();
+        assert_eq!(state.key_epoch(), Some(2));
+        let context = LegacyAuthorityContext {
+            channel: f.group,
+            owner: f.owner.public(),
+            epoch: 2,
+            accepted: vec![LegacyAccountMember {
+                public: f.owner.public(),
+                membership_event: f.events[0].id,
+                acceptance_event: None,
+            }],
+            invited: vec![LegacyAccountMember {
+                public: f.member.public(),
+                membership_event: fresh_root.id,
+                acceptance_event: None,
+            }],
+        };
+        state.apply(&fresh_event, &context, &graph).unwrap();
+        assert_eq!(
+            state
+                .invitation_for_device(&f.member.public(), &f.proof)
+                .and_then(AccountGrant::id),
+            Some(fresh_id)
+        );
+        assert!(state.decline_account(&decline, &f.proof, &graph).is_err());
+        state.apply(&stale_event, &context, &graph).unwrap();
+        assert_eq!(
+            state
+                .invitation_for_device(&f.member.public(), &f.proof)
+                .and_then(AccountGrant::id),
+            Some(fresh_id),
+            "an old owner snapshot or old decline must neither resurrect the old incarnation nor revoke the fresh one"
         );
     }
 }

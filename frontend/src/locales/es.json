@@ -282,6 +282,10 @@
     "peerChecked": "Miembro disponible consultado",
     "peerCheckedDetail": "Última consulta a un miembro accesible: {{time}}. Los miembros sin conexión pueden tener más mensajes.",
     "moreUnread": "Más mensajes sin leer",
+    "groupWaitingForDevice": "Esperando un dispositivo vinculado",
+    "groupRequiresUpgrade": "Actualiza un dispositivo vinculado para enviar",
+    "groupReconciling": "Actualizando el acceso al grupo…",
+    "groupAccessPending": "Actualizando el acceso al grupo…",
     "sharedReference": "Información compartida del grupo",
     "sharedReferenceHint": "Un dispositivo vinculado compartió esta información del grupo. Los mensajes y los controles de membresía requieren un estado del grupo verificado en este dispositivo.",
     "legacySharedReferenceHint": "Este grupo usa un formato de membresía anterior. Para enviar mensajes se requiere actualizar el formato del grupo y la membresía de la cuenta; esta información no concede membresía.",
@@ -935,7 +939,9 @@
     "devices": "Dispositivos ({{count}})",
     "deviceIdentity": "Dispositivo {{id}}",
     "addLinkedDevice": "Añadir dispositivo vinculado",
-    "referencePartial": "Solo se muestran los miembros conocidos. Esta lista compartida es parcial por los límites de tamaño."
+    "referencePartial": "Solo se muestran los miembros conocidos. Esta lista compartida es parcial por los límites de tamaño.",
+    "detailsReconciling": "Se están conciliando los datos del grupo. Se muestra la última política confirmada.",
+    "historyUnavailable": "La política del historial del grupo aún no está disponible. Mantén un dispositivo vinculado conectado y vuelve a intentarlo."
   },
   "createChannel": {
     "trigger": "Nuevo canal",
@@ -1365,5 +1371,22 @@
     "agent": "Cambiar el acceso de agentes locales",
     "settings": "Cambiar la configuración de seguridad",
     "savedLogin": "Guardar la sesión en este dispositivo"
+  },
+  "groupOperation": {
+    "reaction": "Actualizar reacción",
+    "recall": "Retirar mensaje",
+    "waiting": "Esperando a que uno de tus dispositivos vinculados ejecute esta acción de cuenta.",
+    "pending": "La acción de cuenta está pendiente.",
+    "unconfirmed": "El resultado no está confirmado. Comprueba esta operación antes de reintentar.",
+    "cancelling": "Cancelación solicitada. La acción aún puede completarse.",
+    "cancelled": "La acción de cuenta se ha cancelado.",
+    "failed": "No se pudo completar la acción. Actualiza el acceso de la cuenta y reintenta.",
+    "cancel": "Solicitar cancelación",
+    "details": "Detalles técnicos",
+    "title": "Acciones recientes del grupo",
+    "refresh": "Comprobar estado",
+    "committed": "La acción de la cuenta se completó.",
+    "upgrade": "Actualiza un dispositivo vinculado para continuar esta acción.",
+    "actionRequired": "Revisa el acceso al grupo para continuar esta acción."
   }
 }

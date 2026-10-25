@@ -13,6 +13,12 @@ use std::{
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
+#[path = "tests/message_actions.rs"]
+mod message_actions;
+
+#[path = "tests/message_action_reference.rs"]
+mod message_action_reference;
+
 fn node(path: &Path, account: &Account) -> Arc<Node> {
     let (dm, _) = mpsc::unbounded_channel();
     let (channel, _) = mpsc::unbounded_channel();
@@ -1155,5 +1161,17 @@ mod simple_controls;
 #[path = "tests/recovered_fanout.rs"]
 mod recovered_fanout;
 
+#[path = "tests/messages.rs"]
+mod messages;
+
 #[path = "tests/lock_order.rs"]
 mod lock_order;
+
+#[path = "tests/owner_targets.rs"]
+mod owner_targets;
+
+#[path = "tests/files.rs"]
+mod files;
+
+#[path = "tests/result_lifecycle.rs"]
+mod result_lifecycle;

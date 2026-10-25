@@ -1,3 +1,4 @@
+import type { AccountGroupAccessInfo } from "@/lib/types";
 import { captureRuntimeOwner } from "@/store/ownership";
 import { useAccountProfile } from "@/store/accountProfiles";
 import { useEffect, useState } from "react";
@@ -140,11 +141,13 @@ export function ChannelHeader({
   sharedReference = false,
   previousAccount = false,
   memberCount,
+  accountAccess,
 }: {
   id: string;
   name: string;
   memberCount: number;
   sharedReference?: boolean;
+  accountAccess?: AccountGroupAccessInfo | null;
   previousAccount?: boolean;
   archived: boolean;
   dissolved: boolean;
@@ -153,6 +156,26 @@ export function ChannelHeader({
 }) {
   const { t } = useTranslation();
   const presence = usePresenceFor(id);
+  const roleKnown = accountAccess !== undefined;
+  const referenceOnly =
+    sharedReference && (!accountAccess || accountAccess.role === "unknown");
+  const accountMember =
+    accountAccess?.role === "owner" || accountAccess?.role === "member";
+  const execution = accountAccess?.execution.kind;
+  const readiness =
+    !previousAccount && accountMember && execution === "waiting_for_device"
+      ? t("conversation.groupWaitingForDevice", {
+          defaultValue: "Waiting for a linked device",
+        })
+      : !previousAccount && accountMember && execution === "requires_upgrade"
+        ? t("conversation.groupRequiresUpgrade", {
+            defaultValue: "Update a linked device to send",
+          })
+        : !previousAccount && accountMember && execution === "reconciling"
+          ? t("conversation.groupReconciling", {
+              defaultValue: "Updating group access…",
+            })
+          : null;
   return (
     <div className="flex min-w-0 items-center gap-3">
       <div className="relative">
@@ -173,25 +196,31 @@ export function ChannelHeader({
         </div>
         <div
           className="text-xs text-muted-foreground"
+          data-testid={readiness ? "group-execution-readiness" : undefined}
+          role={readiness ? "status" : undefined}
           title={
-            sharedReference || previousAccount
+            referenceOnly || previousAccount
               ? undefined
               : t("presence.knownOnlineHint")
           }
         >
           {previousAccount
             ? t("conversation.previousAccountChannel")
-            : sharedReference
+            : referenceOnly
               ? `${t("conversation.sharedReference")} · ${t("conversation.members", { count: memberCount })}`
-              : dissolved
+              : (roleKnown ? accountAccess?.role === "dissolved" : dissolved)
                 ? t("conversation.dissolvedChannel")
-                : archived
+                : !roleKnown && archived
                   ? t("conversation.archivedChannel")
-                  : left
+                  : (roleKnown ? accountAccess?.role === "left" : left)
                     ? t("conversation.leftChannel")
-                    : pendingInvite
+                    : (
+                          roleKnown
+                            ? accountAccess?.role === "invited"
+                            : pendingInvite
+                        )
                       ? t("conversation.pendingInvite")
-                      : groupPresenceLabel(presence, t)}
+                      : (readiness ?? groupPresenceLabel(presence, t))}
         </div>
       </div>
     </div>

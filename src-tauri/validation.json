@@ -34,9 +34,7 @@
           }
         ]
       },
-      "consumers": [
-        "frontend-group-file-network-cost"
-      ],
+      "consumers": ["frontend-group-file-network-cost"],
       "escalation": [
         "Verify native iPhone/Android/USB hotspot, ordinary Wi-Fi, unavailable provider, VPN, multi-interface, sleep/wake and active transfers on each supported platform; verify the local member pause/exception control."
       ]
@@ -70,9 +68,7 @@
           ]
         }
       ],
-      "consumers": [
-        "frontend-sensitive-operations"
-      ],
+      "consumers": ["frontend-sensitive-operations"],
       "capability": {
         "summary": "Bind sensitive settings, local-agent grants, backup publication and device linking to fresh exact-session identity and lock-revision authority.",
         "guide": "docs/privacy-controls.md#verify-sensitive-operations",
@@ -106,9 +102,7 @@
           ]
         }
       ],
-      "consumers": [
-        "frontend-private-device-hostnames"
-      ],
+      "consumers": ["frontend-private-device-hostnames"],
       "capability": {
         "summary": "Display OS hostnames only within the same account through encrypted certified-sibling device synchronization.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
@@ -133,10 +127,7 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "chat_commands::presence::tests::",
-            "settings::tests::"
-          ]
+          "filters": ["chat_commands::presence::tests::", "settings::tests::"]
         }
       ],
       "capability": {
@@ -156,9 +147,7 @@
       "escalation": [
         "Run encrypted multi-hop core scenarios and a native settings/profile smoke check; mocked IPC alone does not prove Windows office deployment."
       ],
-      "consumers": [
-        "frontend-discovery-origin"
-      ]
+      "consumers": ["frontend-discovery-origin"]
     },
     {
       "id": "desktop-account-group-inventory",
@@ -180,6 +169,7 @@
             "owner_commands::tests::registered_account_group_access_keeps_owner_role_when_its_source_is_offline",
             "owner_commands::tests::registered_account_group_operation_reads_preserve_account_scope",
             "owner_commands::tests::registered_account_group_operations_reject_queued_logout",
+            "owner_commands::tests::registered_account_group_file_checks_account_before_reading_path",
             "owner_commands::tests::registered_account_group_operation_id_mint_is_scoped_and_has_no_admission",
             "owner_commands::tests::registered_owner_channel_creation_checks_account_and_session",
             "owner_commands::tests::queued_channel_mutation_rejects_lock_and_same_owner_relogin",
@@ -221,9 +211,7 @@
           }
         ]
       },
-      "consumers": [
-        "frontend-account-group-inventory"
-      ],
+      "consumers": ["frontend-account-group-inventory"],
       "escalation": [
         "Exercise registered reference list/member IPC, queued owner and lock retirement, and actual native same-account group lists. Browser mocks do not establish account-document transport."
       ]
@@ -254,9 +242,7 @@
           }
         ]
       },
-      "consumers": [
-        "frontend-shared-channel-custody"
-      ],
+      "consumers": ["frontend-shared-channel-custody"],
       "escalation": [
         "Verify registered IPC and actual linked-device group footer convergence."
       ]
@@ -291,9 +277,7 @@
           }
         ]
       },
-      "consumers": [
-        "frontend-startup-appearance"
-      ],
+      "consumers": ["frontend-startup-appearance"],
       "escalation": [
         "Verify native cold startup and same-owner replacement; browser mocks alone cannot prove keystore identity or cancellation ownership."
       ]
@@ -332,26 +316,18 @@
       "escalation": [
         "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence."
       ],
-      "consumers": [
-        "frontend-account-documents"
-      ]
+      "consumers": ["frontend-account-documents"]
     },
     {
       "id": "desktop-conversation-drafts",
-      "paths": [
-        "src-tauri/src/drafts.rs"
-      ],
+      "paths": ["src-tauri/src/drafts.rs"],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "drafts::tests::"
-          ]
+          "filters": ["drafts::tests::"]
         }
       ],
-      "consumers": [
-        "frontend-conversation-drafts"
-      ],
+      "consumers": ["frontend-conversation-drafts"],
       "capability": {
         "summary": "Apply per-conversation encrypted account document patches with session authority, exact version checks and explicit source-only legacy import.",
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
@@ -372,9 +348,7 @@
     },
     {
       "id": "desktop-message-favorites",
-      "paths": [
-        "src-tauri/src/message_favorites.rs"
-      ],
+      "paths": ["src-tauri/src/message_favorites.rs"],
       "rust": [
         {
           "package": "mesh-talk",
@@ -389,9 +363,7 @@
         "src/lib/api/messageFavorites.test.ts",
         "src/lib/attachmentSave.test.ts"
       ],
-      "consumers": [
-        "frontend-message-favorites"
-      ],
+      "consumers": ["frontend-message-favorites"],
       "capability": {
         "summary": "Adapt independent Favorites queries and durable mutations with exact session/runtime authority and explicit retained-file access.",
         "guide": "docs/favorites.md",
@@ -408,9 +380,7 @@
     },
     {
       "id": "desktop-search",
-      "paths": [
-        "src-tauri/src/owner_commands/search.rs"
-      ],
+      "paths": ["src-tauri/src/owner_commands/search.rs"],
       "rust": [
         {
           "package": "mesh-talk",
@@ -423,14 +393,8 @@
           ]
         }
       ],
-      "frontend": [
-        "src/lib/api.test.ts"
-      ],
-      "consumers": [
-        "desktop-session",
-        "frontend-chat",
-        "frontend-owner"
-      ],
+      "frontend": ["src/lib/api.test.ts"],
+      "consumers": ["desktop-session", "frontend-chat", "frontend-owner"],
       "capability": {
         "summary": "Serve exact owner-scoped recent search and bounded read-only message context with validated reference namespaces and explicit coverage.",
         "guide": "docs/ARCHITECTURE.md#recent-search-references",
@@ -476,9 +440,7 @@
           ]
         }
       ],
-      "frontend": [
-        "src/lib/api.test.ts"
-      ],
+      "frontend": ["src/lib/api.test.ts"],
       "consumers": [
         "desktop-chat",
         "desktop-app-lock",
@@ -612,14 +574,10 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "integrations::"
-          ]
+          "filters": ["integrations::"]
         }
       ],
-      "consumers": [
-        "frontend-local-agent-access"
-      ],
+      "consumers": ["frontend-local-agent-access"],
       "capability": {
         "summary": "Control one session-owned integration service, persist explicit authorization deadlines and expose content-free recent local-interface activity.",
         "guide": "docs/bot-integrations.md#desktop-local-agent-access",
@@ -661,11 +619,7 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "chat_commands::",
-            "channel_reception::",
-            "events::"
-          ]
+          "filters": ["chat_commands::", "channel_reception::", "events::"]
         },
         {
           "package": "mesh-talk",
@@ -687,9 +641,7 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "contact_policy::"
-          ]
+          "filters": ["contact_policy::"]
         }
       ],
       "escalation": [
@@ -698,23 +650,17 @@
     },
     {
       "id": "desktop-app-lock",
-      "paths": [
-        "src-tauri/src/app_lock.rs"
-      ],
+      "paths": ["src-tauri/src/app_lock.rs"],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "app_lock::"
-          ]
+          "filters": ["app_lock::"]
         }
       ],
       "escalation": [
         "OS authentication and unlock/session lifecycle changes require focused native platform evidence."
       ],
-      "consumers": [
-        "desktop-conversation-drafts"
-      ]
+      "consumers": ["desktop-conversation-drafts"]
     },
     {
       "id": "desktop-settings",
@@ -726,15 +672,10 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "settings::",
-            "config_store::"
-          ]
+          "filters": ["settings::", "config_store::"]
         }
       ],
-      "consumers": [
-        "desktop-chat"
-      ],
+      "consumers": ["desktop-chat"],
       "escalation": [
         "Persisted settings and live policy application require frontend settings and native session/revision evidence."
       ]
@@ -749,16 +690,10 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "recovery::",
-            "google_drive::command_tests::",
-            "trust::"
-          ]
+          "filters": ["recovery::", "google_drive::command_tests::", "trust::"]
         }
       ],
-      "consumers": [
-        "desktop-session"
-      ],
+      "consumers": ["desktop-session"],
       "capability": {
         "summary": "Create consistent manual encrypted backups with one acknowledged reusable local recovery key, then verify and transactionally restore into a new local profile.",
         "guide": "docs/backup-recovery.md",
@@ -797,12 +732,8 @@
           ]
         }
       ],
-      "node": [
-        "scripts/diagnostics/background-command.test.mjs"
-      ],
-      "consumers": [
-        "desktop-session"
-      ],
+      "node": ["scripts/diagnostics/background-command.test.mjs"],
+      "consumers": ["desktop-session"],
       "capability": {
         "summary": "Discover desktop and standard dedicated post-office endpoints from optional VPN inventories without trusting inventory identities.",
         "guide": "docs/routed-network-discovery.md",
@@ -823,9 +754,7 @@
     },
     {
       "id": "desktop-privacy",
-      "paths": [
-        "src-tauri/src/privacy_commands.rs"
-      ],
+      "paths": ["src-tauri/src/privacy_commands.rs"],
       "rust": [
         {
           "package": "mesh-talk",
@@ -837,9 +766,7 @@
           ]
         }
       ],
-      "consumers": [
-        "desktop-session"
-      ],
+      "consumers": ["desktop-session"],
       "escalation": [
         "Privacy IPC/public policy changes require core guarded-admission and typed frontend consumer checks."
       ],
@@ -887,9 +814,7 @@
           }
         ]
       },
-      "consumers": [
-        "frontend-startup-appearance"
-      ]
+      "consumers": ["frontend-startup-appearance"]
     },
     {
       "id": "desktop-diagnostics",
@@ -901,12 +826,7 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "diagnostics::",
-            "updates::",
-            "perf::",
-            "logger::"
-          ]
+          "filters": ["diagnostics::", "updates::", "perf::", "logger::"]
         }
       ],
       "escalation": [
@@ -915,9 +835,7 @@
     },
     {
       "id": "desktop-updates",
-      "consumers": [
-        "frontend-updates"
-      ],
+      "consumers": ["frontend-updates"],
       "paths": [
         "src-tauri/src/updates.rs",
         "src-tauri/src/updates/",
@@ -929,9 +847,7 @@
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "updates::"
-          ]
+          "filters": ["updates::"]
         }
       ],
       "escalation": [
@@ -1035,21 +951,15 @@
       "escalation": [
         "Run account-profile browser interaction and native owner/lock/replacement command evidence; verify ordinary rename updates the same signed profile."
       ],
-      "consumers": [
-        "frontend-account-profile"
-      ]
+      "consumers": ["frontend-account-profile"]
     },
     {
       "id": "desktop-notification-permission",
-      "paths": [
-        "src-tauri/src/notifications.rs"
-      ],
+      "paths": ["src-tauri/src/notifications.rs"],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "notifications::tests::"
-          ]
+          "filters": ["notifications::tests::"]
         }
       ],
       "frontend": [
@@ -1076,21 +986,14 @@
     },
     {
       "id": "desktop-google-drive-backup",
-      "paths": [
-        "src-tauri/src/google_drive/"
-      ],
+      "paths": ["src-tauri/src/google_drive/"],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": [
-            "google_drive::",
-            "recovery::"
-          ]
+          "filters": ["google_drive::", "recovery::"]
         }
       ],
-      "consumers": [
-        "desktop-recovery"
-      ],
+      "consumers": ["desktop-recovery"],
       "capability": {
         "summary": "Transport verified encrypted recovery archives using a reusable acknowledged recovery key and remembered encrypted Google refresh grant, with bounded cancellable requests and manual backups.",
         "guide": "docs/backup-recovery.md#google-drive-backup-and-restore",
@@ -1126,9 +1029,7 @@
           ]
         }
       ],
-      "node": [
-        "scripts/diagnostics/background-command.test.mjs"
-      ],
+      "node": ["scripts/diagnostics/background-command.test.mjs"],
       "capability": {
         "summary": "Capture through the Linux Screenshot portal or an optional native X11 helper into the shared screenshot editor.",
         "guide": "docs/help/topics/screenshots.md#platform-behavior",
@@ -1153,9 +1054,7 @@
         "src-tauri/src/chat_commands/channels.rs",
         "src-tauri/src/chat_commands/models.rs"
       ],
-      "frontend": [
-        "src/lib/api.test.ts"
-      ],
+      "frontend": ["src/lib/api.test.ts"],
       "capability": {
         "summary": "Expose the owner-controlled recent history window for new channel members.",
         "guide": "docs/help/topics/channels.md",
@@ -1209,9 +1108,7 @@
           ]
         }
       ],
-      "frontend": [
-        "src/features/chat/LinkDeviceDialog.test.ts"
-      ],
+      "frontend": ["src/features/chat/LinkDeviceDialog.test.ts"],
       "consumers": [
         "desktop-session",
         "desktop-app-lock",
@@ -1262,9 +1159,7 @@
         "src-tauri/tauri.conf.json",
         "src-tauri/src/owner_commands/"
       ],
-      "native": [
-        "host"
-      ]
+      "native": ["host"]
     },
     {
       "id": "native-acceptance-harness",
@@ -1275,11 +1170,7 @@
         "scripts/diagnostics/native-capture.mjs",
         "scripts/evals/png-evidence.mjs"
       ],
-      "native": [
-        "darwin",
-        "linux",
-        "win32"
-      ]
+      "native": ["darwin", "linux", "win32"]
     },
     {
       "id": "desktop-account-profile-acceptance",
@@ -1288,24 +1179,14 @@
         "src-tauri/src/trust.rs",
         "src-tauri/src/account_profile.rs"
       ],
-      "browser": [
-        "e2e/account-profiles.spec.ts"
-      ],
-      "native": [
-        "host"
-      ]
+      "browser": ["e2e/account-profiles.spec.ts"],
+      "native": ["host"]
     },
     {
       "id": "desktop-notification-permission-acceptance",
-      "paths": [
-        "src-tauri/src/notifications.rs"
-      ],
-      "browser": [
-        "e2e/notification-permission.spec.ts"
-      ],
-      "native": [
-        "host"
-      ]
+      "paths": ["src-tauri/src/notifications.rs"],
+      "browser": ["e2e/notification-permission.spec.ts"],
+      "native": ["host"]
     },
     {
       "id": "desktop-google-drive-acceptance",
@@ -1314,13 +1195,8 @@
         "src-tauri/src/recovery.rs",
         "src-tauri/src/recovery/"
       ],
-      "browser": [
-        "e2e/google-drive-backup.spec.ts",
-        "e2e/recovery.spec.ts"
-      ],
-      "native": [
-        "host"
-      ]
+      "browser": ["e2e/google-drive-backup.spec.ts", "e2e/recovery.spec.ts"],
+      "native": ["host"]
     }
   ]
 }

@@ -1657,29 +1657,71 @@ async fn stalled_account_attachment_does_not_block_history_and_policy_off_cancel
 
 #[tokio::test]
 async fn archive_authorization_transition_rebuilds_cached_membership_selection() {
-    let (_dir, source, receiver) = sibling_nodes();
-    let channel = source
-        .create_channel_invited("private", vec![receiver.identity.public()])
+    let (dir, source, receiver) = sibling_nodes();
+    let owner = open_sibling(&dir.path().join("external-owner"), &Account::generate());
+    let channel = owner
+        .create_channel_invited("private", vec![source.identity.public()])
         .await
         .unwrap();
+    let copy_public = |from: &Node, to: &Node| {
+        let events: Vec<_> = from
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut log = to.log.lock().unwrap();
+        for event in events {
+            if log.get(&event.id).is_none() {
+                log.append(event).unwrap();
+            }
+        }
+        drop(log);
+        to.process_channel(channel);
+    };
+    copy_public(&owner, &source);
+    source.accept_channel_invite(channel).await.unwrap();
+    copy_public(&source, &owner);
     source
         .send_channel_message(channel, b"accepted only")
         .await
         .unwrap();
+    let retained = source
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .find(|event| event.kind == crate::eventlog::EventKind::Message)
+        .unwrap()
+        .id;
+    copy_public(&source, &owner);
+    owner
+        .remove_channel_member(channel, &source.user_id())
+        .await
+        .unwrap();
+    copy_public(&owner, &source);
+    owner
+        .add_channel_member(channel, source.identity.public())
+        .await
+        .unwrap();
+    copy_public(&owner, &source);
+    // No accepted device from this account remains. The retained row must be
+    // withheld until the source accepts its new, signed membership lifetime.
     let public = receiver.identity.public();
     let (rows, _, _) =
         source.export_sync_records(&public, None, true, false, AccountSyncVersion::V2);
     assert!(rows.is_empty());
-    source
-        .channels
-        .lock()
-        .unwrap()
-        .state_mut(&channel)
-        .unwrap()
-        .accept_invite(&receiver.user_id(), EventId::new([91; 32]));
+    assert_eq!(source.account_archive_cache.lock().unwrap().builds, 1);
+    source.accept_channel_invite(channel).await.unwrap();
     let (rows, _, _) =
         source.export_sync_records(&public, None, true, false, AccountSyncVersion::V2);
     assert_eq!(rows.len(), 1);
+    assert!(
+        matches!(&rows[0], HistoryRecord::Channel(row) if row.event_id == *retained.as_bytes())
+    );
     assert_eq!(source.account_archive_cache.lock().unwrap().builds, 2);
 }
 
@@ -2018,37 +2060,95 @@ async fn account_network_children_retain_retirement_admission_until_cancelled() 
 }
 
 #[tokio::test]
-async fn account_wake_stays_quiet_with_all_sync_categories_off_then_wakes_on_enable() {
-    use tokio::net::TcpListener;
-    let (_dir, local, remote) = sibling_nodes();
-    local
-        .set_device_sync_category(SyncCategory::History, false)
-        .unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    sibling_peer(&local, &remote, listener.local_addr().unwrap());
-    let worker = tokio::spawn(local.clone().run_account_wake_loop());
-    local
-        .set_account_preference(
+async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off() {
+    let (_dir, source, receiver) = sibling_nodes();
+    for node in [&source, &receiver] {
+        for category in [
+            SyncCategory::History,
+            SyncCategory::Attachments,
+            SyncCategory::Profile,
             SyncCategory::Appearance,
-            "theme".into(),
-            Some("dark".into()),
-        )
-        .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(250), listener.accept())
+            SyncCategory::Contacts,
+        ] {
+            node.set_device_sync_category(category, false).unwrap();
+        }
+    }
+    let source_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let receiver_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sibling_peer(&receiver, &source, source_listener.local_addr().unwrap());
+    sibling_peer(&source, &receiver, receiver_listener.local_addr().unwrap());
+    let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
+    let receiver_server = tokio::spawn(receiver.clone().run_accept_loop(receiver_listener));
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if [&source, &receiver].iter().all(|node| {
+                node.device_sync_status()
+                    .iter()
+                    .any(|status| status.document_phase == SyncPhase::UpToDate)
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let channel = source
+            .create_channel("Mandatory group", vec![])
             .await
-            .is_err()
-    );
-    local
-        .set_device_sync_category(SyncCategory::Appearance, true)
-        .unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
-    worker.abort();
-    let _ = worker.await;
-    assert!(
-        result.is_ok(),
-        "enabling a selected category advertises its retained state"
-    );
+            .unwrap();
+        source
+            .set_account_preference(
+                SyncCategory::Appearance,
+                "theme".into(),
+                Some("dark".into()),
+            )
+            .unwrap();
+        source
+            .enqueue_to_account(&source.account_id(), b"optional history", None)
+            .await
+            .unwrap();
+        loop {
+            if receiver.account_group_access(channel).is_ok()
+                && receiver.channel_shared_reference(channel).is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            receiver
+                .account_preferences(SyncCategory::Appearance)
+                .is_empty()
+        );
+        assert!(
+            receiver
+                .account_history(&receiver.account_id(), 10)
+                .is_empty()
+        );
+        for node in [&source, &receiver] {
+            node.set_device_sync_category(SyncCategory::Appearance, true)
+                .unwrap();
+        }
+        loop {
+            if receiver
+                .account_preferences(SyncCategory::Appearance)
+                .iter()
+                .any(|record| record.value.as_deref() == Some("dark"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            receiver
+                .account_history(&receiver.account_id(), 10)
+                .is_empty()
+        );
+    })
+    .await;
+    source_server.abort();
+    receiver_server.abort();
+    let _ = source_server.await;
+    let _ = receiver_server.await;
+    outcome.expect("mandatory account controls wake before periodic repair while optional content obeys its category policy");
 }
 
 #[tokio::test]

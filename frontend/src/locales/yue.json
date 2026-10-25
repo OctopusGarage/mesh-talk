@@ -282,6 +282,10 @@
     "peerChecked": "已檢查連到線嘅成員",
     "peerCheckedDetail": "上次檢查連到線嘅成員：{{time}}。離線成員可能仲有其他訊息。",
     "moreUnread": "仲有更多未讀訊息",
+    "groupWaitingForDevice": "等緊關聯裝置",
+    "groupRequiresUpgrade": "更新關聯裝置先可以傳送",
+    "groupReconciling": "更新緊群組存取權限…",
+    "groupAccessPending": "更新緊群組存取權限…",
     "sharedReference": "共享嘅群組資訊",
     "sharedReferenceHint": "呢啲群組資訊由已連結裝置共享。傳送訊息同管理成員需要本裝置取得經過驗證嘅群組狀態。",
     "legacySharedReferenceHint": "呢個群組用緊較早嘅成員格式。傳送訊息需要更新群組格式同帳號成員資格；呢啲資訊唔會授予成員資格。",
@@ -935,7 +939,9 @@
     "devices": "裝置（{{count}} 部）",
     "deviceIdentity": "裝置 {{id}}",
     "addLinkedDevice": "加入已連結裝置",
-    "referencePartial": "只顯示已知成員。受大小限制，呢份共享成員清單並唔完整。"
+    "referencePartial": "只顯示已知成員。受大小限制，呢份共享成員清單並唔完整。",
+    "detailsReconciling": "正在核對群組資料，目前顯示最後確認嘅政策。",
+    "historyUnavailable": "暫時未取得群組歷史記錄政策。請保持一部已關聯裝置在線，再試一次。"
   },
   "createChannel": {
     "trigger": "建立新頻道",
@@ -1365,5 +1371,22 @@
     "agent": "改動本機 Agent 接入權限",
     "settings": "改動安全設定",
     "savedLogin": "喺呢部裝置儲存登入憑證"
+  },
+  "groupOperation": {
+    "reaction": "更新表情回應",
+    "recall": "撤回訊息",
+    "waiting": "等緊你其中一部關聯裝置執行呢個帳號操作。",
+    "pending": "帳號操作處理中。",
+    "unconfirmed": "結果未確認。重試之前請先檢查呢個操作。",
+    "cancelling": "已要求取消。操作仍然可能成功提交。",
+    "cancelled": "帳號操作已取消。",
+    "failed": "帳號操作未能完成。請更新帳號權限再試。",
+    "cancel": "要求取消",
+    "details": "技術詳情",
+    "title": "最近嘅群組操作",
+    "refresh": "檢查狀態",
+    "committed": "帳號操作已完成。",
+    "upgrade": "請更新關聯裝置先可以繼續呢個操作。",
+    "actionRequired": "請先檢查群組存取權限再繼續呢個操作。"
   }
 }

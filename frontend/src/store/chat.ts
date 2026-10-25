@@ -58,7 +58,12 @@ import {
   beginSendIntent,
   dispatchIntent,
   refreshDeliveryStatuses,
+  refreshGroupOperationIntents,
+  cancelGroupOperationIntent,
+  settleGroupSendIntents,
+  submitGroupControlIntent,
 } from "./outgoingIntent";
+import type { GroupOperationOutcome } from "./accountGroupOperations";
 import {
   type ConversationHistoryState,
   emptyConversationHistory,
@@ -83,6 +88,7 @@ import type {
   FavoriteInfo,
   FileReceivedEvent,
   PeerInfo,
+  ReactionInfo,
 } from "@/lib/types";
 
 import type {
@@ -324,15 +330,12 @@ async function pollUntilReady(
 
 // --- per-conversation API dispatch ----------------------------------------
 
-function reactFor(
-  c: Conversation,
-  target: string,
-  emoji: string,
-  remove: boolean,
-) {
-  return c.kind === "account"
-    ? chat.reactAccount(c.id, target, emoji, remove)
-    : chat.reactChannel(c.id, target, emoji, remove);
+/** Native account ownership is authoritative; older hosts retain their existing identifier convention. */
+export function reactionFromMe(
+  reaction: ReactionInfo,
+  selfId: string,
+): boolean {
+  return reaction.from_me ?? reaction.who.includes(selfId);
 }
 /** Whether this conversation is a channel (drives the `is_channel` flag on the lifecycle
  * commands; 1:1 chats are account-addressed). */
@@ -368,6 +371,8 @@ export interface ChatState
   bootFailed: boolean; // identity did not resolve within the latest boot window
 
   resetForLock: () => void;
+  cancelGroupOperation: (id: string) => Promise<GroupOperationOutcome>;
+  refreshGroupOperations: () => Promise<void>;
   start: () => () => void;
   retryBoot: (background?: boolean) => void;
   loadFavorites: () => Promise<void>;
@@ -445,6 +450,8 @@ function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
     members: [],
     channelOwner: "",
     statusBusy: false,
+    groupOperations: {},
+    groupOperationIssue: undefined,
   };
 }
 
@@ -459,6 +466,8 @@ function emptySessionData() {
     bootRequest: 0,
     startupId: null,
     statusBusy: false,
+    groupOperations: {},
+    groupOperationIssue: undefined,
     rosterRequest: 0,
     favoritesRequest: 0,
     ready: false,
@@ -614,6 +623,40 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   runEpoch: 0,
 
   clearError: () => rawSet({ error: null }),
+  cancelGroupOperation: (id) => cancelGroupOperationIntent(rawSet, get, id),
+  refreshGroupOperations: () => refreshGroupOperationIntents(rawSet, get),
+  onGroupOperationTerminal: (status) => {
+    const lease = captureChat(get);
+    const accountId = get().myAccountId;
+    if (!lease.current() || accountId !== status.account_id) return;
+    settleGroupSendIntents(rawSet, get, status);
+    if (!lease.current() || status.phase.kind !== "committed") return;
+    const active = get().active;
+    const activeGroup =
+      active?.kind === "channel" && active.id === status.group;
+    const messageOperation = ["text", "sticker", "file"].includes(status.kind);
+    if (
+      activeGroup &&
+      (messageOperation ||
+        status.kind === "reaction" ||
+        status.kind === "recall")
+    )
+      void get()
+        .reload()
+        .then(() => {
+          if (lease.current() && get().myAccountId === accountId)
+            settleGroupSendIntents(rawSet, get, status);
+        })
+        .catch(() => {});
+    if (
+      !messageOperation &&
+      status.kind !== "reaction" &&
+      status.kind !== "recall"
+    )
+      void get()
+        .reconcileCommitted(status)
+        .catch(() => {});
+  },
   setError: (msg) => rawSet({ error: msg }),
 
   resetForLock: () => {
@@ -872,6 +915,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const roster = setInterval(() => {
       if (lease.current() && get().ready) {
         bootFailureObserved = false;
+        void refreshGroupOperationIntents(rawSet, get);
         const now = performance.now();
         if (!supportsPushState(lease.owner) || now >= nextRosterFallback) {
           nextRosterFallback = now + 30000;
@@ -909,6 +953,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         )
           return;
         notifySyncInvalidation({ owner: e.owner, kind: e.kind });
+        if (["state", "roster", "delivery", "files"].includes(e.kind))
+          void refreshGroupOperationIntents(rawSet, get);
         if (e.kind === "state" || e.kind === "roster") void refreshRoster(true);
         if (e.kind === "delivery" || e.kind === "files")
           void state.refreshStatuses(undefined, true);
@@ -944,6 +990,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         )
           return;
         void state.refreshChannels(e.channel_id);
+        void refreshGroupOperationIntents(rawSet, get);
       },
       onChannelMessage: (e) => {
         if (lease.current()) get_handleChannel(set, get, e);
@@ -988,7 +1035,12 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       unlisten();
       if (get().runEpoch === lease.run) {
         stopChatCalls();
-        rawSet((s) => ({ runEpoch: s.runEpoch + 1, ready: false }));
+        rawSet((s) => ({
+          runEpoch: s.runEpoch + 1,
+          ready: false,
+          groupOperations: {},
+          groupOperationIssue: undefined,
+        }));
       }
     };
   },
@@ -1144,17 +1196,36 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
   revealUnread: (key, id) => revealConversationIdentity(rawSet, get, key, id),
 
-  reload: () => reloadConversation(rawSet, get),
+  reload: async () => {
+    const lease = captureChat(get);
+    const accountId = get().myAccountId;
+    const loaded = await reloadConversation(rawSet, get);
+    if (!loaded || !lease.current() || get().myAccountId !== accountId)
+      return loaded;
+    const active = get().active;
+    // A terminal receipt may precede canonical history or conversation reopening.
+    // Reuse its exact public identity after history supplies the source metadata.
+    if (active?.kind === "channel")
+      for (const ticket of Object.values(get().groupOperations ?? {})) {
+        if (!lease.current()) break;
+        if (
+          ticket.account_id === accountId &&
+          ticket.group === active.id &&
+          ticket.status?.phase.kind === "committed"
+        )
+          settleGroupSendIntents(rawSet, get, ticket.status);
+      }
+    return loaded;
+  },
   refreshStatuses: (conversation, invalidate) =>
     refreshDeliveryStatuses(rawSet, get, conversation, invalidate),
 
   send: async (text, replyTo) => {
     const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c || !text.trim()) return;
-    await sendIntent(set, get, c, { kind: "text", text, replyTo });
+    await sendIntent(rawSet, get, c, { kind: "text", text, replyTo });
   },
 
   // The composer needs an immediate admission answer so it never clears a draft that
@@ -1164,18 +1235,13 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!lease.current()) return false;
     const c = get().active;
     if (!get().ready || !c || !text.trim()) return false;
-    const dispatch = beginSendIntent(
-      guardedSet(rawSet, lease.current),
-      get,
-      c,
-      {
-        kind: "text",
-        text,
-        replyTo,
-        expiresAtMs,
-        protection,
-      },
-    );
+    const dispatch = beginSendIntent(rawSet, get, c, {
+      kind: "text",
+      text,
+      replyTo,
+      expiresAtMs,
+      protection,
+    });
     if (!dispatch) return false;
     void dispatch;
     return true;
@@ -1189,7 +1255,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!get().ready || !c || !text.trim()) return false;
     return (
       beginSendIntent(
-        guardedSet(rawSet, lease.current),
+        rawSet,
         get,
         c,
         {
@@ -1238,7 +1304,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         ),
       },
     }));
-    await dispatchIntent(set, get, { ...intent, message: pending });
+    await dispatchIntent(rawSet, get, { ...intent, message: pending });
   },
 
   admitImage: async (path, protection, expiresAtMs, onAccepted) => {
@@ -1246,7 +1312,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const c = get().active;
     if (!lease.current() || !get().ready || !c) return "refused";
     const admission = beginSendIntent(
-      guardedSet(rawSet, lease.current),
+      rawSet,
       get,
       c,
       { kind: "file", path, media: true, expiresAtMs, protection },
@@ -1258,11 +1324,15 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   },
   sendFile: async (path, media, expiresAtMs) => {
     const lease = captureChat(get);
-    const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
-    await sendIntent(set, get, c, { kind: "file", path, media, expiresAtMs });
+    await sendIntent(rawSet, get, c, {
+      kind: "file",
+      path,
+      media,
+      expiresAtMs,
+    });
   },
 
   toggleReaction: async (target, emoji) => {
@@ -1272,15 +1342,27 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const c = get().active;
     if (!c) return;
     const key = convKey(c);
-    // Reaction `who` is keyed by account id for account conversations, device user-id for
-    // channels — so "did I already react?" must compare against the matching id, or an
-    // account-conversation reaction can never be detected as ours (never toggles off).
+    // Native channel ownership includes certified siblings, even when they are offline.
+    // Older hosts use account IDs for DMs and physical device IDs for channels.
     const selfId = c.kind === "account" ? get().myAccountId : get().myId;
     const mine = (get().reactions[key] ?? []).find(
-      (r) => r.target === target && r.emoji === emoji && r.who.includes(selfId),
+      (r) =>
+        r.target === target && r.emoji === emoji && reactionFromMe(r, selfId),
     );
     try {
-      await reactFor(c, target, emoji, Boolean(mine));
+      if (c.kind === "channel") {
+        const outcome = await submitGroupControlIntent(rawSet, get, c.id, {
+          kind: "react",
+          target,
+          emoji,
+          remove: Boolean(mine),
+        });
+        if (outcome.kind === "not_admitted") throw outcome.error;
+        if (outcome.kind === "capacity")
+          throw new Error("Too many pending group actions.");
+        return;
+      }
+      await chat.reactAccount(c.id, target, emoji, Boolean(mine));
       // Only reload if still on this conversation (matches send/sendFile).
       if (lease.current() && get().active && convKey(get().active!) === key)
         await get().reload();
@@ -1314,7 +1396,17 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!c) return;
     const key = convKey(c);
     try {
-      await chat.recallMessage(c.id, target, isChannelConv(c));
+      if (c.kind === "channel") {
+        const outcome = await submitGroupControlIntent(rawSet, get, c.id, {
+          kind: "recall",
+          target,
+        });
+        if (outcome.kind === "not_admitted") throw outcome.error;
+        if (outcome.kind === "capacity")
+          throw new Error("Too many pending group actions.");
+        return;
+      }
+      await chat.recallMessage(c.id, target, false);
       if (lease.current() && get().active && convKey(get().active!) === key)
         await get().reload();
     } catch (e) {
@@ -1364,7 +1456,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           convKey(get().active!) !== convKey(c)
         )
           return;
-        const sending = beginSendIntent(set, get, c, {
+        const sending = beginSendIntent(rawSet, get, c, {
           kind: "file",
           path: stagedPath,
           media: true,
@@ -1387,7 +1479,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       }
       return;
     }
-    await sendIntent(set, get, c, {
+    await sendIntent(rawSet, get, c, {
       kind: "sticker",
       stickerId,
       fallback,
@@ -1400,6 +1492,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     write: rawSet,
     capture: () => captureChat(get),
     commands: chat,
+    submitControl: (group, operation) =>
+      submitGroupControlIntent(rawSet, get, group, operation),
     refreshRoster: async () => {
       await get().refreshChannels();
       await get().refreshRoster();

@@ -714,6 +714,9 @@ mod tests {
                     super::owner_create_channel,
                     super::owner_new_account_group_operation_id,
                     super::owner_submit_account_group_control,
+                    super::owner_submit_account_group_text,
+                    super::owner_submit_account_group_sticker,
+                    super::owner_submit_account_group_file,
                     super::owner_account_group_operation_status,
                     super::owner_list_account_group_operations,
                     super::owner_cancel_account_group_operation,
@@ -1182,11 +1185,31 @@ mod tests {
     }
 
     #[test]
+    fn registered_account_group_file_checks_account_before_reading_path() {
+        let fixture = Fixture::new();
+        let error = fixture
+            .invoke(
+                "owner_submit_account_group_file",
+                serde_json::json!({
+                    "owner": "alice", "expectedAccount": "00".repeat(16),
+                    "operationId": "12".repeat(32), "channelId": "34".repeat(32),
+                    "path": "/missing-must-not-read", "media": false,
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(error["kind"], "authorization");
+        assert!(error.to_string().contains("account changed"));
+    }
+
+    #[test]
     fn registered_account_group_operations_reject_queued_logout() {
         for command in [
             "owner_create_channel",
             "owner_new_account_group_operation_id",
             "owner_submit_account_group_control",
+            "owner_submit_account_group_text",
+            "owner_submit_account_group_sticker",
+            "owner_submit_account_group_file",
             "owner_account_group_operation_status",
             "owner_list_account_group_operations",
             "owner_cancel_account_group_operation",
@@ -1213,6 +1236,22 @@ mod tests {
                     body["channelId"] = serde_json::json!("34".repeat(32));
                     body["operation"] =
                         serde_json::json!({"kind":"rename","name":"Must not admit"});
+                }
+                "owner_submit_account_group_file" => {
+                    body["operationId"] = serde_json::json!("12".repeat(32));
+                    body["channelId"] = serde_json::json!("34".repeat(32));
+                    body["path"] = serde_json::json!("/missing-must-not-read");
+                    body["media"] = serde_json::json!(false);
+                }
+                "owner_submit_account_group_text" | "owner_submit_account_group_sticker" => {
+                    body["operationId"] = serde_json::json!("12".repeat(32));
+                    body["channelId"] = serde_json::json!("34".repeat(32));
+                    if command == "owner_submit_account_group_text" {
+                        body["text"] = serde_json::json!("Must not admit");
+                    } else {
+                        body["stickerId"] = serde_json::json!("1f602");
+                        body["fallback"] = serde_json::json!("😂");
+                    }
                 }
                 "owner_list_account_group_operations" => {
                     body["pendingOnly"] = serde_json::json!(true);

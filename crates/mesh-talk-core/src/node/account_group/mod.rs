@@ -11,7 +11,8 @@ pub(in crate::node) mod operations;
 pub use operations::{
     AccountGroupOperation, AccountGroupOperationExecution, AccountGroupOperationId,
     AccountGroupOperationKind, AccountGroupOperationPhase, AccountGroupOperationQuery,
-    AccountGroupOperationRejection, AccountGroupOperationStatus, PreparedAccountGroupMessage,
+    AccountGroupOperationRejection, AccountGroupOperationStatus, AccountGroupStickerInput,
+    AccountGroupTextInput, PreparedAccountGroupMessage,
 };
 pub(in crate::node) mod wire;
 

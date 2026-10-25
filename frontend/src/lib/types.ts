@@ -65,6 +65,8 @@ export interface HistoryItem {
 }
 
 export interface ReactionInfo {
+  /** Current certified account ownership for channel reactions; absent on older hosts and DMs. */
+  from_me?: boolean;
   target: string;
   emoji: string;
   who: string[];

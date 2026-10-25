@@ -2,6 +2,54 @@
 use super::*;
 use crate::{channel::HistoryPolicy, eventlog::ConversationId, node::AccountGroupOperation};
 
+type ControlFixtureTrace =
+    Arc<std::sync::Mutex<std::collections::VecDeque<(u128, &'static str, String)>>>;
+
+fn trace_control_fixture(
+    target: &Arc<Node>,
+    label: &'static str,
+    trace: ControlFixtureTrace,
+    started: std::time::Instant,
+) {
+    fn key_kind(key: &crate::node::AccountDocumentKey) -> &'static str {
+        match key {
+            crate::node::AccountDocumentKey::GroupOperation { .. } => "operation",
+            crate::node::AccountDocumentKey::GroupControl { .. } => "control",
+            crate::node::AccountDocumentKey::GroupInventory { .. } => "inventory",
+            _ => "optional",
+        }
+    }
+    *target.account_session_test_hook.lock().unwrap() = Some(Arc::new(move |_peer, frame| {
+        let trace = trace.clone();
+        Box::pin(async move {
+            use crate::node::account_sync_wire::AccountHistoryFrame;
+            let event = match frame {
+                AccountHistoryFrame::DocumentsRequest { body } => {
+                    crate::node::account_documents::wire::DocumentRequest::decode(&body).map(|request| {
+                        format!("request version={} domain={:?} after={} digest_zero={} probe={} operation_after={} operation_digest_zero={}",
+                            request.version, request.domain,
+                            request.after.as_ref().map_or("none", key_kind), request.known_digest == [0; 32],
+                            request.operation.is_some(), request.operation.as_ref().is_some_and(|probe| probe.after.is_some()),
+                            request.operation.as_ref().is_none_or(|probe| probe.known_digest == [0; 32]))
+                    })
+                }
+                AccountHistoryFrame::DocumentHeader { body } => {
+                    serde_json::from_slice::<crate::node::AccountDocumentMeta>(&body).ok().map(|meta|
+                        format!("header kind={} revision={}", key_kind(&meta.key), meta.revision))
+                }
+                _ => None,
+            };
+            if let Some(event) = event {
+                let mut trace = trace.lock().unwrap();
+                if trace.len() >= 128 {
+                    trace.pop_front();
+                }
+                trace.push_back((started.elapsed().as_millis(), label, event));
+            }
+        })
+    }));
+}
+
 async fn owner_fixture(modern: bool) -> (tempfile::TempDir, Account, Arc<Node>, ConversationId) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
@@ -258,6 +306,16 @@ async fn assert_reference_controls(modern: bool) {
             &left.user_id(),
         );
     }
+    let document_trace: ControlFixtureTrace =
+        Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let trace_started = std::time::Instant::now();
+    trace_control_fixture(&owner, "owner", document_trace.clone(), trace_started);
+    trace_control_fixture(
+        &reference,
+        "reference",
+        document_trace.clone(),
+        trace_started,
+    );
     owner.publish_account_group_access(&mut None);
     pull_group_control(&reference, &owner, addresses[0]).await;
     // Establish the real reverse capability exchange before measuring an action.
@@ -358,6 +416,10 @@ async fn assert_reference_controls(modern: bool) {
                 channel: hex::encode(group.as_bytes()), source_device: executor.user_id(),
             };
             let remote_revision = reference.account_document_meta(&remote_key).map(|meta| meta.revision);
+            let published_source_revision = executor.account_document_meta(&remote_key).map(|meta| meta.revision);
+            let requester_gate = reference.delivery_suspended.load(std::sync::atomic::Ordering::Acquire);
+            let source_gate = executor.delivery_suspended.load(std::sync::atomic::Ordering::Acquire);
+            let document_trace = document_trace.lock().unwrap().clone();
             let remote_frame = reference.account_document(&remote_key).ok().flatten().and_then(|document| {
                 crate::node::account_group::operations::wire::OperationFrame::decode(document.payload(), &account.public().ed25519_pub)
             });
@@ -371,11 +433,14 @@ async fn assert_reference_controls(modern: bool) {
             let input_current = reference.account_group_operation_inputs().iter().any(|(_, _, frame)| {
                 frame.group == group && frame.proof.public() == executor.identity.public()
             });
-            panic!("reference control did not converge: modern={modern}, kind={:?}, requester={requester:?}, source={source:?}, source_heads={source_heads:?}, effects={effects}, executor={}, owner={}, requester={}, requester_ready={}, source_ready={}, requester_sync={:?}, source_sync={:?}, remote_revision={remote_revision:?}, remote_result={remote_result_phase:?}, reference_match={reference_match:?}, current_binding={current_binding:?}, input_current={input_current}", operation.kind(),
-                executor.user_id(), owner.user_id(), reference.user_id(),
+            let requester_sync: Vec<_> = reference.device_sync_status().into_iter()
+                .map(|status| (status.phase, status.document_phase, status.document_requires_upgrade, status.document_error)).collect();
+            let source_sync: Vec<_> = executor.device_sync_status().into_iter()
+                .map(|status| (status.phase, status.document_phase, status.document_requires_upgrade, status.document_error)).collect();
+            panic!("reference control did not converge: modern={modern}, kind={:?}, requester={requester:?}, source={source:?}, source_heads={source_heads:?}, effects={effects}, executor_is_owner={}, requester_is_executor={}, requester_ready={}, source_ready={}, requester_sync={requester_sync:?}, source_sync={source_sync:?}, remote_revision={remote_revision:?}, published_source_revision={published_source_revision:?}, requester_gate={requester_gate}, source_gate={source_gate}, document_trace={document_trace:?}, remote_result={remote_result_phase:?}, reference_match={reference_match:?}, current_binding={current_binding:?}, input_current={input_current}", operation.kind(),
+                executor.identity.public() == owner.identity.public(), reference.identity.public() == executor.identity.public(),
                 reference.identity.public() == executor.identity.public() || reference.group_operation_versions.lock().unwrap().contains_key(&executor.user_id()),
-                executor.identity.public() == reference.identity.public() || executor.group_operation_versions.lock().unwrap().contains_key(&reference.user_id()),
-                reference.device_sync_status(), executor.device_sync_status());
+                executor.identity.public() == reference.identity.public() || executor.group_operation_versions.lock().unwrap().contains_key(&reference.user_id()));
         });
         assert_eq!(status.executions.len(), 1);
         assert_eq!(

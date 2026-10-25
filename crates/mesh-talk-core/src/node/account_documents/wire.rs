@@ -16,17 +16,43 @@ impl OperationContinuation {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub(in crate::node) struct GroupFileAssetRequest {
+    pub id: crate::node::AccountGroupOperationId,
+    pub group: crate::eventlog::ConversationId,
+    pub digest: [u8; 32],
+    pub file_conv: [u8; 32],
+    pub start_chunk: u32,
+    #[serde(default, skip_serializing_if = "asset_execution_mode")]
+    pub result: bool,
+}
+fn asset_execution_mode(result: &bool) -> bool {
+    !*result
+}
+impl GroupFileAssetRequest {
+    pub(in crate::node) fn valid(&self) -> bool {
+        self.id.as_bytes() != &[0; 32]
+            && self.group.as_bytes() != &[0; 32]
+            && self.file_conv != [0; 32]
+            && self.start_chunk <= crate::file::chunk_count_for(crate::node::node::MAX_FILE_SIZE)
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(in crate::node) struct OperationProbe {
     pub version: u8,
     pub nonce: [u8; 32],
     pub after: Option<OperationContinuation>,
     #[serde(default)]
     pub known_digest: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset: Option<GroupFileAssetRequest>,
 }
 impl OperationProbe {
     pub(super) fn supported(&self) -> bool {
         self.version == 1
             && self.nonce != [0; 32]
+            && self.asset.as_ref().is_none_or(|asset| {
+                asset.valid() && self.after.is_none() && self.known_digest == [0; 32]
+            })
             && self.after.as_ref().is_none_or(|after| after.key().valid())
     }
 }
@@ -34,10 +60,18 @@ impl OperationProbe {
 pub(in crate::node) struct OperationCapability {
     pub version: u8,
     pub nonce: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_kinds: Option<u16>,
 }
 impl OperationCapability {
     fn valid(&self) -> bool {
-        self.version == 1 && self.nonce != [0; 32]
+        self.version == 1
+            && self.nonce != [0; 32]
+            && self.supported_kinds.is_none_or(|mask| mask & !0x3fff == 0)
+    }
+    pub(super) fn capabilities(&self) -> u16 {
+        self.supported_kinds
+            .unwrap_or_else(crate::node::AccountGroupOperationKind::legacy_capabilities)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -73,6 +107,11 @@ impl DocumentRequest {
             })
             && request.operation.as_ref().is_none_or(|operation| {
                 request.domain == AccountDocumentDomain::GroupControl
+                    && operation.asset.as_ref().is_none_or(|_| {
+                        operation.supported()
+                            && request.after.is_none()
+                            && request.known_digest == [0; 32]
+                    })
                     && operation
                         .after
                         .as_ref()
@@ -116,6 +155,29 @@ pub(in crate::node) fn valid_header(body: &[u8]) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn operation_completion_retains_an_authenticated_action_mask() {
+        let body = serde_json::json!({ "version": 1, "nonce": ([7u8; 32]),
+            "supported_kinds": 3 });
+        let capability: OperationCapability = serde_json::from_value(body.clone()).unwrap();
+        assert_eq!(serde_json::to_value(capability).unwrap(), body);
+    }
+    #[test]
+    fn operation_completion_rejects_unknown_action_bits() {
+        let body = serde_json::json!({ "enabled": true, "domain": "group_control",
+            "next": null, "digest": ([0u8; 32]), "operation": {
+                "version": 1, "nonce": ([7u8; 32]), "supported_kinds": 16384 } });
+        assert!(!valid_complete(&serde_json::to_vec(&body).unwrap()));
+    }
+    #[test]
+    fn legacy_operation_completion_stays_byte_compatible_without_action_mask() {
+        let capability = format!(
+            "{{\"version\":1,\"nonce\":[{}]}}",
+            std::iter::repeat_n("7", 32).collect::<Vec<_>>().join(",")
+        );
+        let parsed: OperationCapability = serde_json::from_str(&capability).unwrap();
+        assert_eq!(serde_json::to_vec(&parsed).unwrap(), capability.as_bytes());
+    }
+    #[test]
     fn operation_probe_cannot_extend_an_optional_history_domain() {
         let body = serde_json::json!({
             "version":1, "account_id":"a".repeat(32), "domain":"draft",
@@ -132,6 +194,34 @@ mod tests {
             "operation":{"version":1,"nonce":([7u8;32]),"after":{"channel":"bad","source_device":"b".repeat(32)}},
         });
         assert!(DocumentRequest::decode(&serde_json::to_vec(&body).unwrap()).is_none());
+    }
+    #[test]
+    fn execution_asset_request_keeps_its_bytes_when_result_mode_is_absent() {
+        #[derive(Serialize)]
+        struct LegacyAsset {
+            id: crate::node::AccountGroupOperationId,
+            group: crate::eventlog::ConversationId,
+            digest: [u8; 32],
+            file_conv: [u8; 32],
+            start_chunk: u32,
+        }
+        let old = LegacyAsset {
+            id: crate::node::AccountGroupOperationId::new([1; 32]),
+            group: crate::eventlog::ConversationId::new([2; 32]),
+            digest: [3; 32],
+            file_conv: [4; 32],
+            start_chunk: 5,
+        };
+        let before = serde_json::to_vec(&old).unwrap();
+        let mut decoded: GroupFileAssetRequest = serde_json::from_slice(&before).unwrap();
+        assert!(!decoded.result);
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), before);
+        decoded.result = true;
+        assert!(
+            serde_json::from_slice::<GroupFileAssetRequest>(&serde_json::to_vec(&decoded).unwrap())
+                .unwrap()
+                .result
+        );
     }
     #[test]
     fn legacy_request_and_completion_json_bytes_round_trip_without_extension_fields() {

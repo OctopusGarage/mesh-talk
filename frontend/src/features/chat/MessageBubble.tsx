@@ -49,7 +49,12 @@ import { EMOJIS, renderWithMentions } from "@/lib/mentions";
 import { stickerById } from "@/lib/stickerPacks";
 import { usePacks } from "@/store/packs";
 import type { ReactionInfo } from "@/lib/types";
-import { useChat, captureChatOwnership, type ChatMessage } from "@/store/chat";
+import {
+  useChat,
+  captureChatOwnership,
+  reactionFromMe,
+  type ChatMessage,
+} from "@/store/chat";
 import {
   useFileStatus,
   refreshFileAvailability,
@@ -361,8 +366,8 @@ export function MessageBubble({
   /** True when this channel message mentions the current user. */
   mentioned?: boolean;
   reactions: ReactionInfo[];
-  // The id that represents "me" in a reaction's `who`: the ACCOUNT id for account
-  // conversations (who is account-keyed there), the device user-id for channels.
+  // Compatibility fallback when the native channel ownership projection is absent:
+  // account ID for account conversations; device ID for channels.
   selfReactionId: string;
   myName: string;
   onReply: (m: ChatMessage) => void;
@@ -765,7 +770,7 @@ export function MessageBubble({
             className={cn("mt-1 flex flex-wrap gap-1", mine && "justify-end")}
           >
             {reactions.map((r) => {
-              const me = r.who.includes(selfReactionId);
+              const me = reactionFromMe(r, selfReactionId);
               return (
                 <button
                   key={`${r.target}:${r.emoji}`}

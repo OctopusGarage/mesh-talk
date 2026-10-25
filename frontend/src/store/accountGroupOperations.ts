@@ -73,6 +73,8 @@ export interface GroupOperationRequest {
   group: string;
   kind: AccountGroupOperationKind;
   invoke: GroupOperationInvoke;
+  /** Link payload ownership after reservation, before native mutation. */
+  onReserved?: (id: string) => boolean;
 }
 function isTerminal(status: AccountGroupOperationStatus | undefined): boolean {
   return (
@@ -183,6 +185,37 @@ export function createGroupOperationCoordinator(
     }
     return lease.current() ? outcome(status) : { kind: "stale" };
   }
+  const cancelling = new Set<string>();
+  async function requestCancellation(
+    lease: GroupOperationLease,
+    id: string,
+  ): Promise<GroupOperationOutcome> {
+    const ticket = ticketFor(lease, id);
+    if (!lease.current() || !ticket) return { kind: "stale" };
+    if (isTerminal(ticket.status) || cancelling.has(invocationKey(lease, id)))
+      return currentOutcome(ticket);
+    const key = invocationKey(lease, id);
+    cancelling.add(key);
+    const token = ++observation;
+    try {
+      const status = await context.commands.cancel(
+        lease.owner,
+        lease.accountId,
+        id,
+      );
+      return apply(lease, id, status, token);
+    } catch (error) {
+      if (!lease.current()) return { kind: "stale" };
+      const current = ticketFor(lease, id);
+      if (!current) return { kind: "stale" };
+      return isTerminal(current.status)
+        ? currentOutcome(current)
+        : { kind: "unconfirmed", id, error };
+    } finally {
+      cancelling.delete(key);
+    }
+  }
+
   async function invoke(
     lease: GroupOperationLease,
     ticket: GroupOperationTicket,
@@ -196,7 +229,14 @@ export function createGroupOperationCoordinator(
     const token = ++observation;
     try {
       const status = await send(lease.owner, lease.accountId, ticket.id);
-      return apply(lease, ticket.id, status, token);
+      const result = apply(lease, ticket.id, status, token);
+      if (
+        lease.current() &&
+        ticketFor(lease, ticket.id)?.cancelRequested &&
+        !isTerminal(ticketFor(lease, ticket.id)?.status)
+      )
+        return requestCancellation(lease, ticket.id);
+      return result;
     } catch (error) {
       if (!lease.current()) return { kind: "stale" };
       const current = ticketFor(lease, ticket.id);
@@ -246,6 +286,11 @@ export function createGroupOperationCoordinator(
       const reserved = context.reserve(ticket);
       if (!lease.current()) return { kind: "stale" };
       if (!reserved) return { kind: "capacity" };
+      if (request.onReserved && !request.onReserved(id)) {
+        if (lease.current()) context.release(id);
+        return { kind: "stale" };
+      }
+      if (!lease.current()) return { kind: "stale" };
       return invoke(lease, ticket, request.invoke, true);
     },
     async resume(
@@ -277,21 +322,7 @@ export function createGroupOperationCoordinator(
       if (isTerminal(ticket.status)) return currentOutcome(ticket);
       context.update({ ...ticket, cancelRequested: true });
       if (!lease.current()) return { kind: "stale" };
-      const token = ++observation;
-      try {
-        const status = await context.commands.cancel(
-          lease.owner,
-          lease.accountId,
-          id,
-        );
-        return apply(lease, id, status, token);
-      } catch (error) {
-        if (!lease.current()) return { kind: "stale" };
-        const current = ticketFor(lease, id);
-        if (!current) return { kind: "stale" };
-        if (isTerminal(current.status)) return currentOutcome(current);
-        return { kind: "unconfirmed", id, error };
-      }
+      return requestCancellation(lease, id);
     },
     async refresh(): Promise<void> {
       const capturedLease = context.capture();
@@ -392,6 +423,11 @@ export function createGroupOperationCoordinator(
                   ),
                 );
                 if (status) apply(lease, ticket.id, status, token);
+                if (
+                  lease.current() &&
+                  ticketFor(lease, ticket.id)?.cancelRequested
+                )
+                  await requestCancellation(lease, ticket.id);
               } catch {
                 failed = true;
                 if (lease.current()) context.report("observation_failed");
