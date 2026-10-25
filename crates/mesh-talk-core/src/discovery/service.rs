@@ -1454,6 +1454,9 @@ mod tests {
 
         let listener = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let listen_addr = listener.local_addr().unwrap();
+        // Restrict receives to our listener; ephemeral ports can overlap other
+        // tests' discovery targets when nextest runs them in separate processes.
+        peer_sock.connect(listen_addr).await.unwrap();
         let roster = Arc::new(Mutex::new(Roster::default()));
         let self_id = DeviceIdentity::generate();
         let self_announce = shared_announce(&Announce::new(&self_id, "Self", 1));
@@ -1466,10 +1469,7 @@ mod tests {
         ));
 
         // First sight → expect a unicast reply (our self-announce) back.
-        peer_sock
-            .send_to(&encode(&peer_announce), listen_addr)
-            .await
-            .unwrap();
+        peer_sock.send(&encode(&peer_announce)).await.unwrap();
         let mut buf = vec![0u8; 2048];
         let (n, _src) = tokio::time::timeout(Duration::from_secs(2), peer_sock.recv_from(&mut buf))
             .await
@@ -1478,14 +1478,27 @@ mod tests {
         let reply = decode(&buf[..n]).expect("reply decodes");
         assert_eq!(reply.user_id, self_id.public().user_id());
 
-        // Re-announce (refresh) → NO reply (avoids the 2s reply storm).
-        peer_sock
-            .send_to(&encode(&peer_announce), listen_addr)
+        // Other process-isolated discovery tests can announce to the protocol port,
+        // which the OS may also allocate to this ephemeral socket. Exercise that
+        // interference explicitly: only this fixture's listener may supply replies.
+        let unrelated = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let other_id = DeviceIdentity::generate();
+        unrelated
+            .send_to(
+                &encode(&Announce::new(&other_id, "Other test", 4001)),
+                peer_sock.local_addr().unwrap(),
+            )
             .await
             .unwrap();
+
+        // Re-announce (refresh) → NO reply (avoids the 2s reply storm).
+        peer_sock.send(&encode(&peer_announce)).await.unwrap();
         let second =
             tokio::time::timeout(Duration::from_millis(300), peer_sock.recv_from(&mut buf)).await;
-        assert!(second.is_err(), "refresh must not trigger a reply");
+        assert!(
+            second.is_err(),
+            "refresh must not trigger a reply: {second:?}"
+        );
     }
 
     #[tokio::test]

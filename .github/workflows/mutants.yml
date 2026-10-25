@@ -29,7 +29,9 @@ permissions:
 jobs:
   mutants:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The observed 17-mutant shards need up to ~117 minutes including setup,
+    # baseline, 130s builds and the existing 240s per-suite bound.
+    timeout-minutes: 120
     strategy:
       fail-fast: false # Keep other reports if one runner has a baseline/tool failure.
       matrix:
