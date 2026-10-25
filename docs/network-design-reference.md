@@ -772,6 +772,61 @@ recipient wrapper or a connection timeout cannot retract another wrapper's
 confirmed copy at the same office. Unsupported custody exchange is exposed as
 requiring an upgrade, even while the older supported domains continue.
 
+### Cost-aware group attachment sharing
+
+The desktop starts with unknown network cost before participant producers run.
+Unknown or restricted cost pauses export of other devices' retained group file
+chunks. Group text, controls and file offers remain available; the original
+author can still send its own file chunks. Certified same-account synchronization
+keeps its independent category policy. Receive consent is unchanged. The saved
+signed **Share a copy** preference and local retention/expiry rules never change
+because of this temporary restriction. The members dialog exposes only this
+device's cost status, with an authenticated temporary exception for all its groups.
+The exception expires when the observed cost class changes or the runtime ends;
+refreshing an unchanged class does not revoke it. It cannot enable sharing that
+the member has explicitly disabled or override conversation authority.
+
+This policy applies to attachment copies of every size rather than an arbitrary
+large-file threshold. It defines no daily byte allowance or upload-rate limit.
+A later optional cumulative budget must define its traffic and local-user/device
+scope, persist usage, reserve concurrent sends, and keep network exceptions
+independent from budget exceptions. Storage budgets never stand in for uploaded
+bytes; limited payload export must preserve actual possession inventories.
+
+`node/network_cost.rs` owns effective file-serving policy; the desktop
+`network_cost/` adapter supplies observations. macOS uses Network.framework path
+updates for expensive/Low Data Mode flags. Windows re-queries connection cost,
+roaming, limits and background restrictions; Linux reads NetworkManager's Metered
+property, including guessed states. Windows/Linux refresh every two seconds,
+with Linux queries bounded to one second. An unavailable provider yields unknown.
+The runtime owns cancellation and drops native observers at retirement. SDK,
+CLI and integration hosts preserve unrestricted compatibility defaults unless
+they supply an initial/current observation. The additive
+`start_configured_guarded_with_network_cost_observed` constructor applies initial
+cost before launch; existing constructor signatures and `RuntimeNetworkOptions`
+fields remain compatible.
+
+Cost is a conservative default-path observation, not universal hotspot detection
+or a carrier billing guarantee. A hotspot can also carry local-only traffic.
+This implementation has no physical-route exemption: automatic assistance can
+pause even on a local hotspot, and the user can explicitly allow it temporarily.
+VPNs, multiple interfaces and unrecognized hotspots still require native route
+evidence before stronger guarantees. No SSID inference or network-name logging
+is used. Existing peers may continue selecting a paused sharing member; normal
+bounded recovery/source rotation still applies without changing wire formats.
+
+Both sync directions recheck file export projections at each bounded page,
+including existing sessions. Possession inventories and fingerprints remain
+accurate while serving is paused, preventing peers from sending retained chunks
+back to the metered holder. Already selected/buffered bytes may finish, and
+native observation latency precedes enforcement; a switch does not promise zero
+additional bytes. This policy neither deletes cached chunks nor treats a pause
+as recipient completion. It limits optional group attachment assistance, not
+original fanout, downloads, updates, backups or opaque post-office service traffic.
+Focused loopback tests cover pause/resume, existing stores, ordinary receive
+consent, inline media and retained bytes. Platform hotspot/VPN/sleep-wake and
+active-transfer acceptance remain separate from simulated policy assertions.
+
 ### E. Files, folders, consent and completion
 
 ```mermaid

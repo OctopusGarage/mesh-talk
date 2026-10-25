@@ -72,6 +72,8 @@ pub(crate) mod linking;
 pub(crate) mod media_store;
 pub(crate) mod message;
 pub(crate) mod name_directory;
+mod network_cost;
+pub use network_cost::{GroupFileSharingStatus, NetworkCost};
 pub(crate) mod node;
 mod opaque_relay;
 pub(crate) mod pairing;

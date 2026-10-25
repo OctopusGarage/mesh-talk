@@ -75,7 +75,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 post_office_enabled: false,
                 ..Default::default()
             });
-        match mesh_talk_core::node::NodeRuntime::start_configured_guarded_with_network_observed(
+        match mesh_talk_core::node::NodeRuntime::start_configured_guarded_with_network_cost_observed(
             mesh_talk_core::node::RuntimeConfig {
                 base_dir: &base_dir,
                 account_id: &account_id,
@@ -142,6 +142,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 post_office_receive_enabled: relay_settings.post_office_receive_enabled,
                 physical_lan_only: relay_settings.physical_lan_only,
             },
+            mesh_talk_core::node::NetworkCost::Unknown,
             |identity| {
                 authority.observe_identity(identity).map_err(|_| {
                     mesh_talk_core::node::RuntimeError::Io(std::io::Error::new(
@@ -180,6 +181,11 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 // Subscribe before installing/launching the host producer so no
                 // invalidation can fall between capturing the receiver and spawn.
                 let (installed, installation) = tokio::sync::watch::channel(false);
+                let cost_node = runtime.handle();
+                runtime.register_host_task(tokio::spawn(after_install(
+                    installation.clone(),
+                    crate::network_cost::observe(cost_node),
+                )));
                 let changes = runtime.handle().subscribe_channel_changes();
                 let crypto_account_id = runtime.account_id().to_owned();
                 let device_id = runtime.user_id().to_owned();

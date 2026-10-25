@@ -548,7 +548,7 @@ async fn startup_network_options_precede_discovery_and_delivery_launch() {
     let reserve = crate::transport::net::discovery_socket(0).unwrap();
     let port = reserve.local_addr().unwrap().port();
     drop(reserve);
-    let runtime = NodeRuntime::start_configured_guarded_with_network(
+    let runtime = NodeRuntime::start_configured_guarded_with_network_cost_observed(
         RuntimeConfig {
             base_dir: root.path(),
             account_id: "network-options",
@@ -570,11 +570,17 @@ async fn startup_network_options_precede_discovery_and_delivery_launch() {
             post_office_receive_enabled: true,
             physical_lan_only: true,
         },
+        crate::node::NetworkCost::Unknown,
+        |_| Ok(()),
         |launch| {
             let runtime = launch("Scoped");
             let node = runtime.handle();
             let relay = crate::identity::device::DeviceIdentity::generate().public();
             assert!(node.physical_lan_only());
+            assert!(
+                node.group_file_sharing_status().paused,
+                "cost protection precedes participant launch"
+            );
             assert!(!node.relay_send_allowed(&relay));
             assert!(node.relay_receive_allowed(&relay));
             assert!(!node.bridge_directory_allowed());

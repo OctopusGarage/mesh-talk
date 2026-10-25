@@ -675,6 +675,7 @@ mod tests {
                     crate::chat_commands::probe_peer_endpoint,
                     crate::chat_commands::rename_channel,
                     crate::chat_commands::set_channel_replica_enabled,
+                    crate::chat_commands::set_group_file_sharing_override,
                     crate::chat_commands::set_channel_history_policy,
                     crate::chat_commands::list_channels,
                     crate::chat_commands::channel_members,
@@ -1300,6 +1301,60 @@ mod tests {
                 .unwrap_err()["kind"],
             "authorization"
         );
+    }
+
+    #[test]
+    fn registered_group_file_sharing_override_requires_current_unlocked_runtime_and_cost() {
+        use mesh_talk_core::node::NetworkCost;
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let handle = fixture.node.0.blocking_read().as_ref().unwrap().handle();
+        handle.set_network_cost(NetworkCost::Restricted);
+        let body = serde_json::json!({"owner":"alice","networkCost":"restricted","enabled":true});
+        fixture
+            .invoke("set_group_file_sharing_override", body.clone())
+            .unwrap();
+        assert!(handle.group_file_sharing_status().override_enabled);
+        handle.set_network_cost(NetworkCost::Unknown);
+        assert!(
+            fixture
+                .invoke("set_group_file_sharing_override", body.clone())
+                .is_err()
+        );
+        assert!(handle.group_file_sharing_status().paused);
+        handle.set_network_cost(NetworkCost::Restricted);
+        crate::app_lock::lock_app(
+            fixture.webview.state::<AppState>(),
+            fixture.webview.state::<crate::app_lock::AppLock>(),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .invoke("set_group_file_sharing_override", body.clone())
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+        assert!(handle.group_file_sharing_status().paused);
+        fixture.app_state.app_lock().clear();
+        let (entered, captured) = std::sync::mpsc::channel();
+        *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered);
+        let lifecycle = fixture.node.0.blocking_write();
+        let webview = fixture.webview.clone();
+        let pending =
+            std::thread::spawn(move || invoke(&webview, "set_group_file_sharing_override", body));
+        captured
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        fixture
+            .app_state
+            .session()
+            .set("replacement".into(), user("alice"), "pw".into());
+        drop(lifecycle);
+        assert_eq!(
+            pending.join().unwrap().unwrap_err()["kind"],
+            "authorization"
+        );
+        assert!(handle.group_file_sharing_status().paused);
     }
 
     #[test]
