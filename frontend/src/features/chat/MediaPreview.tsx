@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Download, FolderOpen, Play, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { attachmentLabel } from "@/lib/directoryAttachment";
 import { saveAttachment } from "@/lib/attachmentSave";
 import { useSavedDownloads } from "@/lib/savedDownloads";
 import { errorMessage } from "@/lib/error";
@@ -44,6 +45,7 @@ export function MediaPreview({
   readOnly?: boolean;
 }) {
   const { t } = useTranslation();
+  const displayName = attachmentLabel(name, mime ?? "", { media: true, size });
   const motionOK = useMotionOK();
   const setError = useChat((s) => s.setError);
   const savedPath = useSavedDownloads()[fileConv];
@@ -114,8 +116,8 @@ export function MediaPreview({
       onClick={(e) => e.stopPropagation()}
       className="absolute inset-x-0 bottom-0 flex items-center gap-3 bg-gradient-to-t from-black/70 to-transparent px-5 pb-5 pt-12 text-white"
     >
-      <span className="min-w-0 flex-1 truncate text-sm" title={name}>
-        {name}
+      <span className="min-w-0 flex-1 truncate text-sm" title={displayName}>
+        {displayName}
       </span>
       <span className="shrink-0 font-mono text-xs text-white/70">
         {humanSize(size)}
@@ -204,8 +206,8 @@ export function MediaPreview({
   }
   if (!available)
     return (
-      <div className="min-w-40 p-2 text-xs" title={name}>
-        <span className="block truncate">{name}</span>
+      <div className="min-w-40 p-2 text-xs" title={displayName}>
+        <span className="block truncate">{displayName}</span>
         <ReceiveProgress status={status} />
       </div>
     );
@@ -215,7 +217,7 @@ export function MediaPreview({
         className="flex min-h-24 min-w-40 items-center justify-center rounded-lg bg-muted/40 px-3 text-center text-xs text-muted-foreground"
         role="status"
       >
-        {t("common.loading")} {name}
+        {t("common.loading")} {displayName}
       </div>
     );
 
@@ -224,7 +226,7 @@ export function MediaPreview({
     const thumb = poster ? (
       <img
         src={poster}
-        alt={name}
+        alt={displayName}
         data-testid="file-video"
         className="max-h-80 w-full rounded-lg object-cover"
       />
@@ -279,7 +281,7 @@ export function MediaPreview({
             <motion.div
               role="dialog"
               aria-modal="true"
-              aria-label={name}
+              aria-label={displayName}
               data-testid="file-video-lightbox"
               onClick={closeLightbox}
               initial={{ opacity: 0 }}
@@ -325,7 +327,7 @@ export function MediaPreview({
     return (
       <img
         src={url}
-        alt={name}
+        alt={displayName}
         data-testid="file-image"
         onError={() => setImgFailed(true)}
         className="max-h-80 w-full rounded-lg object-cover"
@@ -344,7 +346,7 @@ export function MediaPreview({
       >
         <motion.img
           src={url}
-          alt={name}
+          alt={displayName}
           layoutId={layoutId}
           transition={layoutTransition}
           data-testid="file-image"
@@ -357,7 +359,7 @@ export function MediaPreview({
           <motion.div
             role="dialog"
             aria-modal="true"
-            aria-label={name}
+            aria-label={displayName}
             data-testid="file-image-lightbox"
             onClick={closeLightbox}
             initial={{ opacity: 0 }}
@@ -376,7 +378,7 @@ export function MediaPreview({
             {/* Stop clicks on the photo from closing the lightbox (matches the video player). */}
             <motion.img
               src={url}
-              alt={name}
+              alt={displayName}
               layoutId={layoutId}
               transition={layoutTransition}
               onClick={(e) => e.stopPropagation()}

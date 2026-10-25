@@ -1,3 +1,6 @@
+import { usePacks } from "./packs";
+import { stickerById } from "@/lib/stickerPacks";
+import { snapshotSticker } from "@/lib/stickerMedia";
 import { mentionsName } from "@/lib/mentions";
 import { useAuth } from "./auth";
 import { createRosterRefresh } from "./rosterRefresh";
@@ -1344,6 +1347,46 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
+    const installed = stickerById(stickerId, usePacks.getState().packs);
+    if (installed) {
+      let stagedPath: string | undefined;
+      let transferred = false;
+      try {
+        const snapshot = snapshotSticker(installed, fallback);
+        stagedPath = await chat.writeTempFile(
+          Array.from(snapshot.bytes),
+          snapshot.ext,
+          snapshot.name,
+        );
+        if (
+          !lease.current() ||
+          !get().active ||
+          convKey(get().active!) !== convKey(c)
+        )
+          return;
+        const sending = beginSendIntent(set, get, c, {
+          kind: "file",
+          path: stagedPath,
+          media: true,
+          expiresAtMs,
+          stickerMedia: {
+            name: snapshot.name,
+            size: snapshot.bytes.length,
+            mime: snapshot.mime,
+          },
+        });
+        if (!sending) return;
+        // The ordinary file intent owns this immutable path through retry.
+        transferred = true;
+        await sending;
+      } catch (error) {
+        set({ error: `Couldn't send sticker: ${errorMessage(error)}` });
+      } finally {
+        if (stagedPath && !transferred)
+          await chat.deleteTempFile(stagedPath).catch(() => {});
+      }
+      return;
+    }
     await sendIntent(set, get, c, {
       kind: "sticker",
       stickerId,

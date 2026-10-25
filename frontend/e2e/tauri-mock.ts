@@ -362,6 +362,24 @@ export const test = base.extend({
           media: boolean;
         };
       };
+      const stagedFiles = new Map<string, number[]>();
+      const stickerMediaFiles = new Map<string, number[]>();
+      const stickerFileMetadata = (path: unknown, fileConv: string) => {
+        const name = String(path).split(/[\\/]/).pop() || "file";
+        const bytes = stagedFiles.get(String(path));
+        if (!name.startsWith("mt-sticker-v1-") || !bytes) return {};
+        stickerMediaFiles.set(fileConv, [...bytes]);
+        const ext = name.split(".").pop()!;
+        const mime = (
+          {
+            png: "image/png",
+            jpg: "image/jpeg",
+            webp: "image/webp",
+            gif: "image/gif",
+          } as Record<string, string>
+        )[ext];
+        return { name, size: bytes.length, mime };
+      };
       let mid = 100;
       const msg = (over: Partial<Msg>): Msg => ({
         id: `m${++mid}`,
@@ -1063,6 +1081,7 @@ export const test = base.extend({
                 mime: a.protection ? "image/png" : "application/octet-stream",
                 file_conv: fileConv,
                 media: Boolean(a.media),
+                ...stickerFileMetadata(a.path, fileConv),
               },
             });
             (msgs[`ch:${a.channelId}`] ||= []).push(row);
@@ -1114,6 +1133,7 @@ export const test = base.extend({
                   mime: a.protection ? "image/png" : "application/octet-stream",
                   file_conv: fileConv,
                   media: Boolean(a.media),
+                  ...stickerFileMetadata(a.path, fileConv),
                 },
               }),
             );
@@ -1380,7 +1400,9 @@ export const test = base.extend({
           read_file: () => new ArrayBuffer(0),
           // The durable chat-media store accessor. The mock has no store, so reject like the
           // real "no stored media" path → the preview hook falls back to read_file.
-          read_media: () => {
+          read_media: (a) => {
+            const stickerBytes = stickerMediaFiles.get(String(a.fileConv));
+            if (stickerBytes) return stickerBytes;
             if (dataMode === "screenshot-ipc-fallback") {
               return (
                 (window as unknown as { __lastWrittenFileBytes?: number[] })
@@ -1395,9 +1417,14 @@ export const test = base.extend({
             (
               window as unknown as { __lastWrittenFileBytes?: number[] }
             ).__lastWrittenFileBytes = a.bytes as number[];
-            return `/tmp/${String(a.name || "pasted.png")}`;
+            const path = `/tmp/${String(a.name || "pasted.png")}`;
+            stagedFiles.set(path, [...(a.bytes as number[])]);
+            return path;
           },
-          delete_temp_file: ok,
+          delete_temp_file: (a) => {
+            stagedFiles.delete(String(a.path));
+            return null;
+          },
           screenshot_available: () => dataMode !== "screenshot-unavailable",
           // A deterministic 320x180 PNG, generated in-browser so the mock always
           // supplies a decodable image for the selection and annotation flow.
@@ -2272,6 +2299,35 @@ export const test = base.extend({
       ) => {
         Object.assign(presenceMap, next);
       };
+
+      (window as unknown as Record<string, unknown>).__mockInjectStickerMedia =
+        (conv: string, name: string, bytes: number[], mime: string) => {
+          const fileConv = `received-sticker-${++mid}`;
+          stickerMediaFiles.set(fileConv, [...bytes]);
+          const entry = msg({
+            file: {
+              name,
+              size: bytes.length,
+              mime,
+              file_conv: fileConv,
+              media: true,
+            },
+          });
+          (msgs[conv] ||= []).push(entry);
+          for (const listener of listeners["file-received"] ?? [])
+            listener.cb({
+              from: BOB.device_id,
+              conv: conv.slice(4),
+              is_channel: false,
+              event_id: entry.id,
+              file_conv: fileConv,
+              name,
+              size: bytes.length,
+              mime,
+              media: true,
+            });
+          return entry.id;
+        };
 
       // Inject an inbound message into the store (so a subsequent history reload returns it),
       // mirroring how the real backend persists a received message before emitting its event.

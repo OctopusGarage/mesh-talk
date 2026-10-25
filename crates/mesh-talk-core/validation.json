@@ -2,6 +2,53 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-sticker-media",
+      "paths": [
+        "crates/mesh-talk-core/src/file/sticker.rs",
+        "crates/mesh-talk-core/src/node/sticker_media.rs",
+        "crates/mesh-talk-core/src/node/sticker_media_tests.rs",
+        "crates/mesh-talk-core/src/node/recall.rs",
+        "crates/mesh-talk-core/src/node/file_completion.rs",
+        "crates/mesh-talk-core/src/node/serving.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "file::sticker::tests::",
+            "node::sticker_media_tests::",
+            "node::files::",
+            "node::recall::",
+            "node::file_completion::"
+          ]
+        }
+      ],
+      "consumers": [
+        "desktop-chat"
+      ],
+      "capability": {
+        "summary": "Deliver immutable encrypted sticker media without requiring recipient pack installation and reuse verified transfer bytes only within the same conversation and deadline.",
+        "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
+        "invariants": [
+          {
+            "name": "Pack installation and message media retention are independent; exact image identity is the authenticated attachment checksum",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "Bounded canonical presentation metadata remains compatible ordinary media and never grants cross-conversation read access",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "A cached image only completes a new manifest after exact retained ancestry, origin binding and durable byte validation; cache presence alone never proves recipient delivery",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          }
+        ]
+      },
+      "escalation": [
+        "Run encrypted loopback delivery, source-removal/restart, same-host reuse and deadline/isolation regressions plus the sticker browser suite. Mocked browser results do not prove native decoder availability, deployed relay retention or linked-device policy."
+      ]
+    },
+    {
       "id": "core-private-device-hostnames",
       "paths": [
         "crates/mesh-talk-core/src/node/account_documents/device_hostname.rs",
