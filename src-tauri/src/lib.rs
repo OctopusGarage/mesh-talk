@@ -36,6 +36,7 @@ mod integrations;
 mod linked_account;
 pub mod logger;
 pub mod message_favorites;
+mod network_cost;
 mod notifications;
 pub mod owner_commands;
 pub mod perf;
@@ -429,6 +430,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::dissolve_channel,
                 crate::chat_commands::channel_members,
                 crate::chat_commands::set_channel_replica_enabled,
+                crate::chat_commands::set_group_file_sharing_override,
                 crate::chat_commands::set_channel_history_policy,
                 crate::chat_commands::channel_custody_statuses,
                 crate::chat_commands::channel_activity,

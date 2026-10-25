@@ -104,6 +104,30 @@ Open the members control and find your own accepted membership. **Stop sharing**
 
 A reachable member must retain the needed events and keys and permit sharing for member recovery to work. An opaque post office can hold encrypted copies but cannot grant membership or recover missing endpoint identity keys. A retained message or file card does not guarantee that attachment contents remain available.
 
+### Network data protection
+
+The desktop temporarily pauses sharing other members' attachment contents when
+the system reports a metered/expensive network, a data restriction, or unknown
+network cost. Messages and your original file sends continue. **Share a copy**
+stays enabled and cached files remain subject to their normal retention rules.
+Sharing resumes automatically when the network is reported unrestricted.
+
+The members dialog shows the pause on this device. **Allow temporarily** permits
+file assistance across all groups on this device until the reported cost status
+changes or you sign out. **Resume data protection** revokes the exception sooner.
+An exception never overrides **Stop sharing** or group access permissions.
+
+Protection covers automatic attachment copies of every size, including images.
+It does not set a daily upload allowance. Allowing assistance temporarily does
+not reserve or enforce an amount of data that may be uploaded.
+
+A phone hotspot also uses Wi-Fi; system cost detection cannot identify every
+hotspot. Local-only transfers on that hotspot may also be paused. Use the
+temporary exception when appropriate. VPN and multiple-interface routes can make
+system cost information incomplete. Already buffered traffic can finish after a
+network switch; this feature does not cap all application traffic or change
+downloads, original file sends, backups or post-office service behavior.
+
 ## Read messages after reconnecting
 
 An active accepted group can show that it is waiting for a reachable member, exchanging retained history, or has completed a peer check. A completed check describes this device's observation; offline members can still hold additional messages.

@@ -338,6 +338,29 @@ impl NodeRuntime {
             &mut dyn FnMut(&str) -> NodeRuntime,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
+        Self::start_configured_guarded_with_network_cost_observed(
+            config,
+            events,
+            network,
+            super::NetworkCost::Unrestricted,
+            observe_identity,
+            authorize_launch,
+        )
+        .await
+    }
+
+    /// Initialize a host's cost observation before participant producers start,
+    /// without adding required fields to the established SDK configuration types.
+    pub async fn start_configured_guarded_with_network_cost_observed(
+        config: RuntimeConfig<'_>,
+        events: RuntimeEvents,
+        network: RuntimeNetworkOptions,
+        network_cost: super::NetworkCost,
+        observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> NodeRuntime,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
         let RuntimeConfig {
             base_dir,
             account_id,
@@ -453,6 +476,7 @@ impl NodeRuntime {
         );
         node.set_post_office_enabled(post_office_enabled);
         node.initialize_physical_lan_only(network.physical_lan_only);
+        node.set_network_cost(network_cost);
         let names = Arc::new(Mutex::new(names_result.map_err(|e| {
             RuntimeError::Io(std::io::Error::other(format!("join error: {e}")))
         })??));

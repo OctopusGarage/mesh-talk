@@ -2,6 +2,46 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-group-file-network-cost",
+      "paths": [
+        "src-tauri/src/network_cost/",
+        "src-tauri/src/runtime_bootstrap.rs",
+        "src-tauri/src/chat_commands/channels.rs",
+        "src-tauri/src/chat_commands/models.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "network_cost::",
+            "registered_group_file_sharing_override_requires_current_unlocked_runtime_and_cost",
+            "host_producers_wait_for_successful_installation",
+            "membership_metadata_serializes_each_history_policy"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Observe native network cost under runtime-owned cancellation and expose local-device-only status with session-authorized temporary group attachment exceptions.",
+        "guide": "docs/network-design-reference.md#cost-aware-group-attachment-sharing",
+        "invariants": [
+          {
+            "name": "Unknown startup protection precedes participant producers; observers cannot retain a retired Node, and lock/replacement or mismatched cost rejects override mutations.",
+            "reference": "docs/module-boundaries.md#network-cost-protection"
+          },
+          {
+            "name": "Network cost never leaves this device in signed group controls or remote-member projections.",
+            "reference": "docs/help/topics/channels.md#network-data-protection"
+          }
+        ]
+      },
+      "consumers": [
+        "frontend-group-file-network-cost"
+      ],
+      "escalation": [
+        "Verify native iPhone/Android/USB hotspot, ordinary Wi-Fi, unavailable provider, VPN, multi-interface, sleep/wake and active transfers on each supported platform; verify the local member pause/exception control."
+      ]
+    },
+    {
       "id": "desktop-sensitive-operations",
       "paths": [
         "src-tauri/src/app_lock.rs",

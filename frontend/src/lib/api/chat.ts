@@ -418,6 +418,16 @@ export const chat = {
     invoke<void>("set_channel_history_policy", { channelId, policy }),
   setChannelReplicaEnabled: (channelId: string, enabled: boolean) =>
     invoke<void>("set_channel_replica_enabled", { channelId, enabled }),
+  setGroupFileSharingOverride: (
+    owner: string,
+    networkCost: "unknown" | "unrestricted" | "restricted",
+    enabled: boolean,
+  ) =>
+    invoke<void>("set_group_file_sharing_override", {
+      owner,
+      networkCost,
+      enabled,
+    }),
   channelCustodyStatuses: (channelId: string, ids: string[]) =>
     invoke<Array<{ id: string; replicas: number; post_offices?: number }>>(
       "channel_custody_statuses",

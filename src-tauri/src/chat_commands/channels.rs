@@ -177,6 +177,8 @@ pub async fn channel_members(
                                 .unwrap_or_else(|| user_id.clone())
                         };
                         ChannelMemberInfo {
+                            file_sharing: (reference.is_none() && user_id == node.user_id())
+                                .then(|| node.group_file_sharing_status()),
                             user_id,
                             name,
                             account_id,
@@ -245,6 +247,32 @@ pub async fn set_channel_replica_enabled(
                 .await
                 .map_err(CommandError::from)
             })
+        })
+        .await
+}
+
+/// Temporary permission for this device's optional group attachment assistance.
+#[tauri::command]
+pub async fn set_group_file_sharing_override(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    owner: String,
+    network_cost: mesh_talk_core::node::NetworkCost,
+    enabled: bool,
+) -> Result<(), CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &state, &owner)?;
+    admission
+        .with_runtime(move |runtime| {
+            if runtime
+                .handle()
+                .set_group_file_sharing_override(network_cost, enabled)
+            {
+                Ok(())
+            } else {
+                Err(CommandError::InvalidInput(
+                    "Network cost changed; refresh before allowing file sharing".into(),
+                ))
+            }
         })
         .await
 }

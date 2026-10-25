@@ -575,6 +575,15 @@ Desktop `src-tauri/src/message_favorites.rs` owns admitted IPC adaptation;
 contact pin/alias preferences or Message Yourself as a collection store.
 [Favorites](favorites.md) owns the limits, retention and synchronization contract.
 
+## Network cost protection
+
+`core/node/network_cost.rs` owns temporary group attachment export eligibility,
+independent of signed replica preferences and local retention. Desktop
+`src-tauri/src/network_cost/` owns native observations within the installed
+runtime's host-task lifetime. Existing group sync projections enforce the policy
+in both directions; channel member IPC exposes only local-device status and
+session-authorized overrides. See [network cost protection](network-design-reference.md#cost-aware-group-attachment-sharing).
+
 ## Public help
 
 `docs/help/` owns the English task manual and stable feature catalog.

@@ -95,6 +95,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const myId = useChat((s) => s.myId);
   const myAccountId = useChat((s) => s.myAccountId);
   const myName = useAuth((s) => s.user?.display_name || s.user?.username || "");
+  const localOwner = useAuth((s) => s.user?.id);
   const addMember = useChat((s) => s.addMember);
   const removeMember = useChat((s) => s.removeMember);
   const removeMemberAccount = useChat((s) => s.removeMemberAccount);
@@ -133,6 +134,8 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const [replicaOverride, setReplicaOverride] = useState<boolean | null>(null);
   const [replicaBusy, setReplicaBusy] = useState(false);
   const [replicaError, setReplicaError] = useState(false);
+  const ownMember = members.find((member) => member.user_id === myId);
+  const fileSharing = ownMember?.file_sharing;
   useEffect(() => {
     setReplicaOverride(null);
     setReplicaError(false);
@@ -468,6 +471,55 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               {t("members.replicaHelp")}
             </p>
           )}
+          {!sharedReference &&
+            !dissolved &&
+            (replicaOverride ?? ownMember?.replica_enabled) !== false &&
+            fileSharing &&
+            fileSharing.network_cost !== "unrestricted" && (
+              <div className="space-y-1 text-xs text-muted-foreground">
+                <p role="status">
+                  {t(
+                    fileSharing.override_enabled
+                      ? "members.fileSharingAllowed"
+                      : fileSharing.network_cost === "unknown"
+                        ? "members.fileSharingUnknown"
+                        : "members.fileSharingMetered",
+                  )}
+                </p>
+                <p>{t("members.fileSharingHelp")}</p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={replicaBusy || ownMember?.pending || !localOwner}
+                  onClick={async () => {
+                    if (!localOwner) return;
+                    const generation = useAuth.getState().generation;
+                    const current = () =>
+                      useAuth.getState().user?.id === localOwner &&
+                      useAuth.getState().generation === generation;
+                    setReplicaBusy(true);
+                    setReplicaError(false);
+                    try {
+                      await chatApi.setGroupFileSharingOverride(
+                        localOwner,
+                        fileSharing.network_cost,
+                        !fileSharing.override_enabled,
+                      );
+                    } catch {
+                      if (current()) setReplicaError(true);
+                    } finally {
+                      if (current()) setReplicaBusy(false);
+                    }
+                  }}
+                >
+                  {t(
+                    fileSharing.override_enabled
+                      ? "members.fileSharingProtect"
+                      : "members.fileSharingAllow",
+                  )}
+                </Button>
+              </div>
+            )}
           {replicaError && (
             <p role="alert" className="text-sm text-destructive">
               {t("members.replicaError")}

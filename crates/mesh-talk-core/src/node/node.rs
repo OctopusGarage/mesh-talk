@@ -320,6 +320,7 @@ pub struct Node {
     pub(in crate::node) emitted: Mutex<HashSet<EventId>>,
     pub(in crate::node) file_incoming: mpsc::UnboundedSender<ReceivedFile>,
     pub(in crate::node) files: Mutex<FileBook>,
+    pub(super) group_file_sharing: super::network_cost::GroupFileSharingPolicy,
     /// Per-file conversations we've seen a manifest for but don't yet hold all chunks of —
     /// surfaced this session and awaiting their data. A background task pulls these DIRECTLY
     /// from peers (the post-office drain only covers files when a PO exists; on a plain
@@ -865,6 +866,7 @@ impl Node {
             emitted: Mutex::new(emitted),
             file_incoming,
             files: Mutex::new(files),
+            group_file_sharing: Default::default(),
             pending_files: Mutex::new(HashSet::new()),
             file_pull_notify: tokio::sync::Notify::new(),
             file_pull_cursor: std::sync::atomic::AtomicUsize::new(0),

@@ -79,6 +79,7 @@ const { chatState, authState, avatars, dialog, channelApi, bindingChanges } =
         async (_channelId: string): Promise<ChannelActivityInfo[]> => [],
       ),
       setChannelReplicaEnabled: vi.fn(async () => {}),
+      setGroupFileSharingOverride: vi.fn(async () => {}),
     },
   }));
 
@@ -172,6 +173,9 @@ beforeEach(() => {
   }));
   channelApi.channelActivity.mockReset().mockResolvedValue([]);
   channelApi.setChannelReplicaEnabled.mockReset().mockResolvedValue(undefined);
+  channelApi.setGroupFileSharingOverride
+    .mockReset()
+    .mockResolvedValue(undefined);
 });
 
 it("projects three signed devices as two people with one stable owner badge", () => {
@@ -912,5 +916,103 @@ it("retires a pending removal when the same group becomes shared information", a
   } finally {
     await act(async () => root.unmount());
     vi.unstubAllGlobals();
+  }
+});
+
+it("shows a temporary file-sharing pause without presenting the saved replica preference as off", async () => {
+  chatState.members = [
+    {
+      user_id: "owner-device",
+      account_id: "owner-account",
+      name: "Me",
+      replica_enabled: true,
+      file_sharing: {
+        network_cost: "restricted",
+        paused: true,
+        override_enabled: false,
+      },
+    },
+  ];
+  const { MembersDialog } = await import("./MembersDialog");
+  const html = renderToStaticMarkup(createElement(MembersDialog));
+  expect(html).toContain("Automatic attachment sharing is paused to save data");
+  expect(html).toContain("There is no daily upload cap");
+  expect(html).toContain("Allow temporarily");
+  expect(html).toContain("Stop sharing");
+  expect(html).not.toContain("Replica off");
+});
+
+it("keeps unknown cost explicit and sends an owner-bound exception without claiming success after failure", async () => {
+  chatState.members = [
+    {
+      ...defaultMembers[0],
+      file_sharing: {
+        network_cost: "unknown",
+        paused: true,
+        override_enabled: false,
+      },
+    },
+  ];
+  channelApi.setGroupFileSharingOverride.mockRejectedValueOnce(
+    new Error("network changed"),
+  );
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    expect(container.textContent).toContain("network cost is unknown");
+    const allow = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Allow temporarily",
+    )!;
+    await act(async () => allow.click());
+    expect(channelApi.setGroupFileSharingOverride).toHaveBeenCalledWith(
+      "local-owner",
+      "unknown",
+      true,
+    );
+    expect(container.textContent).toContain("network cost is unknown");
+    expect(container.textContent).not.toContain(
+      "Automatic attachment sharing is temporarily allowed",
+    );
+    expect(container.textContent).toContain("Could not update sharing");
+    expect(channelApi.setChannelReplicaEnabled).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("lets the local device revoke an exception while manual share-off hides temporary controls", async () => {
+  chatState.members = [
+    {
+      ...defaultMembers[0],
+      file_sharing: {
+        network_cost: "restricted",
+        paused: false,
+        override_enabled: true,
+      },
+    },
+  ];
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    expect(container.textContent).toContain(
+      "Automatic attachment sharing is temporarily allowed",
+    );
+    const revoke = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Resume data protection",
+    )!;
+    await act(async () => revoke.click());
+    expect(channelApi.setGroupFileSharingOverride).toHaveBeenCalledWith(
+      "local-owner",
+      "restricted",
+      false,
+    );
+    chatState.members = [{ ...chatState.members[0], replica_enabled: false }];
+    await act(async () => root.render(createElement(MembersDialog)));
+    expect(container.textContent).not.toContain("Resume data protection");
+    expect(container.textContent).toContain("Resume sharing");
+  } finally {
+    await act(async () => root.unmount());
   }
 });

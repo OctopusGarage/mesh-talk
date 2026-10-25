@@ -3311,6 +3311,7 @@ dependencies = [
  "url",
  "windows",
  "xcap",
+ "zbus",
  "zeroize",
 ]
 

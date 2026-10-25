@@ -84,6 +84,12 @@ export interface ChannelMemberInfo {
   account_id?: string | null;
   pending?: boolean;
   replica_enabled?: boolean;
+  /** Local device observation only; remote members do not disclose network cost. */
+  file_sharing?: {
+    network_cost: "unknown" | "unrestricted" | "restricted";
+    paused: boolean;
+    override_enabled: boolean;
+  };
 }
 
 export interface ChannelActivityInfo {

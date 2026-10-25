@@ -2,6 +2,33 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-group-file-network-cost",
+      "paths": [
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/MembersDialog.test.ts",
+        "frontend/e2e/group-network-cost.spec.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/types.ts"
+      ],
+      "frontend": [
+        "src/features/chat/MembersDialog.test.ts",
+        "src/store/channelRefresh.test.ts"
+      ],
+      "capability": {
+        "summary": "Distinguish temporary local file-sharing protection from durable group sharing intent and offer an owner-bound temporary override.",
+        "guide": "docs/help/topics/channels.md#network-data-protection",
+        "invariants": [
+          {
+            "name": "Metered/unknown status is local-device-only, preserves the saved sharing toggle, and failed exceptions do not claim permission.",
+            "reference": "docs/help/topics/channels.md#network-data-protection"
+          }
+        ]
+      },
+      "escalation": [
+        "Exercise group switching, network-cost invalidations and temporary override in a native app; mocked member rendering does not establish OS detection or transfer protection."
+      ]
+    },
+    {
       "id": "frontend-sticker-media",
       "paths": [
         "frontend/src/lib/stickerMedia.ts",
@@ -1560,6 +1587,19 @@
     }
   ],
   "prScenarios": [
+    {
+      "id": "group-file-network-cost-acceptance",
+      "paths": [
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/e2e/group-network-cost.spec.ts"
+      ],
+      "browser": [
+        "e2e/group-network-cost.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
     {
       "id": "frontend-screenshot-submission-acceptance",
       "paths": [

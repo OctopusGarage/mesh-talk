@@ -2,6 +2,46 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-group-file-network-cost",
+      "paths": [
+        "crates/mesh-talk-core/src/node/network_cost.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/node/group_chain_tests.rs",
+        "crates/mesh-talk-core/src/node/runtime.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::network_cost::tests::",
+            "node::group_chain_tests::metered_group_file_replica_pauses_both_directions_without_losing_history_or_chunks",
+            "node::group_chain_tests::metered_group_file_replica_preserves_explicit_attachment_consent",
+            "startup_network_options_precede_discovery_and_delivery_launch"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Pause optional third-party group attachment export on restricted or unknown host-observed networks without changing signed preferences, consent or retention.",
+        "guide": "docs/network-design-reference.md#cost-aware-group-attachment-sharing",
+        "invariants": [
+          {
+            "name": "Both sync directions and existing stores recheck file-only export; original sends and group text/control/offer recovery continue, and cached chunks survive pause/resume.",
+            "reference": "docs/network-design-reference.md#cost-aware-group-attachment-sharing"
+          },
+          {
+            "name": "Cost-class changes expire session-local exceptions; manual share-off and conversation authorization remain authoritative.",
+            "reference": "docs/help/topics/channels.md#network-data-protection"
+          }
+        ]
+      },
+      "consumers": [
+        "desktop-group-file-network-cost"
+      ],
+      "escalation": [
+        "Native cost signals and physical/VPN routes require platform acceptance separately; loopback policy tests do not establish hotspot classification or a zero-byte handoff guarantee."
+      ]
+    },
+    {
       "id": "core-sticker-media",
       "paths": [
         "crates/mesh-talk-core/src/file/sticker.rs",
