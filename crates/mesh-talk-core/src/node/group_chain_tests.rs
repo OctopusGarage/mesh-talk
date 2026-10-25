@@ -407,6 +407,41 @@ async fn public_group_idle_metadata_is_reused_across_fresh_peer_scoped_stores() 
 }
 
 #[tokio::test]
+async fn public_group_history_capability_metadata_is_cached_and_principal_scoped() {
+    use crate::{channel::HistoryPolicy, eventlog::sync::SyncStore};
+    use std::sync::atomic::Ordering;
+    let chain = Chain::new().await;
+    let group = chain.accepted_group().await;
+    let node = &chain.nodes[0];
+    let member = chain.nodes[2].identity.public();
+    // Default invitations already contain a bounded history offer.
+    let original = node
+        .serve_sync_store(&member)
+        .lock()
+        .unwrap()
+        .fingerprint_and_len(&group);
+    node.set_channel_history_policy(group, HistoryPolicy::LastTen)
+        .await
+        .unwrap();
+    let before = node.channel_projection_replays.load(Ordering::Relaxed);
+    for _ in 0..2 {
+        let store = node.serve_sync_store(&member);
+        let store = store.lock().unwrap();
+        assert!(store.requires_channel_v3(&group));
+        assert!(!store.requires_channel_v2(&group));
+        assert_ne!(store.fingerprint_and_len(&group), original);
+    }
+    assert_eq!(
+        node.channel_projection_replays.load(Ordering::Relaxed) - before,
+        1
+    );
+    let outsider = node.serve_sync_store(&chain.nodes[6].identity.public());
+    let outsider = outsider.lock().unwrap();
+    assert!(!outsider.requires_channel_v3(&group));
+    assert!(outsider.event_ids(&group).is_empty());
+}
+
+#[tokio::test]
 async fn public_group_metadata_invalidates_for_authority_history_and_privacy_changes() {
     use crate::{
         discovery::visibility::DiscoveryVisibility,

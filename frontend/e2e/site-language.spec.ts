@@ -328,3 +328,26 @@ test("automatic language detection stays automatic until the visitor makes a cho
   await page.reload();
   await expectLanguage(page, "en");
 });
+
+test("explicit English survives internal navigation when preference storage is blocked", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "languages", {
+      value: ["ja-JP"],
+      configurable: true,
+    });
+    for (const method of ["getItem", "setItem"])
+      Object.defineProperty(Storage.prototype, method, {
+        value: () => {
+          throw new DOMException("Unavailable", "SecurityError");
+        },
+      });
+  });
+  await page.goto(new URL("404.html?lang=en", hosted.url).href);
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  const home = page.locator(".not-found .brand");
+  await expect(home).toHaveAttribute("href", /\?lang=en$/);
+  await home.click();
+  await expectLanguage(page, "en");
+});

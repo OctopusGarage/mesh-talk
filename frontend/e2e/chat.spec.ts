@@ -846,7 +846,18 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.getByTestId("sidebar-overflow").click();
     await page.getByTestId("sidebar-action-link").click();
     await expect(page.getByTestId("link-device-dialog")).toBeVisible();
-    await expect(page.getByText("Add another of your devices")).toBeVisible();
+    const linking = page.getByTestId("link-device-dialog");
+    await expect(
+      linking.getByText("Keep this device’s account", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      linking.getByText("Switch this device to another account", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(linking.getByTestId("link-source-identity")).toContainText(
+      "tester",
+    );
 
     // Show the pairing code: the FULL 32-char code must be visible (the user types it on the
     // other device) and must NOT overflow its container — regression for the truncated/

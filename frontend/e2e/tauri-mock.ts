@@ -1,9 +1,33 @@
+import type {
+  FavoriteSource,
+  FavoriteMetadata,
+  MessageFavorite,
+} from "../src/lib/api/messageFavorites";
+import type {
+  AccountDocumentKey,
+  AccountDocumentMeta,
+  DocumentVersion,
+} from "../src/lib/api/accountDocuments";
 import { test as base, expect } from "@playwright/test";
-import type { PeerInfo, PresenceInfo } from "../src/lib/types";
+import type {
+  ChannelHistoryPolicy,
+  PeerInfo,
+  PresenceInfo,
+} from "../src/lib/types";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import v8ToIstanbul from "v8-to-istanbul";
+
+/** Controls only for retained-attachment scenarios; no product test hooks. */
+export interface FavoriteAttachmentMock {
+  bytes: number[];
+  calls: Array<{ command: string; args: Record<string, unknown> }>;
+  saved: Array<{ path: string; bytes: number[] }>;
+  authorized: boolean;
+  releaseRead?: () => void;
+  releaseSaveDialog?: () => void;
+}
 
 /**
  * Headless E2E runs the React frontend in plain Chromium — there is no Tauri runtime, so
@@ -95,6 +119,11 @@ export const test = base.extend({
           account_id: CAROL.account_id,
         },
       ];
+      if (dataMode === "pairing-routes") {
+        peers[0].directly_reachable = true;
+        peers[1].directly_reachable = false;
+        peers[1].discovered_on_lan = false;
+      }
       if (dataMode === "post-office") {
         peers.push({
           user_id: "44444444444444444444444444444444",
@@ -179,6 +208,7 @@ export const test = base.extend({
           pending_invite: dataMode === "invite",
         },
       ];
+      const channelHistoryPolicies: Record<string, ChannelHistoryPolicy> = {};
       let channelOwner = dataMode === "invite" ? BOB.device_id : SELF.device;
 
       (window as unknown as Record<string, unknown>).__mockClearRoster = () => {
@@ -313,6 +343,7 @@ export const test = base.extend({
       // --- Messages (in-memory, per conversation) ---------------------------
       const BASE = 1_700_000_000_000;
       type Msg = {
+        protection?: "click" | "authenticate" | null;
         expires_at_ms?: number | null;
         id: string | null;
         from_me: boolean;
@@ -407,6 +438,8 @@ export const test = base.extend({
         Array<{ target: string; emoji: string; who: string[] }>
       > = {};
 
+      const protectedBodies: Record<string, string> = {};
+      const protectedModes: Record<string, string> = {};
       const recordSend = (
         conv: string,
         text: string,
@@ -485,6 +518,77 @@ export const test = base.extend({
         return null;
       };
 
+      // Account-owned message collections, separate from conversation pins.
+      const messageCollections: Record<
+        string,
+        Record<string, MessageFavorite>
+      > = {};
+      let collectionRevision = 0;
+
+      // Retained bytes deliberately have no source-chat message or ordinary media entry.
+      let favoriteAttachment: FavoriteAttachmentMock | undefined;
+      if (dataMode?.startsWith("favorites-attachment")) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 2;
+        canvas.height = 2;
+        const context = canvas.getContext("2d")!;
+        context.fillStyle = "#cc5533";
+        context.fillRect(0, 0, 2, 2);
+        const bytes = Array.from(atob(canvas.toDataURL().split(",")[1]), (c) =>
+          c.charCodeAt(0),
+        );
+        favoriteAttachment = { bytes, calls: [], saved: [], authorized: true };
+        (
+          window as unknown as { __favoriteAttachment: FavoriteAttachmentMock }
+        ).__favoriteAttachment = favoriteAttachment;
+        messageCollections.u_self = {
+          retained: {
+            id: "retained",
+            source: {
+              kind: "account",
+              target: BOB.account_id,
+              message_ids: ["removed-photo"],
+            },
+            source_label: BOB.name,
+            metadata: {
+              title: "Retained field photo",
+              description: "After source history was cleared",
+              notes: { "removed-photo": "Keep for the field report" },
+            },
+            messages: [
+              {
+                id: "removed-photo",
+                who: BOB.device_id,
+                sender_name: BOB.name,
+                text: "",
+                wall_clock: BASE,
+                expires_at_ms: null,
+                sticker: null,
+                file: {
+                  file_conv: "retained-photo",
+                  name: "field-photo.png",
+                  size: bytes.length,
+                  mime: "image/png",
+                  media: true,
+                },
+              },
+            ],
+            saved_at_ms: BASE,
+            revision: ++collectionRevision,
+            device_id: SELF.device,
+          },
+        };
+      }
+      const retainedFileAuthorized = (a: Record<string, unknown>) =>
+        !!favoriteAttachment?.authorized &&
+        a.owner === "u_self" &&
+        a.fileConv === "retained-photo" &&
+        Object.values(messageCollections.u_self ?? {}).some((item) =>
+          item.messages.some(
+            (message) => message.file?.file_conv === a.fileConv,
+          ),
+        );
+
       // --- Favorites (pin + alias), persisted in-memory ---------------------
       const favorites: Record<
         string,
@@ -544,6 +648,24 @@ export const test = base.extend({
         lock_when_hidden: false,
         confirm_sensitive_copy: false,
         clipboard_clear_seconds: 0,
+      };
+      const localAgentAccess = {
+        enabled: false,
+        running: false,
+        destinations: [] as { kind: string; id: string }[],
+        available_destinations: [
+          {
+            destination: { kind: "account", id: BOB.account_id },
+            label: BOB.name,
+          },
+          {
+            destination: { kind: "channel", id: CHANNEL.channel_id },
+            label: CHANNEL.name,
+          },
+        ],
+        instructions_path: "/home/tester/.codex/AGENTS.md",
+        instructions: "",
+        error: null,
       };
       let nativeLocked = false;
       let attachmentGlobalAuto = false;
@@ -668,6 +790,19 @@ export const test = base.extend({
       const probedEndpoints: string[] = [];
       (window as unknown as Record<string, unknown>).__mockProbedEndpoints =
         probedEndpoints;
+      let deferredCommand: string | null = null;
+      let releaseCommand: (() => void) | null = null;
+      let deferredBarrier: Promise<void> | null = null;
+      (window as unknown as Record<string, unknown>).__mockDeferNext = (
+        command: string,
+      ) => {
+        deferredCommand = command;
+        deferredBarrier = new Promise<void>((resolve) => {
+          releaseCommand = resolve;
+        });
+      };
+      (window as unknown as Record<string, unknown>).__mockReleaseDeferred =
+        () => releaseCommand?.();
       let failNextCommand: string | null = null;
       let failNextMessage = "network unreachable";
       (window as unknown as Record<string, unknown>).__mockFailNext = (
@@ -710,6 +845,127 @@ export const test = base.extend({
       ) => {
         (delivery[account] ||= {})[id] = status;
       };
+      // Browser fixture only: account namespaces and CAS mirror the IPC contract;
+      // signatures, encrypted persistence and sibling transport are tested natively.
+      type MockDocument = { meta: AccountDocumentMeta; payload: string };
+      const documentCache = new Map<string, Record<string, MockDocument>>();
+      const documentScope = (args: Record<string, unknown>) => {
+        if (args.owner !== "u_self" || args.expectedAccount !== SELF.account)
+          throw new Error("Account changed");
+        return `${args.owner}:${args.expectedAccount}`;
+      };
+      const documents = (args: Record<string, unknown>) => {
+        const scope = documentScope(args);
+        let rows = documentCache.get(scope);
+        if (!rows) {
+          rows = JSON.parse(
+            localStorage.getItem(`mock-account-documents-${scope}`) ?? "{}",
+          );
+          documentCache.set(scope, rows!);
+        }
+        return rows!;
+      };
+      const persistDocuments = (args: Record<string, unknown>) => {
+        try {
+          localStorage.setItem(
+            `mock-account-documents-${documentScope(args)}`,
+            JSON.stringify(documents(args)),
+          );
+        } catch {
+          /* Large browser-only assets may exceed localStorage quota. */
+        }
+      };
+      const version = (meta: AccountDocumentMeta): DocumentVersion => ({
+        revision: meta.revision,
+        writer_device: meta.writer_device,
+        content_hash: meta.content_hash,
+      });
+      const matchesVersion = (
+        meta: AccountDocumentMeta,
+        expected: DocumentVersion | null,
+      ) =>
+        expected !== null &&
+        meta.revision === expected.revision &&
+        meta.writer_device === expected.writer_device &&
+        JSON.stringify(meta.content_hash) ===
+          JSON.stringify(expected.content_hash);
+      const writeDocument = (
+        args: Record<string, unknown>,
+        key: AccountDocumentKey,
+        payload: string,
+        expected: DocumentVersion | null,
+        tombstone = false,
+      ) => {
+        const rows = documents(args),
+          token = JSON.stringify(key),
+          old = rows[token];
+        if (old ? !matchesVersion(old.meta, expected) : expected !== null)
+          throw new Error("Document changed");
+        const revision =
+          Math.max(0, ...Object.values(rows).map((row) => row.meta.revision)) +
+          1;
+        const body = tombstone ? "" : payload;
+        const meta: AccountDocumentMeta = {
+          key,
+          revision,
+          writer_device: SELF.device,
+          content_hash: Array.from({ length: 32 }, (_, index) =>
+            tombstone ? 0 : (revision + index) % 256,
+          ),
+          content_len: atob(body).length,
+          tombstone,
+        };
+        rows[token] = { meta, payload: body };
+        persistDocuments(args);
+        return structuredClone(meta);
+      };
+      const snapshotDrafts = (args: Record<string, unknown>) => {
+        const drafts: Record<string, string> = {},
+          protections: Record<string, string> = {},
+          versions: Record<string, DocumentVersion> = {};
+        for (const { meta, payload } of Object.values(documents(args))) {
+          if (meta.key.kind !== "draft") continue;
+          const target = meta.key.conversation,
+            key = `${target.kind}:${target.id}`;
+          versions[key] = version(meta);
+          if (meta.tombstone) continue;
+          const value = JSON.parse(
+            new TextDecoder().decode(
+              Uint8Array.from(atob(payload), (character) =>
+                character.charCodeAt(0),
+              ),
+            ),
+          ) as { text: string; protection?: string | null };
+          if (value.text) drafts[key] = value.text;
+          if (value.protection) protections[key] = value.protection;
+        }
+        const snapshot = {
+          session: `mock-drafts-session:${documentScope(args)}`,
+          account_id: SELF.account,
+          drafts,
+          protections,
+          versions,
+          conflicts: [] as string[],
+        };
+        localStorage.setItem(
+          `mock-drafts-${documentScope(args)}`,
+          JSON.stringify(snapshot),
+        );
+        return snapshot;
+      };
+      const draftKey = (key: string): AccountDocumentKey => {
+        const [kind, ...parts] = key.split(":");
+        if (kind !== "account" && kind !== "channel")
+          throw new Error("Invalid draft conversation");
+        return { kind: "draft", conversation: { kind, id: parts.join(":") } };
+      };
+      const encodedDraft = (value: unknown) =>
+        btoa(
+          Array.from(new TextEncoder().encode(JSON.stringify(value)), (byte) =>
+            String.fromCharCode(byte),
+          ).join(""),
+        );
+
       const responses: Record<string, (a: Record<string, unknown>) => unknown> =
         {
           owner_node_identity: (a) => ({
@@ -717,6 +973,34 @@ export const test = base.extend({
             device_id: SELF.device,
             account_id: SELF.account,
           }),
+          owner_reveal_image: (a) => {
+            const reference = a.reference as { message_id: string };
+            if (!protectedModes[reference.message_id])
+              throw new Error("Image unavailable");
+            if (
+              protectedModes[reference.message_id] === "authenticate" &&
+              a.password !== "password123"
+            )
+              throw new Error("Verification failed");
+            return (
+              (window as unknown as { __lastWrittenFileBytes?: number[] })
+                .__lastWrittenFileBytes ??
+              Array.from(atob(TINY_PNG.split(",")[1]), (char) =>
+                char.charCodeAt(0),
+              )
+            );
+          },
+          owner_reveal_message: (a) => {
+            const reference = a.reference as { message_id: string };
+            const text = protectedBodies[reference.message_id];
+            if (
+              protectedModes[reference.message_id] === "authenticate" &&
+              a.password !== "password123"
+            )
+              throw new Error("Verification cancelled or failed");
+            if (text === undefined) throw new Error("Message unavailable");
+            return { text, visible_for_ms: 30000 };
+          },
           owner_account_history: (a) =>
             (msgs[`acc:${a.account}`] ?? []).slice(-Number(a.limit ?? 200)),
           owner_delivery_statuses: (a) =>
@@ -731,6 +1015,14 @@ export const test = base.extend({
               a.replyTo,
               a.expiresAtMs as number | null | undefined,
             );
+            if (a.protection) {
+              const row =
+                msgs[`ch:${a.channelId}`][msgs[`ch:${a.channelId}`].length - 1];
+              protectedBodies[row.id!] = row.text;
+              protectedModes[row.id!] = String(a.protection);
+              row.text = "";
+              row.protection = a.protection as "click" | "authenticate";
+            }
             return msgs[`ch:${a.channelId}`][
               msgs[`ch:${a.channelId}`].length - 1
             ].id;
@@ -748,17 +1040,19 @@ export const test = base.extend({
           owner_enqueue_channel_file: (a) => {
             const fileConv = `fc_${++mid}`;
             const row = msg({
+              protection: a.protection as "click" | "authenticate" | undefined,
               from_me: true,
               who: SELF.device,
               file: {
                 name: String(a.path).split(/[\\/]/).pop() || "file",
                 size: 123,
-                mime: "application/octet-stream",
+                mime: a.protection ? "image/png" : "application/octet-stream",
                 file_conv: fileConv,
                 media: Boolean(a.media),
               },
             });
             (msgs[`ch:${a.channelId}`] ||= []).push(row);
+            if (a.protection) protectedModes[row.id!] = String(a.protection);
             return { id: row.id, fileConv };
           },
           channel_custody_statuses: (a) =>
@@ -774,6 +1068,14 @@ export const test = base.extend({
               a.replyTo,
               a.expiresAtMs as number | null | undefined,
             );
+            if (a.protection) {
+              const row =
+                msgs[`acc:${a.account}`][msgs[`acc:${a.account}`].length - 1];
+              protectedBodies[row.id!] = row.text;
+              protectedModes[row.id!] = String(a.protection);
+              row.text = "";
+              row.protection = a.protection as "click" | "authenticate";
+            }
             return acceptLast(String(a.account));
           },
           owner_enqueue_sticker: (a) => {
@@ -788,17 +1090,25 @@ export const test = base.extend({
             const fileConv = `fc_${++mid}`;
             (msgs[`acc:${a.account}`] ||= []).push(
               msg({
+                protection: a.protection as
+                  "click" | "authenticate" | undefined,
                 from_me: true,
                 who: SELF.device,
                 file: {
                   name: String(a.path).split(/[\\/]/).pop() || "file",
                   size: 123,
-                  mime: "application/octet-stream",
+                  mime: a.protection ? "image/png" : "application/octet-stream",
                   file_conv: fileConv,
                   media: Boolean(a.media),
                 },
               }),
             );
+            if (a.protection)
+              protectedModes[
+                msgs[`acc:${a.account}`][
+                  msgs[`acc:${a.account}`].length - 1
+                ].id!
+              ] = String(a.protection);
             return { id: acceptLast(String(a.account)), fileConv };
           },
           // auth
@@ -858,7 +1168,10 @@ export const test = base.extend({
           list_channels: () => channels.map((channel) => ({ ...channel })),
           // The test user (SELF) is the channel owner, so the member-management controls
           // (add/remove) stay visible to the existing e2e flow.
-          channel_members: () => ({
+          channel_members: (a) => ({
+            history_policy:
+              channelHistoryPolicies[String(a.channelId)] ??
+              "last_ten_within_three_days",
             owner: channelOwner,
             members: channelMembers,
           }),
@@ -939,8 +1252,18 @@ export const test = base.extend({
 
           // channels
           create_channel: () => "chan_new_eeee5555",
+          set_channel_history_policy: (a) => {
+            if (channelOwner !== SELF.device)
+              throw new Error(
+                "Only the channel owner may change history policy",
+              );
+            channelHistoryPolicies[String(a.channelId)] =
+              a.policy as ChannelHistoryPolicy;
+            return null;
+          },
           add_channel_member: ok,
           remove_channel_member: ok,
+          remove_channel_account_members: ok,
           dissolve_channel: () => {
             channels[0].dissolved = true;
             return null;
@@ -1144,7 +1467,7 @@ export const test = base.extend({
             const index = rows.findIndex(
               (row) => row.id === reference.message_id,
             );
-            return {
+            const response = {
               status: index >= 0 ? "found" : "unavailable",
               reference,
               messages:
@@ -1153,6 +1476,13 @@ export const test = base.extend({
                   : [],
               newer_entries: index >= 0 ? rows.length - index - 1 : null,
             };
+            if (dataMode === "favorites-delayed-context")
+              return new Promise((resolve) => {
+                (
+                  window as unknown as { __releaseFavoriteContext?: () => void }
+                ).__releaseFavoriteContext = () => resolve(response);
+              });
+            return response;
           },
           // search
           search: (a) => {
@@ -1227,6 +1557,12 @@ export const test = base.extend({
                 '{"history":true,"attachments":false,"profile":true,"appearance":false,"contacts":false}',
             ),
           get_device_sync_status: () => [],
+          get_account_login_sync_status: () => ({
+            account_id: SELF.account,
+            available_revision: null,
+            applied_revision: null,
+            devices: [],
+          }),
           set_device_sync_category: (a) => {
             if (
               ![
@@ -1258,6 +1594,16 @@ export const test = base.extend({
                 `mock-account-preferences-${SELF.device}-${String(a.category)}`,
               ) ?? "[]",
             ),
+          seed_account_preference: (a) => {
+            documentScope(a);
+            const rows = responses.get_account_preferences(a) as Array<
+              Record<string, unknown>
+            >;
+            return (
+              rows.find((row) => row.key === a.key) ??
+              responses.set_account_preference(a)
+            );
+          },
           set_account_preference: (a) => {
             const key = `mock-account-preferences-${SELF.device}-${String(a.category)}`;
             const rows = JSON.parse(localStorage.getItem(key) ?? "[]") as Array<
@@ -1339,6 +1685,148 @@ export const test = base.extend({
             localStorage.setItem(key, JSON.stringify(next));
             return { owner: String(a.owner), contacts: next };
           },
+          owner_inspect_message_favorites: (a) => {
+            const source = a.source as FavoriteSource;
+            const items = Object.values(
+              messageCollections[String(a.owner)] ?? {},
+            ).filter(
+              (item) =>
+                item.source.kind === source.kind &&
+                item.source.target === source.target,
+            );
+            return {
+              existing: structuredClone(
+                items.find(
+                  (item) =>
+                    item.source.message_ids.length ===
+                      new Set(source.message_ids).size &&
+                    item.source.message_ids.every((id) =>
+                      source.message_ids.includes(id),
+                    ),
+                ) ?? null,
+              ),
+              saved_message_ids: [
+                ...new Set(items.flatMap((item) => item.source.message_ids)),
+              ].filter((id) => source.message_ids.includes(id)),
+            };
+          },
+          owner_favorite_file_available: (a) => retainedFileAuthorized(a),
+          owner_read_favorite_file: async (a) => {
+            if (!retainedFileAuthorized(a))
+              throw new Error("Favorite file unavailable");
+            const bytes = new Uint8Array(favoriteAttachment!.bytes).buffer;
+            if (dataMode === "favorites-attachment-delayed-read")
+              await new Promise<void>((resolve) => {
+                favoriteAttachment!.releaseRead = resolve;
+              });
+            // Native read commands return raw IPC bytes, not a JSON array.
+            return bytes;
+          },
+          owner_save_favorite_file: (a) => {
+            if (!retainedFileAuthorized(a))
+              throw new Error("Favorite file unavailable");
+            const path = String(a.dest);
+            favoriteAttachment!.saved.push({
+              path,
+              bytes: [...favoriteAttachment!.bytes],
+            });
+            return path;
+          },
+          owner_list_message_favorites: (a) => {
+            const q = String(a.query ?? "")
+              .trim()
+              .toLowerCase();
+            const items = Object.values(
+              messageCollections[String(a.owner)] ?? {},
+            )
+              .filter((item) =>
+                [
+                  item.metadata.title,
+                  item.metadata.description,
+                  item.source_label,
+                  ...Object.values(item.metadata.notes),
+                  ...item.messages.flatMap((message) => [
+                    message.text,
+                    message.sender_name,
+                    message.file?.name ?? "",
+                  ]),
+                ].some((value) => value.toLowerCase().includes(q)),
+              )
+              .sort((a, b) => b.saved_at_ms - a.saved_at_ms);
+            const offset = Number(a.offset ?? 0),
+              limit = Number(a.limit ?? 20);
+            return {
+              items: items.slice(offset, offset + limit),
+              has_more: items.length > offset + limit,
+            };
+          },
+          owner_save_message_favorite: (a) => {
+            if (dataMode === "favorites-write-fail")
+              throw new Error("disk full");
+            const source = a.source as FavoriteSource;
+            const metadata = a.metadata as FavoriteMetadata;
+            const key =
+              source.kind === "channel"
+                ? `ch:${source.target}`
+                : `acc:${source.target}`;
+            const selected = (msgs[key] ?? []).filter((message) =>
+              source.message_ids.includes(message.id!),
+            );
+            if (selected.length !== source.message_ids.length)
+              throw new Error("Message unavailable");
+            const canonical = {
+              ...source,
+              message_ids: selected.map((message) => message.id!),
+            };
+            const id = `${source.kind}:${source.target}:${canonical.message_ids.join(":")}`;
+            const collection = (messageCollections[String(a.owner)] ??= {});
+            if (collection[id]) return structuredClone(collection[id]);
+            const item: MessageFavorite = {
+              id,
+              source: canonical,
+              source_label: source.kind === "channel" ? CHANNEL.name : BOB.name,
+              metadata: structuredClone(metadata),
+              messages: selected.map((message) => ({
+                id: message.id!,
+                who: message.who,
+                sender_name: message.from_me ? "Me" : BOB.name,
+                text: message.text,
+                wall_clock: message.wall_clock,
+                expires_at_ms: message.expires_at_ms ?? null,
+                sticker: message.sticker ?? null,
+                file: message.file ?? null,
+              })),
+              saved_at_ms: Date.now(),
+              revision: ++collectionRevision,
+              device_id: SELF.device,
+            };
+            collection[id] = item;
+            return structuredClone(item);
+          },
+          owner_edit_message_favorite: (a) => {
+            const item = messageCollections[String(a.owner)]?.[String(a.id)];
+            if (
+              !item ||
+              item.revision !== a.expectedRevision ||
+              item.device_id !== a.expectedDeviceId
+            )
+              throw new Error("Favorite was modified; refresh and retry");
+            item.metadata = structuredClone(a.metadata as FavoriteMetadata);
+            item.revision = ++collectionRevision;
+            return structuredClone(item);
+          },
+          owner_remove_message_favorite: (a) => {
+            const collection = messageCollections[String(a.owner)] ?? {};
+            const item = collection[String(a.id)];
+            if (
+              !item ||
+              item.revision !== a.expectedRevision ||
+              item.device_id !== a.expectedDeviceId
+            )
+              throw new Error("Favorite was modified; refresh and retry");
+            delete collection[item.id];
+            return null;
+          },
           get_favorites: () => Object.values(favorites),
           set_favorite: (a) => {
             const id = String(a.id);
@@ -1398,7 +1886,10 @@ export const test = base.extend({
           },
           // avatars peers propagated to us (none in the mock); publishing is a no-op
           peer_avatars: () => receivedAvatars,
-          publish_avatar: ok,
+          publish_avatar: (args) => {
+            documentScope(args);
+            return null;
+          },
 
           // persistent login: no saved session in the mock → show the login screen
           auto_login: () => null,
@@ -1438,20 +1929,176 @@ export const test = base.extend({
             can_open_settings: true,
           }),
           open_notification_settings: () => null,
+          get_local_agent_access: () => localAgentAccess,
+          set_local_agent_access: (a) => {
+            const destinations = a.destinations as {
+              kind: string;
+              id: string;
+            }[];
+            if (a.enabled && destinations.length === 0)
+              throw new Error("Select a conversation");
+            Object.assign(localAgentAccess, {
+              enabled: a.enabled,
+              running: a.enabled,
+              destinations,
+              instructions: a.enabled
+                ? 'Mesh Talk local API: "http://127.0.0.1:12345/v1/help".\nRead this help URL before using the API for user-authorized tasks.\nThe desktop app must be running and unlocked, with agent access enabled.\n'
+                : "",
+            });
+            return localAgentAccess;
+          },
           get_app_settings: () => appSettings,
-          // Browser-only persistence stand-in; production drafts use encrypted native storage.
-          load_conversation_drafts: (a) => ({
-            session: "mock-drafts-session",
-            drafts: JSON.parse(
-              localStorage.getItem(`mock-drafts-${a.owner}`) ?? "{}",
-            ),
-          }),
+          reconcile_account_settings: () => appSettings,
+          load_conversation_drafts: snapshotDrafts,
           save_conversation_drafts: (a) => {
-            localStorage.setItem(
-              `mock-drafts-${a.owner}`,
-              JSON.stringify(a.drafts),
-            );
+            if (a.session !== `mock-drafts-session:${documentScope(a)}`)
+              throw new Error("Draft writer retired");
+            const changes = a.changes as Record<
+              string,
+              {
+                text: string;
+                protection?: string;
+                expected: DocumentVersion | null;
+              }
+            >;
+            const conflicts: string[] = [];
+            for (const [key, change] of Object.entries(changes)) {
+              try {
+                writeDocument(
+                  a,
+                  draftKey(key),
+                  encodedDraft({
+                    text: change.text,
+                    protection: change.protection,
+                  }),
+                  change.expected,
+                  !change.text && !change.protection,
+                );
+              } catch {
+                conflicts.push(key);
+              }
+            }
+            return { ...snapshotDrafts(a), conflicts };
+          },
+          publish_legacy_account_controls: (a) => {
+            documentScope(a);
+            // This fixture has no historical reaction or recall controls to import.
             return null;
+          },
+          publish_legacy_conversation_drafts: (a) => {
+            documentScope(a);
+            const legacy = JSON.parse(
+              localStorage.getItem(`mock-drafts-${a.owner}`) ?? "{}",
+            );
+            const texts = (legacy.drafts ?? legacy) as Record<string, string>,
+              protections = (legacy.protections ?? {}) as Record<
+                string,
+                string
+              >;
+            let imported = 0,
+              unmapped = 0;
+            for (const key of new Set([
+              ...Object.keys(texts),
+              ...Object.keys(protections),
+            ])) {
+              const documentKey = draftKey(key);
+              if (documents(a)[JSON.stringify(documentKey)]) continue;
+              if (documentKey.kind !== "draft") continue;
+              const target = documentKey.conversation;
+              if (
+                target.kind === "account"
+                  ? ![SELF.account, BOB.account_id, CAROL.account_id].includes(
+                      target.id,
+                    )
+                  : target.id !== CHANNEL.channel_id
+              ) {
+                unmapped++;
+                continue;
+              }
+              writeDocument(
+                a,
+                documentKey,
+                encodedDraft({
+                  text: texts[key] ?? "",
+                  protection: protections[key],
+                }),
+                null,
+              );
+              imported++;
+            }
+            return { imported, unmapped };
+          },
+          get_account_documents: (a) => {
+            const items = Object.values(documents(a))
+              .map((row) => row.meta)
+              .filter((meta) => meta.key.kind === a.domain)
+              .sort((left, right) =>
+                JSON.stringify(left.key).localeCompare(
+                  JSON.stringify(right.key),
+                ),
+              );
+            const after = a.after ? JSON.stringify(a.after) : null;
+            const remaining = after
+              ? items.filter(
+                  (meta) => JSON.stringify(meta.key).localeCompare(after) > 0,
+                )
+              : items;
+            const limit = Math.min(64, Math.max(1, Number(a.limit) || 64));
+            const selected = remaining.slice(0, limit);
+            return {
+              items: structuredClone(selected),
+              next:
+                remaining.length > limit
+                  ? selected[selected.length - 1].key
+                  : null,
+              digest: Array.from(
+                { length: 32 },
+                (_, index) => (items.length + index) % 256,
+              ),
+            };
+          },
+          get_account_document_meta: (a) =>
+            structuredClone(documents(a)[JSON.stringify(a.key)]?.meta ?? null),
+          read_account_document: (a) => {
+            const row = documents(a)[JSON.stringify(a.key)];
+            if (
+              !row ||
+              row.meta.tombstone ||
+              !matchesVersion(row.meta, a.expected as DocumentVersion)
+            )
+              throw new Error("Document changed");
+            return Array.from(atob(row.payload), (character) =>
+              character.charCodeAt(0),
+            );
+          },
+          put_account_document: (a) =>
+            writeDocument(
+              a,
+              a.key as AccountDocumentKey,
+              String(a.payloadBase64),
+              a.expected as DocumentVersion | null,
+            ),
+          remove_account_document: (a) =>
+            writeDocument(
+              a,
+              a.key as AccountDocumentKey,
+              "",
+              a.expected as DocumentVersion | null,
+              true,
+            ),
+          mark_account_message_seen: (a) => {
+            const key: AccountDocumentKey = {
+              kind: "read_receipt",
+              conversation: a.conversation as Extract<
+                AccountDocumentKey,
+                { kind: "draft" }
+              >["conversation"],
+              message_id: String(a.messageId),
+            };
+            return structuredClone(
+              documents(a)[JSON.stringify(key)]?.meta ??
+                writeDocument(a, key, "", null),
+            );
           },
           set_app_settings: (a) => {
             Object.assign(appSettings, (a.settings as object) ?? {});
@@ -1485,6 +2132,16 @@ export const test = base.extend({
 
           // Privacy has dedicated canonical-account scenarios in privacy.spec.ts.
           // Legacy roster fixtures use synthetic IDs, so keep this default empty.
+          get_account_binding_changes: (a) => ({
+            owner: String(a.owner),
+            changes: [],
+          }),
+          accept_account_binding_change: (a) => ({
+            owner: String(a.owner),
+            version: 1,
+            invisible: false,
+            allowed_accounts: [],
+          }),
           get_privacy: (a) => ({
             owner: String(a.owner),
             version: 1,
@@ -1591,6 +2248,27 @@ export const test = base.extend({
             return id;
           },
           async invoke(cmd: string, args: Record<string, unknown>) {
+            if (cmd === deferredCommand) {
+              deferredCommand = null;
+              await deferredBarrier;
+            }
+            if (
+              favoriteAttachment &&
+              /^(owner_.*favorite|read_media$|read_file$|save_file|plugin:dialog\|save$)/.test(
+                cmd,
+              )
+            )
+              favoriteAttachment.calls.push({
+                command: cmd,
+                args: structuredClone(args ?? {}),
+              });
+            if (favoriteAttachment && cmd === "plugin:dialog|save") {
+              if (dataMode === "favorites-attachment-delayed-dialog")
+                await new Promise<void>((resolve) => {
+                  favoriteAttachment!.releaseSaveDialog = resolve;
+                });
+              return "/home/tester/Downloads/field-photo.png";
+            }
             if (cmd === failNextCommand) {
               failNextCommand = null;
               throw new Error(failNextMessage);

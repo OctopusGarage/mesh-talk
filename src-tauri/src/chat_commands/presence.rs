@@ -13,6 +13,8 @@ pub struct PresenceEvidence {
     last_seen_secs: u64,
     expires_in_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    origin_hops: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     post_office: Option<PresencePostOffice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     registration_origin: Option<PresenceRegistrationOrigin>,
@@ -134,6 +136,7 @@ fn add_peer_with_sources(
                             .saturating_sub(wall_now)
                             .as_secs_f64(),
                     }),
+                origin_hops: route.origin_hops,
                 post_office: (route.source == RouteSource::PostOffice).then(|| {
                     offices
                         .get(&route.addr)
@@ -228,6 +231,7 @@ fn add_self(out: &mut HashMap<String, PresenceInfo>, account_id: String, user_id
             source: "self",
             last_seen_secs: 0,
             expires_in_secs: lease,
+            origin_hops: None,
             post_office: None,
             registration_origin: None,
         }],
@@ -291,30 +295,12 @@ pub async fn get_presence(
         }
     }
     for channel in rt.list_channels() {
-        let pending: HashSet<_> = rt.channel_pending_members(channel.id).into_iter().collect();
-        let mut accounts = HashSet::new();
-        let mut unbound = HashSet::new();
-        for device in rt.channel_members(channel.id) {
-            let id = device.user_id();
-            if pending.contains(&id) || node.device_is_post_office(&device) {
-                continue;
-            }
-            let account = if id == rt.user_id() {
-                Some(rt.account_id().to_owned())
-            } else {
-                rt.account_id_for_device(&device)
-            };
-            if let Some(account) = account {
-                accounts.insert(account);
-            } else {
-                unbound.insert(id);
-            }
-        }
+        let (accounts, unbound) = node.channel_member_account_sets(channel.id);
         add_group(
             &mut out,
             hex::encode(channel.id.as_bytes()),
-            accounts,
-            unbound,
+            accounts.into_iter().collect(),
+            unbound.into_iter().collect(),
         );
     }
     Ok(out)
@@ -456,6 +442,7 @@ mod tests {
             route.source = RouteSource::PostOffice;
             route.addr = office.addr;
             route.presence_expires_at = Some(now + std::time::Duration::from_secs(lifetime));
+            route.origin_hops = Some(index - 3);
             peer.routes.push(route);
             offices.push(office);
         }
@@ -464,6 +451,9 @@ mod tests {
         let json = serde_json::to_value(&out[&account.account_id()]).unwrap();
         let evidence = json["devices"][0]["evidence"].as_array().unwrap();
         assert_eq!(evidence.len(), 3);
+        assert!(evidence[0].get("origin_hops").is_none());
+        assert_eq!(evidence[1]["origin_hops"], 0);
+        assert_eq!(evidence[2]["origin_hops"], 1);
         assert!(evidence[0].get("post_office").is_none());
         assert_eq!(evidence[1]["post_office"]["name"], "mac-mini-post-office");
         assert_eq!(

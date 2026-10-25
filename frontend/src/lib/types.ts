@@ -1,9 +1,11 @@
+export type MessageProtection = "click" | "authenticate";
+
 // TypeScript mirrors of the Rust IPC structs (serde serializes field names as-is,
 // so these are snake_case). Keep in sync with src-tauri/src/chat_commands.rs + events.rs.
 
 export interface UserInfo {
   id: string;
-  /** The immutable login handle. */
+  /** The canonical account login name. */
   username: string;
   /** The editable, peer-facing display name (nickname). Equals `username` until changed. */
   display_name: string;
@@ -48,6 +50,7 @@ export interface HistoryFileInfo {
 }
 
 export interface HistoryItem {
+  protection?: MessageProtection | null;
   expires_at_ms?: number | null;
   id: string | null; // null when there is no stable event id yet
   from_me: boolean;
@@ -97,10 +100,16 @@ export interface ChannelActivityInfo {
   wall_clock: number;
 }
 
-// A channel's membership plus its owner. The owner is the only principal allowed to
-// change membership (enforced in core) — the UI shows the owner badge and reveals the
-// add/remove controls only to the owner.
+// Channel membership and native owner-account authority. Legacy owner device IDs
+// remain available for compatibility; roster identity never grants management rights.
+export type ChannelHistoryPolicy =
+  "off" | "last_ten" | "last_three_days" | "last_ten_within_three_days";
+
 export interface ChannelMembersInfo {
+  /** Native authorization for the current certified device/account. */
+  can_manage?: boolean;
+  owner_account_id?: string | null;
+  history_policy: ChannelHistoryPolicy;
   owner: string;
   members: ChannelMemberInfo[];
 }
@@ -128,12 +137,18 @@ export interface ChannelRecovery {
   checked_at?: number | null;
 }
 export interface ChannelInfo {
+  /** Informational account inventory; never grants membership or management. */
+  shared_reference?: boolean;
+  legacy_membership?: boolean;
+  reference_members_complete?: boolean;
+  /** Native authorization; false overrides legacy device ownership. */
+  can_manage?: boolean;
+  owner_account_id?: string | null;
   recovery?: ChannelRecovery | null;
   channel_id: string;
   name: string;
   member_count: number;
-  // The owner's device user_id. Only the owner may rename the channel (synced to all
-  // members); non-owners fall back to a local-only alias.
+  // Legacy signed owner device user_id. Use can_manage for current account rights.
   owner: string;
   archived?: boolean;
   dissolved?: boolean;
@@ -183,6 +198,8 @@ export interface PresenceEvidence {
     "local" | "routed" | "directory" | "authenticated" | "unscoped" | "self";
   last_seen_secs: number;
   expires_in_secs: number;
+  /** Trusted directory distance from direct registration; absent for legacy relays. */
+  origin_hops?: number;
   /** Immediate introducing office, not the member's location or a delivery path. */
   post_office?: {
     endpoint: string;
@@ -339,6 +356,7 @@ export interface FavoriteInfo {
 // --- Tauri events (src-tauri/src/events.rs) ---
 
 export interface DmReceivedEvent {
+  protection?: MessageProtection | null;
   /** Logical account message ID, matching history; legacy hosts may omit it. */
   message_id?: string | null;
   /** Account binding verified by the core, independent of roster arrival order. */
@@ -364,6 +382,7 @@ export interface ReceptionMetadata {
 }
 
 export interface ChannelMessageEvent extends ReceptionMetadata {
+  protection?: MessageProtection | null;
   channel_id: string;
   channel_name: string;
   from: string;
@@ -379,6 +398,7 @@ export interface IntegrationMessageAcceptedEvent {
 }
 
 export interface FileReceivedEvent extends ReceptionMetadata {
+  protection?: MessageProtection | null;
   expires_at_ms?: number | null;
   conv: string;
   is_channel: boolean; // emitted by the same installed native app, not over the network

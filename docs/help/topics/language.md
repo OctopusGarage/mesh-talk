@@ -17,11 +17,11 @@ On first use, the app chooses the first supported system/browser language, then
 falls back to English. Portuguese regional tags select the single **Português** option; Korean regional
 tags select **한국어**.
 
-The desktop app, website, recovery page and current/versioned online help use the
+The desktop app, website, page-not-found screen and current/versioned online help use the
 same fixed selector order: English, Español, Português, 日本語, 한국어, 简体中文,
 繁體中文, 粵語. English comes first, followed by Latin-script languages, Japanese,
 Korean and the Chinese choices.
-Their preference is separate from the desktop app: a shared `lang` URL takes
+Website language preferences are separate from the desktop app: a shared `lang` URL takes
 precedence over a saved website choice and browser preferences. Automatic browser
 detection does not save a fixed website preference; choosing a language or opening
 an explicit language URL does. Native language names carry their own language tags

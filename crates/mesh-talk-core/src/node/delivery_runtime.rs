@@ -944,8 +944,44 @@ impl Node {
                         true,
                         false,
                     )),
+                    DeliveryTransaction::ChannelOutgoing { events, sent, .. }
+                        if events.last().is_some_and(|event| {
+                            event.kind == crate::eventlog::EventKind::FileManifest
+                        }) =>
+                    {
+                        Some((
+                            self.identity.public(),
+                            sent.conversation,
+                            super::received_log::ReceivedEntry {
+                                event_id: tx.id(),
+                                conversation: sent.conversation,
+                                from: self.user_id(),
+                                wall_clock: sent.wall_clock,
+                                plaintext: sent.plaintext.clone(),
+                            },
+                            true,
+                            false,
+                        ))
+                    }
                     _ => None,
                 });
+            // Channel manifests already carry their complete plaintext in the WAL.
+            // Retain their signed chunk scope before retiring that transaction; a
+            // failed scope/sidecar write remains recoverable after acceptance.
+            if let Some((_, channel, entry, true, false)) = &notification
+                && matches!(
+                    store.pending_transactions().first().map(|tx| tx.body()),
+                    Some(DeliveryTransaction::ChannelOutgoing { .. })
+                )
+                && let Some(manifest) = crate::file::decode_manifest(&entry.plaintext)
+            {
+                self.remember_sent_manifest_scope(
+                    manifest.file_conv(),
+                    *channel,
+                    crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub),
+                    entry.event_id,
+                )?;
+            }
             let wake_local =
                 store
                     .pending_transactions()
@@ -1069,11 +1105,16 @@ impl Node {
                                 .insert(manifest.file_conv());
                             if !self.certified_sibling(&sender) {
                                 let _ = self.file_incoming.send(ReceivedFile {
+                                    protection: manifest.protection(),
                                     expires_at_ms: crate::expiry::deadline(&entry.plaintext),
                                     conv: original_conv,
                                     is_channel: false,
                                     from: sender.user_id(),
-                                    name: manifest.name().to_owned(),
+                                    name: if manifest.protection().is_some() {
+                                        "Protected image".into()
+                                    } else {
+                                        manifest.name().to_owned()
+                                    },
                                     size: manifest.size(),
                                     mime: manifest.mime().to_owned(),
                                     file_conv: manifest.file_conv(),
@@ -1116,6 +1157,7 @@ impl Node {
                             from: sender.user_id(),
                             from_name,
                             text: body.text,
+                            protection: body.protection,
                             reply_to: body.reply_to,
                         });
                     }
@@ -1638,9 +1680,16 @@ impl Node {
             .relay_drain_cursor
             .lock()
             .expect("relay cursor lock not poisoned");
-        let offset = cursors.get(scope).copied().unwrap_or(0) % candidates.len();
-        candidates.rotate_left(offset);
-        let next = offset.wrapping_add(candidates.len().min(4));
+        // Always retain the current best candidate; rotate alternatives so cold
+        // and recovered paths are sampled without delaying a healthy fast route.
+        let alternatives = candidates.len().saturating_sub(1);
+        let offset = if alternatives == 0 {
+            0
+        } else {
+            cursors.get(scope).copied().unwrap_or(0) % alternatives
+        };
+        candidates[1..].rotate_left(offset);
+        let next = offset.wrapping_add(alternatives.min(3));
         if cursors.len() >= MAX_RELAY_CUSTODY_HINTS
             && !cursors.contains_key(scope)
             && let Some(key) = cursors.keys().next().cloned()
@@ -3176,6 +3225,10 @@ mod diagnostic_tests {
         assert!(!first.iter().any(|peer| peer.public == tail));
         let second = node.relay_candidate_batch("pull:peer", candidates.clone());
         assert_eq!(second.len(), 4);
+        assert_eq!(
+            second[0].public, first[0].public,
+            "keep the best candidate in every batch"
+        );
         let third = node.relay_candidate_batch("pull:peer", candidates);
         assert!(
             third.iter().any(|peer| peer.public == tail),
@@ -3185,6 +3238,33 @@ mod diagnostic_tests {
         assert_eq!(
             node.relay_candidate_batch("upload:peer", first.clone())[0].public,
             first[0].public
+        );
+        let candidates = node.post_office_candidates(&node.roster.lock().unwrap());
+        let fastest = candidates.last().unwrap();
+        for relay in &candidates {
+            node.sessions.control_succeeded(
+                &relay.public,
+                relay.addr,
+                std::time::Duration::from_millis(if relay.public == fastest.public {
+                    10
+                } else {
+                    900
+                }),
+            );
+        }
+        assert_eq!(
+            node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+            fastest.public
+        );
+        node.record_relay_attempt(&fastest.public, false);
+        assert_ne!(
+            node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+            fastest.public
+        );
+        node.record_relay_attempt(&fastest.public, true);
+        assert_eq!(
+            node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+            fastest.public
         );
     }
 

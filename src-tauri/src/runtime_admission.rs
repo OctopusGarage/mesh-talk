@@ -97,6 +97,28 @@ impl RuntimeAdmission {
         &self.lease
     }
 
+    /// Atomically update private session metadata under the exact runtime installation.
+    pub(crate) fn update_session<T>(
+        &self,
+        runtime: &NodeRuntime,
+        operation: impl FnOnce(&mut crate::state::SessionInfo) -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        self.app
+            .session()
+            .matching(&self.lease, |info| {
+                self.node.check_installation(&self.lease)?;
+                if runtime.host_account_id() != Some(self.lease.owner())
+                    || self.app.app_lock().is_locked()
+                {
+                    return Err(CommandError::Authorization(
+                        "runtime session unavailable".into(),
+                    ));
+                }
+                operation(info)
+            })
+            .map_err(CommandError::Authorization)?
+    }
+
     /// Enclose a synchronous operation in current installation and session authority.
     pub(crate) fn checked<T>(
         &self,
@@ -213,6 +235,7 @@ mod integration_lease_tests {
         ));
         let user = crate::services::user::User {
             user_id: "integration-owner".into(),
+            account_login_name: None,
             name: "integration".into(),
             display_name: "Integration".into(),
             address: "local".into(),

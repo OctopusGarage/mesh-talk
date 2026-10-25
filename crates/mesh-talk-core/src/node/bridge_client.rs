@@ -464,6 +464,12 @@ impl Node {
                         expiry.expires_at,
                         expiry.origin_secs,
                     );
+                    roster.set_directory_origin_hops(
+                        id,
+                        relay.addr,
+                        expiry.origin_secs,
+                        expiry.origin_hops,
+                    );
                 }
                 // An accepted omission (including a legacy response) clears
                 // optional origin data without withdrawing ordinary discovery.
@@ -505,6 +511,7 @@ impl Node {
                 // Construct consent only after the guarded dial below. Preparing
                 // it here could carry an old opt-in across a new channel epoch.
                 bridge_directory::origin_request_header(),
+                bridge_directory::provenance_request(),
                 bridge_directory::freshness_request(),
                 bridge_directory::request(),
                 bridge_directory::gateway_request(),
@@ -1025,6 +1032,7 @@ mod tests {
                 let request = channel.recv().await.unwrap();
                 received.lock().unwrap().push(request.clone());
                 if request.starts_with(bridge_directory::origin_request_header())
+                    || request == bridge_directory::provenance_request()
                     || request == bridge_directory::freshness_request()
                 {
                     continue;
@@ -1040,6 +1048,7 @@ mod tests {
             *requests.lock().unwrap(),
             vec![
                 bridge_directory::origin_request(&node.identity, &proof.public(), false),
+                bridge_directory::provenance_request().to_vec(),
                 bridge_directory::freshness_request().to_vec(),
                 bridge_directory::request().to_vec(),
                 bridge_directory::request().to_vec(),
@@ -1163,6 +1172,7 @@ mod tests {
                     expires_at: Instant::now() + DIRECTORY_MEMBERSHIP_TTL,
                     origin_secs: 15,
                     origin: None,
+                    origin_hops: None,
                 },
             )]);
             let publish = tokio::spawn(async move {

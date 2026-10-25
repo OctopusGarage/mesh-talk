@@ -1,4 +1,5 @@
 import { AccountProfilePanel } from "./AccountProfilePanel";
+import { AccountBindingRecovery } from "./AccountBindingRecovery";
 import { displayIdentity } from "@/lib/displayIdentity";
 import { MessageCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -298,6 +299,26 @@ function MemberProfileContent({
           <p className="text-xs leading-relaxed text-muted-foreground">
             {t("memberProfile.endpointHint")}
           </p>
+        )}
+        {accountId && !target.isSelf && (
+          <AccountBindingRecovery
+            key={accountId}
+            accountId={accountId}
+            onOpenAccount={
+              onMessage
+                ? (currentAccountId) => {
+                    const currentIdentity = displayIdentity({
+                      accountId: currentAccountId,
+                      accounts,
+                      peers,
+                      favorites,
+                    });
+                    onOpenChange(false);
+                    onMessage(currentAccountId, currentIdentity.name);
+                  }
+                : undefined
+            }
+          />
         )}
         {accountId && onMessage && !target.isSelf && (
           <Button

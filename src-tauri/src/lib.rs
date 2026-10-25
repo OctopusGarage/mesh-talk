@@ -14,6 +14,7 @@
 
 // Protocol/core modules live in the `mesh_talk_core` crate; this crate is the
 // Tauri desktop shell over it.
+pub mod account_documents;
 pub mod account_profile;
 pub mod app_lock;
 pub mod avatars;
@@ -24,14 +25,17 @@ pub mod commands;
 pub mod config_store;
 pub mod contact_policy;
 mod desktop_session;
+mod device_enrollment;
 pub mod diagnostics;
 mod drafts;
 mod easytier_discovery;
 pub mod events;
 pub mod favorites;
+mod google_drive;
 mod integrations;
 mod linked_account;
 pub mod logger;
+pub mod message_favorites;
 mod notifications;
 pub mod owner_commands;
 pub mod perf;
@@ -43,6 +47,7 @@ mod runtime_bootstrap;
 pub mod services;
 pub mod session_store;
 pub mod settings;
+mod shared_account_login;
 pub mod state;
 mod tailscale_discovery;
 pub mod tray;
@@ -179,7 +184,14 @@ pub fn run_tauri_configured(
     // Extensions come after single-instance, which must remain the first plugin.
     extend(builder)
         // Restore window size/position across launches (clamps off-screen geometry).
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        & !tauri_plugin_window_state::StateFlags::VISIBLE,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -269,15 +281,12 @@ pub fn run_tauri_configured(
                 }
             }
 
-            // The window is created hidden in `tauri.conf.json`, then explicitly shown only
-            // for normal launches. This avoids a visible flash on Windows autostart where a
-            // visible window would otherwise be created first and hidden later in setup.
-            if !std::env::args().any(|a| a == "--hidden")
-                && let Some(window) = app.get_webview_window("main")
-            {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            // Keep the initial window hidden until its safe/authorized surface
+            // is decoded. Explicit tray/single-instance visibility still wins.
+            crate::window_visibility::defer_initial_presentation(
+                app.handle(),
+                !std::env::args().any(|argument| argument == "--hidden"),
+            );
 
             #[cfg(debug_assertions)]
             if configured_data_root().is_none() {
@@ -293,6 +302,7 @@ pub fn run_tauri_configured(
         // Close-to-tray: if "minimize to tray" is on, hide instead of exiting so the
         // node runtime stays alive and keeps receiving. Quit (tray menu) is the real exit.
         .on_window_event(|window, event| {
+            crate::window_visibility::observe_window_event(window, event);
             if let WindowEvent::CloseRequested { api, .. } = event
                 && window.label() == "main"
             {
@@ -307,6 +317,9 @@ pub fn run_tauri_configured(
                 }
             }
         })
+        .manage(crate::window_visibility::InitialPresentation::new(
+            !std::env::args().any(|argument| argument == "--hidden"),
+        ))
         .manage(app_state.app_lock().clone())
         .manage(app_state)
         .manage(settings_state)
@@ -316,10 +329,15 @@ pub fn run_tauri_configured(
         .manage(avatars_state)
         .manage(crate::contact_policy::HiddenContactsState::default())
         .manage(crate::chat_commands::NodeState::empty())
+        .manage(crate::google_drive::DriveState::default())
         .invoke_handler({
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                crate::window_visibility::initial_presentation_ready,
                 owner_commands::owner_node_identity,
+                owner_commands::owner_startup_identity,
                 owner_commands::owner_enqueue_text,
+                owner_commands::owner_reveal_message,
+                owner_commands::owner_reveal_image,
                 owner_commands::owner_enqueue_channel_text,
                 owner_commands::owner_enqueue_channel_sticker,
                 owner_commands::owner_enqueue_channel_file,
@@ -328,11 +346,17 @@ pub fn run_tauri_configured(
                 owner_commands::owner_account_history,
                 owner_commands::owner_delivery_statuses,
                 commands::login,
+                device_enrollment::begin_device_enrollment,
+                device_enrollment::probe_device_enrollment,
+                device_enrollment::complete_device_enrollment,
+                device_enrollment::cancel_device_enrollment,
                 crate::contact_policy::get_hidden_contacts,
                 crate::contact_policy::set_contact_hidden,
                 crate::contact_policy::set_contact_hidden_batch,
                 crate::contact_policy::delete_contact,
                 crate::privacy_commands::get_privacy,
+                crate::privacy_commands::get_account_binding_changes,
+                crate::privacy_commands::accept_account_binding_change,
                 crate::privacy_commands::set_invisible,
                 crate::privacy_commands::set_privacy_allowed,
                 crate::privacy_commands::initiate_privacy_contact,
@@ -348,6 +372,15 @@ pub fn run_tauri_configured(
                 crate::app_lock::set_call_active,
                 commands::clear_saved_session,
                 commands::adopt_linked_account,
+                google_drive::google_drive_available,
+                google_drive::google_drive_connect,
+                google_drive::google_drive_disconnect,
+                google_drive::google_drive_progress,
+                google_drive::google_drive_list,
+                google_drive::google_drive_create_backup,
+                google_drive::google_drive_download,
+                google_drive::google_drive_inspect,
+                google_drive::google_drive_restore,
                 recovery::create_backup,
                 recovery::prepare_backup_key,
                 recovery::backup_status,
@@ -368,9 +401,11 @@ pub fn run_tauri_configured(
                 crate::chat_commands::link_device,
                 crate::chat_commands::get_device_sync_policy,
                 crate::chat_commands::get_device_sync_status,
+                crate::chat_commands::get_account_login_sync_status,
                 crate::chat_commands::set_device_sync_category,
                 crate::chat_commands::get_account_preferences,
                 crate::chat_commands::set_account_preference,
+                crate::chat_commands::seed_account_preference,
                 crate::chat_commands::rekey_account,
                 crate::chat_commands::list_accounts,
                 crate::chat_commands::send_file_to_account,
@@ -380,6 +415,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::create_channel,
                 crate::chat_commands::add_channel_member,
                 crate::chat_commands::remove_channel_member,
+                crate::chat_commands::remove_channel_account_members,
                 crate::chat_commands::transfer_channel_owner,
                 crate::chat_commands::leave_channel,
                 crate::chat_commands::accept_channel_invite,
@@ -387,6 +423,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::dissolve_channel,
                 crate::chat_commands::channel_members,
                 crate::chat_commands::set_channel_replica_enabled,
+                crate::chat_commands::set_channel_history_policy,
                 crate::chat_commands::channel_custody_statuses,
                 crate::chat_commands::channel_activity,
                 crate::chat_commands::send_channel_message,
@@ -413,6 +450,14 @@ pub fn run_tauri_configured(
                 crate::chat_commands::search,
                 crate::owner_commands::owner_search_recent,
                 crate::owner_commands::owner_search_context,
+                crate::message_favorites::owner_list_message_favorites,
+                crate::message_favorites::owner_save_message_favorite,
+                crate::message_favorites::owner_edit_message_favorite,
+                crate::message_favorites::owner_remove_message_favorite,
+                crate::message_favorites::owner_inspect_message_favorites,
+                crate::message_favorites::owner_favorite_file_available,
+                crate::message_favorites::owner_read_favorite_file,
+                crate::message_favorites::owner_save_favorite_file,
                 crate::chat_commands::delete_message,
                 crate::chat_commands::recall_message,
                 crate::chat_commands::clear_conversation,
@@ -442,12 +487,23 @@ pub fn run_tauri_configured(
                 crate::updates::native::prepare_update,
                 crate::updates::native::install_update,
                 crate::updates::cancel_update_download,
+                crate::integrations::local_access::get_local_agent_access,
+                crate::integrations::local_access::set_local_agent_access,
                 crate::settings::get_app_settings,
+                crate::settings::reconcile_account_settings,
                 crate::drafts::load_conversation_drafts,
                 crate::drafts::save_conversation_drafts,
+                crate::drafts::publish_legacy_conversation_drafts,
                 crate::settings::set_app_settings,
                 crate::trust::get_trust,
                 crate::trust::mark_verified,
+                crate::account_documents::get_account_documents,
+                crate::account_documents::get_account_document_meta,
+                crate::account_documents::read_account_document,
+                crate::account_documents::put_account_document,
+                crate::account_documents::remove_account_document,
+                crate::account_documents::mark_account_message_seen,
+                crate::account_documents::publish_legacy_account_controls,
                 crate::account_profile::get_account_profile,
                 crate::account_profile::save_account_bio,
                 crate::favorites::get_favorites,
@@ -456,6 +512,7 @@ pub fn run_tauri_configured(
                 crate::favorites::set_alias,
                 crate::favorites::set_channel_hidden,
                 crate::avatars::get_avatars,
+                crate::avatars::publish_legacy_avatar_overrides,
                 crate::avatars::set_avatar
             ];
             move |invoke: tauri::ipc::Invoke<tauri::Wry>| {

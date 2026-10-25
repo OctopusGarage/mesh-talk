@@ -1,5 +1,7 @@
 import { captureRuntimeOwner } from "@/store/ownership";
 import { AccountProfilePanel } from "./AccountProfilePanel";
+import { AccountBindingRecovery } from "./AccountBindingRecovery";
+import { displayIdentity } from "@/lib/displayIdentity";
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
@@ -329,6 +331,27 @@ export function VerifyContactDialog({
             </details>
           )}
 
+          {open && (
+            <AccountBindingRecovery
+              key={`binding:${owner}:${accountId}`}
+              accountId={accountId}
+              onOpenAccount={(currentAccountId) => {
+                const state = useChat.getState();
+                const identity = displayIdentity({
+                  accountId: currentAccountId,
+                  accounts: state.accounts,
+                  peers: state.peers,
+                  favorites: state.favorites,
+                });
+                setOpen(false);
+                void state.open({
+                  kind: "account",
+                  id: currentAccountId,
+                  name: identity.name,
+                });
+              }}
+            />
+          )}
           {open && (
             <AccountProfilePanel
               key={`${owner}:${accountId}`}

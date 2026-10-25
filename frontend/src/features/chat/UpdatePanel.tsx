@@ -165,7 +165,11 @@ export function UpdatePanel() {
                 <>
                   <p className="break-words text-xs leading-relaxed text-muted-foreground">
                     {release.automatic_install
-                      ? t("about.updates.automaticHelp")
+                      ? t(
+                          installKey === "windows"
+                            ? "about.updates.automaticWindowsHelp"
+                            : "about.updates.automaticHelp",
+                        )
                       : release.package_name}
                     {release.package_size
                       ? ` · ${readableSize(release.package_size)}`

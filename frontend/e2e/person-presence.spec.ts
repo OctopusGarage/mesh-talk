@@ -217,7 +217,7 @@ test("profile deduplicates a device with overlapping discovery sources", async (
   );
 });
 
-test("profile names introducing offices alongside local multicast and expires sources during refresh failure", async ({
+test("profile selects the closest visible office to origin and expires sources during refresh failure", async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 760, height: 520 });
@@ -239,6 +239,7 @@ test("profile names introducing offices alongside local multicast and expires so
                 source: "directory",
                 last_seen_secs: 0,
                 expires_in_secs: 30,
+                origin_hops: 0,
                 post_office: {
                   user_id: "office-mini",
                   name: "mac-mini-post-office",
@@ -249,6 +250,7 @@ test("profile names introducing offices alongside local multicast and expires so
                 source: "directory",
                 last_seen_secs: 0,
                 expires_in_secs: 30,
+                origin_hops: 1,
                 post_office: {
                   user_id: "office-2015",
                   name: "mac2015-post-office",
@@ -265,8 +267,8 @@ test("profile names introducing offices alongside local multicast and expires so
   const sources = page.getByTestId("member-discovery-sources");
   await expect(sources).toContainText("Local LAN · UDP multicast");
   await expect(sources).toContainText("Post office · mac-mini-post-office");
-  await expect(sources).toContainText("Post office · mac2015-post-office");
-  await expect(sources.getByRole("listitem")).toHaveCount(3);
+  await expect(sources).not.toContainText("Post office · mac2015-post-office");
+  await expect(sources.getByRole("listitem")).toHaveCount(2);
   await sources.scrollIntoViewIfNeeded();
   await page.screenshot({
     path: testInfo.outputPath("member-discovery-sources.png"),
@@ -279,7 +281,7 @@ test("profile names introducing offices alongside local multicast and expires so
   await expect(sources).not.toContainText("Local LAN · UDP multicast", {
     timeout: 10000,
   });
-  await expect(sources.getByRole("listitem")).toHaveCount(2);
+  await expect(sources.getByRole("listitem")).toHaveCount(1);
   await expect(sources).toContainText("mac-mini-post-office");
 });
 

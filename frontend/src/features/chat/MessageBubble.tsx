@@ -1,3 +1,5 @@
+import { canCollect } from "./favorites/selection";
+import { ProtectedMessage } from "./ProtectedMessage";
 import {
   retryAutomaticDownload,
   useAutomaticDownloads,
@@ -6,6 +8,8 @@ import { createAttachmentDecision } from "./attachments/attachmentDecision";
 import { useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
+  Bookmark,
+  ListChecks,
   Copy,
   CornerUpLeft,
   Download,
@@ -323,7 +327,13 @@ export function MessageBubble({
   onDelete,
   onRecall,
   onReEdit,
+  onCollect,
+  onSelectMessages,
+  collected = false,
 }: {
+  onCollect?: (m: ChatMessage) => void;
+  onSelectMessages?: (m: ChatMessage) => void;
+  collected?: boolean;
   m: ChatMessage;
   parent: ChatMessage | null;
   showAuthor: boolean;
@@ -363,7 +373,7 @@ export function MessageBubble({
   const { t } = useTranslation();
   const setError = useChat((s) => s.setError);
   const installedPacks = usePacks((s) => s.packs);
-  const displayedText = m.text;
+  const displayedText = m.protection ? t("protectedMessage.label") : m.text;
   const mine = m.fromMe;
   const isFile = !!m.file;
   // Sticker messages render bubble-less (Telegram-style): just the animation. Fall back to
@@ -376,7 +386,7 @@ export function MessageBubble({
   // Copy the message text to the clipboard. File messages have no text → no-op.
   const copyText = async () => {
     const lease = captureChatOwnership();
-    if (!m.text) return;
+    if (!m.text || m.protection) return;
     try {
       await copySensitiveText(displayedText, t("settings.confirmCopyPrompt"));
     } catch (e) {
@@ -396,9 +406,11 @@ export function MessageBubble({
     : m.failed
       ? t(`message.fail.${m.failReason ?? "unknown"}`)
       : "";
-  const body = isFile
-    ? t("files.sentFile", { name: m.file!.name })
-    : displayedText;
+  const body = m.protection
+    ? displayedText
+    : isFile
+      ? t("files.sentFile", { name: m.file!.name })
+      : displayedText;
   const ariaLabel = `${speaker}: ${body} · ${formatTime(m.wallClock)}${
     status ? ` · ${status}` : ""
   }`;
@@ -457,7 +469,7 @@ export function MessageBubble({
         </ContextMenu>
         {/* Re-edit: only for our own recalled TEXT messages (WeChat). Drops the original
             text back into the composer. */}
-        {mine && m.recalledText && !readOnly && (
+        {mine && m.recalledText && !m.protection && !readOnly && (
           <button
             type="button"
             data-testid="msg-reedit"
@@ -601,11 +613,20 @@ export function MessageBubble({
                   >
                     <CornerUpLeft className="h-3 w-3 shrink-0 opacity-70" />
                     <span className="truncate opacity-80">
-                      {parent.text || t("composer.message")}
+                      {parent.protection
+                        ? t("protectedMessage.label")
+                        : parent.text || t("composer.message")}
                     </span>
                   </div>
                 )}
-                {isSticker ? (
+                {m.protection ? (
+                  <ProtectedMessage
+                    id={m.id}
+                    protection={m.protection}
+                    image={!!m.file}
+                    mime={m.file?.mime}
+                  />
+                ) : isSticker ? (
                   sticker ? (
                     <img
                       src={sticker.url}
@@ -644,9 +665,31 @@ export function MessageBubble({
               </div>
             </ContextMenuTrigger>
             <ContextMenuContent data-testid="message-context-menu">
+              {onCollect && canCollect(m) && (
+                <ContextMenuItem
+                  data-testid="msg-collect"
+                  onSelect={() => onCollect(m)}
+                >
+                  <Bookmark className="h-3.5 w-3.5 opacity-70" />
+                  {t(
+                    collected
+                      ? "messageFavorites.saved"
+                      : "messageFavorites.add",
+                  )}
+                </ContextMenuItem>
+              )}
+              {onSelectMessages && canCollect(m) && (
+                <ContextMenuItem
+                  data-testid="msg-select-messages"
+                  onSelect={() => onSelectMessages(m)}
+                >
+                  <ListChecks className="h-3.5 w-3.5 opacity-70" />
+                  {t("messageFavorites.selectMessages")}
+                </ContextMenuItem>
+              )}
               <ContextMenuItem
                 data-testid="msg-copy"
-                disabled={!m.text}
+                disabled={!m.text || !!m.protection}
                 onSelect={() => void copyText()}
               >
                 <Copy className="h-3.5 w-3.5 opacity-70" />

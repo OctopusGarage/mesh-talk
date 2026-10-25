@@ -31,8 +31,8 @@ pub use messaging::*;
 pub use models::*;
 pub use platform::*;
 pub use presence::*;
-pub use state::NodeState;
 pub(crate) use state::RuntimeAuthority;
+pub use state::{NodeState, StartupIdentity};
 pub use sync::*;
 
 pub(crate) fn parse_channel_id(hex_id: &str) -> Result<ConversationId, CommandError> {

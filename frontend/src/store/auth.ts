@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { auth } from "@/lib/api/auth";
 import { chat } from "@/lib/api/chat";
 import { errorMessage as errMsg } from "@/lib/error";
-import type { SavedSessionStatus, UserInfo } from "@/lib/types";
+import type { LoginResult, SavedSessionStatus, UserInfo } from "@/lib/types";
 
 interface AuthState {
   user: UserInfo | null;
@@ -26,9 +26,56 @@ interface AuthState {
   tryAutoLogin: () => Promise<void>;
   login: (username: string, password: string) => Promise<boolean>;
   register: (username: string, password: string) => Promise<boolean>;
+  enrollDevice: (
+    enrollmentId: string,
+    sourceId: string,
+    code: string,
+    includeHistory: boolean,
+  ) => Promise<boolean>;
   /** Change the editable display name (nickname). Returns true on success. */
   rename: (newDisplayName: string) => Promise<boolean>;
   logout: () => Promise<void>;
+}
+
+/** All successful native authentication paths publish through one generation owner. */
+async function enterAuthenticatedSession(
+  request: () => Promise<LoginResult>,
+  newAccount: boolean,
+  set: (state: Partial<AuthState>) => void,
+  get: () => AuthState,
+): Promise<boolean> {
+  const generation = get().generation + 1;
+  const operation = get().operation + 1;
+  set({
+    generation,
+    operation,
+    user: null,
+    newAccount: false,
+    savedSession: null,
+    loading: true,
+    loggingOut: false,
+    error: null,
+  });
+  try {
+    const res = await request();
+    if (get().generation !== generation || get().operation !== operation)
+      return false;
+    if (!res.success || !res.user) throw new Error("Unable to sign in");
+    set({
+      user: res.user,
+      loading: false,
+      booting: false,
+      newAccount,
+      createdUsername: null,
+      savedSession: res.saved_session ?? null,
+    });
+    return true;
+  } catch (e) {
+    if (get().generation !== generation || get().operation !== operation)
+      return false;
+    set({ error: errMsg(e), loading: false });
+    return false;
+  }
 }
 
 export const useAuth = create<AuthState>((set, get) => ({
@@ -73,41 +120,26 @@ export const useAuth = create<AuthState>((set, get) => ({
     }
   },
 
-  login: async (username, password) => {
-    const newAccount = get().createdUsername === username;
-    const generation = get().generation + 1;
-    const operation = get().operation + 1;
-    set({
-      generation,
-      operation,
-      user: null,
-      newAccount: false,
-      savedSession: null,
-      loading: true,
-      loggingOut: false,
-      error: null,
-    });
-    try {
-      const res = await auth.login(username, password);
-      if (get().generation !== generation || get().operation !== operation)
-        return false;
-      if (!res.success || !res.user) throw new Error("Unable to sign in");
-      set({
-        user: res.user,
-        loading: false,
-        booting: false,
-        newAccount,
-        createdUsername: null,
-        savedSession: res.saved_session ?? null,
-      });
-      return true;
-    } catch (e) {
-      if (get().generation !== generation || get().operation !== operation)
-        return false;
-      set({ error: errMsg(e), loading: false });
-      return false;
-    }
-  },
+  login: (username, password) =>
+    enterAuthenticatedSession(
+      () => auth.login(username, password),
+      get().createdUsername === username,
+      set,
+      get,
+    ),
+  enrollDevice: (enrollmentId, sourceId, code, includeHistory) =>
+    enterAuthenticatedSession(
+      () =>
+        auth.completeDeviceEnrollment(
+          enrollmentId,
+          sourceId,
+          code,
+          includeHistory,
+        ),
+      false,
+      set,
+      get,
+    ),
 
   register: async (username, password) => {
     const generation = get().generation + 1;

@@ -273,3 +273,385 @@ async fn legacy_pairing_request_frames_remain_accepted_by_metadata_capable_respo
     pairing_without_backfill_case(false, true, 2).await;
     pairing_without_backfill_case(true, false, 1).await;
 }
+
+#[tokio::test]
+async fn pairing_connection_failure_preserves_network_error_with_history_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let joiner = open(dir.path(), "joiner");
+    joiner
+        .set_device_sync_category(SyncCategory::History, false)
+        .unwrap();
+    let peer = DeviceIdentity::generate().public();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let error = joiner
+        .link_to_device(address, &peer, &PairingCode::generate().as_hex())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error,
+            NodeError::Linking(LinkingError::Connection(TransportError::Io(ref io)))
+            if io.kind() == std::io::ErrorKind::ConnectionRefused
+        ),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn pairing_authentication_timeout_does_not_retry_legacy() {
+    let dir = tempfile::tempdir().unwrap();
+    let joiner = open(dir.path(), "joiner");
+    let peer = DeviceIdentity::generate().public();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (accepted, connected) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        accepted.send(()).unwrap();
+        std::future::pending::<()>().await;
+        drop(socket);
+    });
+    let linking = tokio::spawn(async move {
+        joiner
+            .link_to_device(address, &peer, &PairingCode::generate().as_hex())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), connected)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    let finished = linking.is_finished();
+    serving.abort();
+    if !finished {
+        linking.abort();
+    }
+    assert!(
+        finished,
+        "a transport timeout must not start a second legacy dial"
+    );
+    let error = linking.await.unwrap().err().unwrap().to_string();
+    assert!(error.contains("connect"), "{error}");
+}
+
+#[tokio::test]
+async fn pairing_authenticated_response_wait_is_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let joiner = open(dir.path(), "joiner");
+    let identity = DeviceIdentity::generate();
+    let peer = identity.public();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (received, request_seen) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut channel = SecureChannel::accept(socket, &identity).await.unwrap();
+        assert!(channel.recv().await.unwrap().starts_with(b"MTPQ3"));
+        received.send(()).unwrap();
+        std::future::pending::<()>().await;
+        drop(channel);
+    });
+    let linking = tokio::spawn(async move {
+        joiner
+            .link_to_device(address, &peer, &PairingCode::generate().as_hex())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), request_seen)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    let finished = linking.is_finished();
+    serving.abort();
+    if !finished {
+        linking.abort();
+    }
+    assert!(
+        finished,
+        "an authenticated peer must not hold pairing open indefinitely"
+    );
+    let error = linking.await.unwrap().err().unwrap().to_string();
+    assert!(error.contains("pairing response timed out"), "{error}");
+}
+
+#[tokio::test]
+async fn pairing_malformed_response_never_retries_legacy() {
+    let dir = tempfile::tempdir().unwrap();
+    let joiner = open(dir.path(), "joiner");
+    let identity = DeviceIdentity::generate();
+    let peer = identity.public();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut channel = SecureChannel::accept(socket, &identity).await.unwrap();
+        channel.recv().await.unwrap();
+        channel.send(b"invalid pairing response").await.unwrap();
+        drop(channel);
+        tokio::time::timeout(Duration::from_millis(200), listener.accept())
+            .await
+            .is_ok()
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        joiner.link_to_device(address, &peer, &PairingCode::generate().as_hex()),
+    )
+    .await;
+    assert!(
+        !serving.await.unwrap(),
+        "malformed response must not authorize a legacy retry"
+    );
+    assert!(result.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn pairing_relay_only_presence_explains_direct_connection_requirement() {
+    let dir = tempfile::tempdir().unwrap();
+    let joiner = open(dir.path(), "joiner");
+    let peer = DeviceIdentity::generate();
+    let proof = crate::discovery::Announce::new_with_account(
+        &peer,
+        &Account::generate(),
+        "relay-only",
+        54371,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    joiner
+        .roster
+        .lock()
+        .unwrap()
+        .update_relayed(&proof, address, &joiner.user_id());
+    let error = joiner
+        .link_to_device(address, &peer.public(), &PairingCode::generate().as_hex())
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("direct connection"), "{error}");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn v4_requires_source_credentials_and_returns_signed_private_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = open(dir.path(), "source");
+    let target = open(dir.path(), "target");
+    let snapshot = source
+        .publish_account_access_if(b"opaque credentials".to_vec(), |commit| commit())
+        .unwrap();
+    source
+        .set_device_sync_category(SyncCategory::History, false)
+        .unwrap();
+    let code = PairingCode::from_hex(&source.start_linking()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serving = source.clone();
+    let task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut channel = SecureChannel::accept(socket, &serving.identity)
+            .await
+            .unwrap();
+        let bytes = channel.recv().await.unwrap();
+        let (request, history) = PairingRequest::decode_access(&bytes).unwrap();
+        serving
+            .serve_pairing_access(&mut channel, request, history)
+            .await;
+    });
+    let mut channel = SecureChannel::connect(
+        TcpStream::connect(addr).await.unwrap(),
+        &target.identity,
+        Some(&source.identity.public()),
+    )
+    .await
+    .unwrap();
+    let request = PairingRequest {
+        joiner: target.identity.public(),
+        tag: code.authenticator_access(
+            &source.identity.public().ed25519_pub,
+            &target.identity.public().ed25519_pub,
+            false,
+        ),
+    };
+    channel.send(&request.encode_access(false)).await.unwrap();
+    let response =
+        super::super::pairing::PairingAccessResponse::decode(&channel.recv().await.unwrap())
+            .unwrap();
+    assert_eq!(response.access, snapshot);
+    assert!(
+        response
+            .access
+            .valid_for(&response.account.account_ed25519_pub)
+    );
+    assert!(channel.recv().await.unwrap().is_empty());
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn v4_preflight_rejection_and_unsupported_peer_preserve_target_account() {
+    for source_ready in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = open(&dir.path().join("source"), "source");
+        let target = open(&dir.path().join("target"), "target");
+        if source_ready {
+            source
+                .publish_account_access_if(b"credentials".to_vec(), |commit| commit())
+                .unwrap();
+        }
+        let own = target.account_id();
+        let code = source.start_linking();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serving = source.clone();
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(socket, &serving.identity)
+                .await
+                .unwrap();
+            let bytes = channel.recv().await.unwrap();
+            let (request, history) = PairingRequest::decode_access(&bytes).unwrap();
+            serving
+                .serve_pairing_access(&mut channel, request, history)
+                .await;
+        });
+        let mut checked = false;
+        let result = target
+            .link_to_device_with_account_access_checked_if(
+                addr,
+                &source.identity.public(),
+                &code,
+                |_| {
+                    checked = true;
+                    Err(NodeError::Authorization("login collision".into()))
+                },
+                |commit| commit(),
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(checked, source_ready);
+        assert_eq!(target.account_id(), own);
+        assert!(
+            target
+                .account_access
+                .lock()
+                .unwrap()
+                .current(&source.account_id())
+                .is_none()
+        );
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn v4_wrong_code_never_releases_access_or_enrolls_joiner() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = open(&dir.path().join("source"), "source");
+    let target = open(&dir.path().join("target"), "target");
+    source
+        .publish_account_access_if(b"credentials".to_vec(), |commit| commit())
+        .unwrap();
+    source.start_linking();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = source.clone();
+    let task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut channel = SecureChannel::accept(socket, &serving.identity)
+            .await
+            .unwrap();
+        let bytes = channel.recv().await.unwrap();
+        let (request, history) = PairingRequest::decode_access(&bytes).unwrap();
+        serving
+            .serve_pairing_access(&mut channel, request, history)
+            .await;
+    });
+    let old = target.account_id();
+    assert!(
+        target
+            .link_to_device_with_account_access_checked_if(
+                address,
+                &source.identity.public(),
+                &PairingCode::generate().as_hex(),
+                |_| Ok(()),
+                |commit| commit()
+            )
+            .await
+            .is_err()
+    );
+    task.await.unwrap();
+    assert_eq!(target.account_id(), old);
+    assert_eq!(source.linked_devices().len(), 1);
+    assert!(target.account_access_snapshot().is_none());
+}
+
+#[tokio::test]
+async fn v4_client_persists_source_account_record_without_relabeling_target_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = open(&dir.path().join("source"), "source");
+    let target = open(&dir.path().join("target"), "target");
+    let expected = source
+        .publish_account_access_if(b"source credentials".to_vec(), |commit| commit())
+        .unwrap();
+    let old = target
+        .publish_account_access_if(b"old target credentials".to_vec(), |commit| commit())
+        .unwrap();
+    target
+        .set_device_sync_category(SyncCategory::History, false)
+        .unwrap();
+    let code = source.start_linking();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = source.clone();
+    let task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let channel = SecureChannel::accept(socket, &serving.identity)
+            .await
+            .unwrap();
+        serving.serve_connection(channel).await;
+    });
+    let linked = target
+        .link_to_device_with_account_access_checked_if(
+            address,
+            &source.identity.public(),
+            &code,
+            |snapshot| {
+                assert_eq!(*snapshot, expected);
+                Ok(())
+            },
+            |commit| commit(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(linked.account_id, source.account_id());
+    assert_eq!(target.account_access_snapshot(), Some(old));
+    assert_eq!(
+        target
+            .account_access
+            .lock()
+            .unwrap()
+            .current(&linked.account_id),
+        Some(expected.clone())
+    );
+    task.await.unwrap();
+    drop(target);
+    let reopened = super::super::account_access::AccountAccessStore::open(
+        &dir.path().join("target/account-access.log"),
+        "pw",
+    )
+    .unwrap();
+    assert_eq!(reopened.current(&linked.account_id), Some(expected));
+}

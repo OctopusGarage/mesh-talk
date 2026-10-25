@@ -278,3 +278,30 @@ it("does not replace a successful live profile with an obsolete request failure"
   expect(host.textContent).toContain("Live bio");
   expect(host.querySelector('[role="alert"]')).toBeNull();
 });
+
+it("restarts a pending profile load after recovered identity invalidates the cache", async () => {
+  const { useAccountProfiles } = await import("@/store/accountProfiles");
+  useAccountProfiles.getState().clear();
+  let finish!: (value: AccountProfileView) => void;
+  mocks.get
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    )
+    .mockResolvedValueOnce({ ...card("bob"), bio: "Recovered profile" });
+  await act(async () =>
+    root.render(createElement(AccountProfilePanel, { accountId: "bob" })),
+  );
+  await act(async () => {
+    useAccountProfiles.getState().clear();
+    finish({ ...card("bob"), bio: "Retired profile" });
+  });
+  expect(mocks.get).toHaveBeenCalledTimes(2);
+  expect(host.textContent).toContain("Recovered profile");
+  expect(host.textContent).not.toContain("Retired profile");
+  expect(
+    host.querySelector('[data-testid="account-profile-details"]'),
+  ).not.toBeNull();
+});

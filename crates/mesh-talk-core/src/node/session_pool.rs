@@ -8,21 +8,24 @@ use crate::identity::device::PublicIdentity;
 use crate::transport::{SecureChannel, TransportError};
 use std::{
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 use tokio::{
     net::TcpStream,
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore},
 };
 
 pub(super) const MAX_TCP_CONNECTIONS: usize = 8;
 pub(super) const MAX_DIRECTION_CONNECTIONS: usize = MAX_TCP_CONNECTIONS - 1;
 const IDLE_TTL: Duration = Duration::from_secs(15);
 const CAPACITY_WAIT: Duration = Duration::from_secs(2);
+const CAPACITY_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 const ACCOUNT_CAPABILITY_COOLDOWN: Duration = Duration::from_secs(60);
 const MAX_ACCOUNT_CAPABILITIES: usize = 256;
 const MAX_ROUTE_AFFINITIES: usize = 256;
+const MAX_AUTHENTICATION_GATES: usize = 256;
+type AuthenticationGate = tokio::sync::Mutex<()>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::node) enum SessionProtocol {
@@ -54,7 +57,26 @@ impl Drop for ExpiryTask {
     }
 }
 
+#[derive(Default)]
+struct CapacityDiagnostics {
+    next_report: Option<Instant>,
+    timeouts: u64,
+}
+
+impl CapacityDiagnostics {
+    fn timed_out(&mut self, now: Instant) -> Option<u64> {
+        self.timeouts = self.timeouts.saturating_add(1);
+        if self.next_report.is_some_and(|next| now < next) {
+            return None;
+        }
+        self.next_report = Some(now + CAPACITY_REPORT_INTERVAL);
+        Some(std::mem::take(&mut self.timeouts))
+    }
+}
+
 pub(in crate::node) struct SessionPool {
+    authentication_gates: Mutex<Vec<(PeerEndpointKey, Weak<AuthenticationGate>)>>,
+    capacity_diagnostics: Mutex<CapacityDiagnostics>,
     total: Arc<Semaphore>,
     outbound: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
@@ -67,6 +89,8 @@ pub(in crate::node) struct SessionPool {
 impl Default for SessionPool {
     fn default() -> Self {
         Self {
+            authentication_gates: Mutex::new(Vec::new()),
+            capacity_diagnostics: Mutex::new(CapacityDiagnostics::default()),
             total: Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS)),
             outbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             inbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
@@ -79,6 +103,37 @@ impl Default for SessionPool {
 }
 
 impl SessionPool {
+    /// Serialize unauthenticated sockets for one exact route before they acquire
+    /// TCP capacity. Weak entries disappear after the last owner/waiter drops;
+    /// active gates must never be evicted, including during a policy reset.
+    pub(in crate::node) async fn authentication_admission(
+        &self,
+        key: PeerEndpointKey,
+    ) -> Result<OwnedMutexGuard<()>, TransportError> {
+        let gate = {
+            let mut gates = self.authentication_gates.lock().unwrap();
+            gates.retain(|(_, gate)| gate.strong_count() > 0);
+            if let Some(gate) = gates
+                .iter()
+                .find_map(|(candidate, gate)| (candidate == &key).then(|| gate.upgrade()).flatten())
+            {
+                gate
+            } else {
+                if gates.len() >= MAX_AUTHENTICATION_GATES {
+                    return Err(TransportError::Noise(
+                        "peer authentication capacity busy".into(),
+                    ));
+                }
+                let gate = Arc::new(AuthenticationGate::new(()));
+                gates.push((key, Arc::downgrade(&gate)));
+                gate
+            }
+        };
+        tokio::time::timeout(CAPACITY_WAIT, gate.lock_owned())
+            .await
+            .map_err(|_| TransportError::Noise("peer authentication capacity busy".into()))
+    }
+
     fn prune(&self) {
         self.idle
             .lock()
@@ -131,6 +186,17 @@ impl SessionPool {
             .timed_out(&peer.user_id(), address);
     }
 
+    pub(in crate::node) fn routing_cost(
+        &self,
+        peer: &PublicIdentity,
+        address: SocketAddr,
+    ) -> Option<Duration> {
+        self.timings
+            .lock()
+            .unwrap()
+            .routing_cost(&peer.user_id(), address, Instant::now())
+    }
+
     pub(in crate::node) fn control_timeout(
         &self,
         peer: &PublicIdentity,
@@ -170,11 +236,26 @@ impl SessionPool {
         }
     }
 
+    fn report_outbound_capacity_timeout(&self, waiting_since: Instant) {
+        let count = self
+            .capacity_diagnostics
+            .lock()
+            .unwrap()
+            .timed_out(Instant::now());
+        if let Some(count) = count {
+            log::warn!(target: "mesh_talk::delivery",
+                "outbound TCP capacity wait exhausted wait_ms={} shared_available={} outbound_available={} timeouts_since_report={}",
+                waiting_since.elapsed().as_millis(), self.total.available_permits(),
+                self.outbound.available_permits(), count);
+        }
+    }
+
     async fn acquire(
         &self,
         direction: &Arc<Semaphore>,
     ) -> Result<Vec<OwnedSemaphorePermit>, TransportError> {
         self.prepare_capacity(direction);
+        let waiting_since = Instant::now();
         tokio::time::timeout(CAPACITY_WAIT, async {
             let directional = direction
                 .clone()
@@ -190,12 +271,20 @@ impl SessionPool {
             Ok(vec![directional, shared])
         })
         .await
-        .map_err(|_| TransportError::Noise("TCP connection capacity busy".into()))?
+        .map_err(|_| {
+            if Arc::ptr_eq(direction, &self.outbound) {
+                self.report_outbound_capacity_timeout(waiting_since);
+            }
+            TransportError::Noise("TCP connection capacity busy".into())
+        })?
     }
 
     pub(in crate::node) async fn outbound(
         &self,
     ) -> Result<Vec<OwnedSemaphorePermit>, TransportError> {
+        if let Some(permits) = self.try_outbound() {
+            return Ok(permits);
+        }
         self.acquire(&self.outbound).await
     }
 
@@ -479,6 +568,145 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_diagnostic_throttle_counts_timeouts_without_sliding_its_deadline() {
+        let now = Instant::now();
+        let mut diagnostics = CapacityDiagnostics::default();
+        assert_eq!(diagnostics.timed_out(now), Some(1));
+        for seconds in [0, 1, 15, 29] {
+            assert_eq!(
+                diagnostics.timed_out(now + Duration::from_secs(seconds)),
+                None
+            );
+        }
+        assert_eq!(
+            diagnostics.timed_out(now + CAPACITY_REPORT_INTERVAL),
+            Some(5)
+        );
+        assert_eq!(diagnostics.timed_out(now + Duration::from_secs(59)), None);
+        assert_eq!(
+            diagnostics.timed_out(now + CAPACITY_REPORT_INTERVAL * 2),
+            Some(2)
+        );
+        let mut independent_pool = CapacityDiagnostics::default();
+        assert_eq!(independent_pool.timed_out(now), Some(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capacity_diagnostic_records_only_actual_outbound_capacity_timeouts() {
+        let pool = SessionPool::default();
+        let outbound = (0..MAX_DIRECTION_CONNECTIONS)
+            .map(|_| pool.try_outbound().unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            pool.capacity_diagnostics
+                .lock()
+                .unwrap()
+                .next_report
+                .is_none()
+        );
+        assert!(pool.outbound().await.is_err());
+        assert!(
+            pool.capacity_diagnostics
+                .lock()
+                .unwrap()
+                .next_report
+                .is_some()
+        );
+        assert_eq!(pool.capacity_diagnostics.lock().unwrap().timeouts, 0);
+        assert!(pool.outbound().await.is_err());
+        assert_eq!(pool.capacity_diagnostics.lock().unwrap().timeouts, 1);
+        let inbound = pool.inbound().await.unwrap();
+        assert!(pool.inbound().await.is_err());
+        assert_eq!(
+            pool.capacity_diagnostics.lock().unwrap().timeouts,
+            1,
+            "inbound timeouts must not pollute the outbound diagnostic"
+        );
+        drop(inbound);
+        drop(outbound);
+        assert!(pool.outbound().await.is_ok());
+        assert_eq!(
+            pool.capacity_diagnostics.lock().unwrap().timeouts,
+            1,
+            "successful capacity acquisition must not create a timeout record"
+        );
+    }
+
+    fn authentication_key(port: u16) -> PeerEndpointKey {
+        PeerEndpointKey {
+            identity: crate::identity::device::DeviceIdentity::generate().public(),
+            address: SocketAddr::from(([127, 0, 0, 1], port)),
+            generation: 1,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authentication_gates_scope_both_identity_keys_endpoint_and_generation() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let owner = pool.authentication_admission(key.clone()).await.unwrap();
+        for changed in 0..4 {
+            let mut independent = key.clone();
+            match changed {
+                0 => independent.identity.ed25519_pub[0] ^= 1,
+                1 => independent.identity.x25519_pub[0] ^= 1,
+                2 => independent.address.set_port(2),
+                _ => independent.generation += 1,
+            }
+            let _guard = pool.authentication_admission(independent).await.unwrap();
+        }
+        assert!(
+            pool.authentication_admission(key.clone()).await.is_err(),
+            "a duplicate waits for bounded admission without another owner"
+        );
+        assert_eq!(pool.outbound.available_permits(), MAX_DIRECTION_CONNECTIONS);
+        drop(owner);
+        assert!(pool.authentication_admission(key).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authentication_gates_never_evict_live_owners_and_release_cancelled_waiters() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let owner = pool.authentication_admission(key.clone()).await.unwrap();
+        let mut owners = Vec::new();
+        for port in 2..=MAX_AUTHENTICATION_GATES {
+            let mut independent = key.clone();
+            independent.address.set_port(port as u16);
+            owners.push(pool.authentication_admission(independent).await.unwrap());
+        }
+        assert!(
+            pool.authentication_admission(authentication_key(300))
+                .await
+                .is_err()
+        );
+        pool.clear();
+        pool.network_changed();
+        // Poll then cancel a duplicate waiter; resets must not create a second
+        // owner for the still-active old-generation authentication.
+        {
+            let waiter = pool.authentication_admission(key.clone());
+            tokio::pin!(waiter);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1), &mut waiter)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(pool.authentication_admission(key.clone()).await.is_err());
+        drop(owner);
+        let recovered = pool.authentication_admission(key).await.unwrap();
+        drop(recovered);
+        drop(owners);
+        assert!(
+            pool.authentication_admission(authentication_key(300))
+                .await
+                .is_ok()
+        );
+        assert_eq!(pool.authentication_gates.lock().unwrap().len(), 1);
+    }
 
     #[test]
     fn unsupported_account_capabilities_are_bounded_and_scope_specific() {

@@ -12,9 +12,17 @@ A local sign-in identity and its protected application data. A local user is not
 the cross-device mesh account or a network device.
 _Avoid_: account ID, device ID when referring to the local login identity.
 
-**Username**:
-The local user's login name. It is distinct from an editable display name.
-_Avoid_: account ID, peer identity.
+**Username / account login name**:
+The name entered at sign-in. Linked desktop devices use the kept account's same
+login name and password. It is distinct from the account nickname and from the
+immutable local storage username retained internally for an existing local user.
+_Avoid_: account ID, device ID, nickname, storage directory as interchangeable names.
+
+**Local storage username**:
+The existing per-device storage namespace for a local user. Account login
+migration preserves this name and the local-user UUID; a credential envelope maps
+the shared login to the retained local owner and its separate storage secrets.
+_Avoid_: account login name, account ID, shared password.
 
 **Display name**:
 A human-readable label for presentation. It is neither unique identity nor
@@ -31,6 +39,8 @@ Account-authenticated nickname, biography and avatar, saved through ordinary
 profile editing and synchronized automatically. It carries read-only creation
 metadata when known; revisions order updates across devices.
 _Avoid_: local login profile, device identity, proof of a person's identity.
+
+Linked devices share account login credentials through private account access. Login names remain distinct from public nicknames; device identities and local encrypted-storage secrets remain distinct.
 
 **Device**:
 A participant identified by its persistent signing and key-agreement identity.
@@ -84,8 +94,10 @@ accepted user-facing label for this concept.
 _Avoid_: multicast group, Noise channel when referring to conversation membership.
 
 **Channel member**:
-A device admitted by the channel's membership state. A person-facing account
-count can combine certified devices without changing device membership authority.
+A signed account grant admitted by the channel's membership state. Certified
+devices inherit that account's accepted membership and role without another owner
+approval. Legacy channels retain device-scoped authority until a validated,
+owner-signed account migration; discovery alone never creates membership.
 _Avoid_: discovered peer, invitee, online person.
 
 **Event**:
@@ -104,15 +116,33 @@ A local attempt to send content to a conversation before or while acceptance is
 resolved. Its local identity is distinct from an accepted event's identity.
 _Avoid_: delivered message, accepted event before acceptance.
 
+**Protected message**:
+A text or image message carrying an authenticated requirement to conceal its content
+until an explicit local reveal, optionally after the viewer authenticates with
+the application's lock mechanism. Each reveal lasts at most 30 seconds on that
+device. Protection is separate from retention, message expiry and read state.
+_Avoid_: disappearing message, view-once message, password shared by the sender.
+
 **History coverage**:
 What this installation has observed of a conversation's retained events. It is
 not proof of global history completeness or a read position.
 _Avoid_: synchronization complete, all messages received.
 
-**Saved Messages**:
+**Message Yourself**:
 The current account's personal conversation. Its existence does not require a
 second device to be discoverable.
+UI label: **Message Yourself** (Simplified Chinese: **给自己发消息**).
 _Avoid_: second account, temporary local scratch chat.
+
+**Message favorite**:
+An account-owned saved item containing one or more ordered message snapshots and
+optional personal title, description and per-message notes. It is independent of
+ordinary chat retention; explicit message expiry still applies to saved content.
+Collection UI label: **Favorites** (Simplified Chinese: **收藏夹**). An item without
+a title is an **Untitled favorite** (**未命名收藏**). Do not use “Saved Messages”
+as either feature's UI label.
+_Avoid_: Message Yourself, self-chat, pinned contact or pinned conversation.
+See [Favorites](docs/favorites.md).
 
 **Recovery archive**:
 A user-created encrypted snapshot protected by a separate recovery key. Restore
@@ -184,6 +214,13 @@ Eligible participant information learned through a bridge. Its mailbox route
 must not be mistaken for the participant's own transport listener.
 _Avoid_: direct endpoint, participant's physical machine address.
 
+**Presence source office**:
+The identified visible directory introducer closest to a device's original
+presence registration by known trusted forwarding distance. It is client-relative;
+an unseen origin can be represented by the nearest visible introducer. Unknown
+legacy distance remains unknown. Multiple devices may have different sources.
+_Avoid_: physical location, first responder, selected delivery relay.
+
 **Federation**:
 Authenticated exchange among operator-approved, equally eligible post offices.
 Approval uses explicit device pins or authority-signed network memberships;
@@ -237,7 +274,18 @@ _Avoid_: file downloaded because its message arrived.
 **Group history replica**:
 A retained authorized copy served by an accepted channel member. It is distinct
 from an opaque post-office copy whose holder cannot decrypt channel content.
+Displayed copy confirmations count distinct external member accounts, excluding
+the sender's linked devices. The sender account can share its historical
+observations privately across devices; unknown status is separate from zero.
 _Avoid_: post-office membership, global archive.
+
+**Join-history copy**:
+A bounded, owner-authorized copy of retained channel text offered for a particular
+invitation and readable only after acceptance. Original IDs and authored times
+are retained; the owner attests to the copied content. It does not grant old
+sender-chain keys, attachment access or complete conversation history.
+_Avoid_: full history sync, original-author signature on the copied plaintext.
+See [channel history settings](docs/help/topics/channels.md#history-for-new-members).
 
 ## Peer trust evidence
 
@@ -254,3 +302,19 @@ _Avoid_: post-office membership, global archive.
   current application workflow or verification authority.
 
 The [profile and verification guide](docs/peer-trust.md) owns evidence limits and sharing rules.
+
+**Private account document**:
+A typed, account-authenticated versioned record synchronized only among certified
+sibling devices under its domain policy. Optional personal data follows its
+consent category; group-directory metadata follows the existing mandatory account
+topology contract and contains no message bodies or keys. Its signed metadata and deletion
+tombstone are distinct from the encrypted content-addressed blob and from public
+group authority events.
+_Avoid_: arbitrary replicated settings file, public group patch, delivery receipt.
+
+**Shared group reference**:
+An account-private descriptive snapshot supplied by a certified device that
+legitimately holds the group. It preserves the group's exact identity and known
+member facts before another device obtains validated group state. It does not
+create membership, management authority, sending permission or receiving keys.
+_Avoid_: accepted invitation, backup restoration, device approval, authority grant.

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n, {
+  applyAccountLanguage,
+  savedLanguage,
+  subscribeLanguageChanges,
   resolveLanguage,
   setLanguage,
   SUPPORTED_LANGUAGES,
@@ -68,3 +71,75 @@ it("switches the interface and document language when preference storage is deni
   expect(i18n.resolvedLanguage).toBe("ko");
   expect(document.documentElement.lang).toBe("ko");
 });
+
+it("notifies local language subscribers once and never echoes account imports", async () => {
+  const changed = vi.fn();
+  const unsubscribe = subscribeLanguageChanges(changed);
+  try {
+    setLanguage("pt-BR");
+    await Promise.resolve();
+    expect(changed).toHaveBeenCalledExactlyOnceWith("pt-BR");
+    expect(applyAccountLanguage("ko")).toBe(true);
+    await Promise.resolve();
+    expect(i18n.resolvedLanguage).toBe("ko");
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(applyAccountLanguage("ko-KR")).toBe(false);
+    expect(changed).toHaveBeenCalledTimes(1);
+  } finally {
+    unsubscribe();
+  }
+  setLanguage("en");
+  expect(changed).toHaveBeenCalledTimes(1);
+});
+
+it("does not treat a browser default as an explicit saved language", () => {
+  const entries = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => entries.get(key) ?? null,
+    setItem: (key: string, value: string) => entries.set(key, value),
+  });
+  vi.stubGlobal("navigator", { languages: ["ko-KR"], language: "ko-KR" });
+  expect(savedLanguage()).toBeNull();
+  setLanguage("pt-BR");
+  expect(savedLanguage()).toBe("pt-BR");
+});
+
+it("reads denied storage safely and applies account languages without local echoes", () => {
+  vi.stubGlobal("localStorage", {
+    getItem() {
+      throw new Error("Storage denied");
+    },
+    setItem() {
+      throw new Error("Storage denied");
+    },
+  });
+  const changed = vi.fn();
+  const unsubscribe = subscribeLanguageChanges(changed);
+  try {
+    expect(savedLanguage()).toBeNull();
+    for (const language of SUPPORTED_LANGUAGES) {
+      expect(applyAccountLanguage(language)).toBe(true);
+      expect(i18n.resolvedLanguage).toBe(language);
+    }
+    expect(changed).not.toHaveBeenCalled();
+  } finally {
+    unsubscribe();
+  }
+});
+
+it.each([
+  [null, ["unsupported", "ko-KR", "pt-BR"], "ko"],
+  ["PT-br", ["ko-KR"], "pt-BR"],
+  ["unsupported", ["pt-PT", "ko-KR"], "pt-BR"],
+] as const)(
+  "initializes from saved choice %s and ordered browser languages %j",
+  async (stored, languages, expected) => {
+    vi.stubGlobal("localStorage", { getItem: () => stored });
+    vi.stubGlobal("navigator", { languages, language: "en" });
+    vi.resetModules();
+    const { default: initialized, savedLanguage: saved } =
+      await import("./i18n");
+    expect(initialized.resolvedLanguage).toBe(expected);
+    expect(saved()).toBe(stored === "PT-br" ? "pt-BR" : null);
+  },
+);

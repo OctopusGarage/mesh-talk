@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=MESH_TALK_GOOGLE_CLIENT_ID");
+    println!("cargo:rerun-if-env-changed=MESH_TALK_GOOGLE_CLIENT_SECRET");
     // Tauri warns whenever this legacy variable is present, even on non-Windows
     // builds. Remove it before tauri-build and preserve its Windows override.
     println!("cargo:rerun-if-env-changed=STATIC_VCRUNTIME");

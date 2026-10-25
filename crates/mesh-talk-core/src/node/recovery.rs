@@ -97,17 +97,28 @@ impl Write for MediaDigest {
 struct MediaRecordSink<'a, W: Write> {
     writer: &'a mut SnapshotWriter<W>,
     file_conv: ConversationId,
+    favorite: bool,
     buffer: Vec<u8>,
     index: u32,
 }
 
 impl<W: Write> MediaRecordSink<'_, W> {
     fn push_buffer(&mut self) -> Result<(), SnapshotError> {
-        self.writer.push(&SnapshotRecordV1::MediaChunk {
-            file_conv: *self.file_conv.as_bytes(),
-            index: self.index,
-            bytes: std::mem::take(&mut self.buffer),
-        })?;
+        let bytes = std::mem::take(&mut self.buffer);
+        let record = if self.favorite {
+            SnapshotRecordV1::FavoriteMediaChunk {
+                file_conv: *self.file_conv.as_bytes(),
+                index: self.index,
+                bytes,
+            }
+        } else {
+            SnapshotRecordV1::MediaChunk {
+                file_conv: *self.file_conv.as_bytes(),
+                index: self.index,
+                bytes,
+            }
+        };
+        self.writer.push(&record)?;
         self.index = self.index.checked_add(1).ok_or(SnapshotError::SizeLimit)?;
         Ok(())
     }
@@ -282,15 +293,27 @@ impl Node {
         let mut media_names = HashMap::new();
         let mut account_created_at_ms = None;
         let header = read_snapshot(&mut source, |record| {
-            if let SnapshotRecordV1::AccountCreation { created_at_ms } = &record {
-                account_created_at_ms = *created_at_ms;
-            }
-            if let SnapshotRecordV1::FileCard { manifest, .. } = record {
-                let card = crate::file::decode_manifest(&manifest)
-                    .ok_or(SnapshotError::InvalidFileCard)?;
-                media_names
-                    .entry(*card.file_conv().as_bytes())
-                    .or_insert_with(|| card.name().to_string());
+            match record {
+                SnapshotRecordV1::FileCard { manifest, .. } => {
+                    let card = crate::file::decode_manifest(&manifest)
+                        .ok_or(SnapshotError::InvalidFileCard)?;
+                    media_names
+                        .entry((false, *card.file_conv().as_bytes()))
+                        .or_insert_with(|| card.name().to_string());
+                }
+                SnapshotRecordV1::Favorite { payload } => {
+                    for file in super::favorites::recovery::summarize(&payload)?.files {
+                        let conv = super::favorites::conversation(&file.file_conv)
+                            .ok_or(SnapshotError::InvalidEncoding)?;
+                        media_names
+                            .entry((true, *conv.as_bytes()))
+                            .or_insert(file.name);
+                    }
+                }
+                SnapshotRecordV1::AccountCreation { created_at_ms } => {
+                    account_created_at_ms = created_at_ms;
+                }
+                _ => {}
             }
             Ok(())
         })?;
@@ -355,7 +378,9 @@ impl Node {
                 new_password,
             )
             .map_err(|_| SnapshotError::Io)?;
-            let mut media_temp: HashMap<[u8; 32], (PathBuf, std::fs::File)> = HashMap::new();
+            // Keep staged paths, not open handles: a valid archive can retain
+            // thousands of independently referenced Favorites attachments.
+            let mut media_temp: HashMap<(bool, [u8; 32]), PathBuf> = HashMap::new();
             // Legacy/channel sent rows are keyed only by (conversation, seq).
             // Old and new devices may both start at sequence 1, so keep imported
             // rows in a disjoint local sequence range. Their original event IDs
@@ -460,19 +485,43 @@ impl Node {
                             .restore_avatar(&account_id, updated_at, avatar)
                             .map_err(|_| SnapshotError::Io)?;
                     }
-                    SnapshotRecordV1::MediaDescriptor { file_conv, .. } => {
-                        let path =
-                            staging_dir.join(format!("recovery-media-{}", hex::encode(file_conv)));
-                        let file = std::fs::File::create(&path).map_err(|_| SnapshotError::Io)?;
-                        media_temp.insert(file_conv, (path, file));
+                    SnapshotRecordV1::Favorite { payload } => {
+                        node.favorites
+                            .lock()
+                            .expect("favorites mutex")
+                            .restore_portable(&payload, &node.account_id())?;
+                    }
+                    SnapshotRecordV1::MediaDescriptor { file_conv, .. }
+                    | SnapshotRecordV1::FavoriteMediaDescriptor { file_conv, .. } => {
+                        let favorite =
+                            matches!(record, SnapshotRecordV1::FavoriteMediaDescriptor { .. });
+                        let path = staging_dir.join(format!(
+                            "recovery-media-{favorite}-{}",
+                            hex::encode(file_conv)
+                        ));
+                        drop(std::fs::File::create(&path).map_err(|_| SnapshotError::Io)?);
+                        media_temp.insert((favorite, file_conv), path);
                     }
                     SnapshotRecordV1::MediaChunk {
-                        file_conv, bytes, ..
+                        file_conv,
+                        ref bytes,
+                        ..
+                    }
+                    | SnapshotRecordV1::FavoriteMediaChunk {
+                        file_conv,
+                        ref bytes,
+                        ..
                     } => {
-                        let (_, file) = media_temp
-                            .get_mut(&file_conv)
+                        let favorite =
+                            matches!(record, SnapshotRecordV1::FavoriteMediaChunk { .. });
+                        let path = media_temp
+                            .get(&(favorite, file_conv))
                             .ok_or(SnapshotError::InvalidMedia)?;
-                        file.write_all(&bytes).map_err(|_| SnapshotError::Io)?;
+                        std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(path)
+                            .and_then(|mut file| file.write_all(bytes))
+                            .map_err(|_| SnapshotError::Io)?;
                     }
                     SnapshotRecordV1::SignedEvent { event } => {
                         node.log
@@ -510,14 +559,22 @@ impl Node {
             if installed_header != header {
                 return Err(SnapshotError::InvalidAccount);
             }
-            for (file_conv, (path, file)) in media_temp {
-                file.sync_all().map_err(|_| SnapshotError::Io)?;
-                drop(file);
+            for ((favorite, file_conv), path) in media_temp {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| SnapshotError::Io)?;
                 let name = media_names
-                    .get(&file_conv)
+                    .get(&(favorite, file_conv))
                     .map(String::as_str)
                     .unwrap_or("recovered.bin");
-                node.media
+                let store = if favorite {
+                    &node.favorite_media
+                } else {
+                    &node.media
+                };
+                store
                     .store_from_path(ConversationId::new(file_conv), name, &path)
                     .map_err(|_| SnapshotError::Io)?;
                 std::fs::remove_file(path).map_err(|_| SnapshotError::Io)?;
@@ -626,6 +683,12 @@ impl Node {
     ) -> Result<(), SnapshotError> {
         let own_account = self.account_id();
         let candidate_contacts = self.known_account_ids();
+        let now = self.expiry_now();
+        let favorites = self.favorites.lock().expect("favorites mutex");
+        // Protection projection reads canonical history. Resolve it before taking
+        // the snapshot's history locks, then reuse it for records, files and count.
+        let portable_favorites = favorites.portable_projection(self);
+        let favorite_files = portable_favorites.portable_files(now)?;
         let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
         let received = self.received.lock().expect("received mutex not poisoned");
         let log = self.log.lock().expect("event log mutex not poisoned");
@@ -718,29 +781,48 @@ impl Node {
                 .and_then(|count| count.checked_add(event_count))
                 .and_then(|count| count.checked_add(file_count))
                 .and_then(|count| count.checked_add(file_contacts.len()))
+                .and_then(|count| count.checked_add(portable_favorites.len()))
                 .ok_or(SnapshotError::SizeLimit)?,
         )
         .map_err(|_| SnapshotError::SizeLimit)?;
-        let media_files = self.media.managed_files().map_err(|_| SnapshotError::Io)?;
-        let mut media = Vec::with_capacity(media_files.len());
-        for (file_conv, _) in media_files {
-            if !visible_media.contains(&file_conv) {
-                continue;
+        let mut media = Vec::new();
+        let visible_favorite_media = favorite_files
+            .iter()
+            .filter(|(_, file)| file.size <= super::favorites::recovery::PORTABLE_FILE_LIMIT)
+            .map(|(conv, _)| *conv)
+            .collect::<HashSet<_>>();
+        for (favorite, store, visible) in [
+            (false, &self.media, &visible_media),
+            (true, &self.favorite_media, &visible_favorite_media),
+        ] {
+            for (file_conv, _) in store.managed_files().map_err(|_| SnapshotError::Io)? {
+                if !visible.contains(&file_conv) {
+                    continue;
+                }
+                // Authenticate every source chunk before wrapping portable plaintext
+                // in the independently encrypted recovery archive.
+                let mut digest = MediaDigest(Sha256::new());
+                let size = store
+                    .copy_decrypted(file_conv, &mut digest)
+                    .map_err(|_| SnapshotError::InvalidMedia)?;
+                if favorite
+                    && favorite_files
+                        .get(&file_conv)
+                        .is_none_or(|file| file.size != size)
+                {
+                    return Err(SnapshotError::InvalidMedia);
+                }
+                record_count = record_count
+                    .checked_add(1)
+                    .and_then(|count| count.checked_add(size.div_ceil(MEDIA_CHUNK_BYTES as u64)))
+                    .ok_or(SnapshotError::SizeLimit)?;
+                media.push((
+                    favorite,
+                    file_conv,
+                    size,
+                    <[u8; 32]>::from(digest.0.finalize()),
+                ));
             }
-            // MediaStore authenticates and decrypts each chunk before it reaches the
-            // archive. The archive is encrypted separately and remains portable across
-            // account passwords and media-store salts.
-            let mut digest = MediaDigest(Sha256::new());
-            let size = self
-                .media
-                .copy_decrypted(file_conv, &mut digest)
-                .map_err(|_| SnapshotError::InvalidMedia)?;
-            let chunks = size.div_ceil(MEDIA_CHUNK_BYTES as u64);
-            record_count = record_count
-                .checked_add(1)
-                .and_then(|count| count.checked_add(chunks))
-                .ok_or(SnapshotError::SizeLimit)?;
-            media.push((file_conv, size, <[u8; 32]>::from(digest.0.finalize())));
         }
         let mut source_device_ed25519_pubs: Vec<_> = self
             .recovery_origins
@@ -870,20 +952,37 @@ impl Node {
         for card in trust_cards {
             writer.push(&SnapshotRecordV1::PeerTrustCard { card })?;
         }
-        for (file_conv, size, digest) in media {
-            writer.push(&SnapshotRecordV1::MediaDescriptor {
-                file_conv: *file_conv.as_bytes(),
-                size,
-                sha256: digest,
-            })?;
+        for payload in portable_favorites.portable_records(&own_account, now) {
+            writer.push(&SnapshotRecordV1::Favorite { payload: payload? })?;
+        }
+        for (favorite, file_conv, size, digest) in media {
+            let descriptor = if favorite {
+                SnapshotRecordV1::FavoriteMediaDescriptor {
+                    file_conv: *file_conv.as_bytes(),
+                    size,
+                    sha256: digest,
+                }
+            } else {
+                SnapshotRecordV1::MediaDescriptor {
+                    file_conv: *file_conv.as_bytes(),
+                    size,
+                    sha256: digest,
+                }
+            };
+            writer.push(&descriptor)?;
             let mut sink = MediaRecordSink {
                 writer: &mut writer,
                 file_conv,
+                favorite,
                 buffer: Vec::with_capacity(MEDIA_CHUNK_BYTES),
                 index: 0,
             };
-            let written = self
-                .media
+            let store = if favorite {
+                &self.favorite_media
+            } else {
+                &self.media
+            };
+            let written = store
                 .copy_decrypted(file_conv, &mut sink)
                 .map_err(|_| SnapshotError::InvalidMedia)?;
             if written != size {
@@ -901,6 +1000,9 @@ fn preview_snapshot<R: Read>(source: R) -> Result<BackupPreview, SnapshotError> 
     let mut file_cards = 0u64;
     let mut media = HashSet::new();
     let mut file_references = Vec::new();
+    let mut favorites = 0u64;
+    let mut favorite_media = HashSet::new();
+    let mut favorite_references = HashSet::new();
     let header = read_snapshot(source, |record| {
         match record {
             SnapshotRecordV1::SentDm { .. } | SnapshotRecordV1::ReceivedDm { .. } => {
@@ -920,6 +1022,16 @@ fn preview_snapshot<R: Read>(source: R) -> Result<BackupPreview, SnapshotError> 
             SnapshotRecordV1::MediaDescriptor { file_conv, .. } => {
                 media.insert(file_conv);
             }
+            SnapshotRecordV1::Favorite { payload } => {
+                let favorite = super::favorites::recovery::summarize(&payload)?;
+                if !favorite.removed {
+                    favorites += 1;
+                }
+                favorite_references.extend(favorite.files.into_iter().map(|file| file.file_conv));
+            }
+            SnapshotRecordV1::FavoriteMediaDescriptor { file_conv, .. } => {
+                favorite_media.insert(hex::encode(file_conv));
+            }
             _ => {}
         }
         Ok(())
@@ -936,6 +1048,9 @@ fn preview_snapshot<R: Read>(source: R) -> Result<BackupPreview, SnapshotError> 
         file_cards,
         media_files: media.len() as u64,
         missing_media,
+        favorites,
+        favorite_files: favorite_media.len() as u64,
+        missing_favorite_files: favorite_references.difference(&favorite_media).count() as u64,
     })
 }
 

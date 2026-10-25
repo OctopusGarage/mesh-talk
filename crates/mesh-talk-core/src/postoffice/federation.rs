@@ -8,7 +8,7 @@ use crate::eventlog::store::AppendOutcome;
 use crate::eventlog::sync::SyncStore;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::bridge_directory::{
-    BridgeDirectory, FederatedPresence, FederatedPresenceWithOrigin,
+    BridgeDirectory, FederatedPresence, FederatedPresenceSource, FederatedPresenceWithOrigin,
 };
 use crate::node::session::request_round;
 use crate::postoffice::gateway::GatewayProof;
@@ -22,16 +22,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
+const REQUEST_V4: &[u8] = b"MTFI4Q";
+const PRESENCE_ORIGIN_FRAME: &[u8] = b"MTFP3D";
 const REQUEST: &[u8] = b"MTFI1Q";
-const REQUEST_V2: &[u8] = b"MTFI2Q";
 const REQUEST_V3: &[u8] = b"MTFI3Q";
-const PRESENCE_ORIGIN_FRAME: &[u8] = b"MTFP2D";
+const REQUEST_V2: &[u8] = b"MTFI2Q";
 const RESPONSE: &[u8] = b"MTFI1R";
 const IDS_PER_PAGE: usize = 512;
 const MAX_PAGES: usize = 256;
 const ROUND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum mailbox work in one bounded exchange; a full batch schedules continuation.
 pub const MAX_MAILBOXES_PER_EXCHANGE: usize = 16;
+const ROUTED_PRESENCE_FRAME: &[u8] = b"MTFP2D";
 const PRESENCE_FRAME: &[u8] = b"MTFP1D";
 const PRESENCE_PER_PAGE: usize = 16;
 
@@ -127,7 +129,6 @@ impl FederationDirectory {
         Self(Arc::new(Mutex::new(BridgeDirectory::with_gateway(gateway))))
     }
 
-    /// Set the operator's bounded display name; only consenting clients disclose it.
     pub fn set_office_name(&self, name: &str) {
         self.0
             .lock()
@@ -166,31 +167,23 @@ impl FederationDirectory {
         network: &super::network::RelayNetwork,
     ) -> Result<usize, String> {
         tokio::time::timeout(ROUND_TIMEOUT, async {
-            match sync_version(
-                addr,
-                identity,
-                expected,
-                store,
-                Some(&self.0),
-                REQUEST_V3,
-                Some(network),
-            )
-            .await
-            {
-                Err(error) if error == "unsupported federation version" => {
-                    sync_version(
-                        addr,
-                        identity,
-                        expected,
-                        store,
-                        Some(&self.0),
-                        REQUEST_V2,
-                        Some(network),
-                    )
-                    .await
+            for request in [REQUEST_V4, REQUEST_V3, REQUEST_V2] {
+                match sync_version(
+                    addr,
+                    identity,
+                    expected,
+                    store,
+                    Some(&self.0),
+                    request,
+                    Some(network),
+                )
+                .await
+                {
+                    Err(error) if error == "unsupported federation version" => continue,
+                    result => return result,
                 }
-                result => result,
             }
+            Err("unsupported federation version".to_string())
         })
         .await
         .map_err(|_| "federation exchange deadline exceeded".to_string())?
@@ -282,7 +275,13 @@ fn decode_origin_page(bytes: &[u8]) -> Result<(Vec<FederatedPresenceWithOrigin>,
         .deserialize(&body[1..])
         .map_err(|error| error.to_string())?;
     let now = unix_now();
-    if proofs.len() > PRESENCE_PER_PAGE {
+    if proofs.len() > PRESENCE_PER_PAGE
+        || proofs.iter().any(|entry| {
+            entry
+                .origin_hops
+                .is_some_and(|h| h > crate::node::bridge_directory::MAX_ORIGIN_HOPS)
+        })
+    {
         return Err("federation origin count exceeds bound".into());
     }
     for entry in &mut proofs {
@@ -298,6 +297,7 @@ async fn send_presence_pages<IO>(
     channel: &mut SecureChannel<IO>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
     limit: usize,
+    routed: bool,
     origins: bool,
 ) -> Result<(), String>
 where
@@ -328,20 +328,29 @@ where
             directory
                 .lock()
                 .expect("directory lock not poisoned")
-                .export_federated(Instant::now(), unix_now())
+                .export_presence_sources(Instant::now(), unix_now())
         })
         .unwrap_or_default();
     proofs.truncate(limit);
+    let encode = |entries: &[FederatedPresenceSource], last| {
+        if routed {
+            let mut bytes = Vec::from(ROUTED_PRESENCE_FRAME);
+            bytes.push(u8::from(last));
+            bytes.extend_from_slice(&bincode::serialize(entries).map_err(|e| e.to_string())?);
+            (bytes.len() <= MAX_PLAINTEXT)
+                .then_some(bytes)
+                .ok_or_else(|| "federation presence page is too large".to_string())
+        } else {
+            let legacy: Vec<_> = entries.iter().map(|entry| entry.presence.clone()).collect();
+            encode_presence_page(&legacy, last)
+        }
+    };
     let chunks = proofs.chunks(PRESENCE_PER_PAGE).collect::<Vec<_>>();
     if chunks.is_empty() {
-        send_frame(channel, &encode_presence_page(&[], true)?).await?;
+        send_frame(channel, &encode(&[], true)?).await?;
     } else {
         for (index, chunk) in chunks.iter().enumerate() {
-            send_frame(
-                channel,
-                &encode_presence_page(chunk, index + 1 == chunks.len())?,
-            )
-            .await?;
+            send_frame(channel, &encode(chunk, index + 1 == chunks.len())?).await?;
         }
     }
     Ok(())
@@ -351,6 +360,7 @@ async fn receive_presence_pages<IO>(
     channel: &mut SecureChannel<IO>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
     limit: usize,
+    routed: bool,
     origins: bool,
 ) -> Result<(), String>
 where
@@ -392,7 +402,41 @@ where
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-        let (page, last) = decode_presence_page(&bytes)?;
+        let (page, last) = if routed {
+            let body = bytes
+                .strip_prefix(ROUTED_PRESENCE_FRAME)
+                .ok_or_else(|| "invalid routed federation presence frame".to_string())?;
+            if bytes.len() > MAX_PLAINTEXT || body.is_empty() || body[0] > 1 {
+                return Err("invalid routed federation presence page".into());
+            }
+            let page: Vec<FederatedPresenceSource> = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_limit(MAX_PLAINTEXT as u64)
+                .reject_trailing_bytes()
+                .deserialize(&body[1..])
+                .map_err(|e| e.to_string())?;
+            if page.len() > PRESENCE_PER_PAGE
+                || page.iter().any(|entry| {
+                    entry
+                        .origin_hops
+                        .is_some_and(|h| h > crate::node::bridge_directory::MAX_ORIGIN_HOPS)
+                })
+            {
+                return Err("invalid federation origin distance".into());
+            }
+            (page, body[0] == 1)
+        } else {
+            let (page, last) = decode_presence_page(&bytes)?;
+            (
+                page.into_iter()
+                    .map(|presence| FederatedPresenceSource {
+                        presence,
+                        origin_hops: None,
+                    })
+                    .collect(),
+                last,
+            )
+        };
         proofs.extend(page);
         if last {
             complete = true;
@@ -403,24 +447,23 @@ where
         return Err("incomplete federation presence".into());
     }
     if let Some(directory) = directory {
-        directory
-            .lock()
-            .map_err(|e| e.to_string())?
-            .import_federated(&proofs, unix_now());
+        let mut directory = directory.lock().map_err(|e| e.to_string())?;
+        if routed {
+            directory.import_presence_sources(&proofs, unix_now());
+        } else {
+            let legacy: Vec<_> = proofs.into_iter().map(|entry| entry.presence).collect();
+            directory.import_federated(&legacy, unix_now());
+        }
     }
     Ok(())
 }
 
 pub(crate) fn is_inventory_request(bytes: &[u8]) -> bool {
-    bytes == REQUEST || bytes == REQUEST_V2 || bytes == REQUEST_V3
-}
-
-pub(crate) fn origin_capable(request: &[u8]) -> bool {
-    request == REQUEST_V3
+    bytes == REQUEST || bytes == REQUEST_V2 || bytes == REQUEST_V3 || bytes == REQUEST_V4
 }
 
 pub(crate) fn presence_limit(request: &[u8]) -> usize {
-    if request == REQUEST_V2 || request == REQUEST_V3 {
+    if request == REQUEST_V2 || request == REQUEST_V3 || request == REQUEST_V4 {
         crate::node::bridge_directory::MAX_MEMBERS
     } else {
         crate::node::bridge_directory::LEGACY_MAX_MEMBERS
@@ -518,32 +561,18 @@ where
     Ok(entries)
 }
 
-#[cfg(test)]
 pub(crate) async fn send_inventory<IO>(
     channel: &mut SecureChannel<IO>,
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
-    limit: usize,
-) -> Result<FederationStore, String>
-where
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    send_inventory_versioned(channel, store, directory, limit, false).await
-}
-
-pub(crate) async fn send_inventory_versioned<IO>(
-    channel: &mut SecureChannel<IO>,
-    store: &Arc<Mutex<PostOffice>>,
-    directory: Option<&Arc<Mutex<BridgeDirectory>>>,
-    limit: usize,
-    origins: bool,
+    request: &[u8],
 ) -> Result<FederationStore, String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     tokio::time::timeout(
         ROUND_TIMEOUT,
-        send_inventory_inner(channel, store, directory, limit, origins),
+        send_inventory_inner(channel, store, directory, request),
     )
     .await
     .map_err(|_| "federation inventory deadline exceeded".to_string())?
@@ -553,13 +582,15 @@ async fn send_inventory_inner<IO>(
     channel: &mut SecureChannel<IO>,
     store: &Arc<Mutex<PostOffice>>,
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
-    limit: usize,
-    origins: bool,
+    request: &[u8],
 ) -> Result<FederationStore, String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    receive_presence_pages(channel, directory, limit, origins).await?;
+    let limit = presence_limit(request);
+    let routed = request == REQUEST_V3 || request == REQUEST_V4;
+    let origins = request == REQUEST_V4;
+    receive_presence_pages(channel, directory, limit, routed, origins).await?;
     let remote = receive_inventory_pages(channel).await?;
     let mut local = {
         let mut office = store.lock().map_err(|e| e.to_string())?;
@@ -571,7 +602,7 @@ where
     };
     local.sort_by_key(|entry| *entry.id.as_bytes());
     send_inventory_pages(channel, &local).await?;
-    send_presence_pages(channel, directory, limit, origins).await?;
+    send_presence_pages(channel, directory, limit, routed, origins).await?;
     Ok(FederationStore::new(store, remote))
 }
 
@@ -595,13 +626,15 @@ async fn sync_with_directory(
     directory: Option<&Arc<Mutex<BridgeDirectory>>>,
 ) -> Result<usize, String> {
     tokio::time::timeout(ROUND_TIMEOUT, async {
-        for request in [REQUEST_V3, REQUEST_V2, REQUEST] {
+        for request in [REQUEST_V4, REQUEST_V3, REQUEST_V2, REQUEST] {
             match sync_version(addr, identity, expected, store, directory, request, None).await {
+                Ok(count) => return Ok(count),
+                // Only a pre-response authenticated close negotiates a lower version.
                 Err(error) if error == "unsupported federation version" => continue,
-                result => return result,
+                Err(error) => return Err(error),
             }
         }
-        Err("unsupported federation version".into())
+        Err("unsupported federation version".to_string())
     })
     .await
     .map_err(|_| "federation exchange deadline exceeded".to_string())?
@@ -633,7 +666,14 @@ async fn sync_version(
         network.connect(&mut channel).await?;
     }
     send_frame(&mut channel, request).await?;
-    send_presence_pages(&mut channel, directory, limit, origin_capable(request)).await?;
+    send_presence_pages(
+        &mut channel,
+        directory,
+        limit,
+        request == REQUEST_V3 || request == REQUEST_V4,
+        request == REQUEST_V4,
+    )
+    .await?;
     let mut local = {
         let mut office = store.lock().map_err(|e| e.to_string())?;
         office.prune_expired().map_err(|e| e.to_string())?;
@@ -647,7 +687,14 @@ async fn sync_version(
         .map_err(|e| e.to_string())?
         .adopt_federated_arrivals(&remote, SystemTime::now())
         .map_err(|e| e.to_string())?;
-    receive_presence_pages(&mut channel, directory, limit, origin_capable(request)).await?;
+    receive_presence_pages(
+        &mut channel,
+        directory,
+        limit,
+        request == REQUEST_V3 || request == REQUEST_V4,
+        request == REQUEST_V4,
+    )
+    .await?;
     let local_digests = local
         .iter()
         .map(|entry| (entry.id, entry.digest))
@@ -695,6 +742,65 @@ mod tests {
     use crate::{discovery::Announce, identity::account::Account};
     use tokio::net::TcpListener;
 
+    #[tokio::test]
+    async fn signed_origin_negotiation_preserves_deployed_v3_presence_layout() {
+        let office = DeviceIdentity::generate();
+        let user = DeviceIdentity::generate();
+        let viewer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&user, &Account::generate(), "Duncan", 47474);
+        let mut directory = BridgeDirectory::default();
+        directory.set_office_name("Windows 10 office");
+        directory
+            .register(&user.public(), Some(&proof), true, Instant::now())
+            .unwrap();
+        let request = crate::node::bridge_directory::origin_request(&user, &office.public(), true);
+        assert!(directory.apply_origin_request(
+            &request,
+            &user.public(),
+            Some(&office),
+            unix_now()
+        ));
+        let directory = Arc::new(Mutex::new(directory));
+        let (client, server) = tokio::io::duplex(MAX_PLAINTEXT * 2);
+        let expected = office.public();
+        let (client, server) = tokio::join!(
+            SecureChannel::connect(client, &viewer, Some(&expected)),
+            SecureChannel::accept(server, &office)
+        );
+        let mut client = client.unwrap();
+        let mut server = server.unwrap();
+        for request in [REQUEST_V3, REQUEST_V4] {
+            send_presence_pages(
+                &mut server,
+                Some(&directory),
+                presence_limit(request),
+                true,
+                request == REQUEST_V4,
+            )
+            .await
+            .unwrap();
+            let bytes = client.recv().await.unwrap();
+            if request == REQUEST_V3 {
+                let body = bytes.strip_prefix(ROUTED_PRESENCE_FRAME).unwrap();
+                let entries: Vec<FederatedPresenceSource> = bincode::DefaultOptions::new()
+                    .with_fixint_encoding()
+                    .reject_trailing_bytes()
+                    .deserialize(&body[1..])
+                    .unwrap();
+                assert_eq!(entries[0].presence.announce.user_id, user.user_id());
+                assert_eq!(entries[0].origin_hops, Some(0));
+            } else {
+                let (entries, last) = decode_origin_page(&bytes).unwrap();
+                assert!(last);
+                assert_eq!(entries[0].origin_hops, Some(0));
+                assert_eq!(
+                    entries[0].origin.as_ref().unwrap().office_name(),
+                    "Windows 10 office"
+                );
+            }
+        }
+    }
+
     #[test]
     fn expired_optional_origin_does_not_discard_federated_presence() {
         let user = DeviceIdentity::generate();
@@ -715,6 +821,7 @@ mod tests {
                 expires_at_secs: now + 10,
             },
             origin: Some(origin),
+            origin_hops: Some(0),
         }];
         let (decoded, last) =
             decode_origin_page(&encode_origin_page(&entries, true).unwrap()).unwrap();
@@ -798,7 +905,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut channel = SecureChannel::accept(stream, &remote).await.unwrap();
-            assert_eq!(channel.recv().await.unwrap(), REQUEST_V3);
+            assert_eq!(channel.recv().await.unwrap(), REQUEST_V4);
             accepted.send(()).unwrap();
             std::future::pending::<()>().await;
         });
@@ -1070,23 +1177,24 @@ mod tests {
         let learned = target.clone();
         let server = tokio::spawn(async move {
             let identity = DeviceIdentity::from_secret_bytes(be, bx);
-            for request in [REQUEST_V3, REQUEST_V2] {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut first = SecureChannel::accept(stream, &identity).await.unwrap();
-                assert_eq!(first.recv().await.unwrap(), request);
-                drop(first); // Simulate a legacy endpoint rejecting each new request.
-            }
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut newest = SecureChannel::accept(stream, &identity).await.unwrap();
+            assert_eq!(newest.recv().await.unwrap(), REQUEST_V4);
+            drop(newest);
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut first = SecureChannel::accept(stream, &identity).await.unwrap();
+            assert_eq!(first.recv().await.unwrap(), REQUEST_V3);
+            drop(first);
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut second = SecureChannel::accept(stream, &identity).await.unwrap();
+            assert_eq!(second.recv().await.unwrap(), REQUEST_V2);
+            drop(second); // Simulate a pre-v2 endpoint rejecting the new request.
             let (stream, _) = listener.accept().await.unwrap();
             let mut legacy = SecureChannel::accept(stream, &identity).await.unwrap();
             assert_eq!(legacy.recv().await.unwrap(), REQUEST);
-            send_inventory(
-                &mut legacy,
-                &remote,
-                Some(&target.0),
-                presence_limit(REQUEST),
-            )
-            .await
-            .unwrap();
+            send_inventory(&mut legacy, &remote, Some(&target.0), REQUEST)
+                .await
+                .unwrap();
         });
         source
             .sync_with_relay(address, &a, &expected, &local)

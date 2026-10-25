@@ -23,6 +23,7 @@
   const owned = new Map(),
     cache = new Map();
   let statusTimer;
+  let explicitLanguage = new URL(location.href).searchParams.has("lang");
   let locale = "en",
     messages = {},
     generation = 0,
@@ -115,12 +116,12 @@
       !/\/(?:[^/.]+\.html)?$/.test(url.pathname)
     )
       return;
-    if (locale === "en") url.searchParams.delete("lang");
-    else url.searchParams.set("lang", locale);
-    // English preserves the incumbent relative hrefs. Non-English links carry
-    // preference even when localStorage is denied or the URL is shared.
-    record.last =
-      locale === "en" ? record.source : url.pathname + url.search + url.hash;
+    const automaticEnglish = locale === "en" && !explicitLanguage;
+    if (!automaticEnglish) url.searchParams.set("lang", locale);
+    // Explicit English needs the same storage-independent navigation as other locales.
+    record.last = automaticEnglish
+      ? record.source
+      : url.pathname + url.search + url.hash;
     if (actual !== record.last) element.setAttribute("href", record.last);
   }
   function visit(root) {
@@ -234,6 +235,7 @@
       if (current !== generation) return;
       messages = next;
       locale = code;
+      explicitLanguage ||= !initial;
       apply();
       const url = new URL(location.href);
       // Preserve an explicit English choice and every existing search/hash.

@@ -20,7 +20,15 @@ document.addEventListener("keydown", (event) => {
   event.preventDefault();
   const search = document.querySelector("#search");
   if (search) search.focus();
-  else location.href = "index.html#search";
+  else {
+    const link = document.querySelector(".header-links > a[href]");
+    const destination = new URL(
+      link?.getAttribute("href") ?? "index.html",
+      location.href,
+    );
+    destination.hash = "search";
+    location.href = destination.href;
+  }
 });
 if (location.hash === "#search") document.querySelector("#search")?.focus();
 

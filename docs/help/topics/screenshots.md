@@ -20,7 +20,7 @@ On macOS and Windows, capture uses the display containing the app window. Linux 
 
 For Ubuntu XFCE sessions, including XFCE running inside WSL2, the X11 fallback requires `xfce4-screenshooter` on the app's executable search path. If it is missing, install it with `sudo apt install xfce4-screenshooter` and restart Mesh-Talk. The fallback captures the X11 desktop, which may include multiple displays; crop the desired area in the editor. It does not capture the surrounding Windows desktop. Native Wayland sessions require a working screenshot portal. Cancelling a portal prompt or receiving a capture error does not trigger a second capture method.
 
-The entry is disabled when capture is unavailable. This feature does not provide scrolling screenshots, OCR, capture spanning multiple displays, or guaranteed redaction of the original screen. Review the exported region and annotations before sending.
+The entry is disabled when capture is unavailable. This feature does not provide scrolling screenshots, OCR, or guaranteed redaction of the original screen. Review the exported region and annotations before sending.
 
 ## Further reference
 

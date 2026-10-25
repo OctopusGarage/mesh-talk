@@ -6,8 +6,10 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 import { useSettings } from "./settings";
 import { DEFAULT_RINGTONE } from "@/lib/ringtones";
 import { useAuth } from "./auth";
+import { registerRuntimeSnapshot } from "./ownership";
 
 beforeEach(() => {
+  registerRuntimeSnapshot(() => ({ runEpoch: 0, identityEpoch: 0 }));
   invoke.mockReset();
   useAuth.setState({
     user: { id: "alice", username: "alice", display_name: "Alice" },
@@ -104,4 +106,22 @@ it("loads every presentation privacy field and restores safe defaults on owner r
     confirm_sensitive_copy: false,
     clipboard_clear_seconds: 0,
   });
+});
+
+it("does not install delayed settings after the same local owner adopts another account", async () => {
+  let runtime = { runEpoch: 1, identityEpoch: 1, accountId: "old-account" };
+  registerRuntimeSnapshot(() => runtime);
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = useSettings.getState().load();
+  runtime = { ...runtime, identityEpoch: 2, accountId: "adopted-account" };
+  finish({ calls_enabled: true, ringtone: "marimba", notifications: true });
+  await pending;
+  expect(useSettings.getState().callsEnabled).toBe(false);
+  expect(useSettings.getState().ringtone).toBe(DEFAULT_RINGTONE);
 });

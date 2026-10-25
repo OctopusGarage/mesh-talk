@@ -249,3 +249,36 @@ for (const language of ["pt-BR", "ko"]) {
     }
   });
 }
+
+for (const language of ["en", "es"]) {
+  test(`article search shortcut preserves explicit ${language} with blocked storage`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "languages", {
+        value: ["ja-JP"],
+        configurable: true,
+      });
+      for (const method of ["getItem", "setItem"])
+        Object.defineProperty(Storage.prototype, method, {
+          value: () => {
+            throw new DOMException("Unavailable", "SecurityError");
+          },
+        });
+    });
+    await page.goto(`${origin}index.html?lang=${language}`);
+    await expect(page.locator("html")).toHaveAttribute("lang", language);
+    await page
+      .locator("#results a", {
+        hasText: "Change where received files are saved",
+      })
+      .click();
+    await expect(page.locator("article")).toBeVisible();
+    await page.keyboard.press("/");
+    await expect(page).toHaveURL(
+      new RegExp(`index\\.html\\?lang=${language}#search$`),
+    );
+    await expect(page.locator("html")).toHaveAttribute("lang", language);
+    await expect(page.locator("#search")).toBeFocused();
+  });
+}

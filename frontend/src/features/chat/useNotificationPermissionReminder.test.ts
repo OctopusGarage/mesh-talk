@@ -130,7 +130,7 @@ it("retains dismissal across conversation navigation but allows a new login gene
   await submit();
   expect(notice()).not.toBeNull();
 });
-it("does not treat Saved Messages or updates to existing intents as a new reply-notification opportunity", async () => {
+it("does not treat Message Yourself or updates to existing intents as a new reply-notification opportunity", async () => {
   await render();
   const value = await submit(undefined, "self");
   await act(async () =>

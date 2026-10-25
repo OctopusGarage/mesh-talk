@@ -444,16 +444,20 @@ async fn private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_rout
             .load(std::sync::atomic::Ordering::Relaxed),
         0
     );
-    alice
-        .probe_private_routes_with_budget(Duration::from_millis(300))
-        .await;
-    assert_eq!(
+    // Each expired round launches only its two admitted children. Queued routes
+    // retain their turn rather than being skipped by the canceled round.
+    for launched in [2, 4, 6, 8] {
         alice
-            .privacy
-            .route_probe_cursor
-            .load(std::sync::atomic::Ordering::Relaxed),
-        8
-    );
+            .probe_private_routes_with_budget(Duration::from_millis(300))
+            .await;
+        assert_eq!(
+            alice
+                .privacy
+                .route_probe_cursor
+                .load(std::sync::atomic::Ordering::Relaxed),
+            launched,
+        );
+    }
     assert!(alice.roster.lock().unwrap().get(&live_id).is_none());
     {
         let round =
@@ -474,12 +478,16 @@ async fn private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_rout
         }).await.expect("live peer did not complete pinned authentication within the production probe deadline");
         // Dropping the pending round cancels the other stalled child probes.
     }
-    assert_eq!(
-        alice
-            .privacy
-            .route_probe_cursor
-            .load(std::sync::atomic::Ordering::Relaxed),
-        16
+    let launched = alice
+        .privacy
+        .route_probe_cursor
+        .load(std::sync::atomic::Ordering::Relaxed);
+    // The live tenth route may finish and free a worker before this observer
+    // sees its roster update. Further queued work is valid up to this round's
+    // eight-device bound; expired rounds above still require exactly two starts.
+    assert!(
+        (10..=16).contains(&launched),
+        "live route must be admitted without exceeding the bounded round: {launched} starts"
     );
     assert!(
         alice.roster.lock().unwrap().get(&live_id).is_some(),

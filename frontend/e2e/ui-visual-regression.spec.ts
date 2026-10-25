@@ -134,6 +134,23 @@ for (const viewport of VIEWPORTS) {
       test(`shell ${theme}`, async ({ page }) => {
         await seedThemeBeforeLoad(page, theme);
         await enterChat(page);
+        if (!["light", "dark", "oled"].includes(theme)) {
+          await expect(page.locator("html")).toHaveAttribute(
+            "data-palette",
+            theme,
+          );
+          await expect
+            .poll(() =>
+              page.evaluate(async (id) => {
+                const path = "/src/store/packs.ts";
+                const { installedTheme } = await import(
+                  /* @vite-ignore */ path
+                );
+                return installedTheme(id)?.id;
+              }, theme),
+            )
+            .toBe(theme);
+        }
         await prepareForScreenshot(page);
         await openBobDm(page);
 
@@ -157,10 +174,8 @@ for (const viewport of VIEWPORTS) {
             : process.platform;
         const needsPlatformReference =
           viewport.width === 760 &&
-          ((theme === "oled" &&
-            ["linux", "win32"].includes(process.platform)) ||
-            (["light", "dark"].includes(theme) &&
-              process.platform === "linux"));
+          ["light", "dark", "oled"].includes(theme) &&
+          ["linux", "win32"].includes(process.platform);
         const reference = needsPlatformReference
           ? name.replace(".png", `-${profile}.png`)
           : name;

@@ -33,6 +33,8 @@ pub struct PeerEndpoint {
     pub presence_expires_at: Option<Instant>,
     /// Original directory expiry in Unix seconds, retained across repeated old-relay evidence.
     pub presence_origin_expires_at: Option<u64>,
+    /// Trusted directory forwarding distance; zero denotes a direct registration.
+    pub origin_hops: Option<u8>,
     /// Optional consented registration relationship; never routing authority.
     pub registration_origin: Option<crate::node::RegistrationOrigin>,
 }
@@ -291,6 +293,16 @@ impl Roster {
             .insert(id, (public.clone(), certificate.clone()));
     }
 
+    /// The protocol has validated an exact-device, old/new-root signed transition.
+    /// Discovery alone must never invoke this authority boundary.
+    pub(crate) fn authorize_verified_account_transition(
+        &mut self,
+        public: &PublicIdentity,
+        certificate: &crate::identity::account::DeviceCertificate,
+    ) {
+        self.authorize_linked_account(public, certificate);
+    }
+
     fn linked_binding_matches(&self, announce: &Announce) -> bool {
         self.linked_bindings
             .get(&announce.user_id)
@@ -436,6 +448,30 @@ impl Roster {
         }
     }
 
+    pub(crate) fn set_directory_origin_hops(
+        &mut self,
+        id: &str,
+        relay: SocketAddr,
+        origin_secs: u64,
+        hops: Option<u8>,
+    ) {
+        let mut changed = false;
+        if let Some(peer) = self.peers.get_mut(id) {
+            for route in &mut peer.routes {
+                if route.source == RouteSource::PostOffice
+                    && route.addr == relay
+                    && route.presence_origin_expires_at == Some(origin_secs)
+                {
+                    changed |= route.origin_hops != hops;
+                    route.origin_hops = hops;
+                }
+            }
+        }
+        if changed {
+            self.publish_observation();
+        }
+    }
+
     pub fn update_routed(
         &mut self,
         announce: &Announce,
@@ -553,6 +589,7 @@ impl Roster {
             .find(|route| route.addr == relay && route.source == RouteSource::PostOffice);
         let prior_expiry = prior.and_then(|route| route.presence_expires_at);
         let prior_origin = prior.and_then(|route| route.presence_origin_expires_at);
+        let prior_hops = prior.and_then(|route| route.origin_hops);
         let prior_registration = prior.and_then(|route| route.registration_origin.clone());
         routes.retain(|route| route.addr != relay || route.source != RouteSource::PostOffice);
         routes.push(PeerEndpoint {
@@ -562,6 +599,7 @@ impl Roster {
             last_authenticated: None,
             presence_expires_at: prior_expiry,
             presence_origin_expires_at: prior_origin,
+            origin_hops: prior_hops,
             registration_origin: prior_registration,
         });
         if routes.len() > MAX_ROUTES_PER_PEER {
@@ -761,6 +799,7 @@ impl Roster {
             presence_expires_at: (source == RouteSource::Authenticated)
                 .then_some(now + PUBLIC_PRESENCE_TTL),
             presence_origin_expires_at: None,
+            origin_hops: None,
             registration_origin: None,
         });
         if routes.len() > MAX_ROUTES_PER_PEER {
@@ -834,6 +873,7 @@ impl Roster {
                 last_authenticated: Some(now),
                 presence_expires_at: None,
                 presence_origin_expires_at: None,
+                origin_hops: None,
                 registration_origin: None,
             });
             if peer.routes.len() > MAX_ROUTES_PER_PEER {

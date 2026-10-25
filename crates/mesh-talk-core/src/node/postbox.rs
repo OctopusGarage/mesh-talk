@@ -85,6 +85,22 @@ pub fn post_office_candidates_for(
     candidates
 }
 
+/// Performance never changes candidate eligibility; equal costs retain stable policy order.
+fn prioritize_responsive_relays(
+    candidates: &mut [PeerRecord],
+    preferred: Option<&str>,
+    cost: impl Fn(&PeerRecord) -> (bool, Duration),
+) {
+    candidates.sort_by_cached_key(|relay| {
+        let (ready, latency) = cost(relay);
+        (
+            !ready,
+            preferred != Some(relay.public.user_id().as_str()),
+            latency,
+        )
+    });
+}
+
 impl super::Node {
     pub fn set_bridge_hub_id(&self, id: Option<&str>) -> Result<(), &'static str> {
         if id
@@ -115,7 +131,9 @@ impl super::Node {
             .bridge_hub_id
             .lock()
             .expect("bridge hub lock not poisoned");
-        post_office_candidates(roster, preferred.as_deref())
+        let mut candidates = post_office_candidates(roster, preferred.as_deref());
+        self.rank_relay_candidates(&mut candidates, preferred.as_deref(), None);
+        candidates
     }
 
     pub(in crate::node) fn post_office_candidates_for(
@@ -127,7 +145,42 @@ impl super::Node {
             .bridge_hub_id
             .lock()
             .expect("bridge hub lock not poisoned");
-        post_office_candidates_for(roster, preferred.as_deref(), recipient)
+        let mut candidates = post_office_candidates_for(roster, preferred.as_deref(), recipient);
+        self.rank_relay_candidates(
+            &mut candidates,
+            preferred.as_deref(),
+            roster
+                .get(&recipient.user_id())
+                .filter(|record| record.public == *recipient),
+        );
+        candidates
+    }
+
+    fn rank_relay_candidates(
+        &self,
+        candidates: &mut [PeerRecord],
+        preferred: Option<&str>,
+        recipient: Option<&PeerRecord>,
+    ) {
+        let now = std::time::Instant::now();
+        prioritize_responsive_relays(candidates, preferred, |relay| {
+            let hops = recipient.and_then(|peer| {
+                peer.presence_routes(now)
+                    .filter(|(route, _, _)| {
+                        route.source == RouteSource::PostOffice && route.addr == relay.addr
+                    })
+                    .filter_map(|(route, _, _)| route.origin_hops)
+                    .min()
+            });
+            let measured = self.sessions.routing_cost(&relay.public, relay.addr);
+            let cold = Duration::from_millis(if relay.has_lan_route() { 250 } else { 1000 });
+            // The forwarding allowance is a cold topology estimate, never an end-to-end SLA.
+            let forwarding = Duration::from_millis(u64::from(hops.unwrap_or(4)) * 50);
+            (
+                self.relay_retry_due(&relay.public),
+                measured.unwrap_or(cold) + forwarding,
+            )
+        });
     }
 }
 
@@ -235,14 +288,8 @@ async fn serve_relay_or_bridge_connection_with_trust<IO>(
         // and subsequent mailbox rounds; a slow authenticated relay cannot
         // renew its reservation indefinitely by sending one more frame.
         let _ = tokio::time::timeout(RELAY_IDLE_TIMEOUT, async {
-            let Ok(session_store) = federation::send_inventory_versioned(
-                &mut channel,
-                &store,
-                directory.as_ref(),
-                federation::presence_limit(&first),
-                federation::origin_capable(&first),
-            )
-            .await
+            let Ok(session_store) =
+                federation::send_inventory(&mut channel, &store, directory.as_ref(), &first).await
             else {
                 return;
             };
@@ -515,6 +562,42 @@ mod tests {
             );
         }
         roster
+    }
+
+    #[test]
+    fn responsive_relay_order_preserves_preference_and_avoids_failed_paths() {
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let roster = po_roster(&[(&a, 5001), (&b, 5002)], &[]);
+        let mut candidates = post_office_candidates(&roster, None);
+        let fast = candidates[1].public.user_id();
+        let slow = candidates[0].public.user_id();
+        prioritize_responsive_relays(&mut candidates, None, |relay| {
+            (
+                true,
+                Duration::from_millis(if relay.public.user_id() == fast {
+                    20
+                } else {
+                    900
+                }),
+            )
+        });
+        assert_eq!(candidates[0].public.user_id(), fast);
+        prioritize_responsive_relays(&mut candidates, Some(&slow), |relay| {
+            (
+                true,
+                Duration::from_millis(if relay.public.user_id() == fast {
+                    20
+                } else {
+                    900
+                }),
+            )
+        });
+        assert_eq!(candidates[0].public.user_id(), slow);
+        prioritize_responsive_relays(&mut candidates, Some(&slow), |relay| {
+            (relay.public.user_id() != slow, Duration::from_millis(20))
+        });
+        assert_eq!(candidates[0].public.user_id(), fast);
     }
 
     #[test]

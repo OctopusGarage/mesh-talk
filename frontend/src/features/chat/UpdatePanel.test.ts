@@ -21,7 +21,7 @@ const mocks = vi.hoisted(() => ({
   revealItemInDir: vi.fn(),
 }));
 vi.mock("@/store/updateRestart", () => ({
-  prepareUpdateRestart: vi.fn(async () => {}),
+  prepareUpdateRestart: vi.fn(async () => () => {}),
 }));
 vi.mock("@/lib/api", () => ({ updates: mocks }));
 vi.mock("@tauri-apps/plugin-opener", () => ({

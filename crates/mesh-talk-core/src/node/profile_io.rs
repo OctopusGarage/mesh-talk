@@ -66,12 +66,15 @@ impl Node {
                 self.account_profiles
                     .receive_account_profile(&profile)
                     .map_err(NodeError::Log)?;
+                // Keep the durable edit atomic, then release before channel/log work.
+                drop(store);
                 for peer in self.profile_fanout_targets() {
                     if let Some(conv) = self.prepare_account_profile_delivery(&peer, &profile) {
                         delivery.push((peer, conv));
                     }
                 }
             } else if let Some(payload) = self.account_profiles.set_avatar(avatar.clone())? {
+                drop(store);
                 for peer in self.profile_fanout_targets() {
                     if let Some(conv) = self.prepare_profile_delivery(&peer, &payload.encode()) {
                         delivery.push((peer, conv));
@@ -164,6 +167,10 @@ impl Node {
         wire: &[u8],
         required_parent: Option<crate::eventlog::event::EventId>,
     ) -> Option<(ConversationId, crate::eventlog::event::EventId)> {
+        #[cfg(test)]
+        if let Some(hook) = self.profile_prepare_hook.lock().unwrap().take() {
+            hook();
+        }
         if !self.known_account_allowed(&peer.public) {
             return None;
         }

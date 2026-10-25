@@ -5,6 +5,7 @@
 //! exchange, and application messages.
 
 use crate::discovery::Announce;
+use crate::identity::account_transition::AccountBindingTransition;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
 #[cfg(test)]
 use crate::transport::auth::build_auth;
@@ -56,11 +57,30 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
     }
 
     pub async fn connect_with_visibility(
+        stream: S,
+        identity: &DeviceIdentity,
+        expected_peer: Option<&PublicIdentity>,
+        presence: Option<&Announce>,
+        publicly_visible: bool,
+    ) -> Result<Self, TransportError> {
+        Self::connect_with_transitions(
+            stream,
+            identity,
+            expected_peer,
+            presence,
+            publicly_visible,
+            &[],
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_with_transitions(
         mut stream: S,
         identity: &DeviceIdentity,
         expected_peer: Option<&PublicIdentity>,
         presence: Option<&Announce>,
         publicly_visible: bool,
+        transitions: &[AccountBindingTransition],
     ) -> Result<Self, TransportError> {
         presence_auth::validate_own(identity, presence)?;
         let x_secret = identity.secret_bytes().1;
@@ -89,6 +109,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             identity,
             presence,
             publicly_visible,
+            transitions,
             out,
             AuthOrder::SendFirst,
             |_| true,
@@ -161,10 +182,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
     }
 
     pub async fn accept_with_visibility<F>(
+        stream: S,
+        identity: &DeviceIdentity,
+        presence: Option<&Announce>,
+        publicly_visible: bool,
+        admit: F,
+    ) -> Result<Self, TransportError>
+    where
+        F: FnOnce(&VerifiedPeer) -> bool,
+    {
+        Self::accept_with_transitions(stream, identity, presence, publicly_visible, &[], admit)
+            .await
+    }
+
+    pub(crate) async fn accept_with_transitions<F>(
         mut stream: S,
         identity: &DeviceIdentity,
         presence: Option<&Announce>,
         publicly_visible: bool,
+        transitions: &[AccountBindingTransition],
         admit: F,
     ) -> Result<Self, TransportError>
     where
@@ -188,6 +224,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SecureChannel<S> {
             identity,
             presence,
             publicly_visible,
+            transitions,
             out,
             AuthOrder::ReceiveFirst,
             admit,
@@ -342,6 +379,10 @@ impl SecureChannel<tokio::net::TcpStream> {
     }
 
     /// A reusable session has no unsolicited bytes. EOF, pending frames and
+    pub(crate) fn verified_peer(&self) -> &VerifiedPeer {
+        &self.peer
+    }
+
     /// socket errors all require a fresh handshake rather than nonce reuse.
     pub(crate) fn idle_tcp_alive(&self) -> bool {
         let mut byte = [0u8; 1];
@@ -367,19 +408,27 @@ fn encrypt_auth(
     handshake_hash: &[u8; 32],
     presence: Option<&Announce>,
     publicly_visible: bool,
+    transitions: &[AccountBindingTransition],
 ) -> Result<Vec<u8>, TransportError> {
-    let bytes =
-        presence_auth::build_with_visibility(identity, handshake_hash, presence, publicly_visible)?;
+    let bytes = presence_auth::build_with_transitions(
+        identity,
+        handshake_hash,
+        presence,
+        publicly_visible,
+        transitions,
+    )?;
     session.encrypt(&bytes)
 }
 
 /// Exchange and verify identity-auth messages over the freshly-established
 /// session. Returns the session and the verified peer identity.
+#[allow(clippy::too_many_arguments)]
 async fn auth_exchange<S, F>(
     stream: &mut S,
     identity: &DeviceIdentity,
     presence: Option<&Announce>,
     publicly_visible: bool,
+    transitions: &[AccountBindingTransition],
     out: HandshakeOutput,
     order: AuthOrder,
     admit: F,
@@ -402,6 +451,7 @@ where
                 &handshake_hash,
                 presence,
                 publicly_visible,
+                transitions,
             )?;
             write_frame(stream, &ct).await?;
             let peer_ct = read_frame(stream).await?;
@@ -419,6 +469,7 @@ where
                 &handshake_hash,
                 presence,
                 publicly_visible,
+                transitions,
             )?;
             write_frame(stream, &ct).await?;
             peer

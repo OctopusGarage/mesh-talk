@@ -174,6 +174,7 @@ mod tests {
             "diagnostics".into(),
             crate::services::user::User {
                 user_id: "diagnostics-test".into(),
+                account_login_name: None,
                 name: "diagnostics".into(),
                 display_name: "Diagnostics Test".into(),
                 address: "local".into(),

@@ -11,27 +11,65 @@ settings to confirm the value before editing it again.
 
 | Category              | Controls                                                                                                   |
 | --------------------- | ---------------------------------------------------------------------------------------------------------- |
-| General               | Display language, launch at OS login, close to tray.                                 |
+| General               | Display language, launch at OS login, close to tray and scoped local agent access.                                 |
 | Appearance            | Theme/library, available theme wallpapers and wallpaper visibility.                                        |
 | Notifications & calls | Notifications, message previews, experimental calling and ringtone.                                        |
 | Connection & delivery | Invisible mode, reply permissions, discovery scope, relay master/send/receive and preferred post office.   |
-| Privacy & security    | Device privacy preset, idle/hidden locking, sensitive copy/clipboard, stay signed in and hidden contacts.  |
+| Privacy & security    | Privacy preset, idle/hidden locking, sensitive copy/clipboard, stay signed in and hidden contacts.  |
 | Files & receiving     | Attachment receiving default and download destination. Individual conversations retain their own override. |
 | History & backup      | Local retention, encrypted backup, last-backup metadata and restore guidance.                              |
 
-App startup and keychain sign-in are computer-wide choices; most communication
-preferences belong to the signed-in account on this device. Appearance can
-participate in linked-device synchronization when its category is enabled. Each
-page names its scope, with exceptions beside the affected control. Backup does
-not export the device's settings; see [backup and recovery](backup-recovery.md).
+## Linked-account scope
 
-Before issuing a pairing code, only explicitly saved local appearance choices
-seed missing account preferences. Fresh-device defaults remain local, and
-existing account values are preserved.
+With preference synchronization enabled, linked devices share portable settings:
+notifications and preview preference, retention, calling and ringtone, post-office
+master/send/receive, LAN restriction, bridge discovery/hub, privacy preset, idle and
+hidden locking, sensitive-copy confirmation and clipboard clearing. Existing
+appearance preferences include language, theme, wallpaper and library selection.
+Custom themes, stickers, avatars and their validated assets use versioned private
+account documents. Contact remarks, pins and private contact/group photos share
+account scope; they do not change a contact's public signed nickname.
+
+Download destinations, autostart, close-to-tray, stay-signed-in, update channel,
+OS authorization, local-agent grants and device sync selection remain local.
+Invisible mode and reply-permission grants remain device-local under
+[privacy controls](privacy-controls.md). Attachment acceptance is a decision by
+the receiving device, and TOFU/manual safety verification remains installation-
+local; neither is expanded by importing another device’s settings.
+Enabling a shared notification preference never grants OS permission implicitly.
+Local encrypted-storage keys and device identity also remain distinct.
+
+The explicit kept-source pairing action seeds missing portable preferences and
+legacy libraries, drafts and private photos. Storage performs create-only seeding
+atomically, preserving existing values and tombstones. Fresh joining-device defaults
+cannot overwrite established account choices. Each preference key has an independent
+version; changes overlay the current canonical settings instead of replacing an
+outdated whole-device snapshot. Backup does not export device-local settings;
+see [backup and recovery](backup-recovery.md).
+
+## Local agent access
+
+In **General**, choose the contacts or joined groups a local agent may send to,
+then enable **Local agent access**. The switch starts the desktop's existing
+integration service with a loopback HTTP adapter. No CLI or additional download
+is needed. Agents can send text and replies; they cannot read chat history.
+Hidden contacts are omitted from new scope choices. Already granted conversations
+stay listed for explicit removal; hiding alone does not revoke an agent's access.
+
+**View agent instructions** expands a short bootstrap containing the live API help
+URL; **Copy instructions** copies the same text. Enabling also maintains a single
+Mesh-Talk block in the displayed Codex user-level `AGENTS.md`. Disabling stops
+admission, removes the scoped credential and removes only that block, preserving
+other instructions. Saved choices belong to the signed-in account on this device.
+Running, disabled and unavailable states are reported separately, with retry for
+failures. The app must remain running and unlocked; normal login restores enabled
+access and updates the bootstrap to its new endpoint. See the
+[local API guide](bot-integrations.md#desktop-local-agent-access) for discovery,
+authority, credential handling and transport limits.
 
 ## System notification permission
 
-The notification switch saves the signed-in account's preference on this device;
+The notification switch saves the signed-in account's shared preference;
 it does not override operating-system authorization. While enabled, its row shows
 current system permission separately. Turning the switch on checks permission and
 requests access only when the OS has not recorded a decision. Existing denials
@@ -52,8 +90,8 @@ conversation header. Message admission and delivery never await permission. A
 stalled permission check cannot hold the composer; incoming history and updates
 to an existing outgoing intent do not trigger the reminder. Dismissal lasts for
 the login generation, including conversation changes. Disabling notifications
-hides guidance without changing the saved preview preference. Saved Messages do
-not trigger a reply-notification reminder.
+hides guidance without changing the saved preview preference. Messages sent to
+yourself do not trigger a reply-notification reminder.
 
 macOS checks the installed application's UserNotifications authorization and alert
 settings; quiet/provisional access is shown as limited. Windows checks the
@@ -73,9 +111,9 @@ state transitions and recovery. Real packaged-app permission dialogs, settings
 navigation and notification presentation still require native platform evidence;
 browser mocks do not certify those boundaries.
 
-## Saved Messages and linked devices
+## Message Yourself and linked devices
 
-**Saved Messages** is always available after the account is ready, including when
+**Message Yourself** is always available after the account is ready, including when
 no peers are online. Text, stickers and file cards use the account's ordinary
 conversation history. Acceptance saves them locally; it does not promise that
 another device has received them. Personal messages do not expire automatically.
@@ -86,6 +124,12 @@ messages and file information with certified devices on your account.
 bytes. Both endpoints must permit the relevant category. Turning these off does
 not disable conversations with other people or groups.
 
+The group directory remains available across linked devices independently of
+these optional data switches. It contains descriptive group and member facts,
+including references to legacy groups on another device; it contains no message
+bodies or sending keys and does not grant access. A reference remains read-only
+until the device obtains the group's validated state.
+
 Upgraded devices can synchronize file cards without downloading their contents.
 Older devices retain their existing attachment-coupled metadata behavior; the
 linked-device status explains when an upgrade is needed. Choosing no history
@@ -95,6 +139,15 @@ must be upgraded rather than transferring history first.
 Synchronization resumes when a trusted source is reachable and still retains the
 selected data. Local retention and deletion can remove that source; this feature
 is not an unlimited cloud archive. A local save remains useful while offline.
+
+## Favorites and linked-device permissions
+
+**Favorites** is separate from the self-chat **Message Yourself**. It stores useful
+message snapshots with editable searchable descriptions and per-message notes.
+Both linked devices must enable **Message history** to exchange Favorites,
+including notes and removals, and **Attachments** to exchange retained file bytes.
+Disabling sharing preserves local favorites. See [Favorites](favorites.md) for
+retention, compatibility and file-size limits.
 
 ## Network preferences and effective behavior
 

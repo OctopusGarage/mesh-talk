@@ -358,3 +358,71 @@ it.each([
     expect(invoke.mock.calls.map(([cmd]) => cmd)).toEqual(["register"]);
   },
 );
+
+describe("device enrollment session publication", () => {
+  it("enters the kept account through the normal authenticated state without registering a temporary user", async () => {
+    invoke.mockResolvedValue({
+      success: true,
+      token: "native-token",
+      saved_session: "saved",
+      user: {
+        id: "retained-local-user",
+        username: "kept-login",
+        display_name: "Kept nickname",
+      },
+    });
+    expect(
+      await useAuth
+        .getState()
+        .enrollDevice("attempt", "verified-source", "a".repeat(32), true),
+    ).toBe(true);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith(
+      "complete_device_enrollment",
+      {
+        enrollmentId: "attempt",
+        sourceId: "verified-source",
+        code: "a".repeat(32),
+        includeHistory: true,
+      },
+    );
+    expect(useAuth.getState()).toMatchObject({
+      user: {
+        id: "retained-local-user",
+        username: "kept-login",
+        display_name: "Kept nickname",
+      },
+      loading: false,
+      booting: false,
+      newAccount: false,
+      savedSession: "saved",
+    });
+  });
+
+  it("does not publish a late enrollment response into a replacement authentication operation", async () => {
+    let finish!: (value: unknown) => void;
+    invoke.mockImplementation((command: string) =>
+      command === "complete_device_enrollment"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : Promise.resolve({
+            success: true,
+            user: {
+              id: "replacement",
+              username: "other",
+              display_name: "Other",
+            },
+          }),
+    );
+    const previous = useAuth
+      .getState()
+      .enrollDevice("old", "source", "a".repeat(32), false);
+    await useAuth.getState().login("other", "password");
+    finish({
+      success: true,
+      user: { id: "old", username: "old-login", display_name: "Old" },
+    });
+    expect(await previous).toBe(false);
+    expect(useAuth.getState().user?.id).toBe("replacement");
+  });
+});

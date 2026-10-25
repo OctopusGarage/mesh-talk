@@ -22,6 +22,7 @@ export function AccountProfilePanel({
   const { t } = useTranslation();
   const owner = useAuth((s) => s.user?.id);
   const sessionGeneration = useAuth((s) => s.generation);
+  const runtimeEpoch = useAccountProfiles((state) => state.epoch);
   const cachedProfile = useAccountProfiles(
     (state) => state.profiles[accountId],
   );
@@ -70,7 +71,7 @@ export function AccountProfilePanel({
     return () => {
       generation.current = epoch + 1;
     };
-  }, [owner, sessionGeneration, accountId, reload]);
+  }, [owner, sessionGeneration, runtimeEpoch, accountId, reload]);
   useEffect(() => {
     if (!own && cachedProfile !== undefined) setProfile(cachedProfile);
   }, [cachedProfile, own]);

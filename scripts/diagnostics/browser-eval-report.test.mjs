@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 64], ["extended", 65]]) {
+  for (const [tier, count] of [["core", 66], ["extended", 67]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[0] === "portable-core.spec.ts" && path[1] === "presence waits for node readiness without showing a startup failure"));
     assert.ok(paths.some(path => path[1] === "city avatar thumbnails load after scrolling the gallery"));
-    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 12);
+    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 13);
     assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "a scoped native delivery invalidation refreshes status without a polling response"));
+    assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "linked-device channel history waits for copy confirmation before showing a check"));
     for (const result of ["acceptance", "rejection"]) assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === `submitted text stays in its bubble after ${result} and navigation`));
     for (const size of ["1280x800", "760x620", "320x360"]) {
       assert.ok(paths.some(path => path[1] === `delivery details preserve keyboard focus and fit ${size}`));
@@ -25,14 +28,30 @@ test("portable matrix requires existing receipt and media cases in both tiers", 
     assert.equal(paths.filter(path => path[0] === "directory-transfer.spec.ts").length, 3);
     assert.equal(paths.filter(path => path[0] === "attachment-approval.spec.ts").length, 4);
     assert.ok(paths.some(path => path[0] === "attachment-approval.spec.ts" && path[1] === "an expired previously ready attachment becomes unavailable"));
-    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 11);
+    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 12);
+    assert.ok(paths.some(path => path[0] === "unread-badge.spec.ts" && path[1] === "channel mention indicator survives later traffic and clears when the mention is viewed"));
     assert.ok(paths.some(path => path[0] === "unread-badge.spec.ts" && path[1] === "one logical DM remains one unread badge across duplicate live events and history scanning"));
     const report = complete();
     report.stats.expected = count;
-    report.suites = paths.map(([file, ...titles], index) => ({ title: file, specs: [{ ...complete().suites[0].specs[0], id: `case-${index}`, title: titles.at(-1), tests: [{ ...complete().suites[0].specs[0].tests[0], results: [{ ...complete().suites[0].specs[0].tests[0].results[0], attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/case-${index}/${name}` })) }] }] }] }));
+    report.suites = paths.map(([file, ...titles], index) => {
+      const suite = { title: file };
+      let parent = suite;
+      for (const title of titles.slice(0, -1)) {
+        const child = { title };
+        parent.suites = [child];
+        parent = child;
+      }
+      parent.specs = [{ ...complete().suites[0].specs[0], id: `case-${index}`, title: titles.at(-1), tests: [{ ...complete().suites[0].specs[0].tests[0], results: [{ ...complete().suites[0].specs[0].tests[0].results[0], attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/case-${index}/${name}` })) }] }] }];
+      return suite;
+    });
+    const { validateBrowserReport } = await import("../evals/browser-report.mjs");
+    assert.equal(validateBrowserReport(report, { count, browser: "chromium", expectedPaths: paths }).length, count);
+    const substituted = structuredClone(report);
+    const linkedCopy = substituted.suites.find(suite => suite.specs?.[0].title === "linked-device channel history waits for copy confirmation before showing a check");
+    linkedCopy.specs[0].title = "unregistered replacement with the same executed count";
+    assert.throws(() => validateBrowserReport(substituted, { count, browser: "chromium", expectedPaths: paths }), /workflow matrix differs/);
     // A superficially successful result containing only old cases must not pass.
     report.suites = report.suites.filter(suite => suite.title === "portable-core.spec.ts");
-    const { validateBrowserReport } = await import("../evals/browser-report.mjs");
     assert.throws(() => validateBrowserReport(report, { count, browser: "chromium", expectedPaths: paths }));
   }
 });
@@ -89,3 +108,27 @@ test("isolated portable shards preserve the complete strict inventory and every 
   assert.throws(() => validateBrowserReport(mergePortableReports([first, bad]), options), /harness errors/);
   assert.throws(() => mergePortableReports([]), /Missing/);
 });
+
+for (const tier of ["core", "extended"]) {
+  test(`portable ${tier} inventory matches Playwright discovery`, async () => {
+    const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
+    const frontend = fileURLToPath(new URL("../../frontend/", import.meta.url));
+    const cli = fileURLToPath(new URL("../../frontend/node_modules/@playwright/test/cli.js", import.meta.url));
+    const listed = spawnSync(process.execPath, [cli, "test", "--config", "playwright.portable.config.ts", "--list", "--reporter=json"], {
+      cwd: frontend,
+      env: { ...process.env, EVAL_BROWSER: "chromium", EVAL_TIER: tier },
+      encoding: "utf8", maxBuffer: 8 * 1024 * 1024, timeout: 120_000,
+    });
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    const report = JSON.parse(listed.stdout);
+    assert.deepEqual(report.errors, []);
+    const paths = [];
+    function visit(suite, parents = []) {
+      const current = [...parents, suite.title];
+      for (const spec of suite.specs ?? []) paths.push([...current, spec.title]);
+      for (const child of suite.suites ?? []) visit(child, current);
+    }
+    for (const suite of report.suites ?? []) visit(suite);
+    assert.deepEqual(paths.map(path => JSON.stringify(path)).sort(), requiredBrowserPaths(tier).map(path => JSON.stringify(path)).sort());
+  });
+}

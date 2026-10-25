@@ -64,6 +64,59 @@ session authorization continues to enclose synchronous commits.
 
 ## 2. Crypto & identity (`identity/`, `transport/`, `ratchet/`, `dm/`, `channel/`)
 
+### Protected messages
+
+Text and image messages can carry an authenticated `MessageProtection` policy: explicit
+click-to-view, or authentication with the viewing device's existing app-lock
+mechanism. Core history, search and received-event projections omit protected
+content; explicit exact-message text and image queries are available to authorized
+hosts. Ordinary image read and export APIs reject protected images.
+The encrypted sent/received stores and eligible history replication retain the
+full protected body. Ordinary text/reply and sticker wire layouts stay unchanged.
+
+Protected wire bodies reserve an outer `MTEX1` zero-deadline sentinel, followed
+by an optional ordinary nonzero-deadline frame and the strict versioned `MTPR1`
+body. Existing expiry-aware clients reject the outer zero sentinel before their
+raw-text fallback. The body carries base64 text so even clients predating expiry
+framing do not render literal message text through that fallback. This encoding
+is not encryption or access authorization; existing DM/channel encryption remains
+the confidentiality boundary. Unknown or malformed protected bodies fail closed.
+Updated clients preserve the nested absolute expiry independently of the
+30-second local reveal. Older clients cannot reveal protected messages and may
+display an empty or encoded item; there is no automatic ordinary-text downgrade.
+
+Protected images wrap an existing encrypted file manifest in a strict versioned
+`MFP1` protection envelope. Ordinary file manifests remain byte-compatible; older
+clients cannot decode the protected wrapper and do not receive an ordinary image
+downgrade. File chunks, integrity checks, transfer consent and encrypted media
+persistence keep their existing owners. The canonical file binding retains the
+protection requirement, so another filename or offer cannot grant ordinary access
+to the same protected transfer. The explicit image reveal resolves the retained
+message reference before reading image bytes. Ordinary media reads require a known
+unprotected manifest; retiring metadata before blob cleanup cannot grant access.
+Channel image admission retains the manifest and protection policy in the existing
+delivery WAL. Recovery projects manifest history and retained chunk scope before
+retiring the transaction; projection failure preserves the accepted message ID
+instead of reporting a new send failure.
+
+The desktop reveal command captures `RuntimeAdmission`, validates an exact
+account/channel message reference, and reuses the app-lock credential verifier
+when required. It checks the same desktop session, installed participant runtime,
+lock state and retained message again after authentication. Recall, expiry,
+logout or runtime replacement during the prompt prevents content publication.
+The verifier does not unlock the app and its result is not shared across messages.
+
+The frontend keeps the returned body in temporary message-view state for at most
+30 seconds and clears it when the view, conversation or owner retires, or the app
+loses focus or visibility. Late IPC results cannot restore a retired reveal.
+Image previews use component-local Blob URLs, revoked when concealed or retired,
+and never use the ordinary shared image URL cache.
+Ordinary history IPC, accessibility summaries, notifications, conversation
+previews and reply quotes carry placeholders. This is a supported-client
+presentation control, separate from encryption at rest, message expiry and
+retention; it cannot prevent a recipient from modifying their client or capturing
+already displayed content. See [protected-message behavior](privacy-controls.md#protected-messages).
+
 ### Fixed-deadline messages
 
 The composer optionally selects a per-message duration and computes
@@ -140,6 +193,42 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   when its signed event causally descends from acceptance, and an unaccepted member
   cannot send or inherit ownership. This cutoff also applies to channel file
   manifests, reactions, and recalls.
+  A separately owner-authorized [join-history copy](help/topics/channels.md#history-for-new-members)
+  is the bounded exception to the acceptance cutoff. Append-only event kinds 15/16
+  carry a signed policy and versioned offer/release controls; V3 channel sync gates
+  them from older decoders. Invitation and offer use the existing durable delivery
+  journal as one transaction. The offer freezes a capped selection of retained text
+  at the invitation, with original event IDs and expiry framing. A fresh snapshot
+  root derives independent per-message encryption keys via domain-separated HKDF;
+  only existing holders authorized for every row receive the root, sealed per
+  device. After signed acceptance, an eligible sharing holder seals only unexpired,
+  nonrecalled row keys to the new device. The release observes both offer and
+  acceptance, which may arrive in either order. Removal ends that invitation's
+  permission lifetime; stale offers do not generate retry events. Recipients
+  validate canonical owner authority, original event ancestry, count/time limits, lifetime,
+  release authority and encryption before using the existing durable received
+  projection. Ownership transfers pin observed policy/offer ancestry; former-owner
+  forks cannot override the new owner or backdate unobserved grants into a closed
+  owner lifetime. These are owner-attested copies of text, not independent proof that
+  the original author encrypted that exact plaintext. Sender chains, attachment
+  admission, ordinary post-acceptance content and existing plaintext archive rules
+  remain owned by their existing modules.
+  Account-authorized channels append root-signed account grants in kind 17 and
+  full-device account attestations in V4-gated kind 18. Membership, owner roles,
+  consent and revocation apply to an account grant lifetime. Certified devices
+  inherit accepted roles without individual owner approval and keep independent
+  sending chains. Initial migration is a new owner-authorized commitment, using
+  local creation/kept-source provenance and authenticated full-key account proofs;
+  later device account adoption cannot relabel an established grant.
+  For an account invitation, invitation, pending grant and selected history offer
+  commit atomically through the same delivery journal. Any certified device of
+  that account can accept. A bounded `MTJHA1` release in kind 18 binds the frozen
+  offer, exact grant incarnation, causal acceptance and target device attestation,
+  so an eligible sharing holder can send only selected row keys even when the
+  invitation's original device is offline. Legacy offer/release bytes remain
+  unchanged; account releases retain the original expiry, recall, protection,
+  count and ownership lifetime checks. See the
+  [account membership contract](network-design-reference.md#d-group-creation-distribution-and-member-recovery).
   Legacy unmarked channels retain their original auto-join semantics. The current
   owner alone may add/remove members or sign `ChannelOwnerTransfer`, and only an
   accepted current member can become owner. A non-owner can append a self-signed
@@ -151,7 +240,8 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   Departure, acceptance, and ownership-transfer delivery are retried to channel
   members after an offline first push (bounded batches).
   Membership is keyed to the device identity. When a channel owner discovers a
-  certified sibling of an accepted member, it signs and distributes one invitation
+  certified sibling of an accepted member, and local group-owner provenance is
+  established, it signs and distributes one invitation
   per recovery pass; the sibling must still accept it. If the owner is offline, the
   invitation waits until its node runs and learns the sibling's verified route.
   Restored groups remain read-only archives until the new device is invited.
@@ -174,8 +264,34 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   devices when linked-message history is enabled; `account_history` merges by `msg_id`. Device **linking** (`node/pairing.rs`):
   one-time 128-bit code (SHA-256 authenticator binding both device keys, constant-time
   check) → account secret + cert + history backfill transferred over the Noise channel.
+  Desktop enrollment uses `MTPQ4` / `MTPS4` and requires the source's signed
+  private account-access snapshot before adopting account keys. Desktop linking
+  never downgrades to V1/V2/V3; immutable creation metadata remains included,
+  and historical SDK/CLI V1/V2/V3 paths remain compatible.
+  `node/account_access.rs` owns bounded opaque account-access records, encrypted
+  persistence, account signature/revision validation and authenticated certified-
+  sibling exchange, independently of optional synchronization categories. Only
+  the explicit keep-account action seeds source credentials; joining startup
+  never publishes its previous login. Public profiles, discovery, contact remarks
+  and ordinary chat events never carry passwords.
+  `identity/account_login.rs` owns canonical sign-in resolution through an atomic
+  versioned per-local-user envelope. Its encrypted payload repeats the public
+  account/local-user binding and retains separate identity-auth and raw node-
+  storage passwords. Shared sign-in changes neither the local-user UUID nor the
+  existing storage username and never re-encrypts retained history. Migrated users
+  cannot authenticate through the old login; corrupt envelopes fail closed.
+  Registration and migration share a namespace lock and reject canonical-login
+  collisions without merging users or overwriting existing accounts.
+  `src-tauri/src/shared_account_login.rs` owns private desktop payloads, source
+  initialization, pre-adoption collision checks and admitted snapshot application.
+  It checks the current session after encryption and publishes the envelope under
+  that authority. Cross-account replacement additionally requires the matching
+  persisted previous-account/next-account/device adoption intent. Session and
+  saved-login projections use the canonical account login, while retained storage
+  credentials remain device-local. The code issuer keeps its account and login;
+  the joining desktop explicitly consents to use that login name and password.
   Self-account sends also work with no known siblings: the delivery WAL accepts a
-  durable local projection without reserving a remote queue slot. Saved Messages
+  durable local projection without reserving a remote queue slot. Message Yourself
   reuses the self-account conversation and logical message IDs. Personal file
   cards retain encrypted managed content and a detached signed manifest proof
   (`MTPFM1`) binding the exact expiry-wrapped manifest digest to that conversation.
@@ -314,6 +430,17 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   An offline peer cannot be rechecked, so the count is still historical evidence,
   not proof that a peer currently has the event, nor a delivery or read receipt.
   Post offices are not counted as group-member copies.
+  Certified devices of the sender's account share custody observations through
+  the existing private account-document session. Observations name the exact
+  channel, event and holder; account-authenticated revisions and negative
+  observations prevent stale positive replay. They attest to an account device's
+  authenticated durable-have check, not an independently signed holder receipt.
+  Status queries also recognize retained outgoing history authored by a certified
+  sibling. Counts group accepted external member accounts once and exclude all
+  sender-account devices; legacy membership retains verified device fallback.
+  Missing observation data is unknown, rather than evidence of zero copies.
+  The optional custody domain requires an upgraded sibling while existing
+  supported document domains continue with older peers.
   The ignored `channel_replica_scale_rehearsal` test runs a repeatable 5/20/50
   member Noise duplex exercise with every fifth recipient initially offline,
   then recovers them from another member after the origin exits. It reports
@@ -372,6 +499,12 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   writers on errors and authorizes the synchronous producer launch, installation,
   and each inbound callback against the current lease/ticket. A late rename cannot
   change a replacement session or runtime; startup uses the current matching name.
+  An IDs-only startup observation may publish the device/account identity after
+  the existing keystore unlocks, before durable stores finish opening. The host
+  binds it to that exact lease and startup ticket; replacement and failed or
+  cancelled startup revoke it. This observation permits account-scoped appearance
+  cache hydration only. It does not install a runtime or admit messaging/settings
+  commands. Full node identity and readiness still require runtime admission.
   Successful logout forgets the original login credential before awaiting teardown.
   On macOS, Stay signed in stores a password in the standard OS Keychain so a
   previously unlocked desktop can resume the session on launch. The in-app lock
@@ -708,8 +841,10 @@ locking, and copying. Rust persists the typed policy and sends one native
 notification for each eligible inbound event. An `AppLock` gate blocks new app
 IPC and plaintext events while keeping the node runtime alive; a native timer
 checks idle and hidden policies even when the webview pauses. Unlock verifies
-the active account with a password or, on macOS when enabled, the existing Touch
-ID protected Keychain credential. Frontend ownership generations discard stale
+the active local user with the Mesh-Talk password on non-macOS platforms;
+macOS uses system device-owner authentication with Touch ID or the Mac login
+password. The same verifier serves individual protected-message reveals.
+Frontend ownership generations discard stale
 UI work. Requests that began before a lock may still deliver a native IPC
 response to the webview; do not treat the lock as a process-memory or OS capture
 boundary.
@@ -896,7 +1031,12 @@ completion never recreates an evicted conversation cache.
 Owner-scoped channel text, sticker and file enqueue commands return exact durable
 IDs before network work; a separate admitted fanout retains runtime retirement
 protection. Nickname publication uses shared runtime admission and synchronized
-metadata, leaving lifecycle replacement exclusive. `NodeRuntime::display_name`
+metadata, leaving lifecycle replacement exclusive. The authenticated account profile owns
+nickname, bio and avatar across linked devices; desktop projection persists the
+nickname and emits an owner-scoped update, while startup/roster identity reads
+repair a missed frontend event. Legacy source migration is marked per local
+profile/account and never seeds a joining device's previous nickname.
+`NodeRuntime::display_name`
 returns an owned snapshot so concurrent rename never exposes a borrowed mutable
 name. Member and verified opaque post-office custody are separate projections,
 with post-office confirmations never retiring member-copy recovery work.
@@ -935,8 +1075,10 @@ remain unchanged.
 Conversation headers show accepted distinct account counts and known-online
 counts, including self while an accepted local node runs. Pending/removed members
 and infrastructure are excluded. Account-unresolved device memberships appear
-separately rather than being labeled people; membership actions still address
-devices. Member profiles expose deduplicated fresh devices and overlapping source
+separately rather than being labeled people. Account-authorized channels apply
+membership and owner roles to accounts; certified devices inherit those roles
+without separate owner approval. Legacy device authority remains until a verified
+owner-signed migration. Member profiles expose deduplicated fresh devices and overlapping source
 details without inferring physical LAN location or claiming a connection. Group
 history through an intermediary does not propagate presence. See the
 [network presence contract](network-design-reference.md#person-presence-contract).
@@ -995,6 +1137,30 @@ The `native-contact-eval` example uses the same desktop builder with isolated da
 roots and a dev-only embedded WebDriver. The normal entry point has no driver plugin or
 storage override. Three-platform native scenarios and the usability rubric are documented
 in [platform validation](platform-validation.md).
+
+### Initial native presentation
+
+The application root starts the existing authenticated runtime and account-scoped
+appearance coordinators before loading the chat view. Startup and chat share
+wallpaper composition; synchronous owner, account, runtime-session and lock checks
+conceal retired images before asynchronous cleanup.
+
+The native main window starts hidden. Its visibility owner accepts one renderer
+acknowledgement after a safe entry surface or verified local appearance and decoded
+selected image have a committed layout. The pack owner publishes selected-theme
+preparation under its current scope/session, so unrelated library enumeration
+does not hold the initial window. Full-library completion remains a storage
+fallback when point lookup is unavailable or fails. This preparation does
+not await full node readiness or remote peers. Hidden webviews use a layout/timer
+boundary because animation frames may be suspended before mapping.
+
+The same native owner supplies a ten-second fault fallback for normal launches.
+Both paths claim the pending show on the native main thread. Explicit visibility
+and close/minimize choices retire it, preventing delayed focus or redisplay.
+Hidden autostart never arms an automatic show. The window-state plugin restores
+geometry and decorations without restoring visibility. Presentation IPC is
+allowed for the locked entry screen, targets only the main window, and admits no
+account data or runtime operation.
 
 ### Recent search references
 
@@ -1084,7 +1250,6 @@ order differs from authored time; pending accepted rows follow durable rows.
 Signed DAG ancestry is not pruned to satisfy a local memory
 limit; authenticated checkpoint compaction remains a separate protocol decision.
 
-
 ### Manual encrypted backup and recovery
 
 `recovery/{snapshot,archive,key}.rs` defines a versioned logical snapshot inside
@@ -1111,9 +1276,11 @@ auth and node stores for verification. A publication marker makes the two direct
 renames recoverable: startup removes an incomplete pair or retains a completed pair
 before auth initializes. Startup also removes orphan staging and decrypted scratch.
 The recovered account fingerprint remains the same; the new device fingerprint
-differs. Restored channels are read-only archives because their old sender keys
-are excluded. A new device must be invited into an active channel as a new member
-to receive fresh sender keys and participate in future messages. Peer replicas
+differs. Restored channels initially expose retained archives because old sender
+keys are excluded. A certified device can inherit an existing account grant from a
+reachable accepted sibling in an account-authorized channel, including while the
+owner is offline. Legacy device-only channels first require a compatible,
+owner-signed migration; restoration does not fabricate that authorization. Peer replicas
 can restore signed ciphertext events but cannot give the new device the retired
 device's sender chains or decrypt past channel history. A certified linked device
 with retained plaintext can share its available archive after channel enrollment;
@@ -1122,7 +1289,15 @@ discovered from durable account history.
 
 Snapshots include visible plaintext history, signed event provenance, file cards,
 managed media referenced by visible cards, received peer avatars, signed public
-account profiles, immutable account creation metadata, legacy compatibility records, and recall marks.
+account profiles, immutable account creation metadata, legacy compatibility records,
+recall marks, and account-owned Favorites with their metadata, notes and independently
+retained attachment bytes. Schema 5 combines these records without changing the
+released positional tags. Readers preserve schemas 1–3 and strictly distinguish the
+two draft schema-4 extension families; mixed or malformed extensions are rejected.
+The Favorites owner applies one eligible record projection to archive count, record
+encoding and retained-file authorization. Expired and canonical protected Favorite
+content is withheld, while removal generations/tombstones remain. Favorite media
+has a separate namespace from ordinary media and shares the archive's byte budget.
 Verified peer recall marks are persisted before export so a restored device does not
 redisplay recalled plaintext it cannot decrypt from the old device's events. A
 password-encrypted local index retains original IDs for restored outgoing messages;
@@ -1247,7 +1422,8 @@ evicted. Details and operational limits are in
 
 Messages have no content-language restrictions. The core does not bundle language
 models, classify message text, or persist language-based visibility decisions.
-Display-language localization remains a device preference.
+The interface language is a portable account preference when appearance
+synchronization is enabled; operating-system locale remains device-local.
 
 Avatar compatibility publications use `MTPF1`; ordinary account profiles publish
 `MTP3` first, then the compatibility avatar under the same publication lock. The

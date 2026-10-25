@@ -15,8 +15,22 @@ test("owner can dissolve a channel and keep its history read-only", async ({
   await page.getByTestId("dissolve-channel-trigger").click();
   await expect(page.getByTestId("dissolve-channel-dialog")).toBeVisible();
   await page.getByTestId("dissolve-channel-confirm").click();
-  await expect(page.getByText("Dissolved channel").first()).toBeVisible();
-  await expect(page.getByText(/owner dissolved this channel/i)).toBeVisible();
+  await expect(page.getByTestId("dissolve-channel-dialog")).toBeHidden();
+  await expect(
+    page.getByRole("dialog").getByText(/owner dissolved this channel/i),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("conversation-header")
+      .getByText("Dissolved channel", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByRole("status")
+      .filter({ hasText: /owner dissolved this channel/i }),
+  ).toBeVisible();
   await expect(page.getByTestId("members-trigger")).toBeVisible();
   await expect(page.getByTestId("dissolve-channel-trigger")).toHaveCount(0);
   await page.getByTestId("members-trigger").click();

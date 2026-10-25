@@ -32,15 +32,24 @@ pub async fn account_id(state: tauri::State<'_, NodeState>) -> Result<String, Co
 pub async fn publish_avatar(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
+    owner: String,
+    expected_account: String,
     avatar: Option<String>,
 ) -> Result<(), CommandError> {
-    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let admission = RuntimeAdmission::capture(&app, &state, &owner)?;
     admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
                 let node = runtime.handle();
                 node.set_avatar_if(avatar.map(|s| s.into_bytes()), |commit| {
-                    admission.authorize_accept(runtime, commit)
+                    admission.authorize_accept(runtime, &mut || {
+                        if runtime.account_id() != expected_account {
+                            return Err(mesh_talk_core::node::NodeError::Authorization(
+                                "avatar account changed".into(),
+                            ));
+                        }
+                        commit()
+                    })
                 })
                 .await
                 .map_err(CommandError::from)
@@ -70,13 +79,36 @@ pub async fn peer_avatars(
 }
 
 #[tauri::command]
-pub async fn start_linking(
+pub async fn start_linking<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
-    RuntimeAdmission::capture_current(&app, &state)?
-        .with_runtime(move |rt| Ok(rt.start_linking()))
-        .await
+    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let source_app = app.inner().clone();
+    admission
+        .clone()
+        .detached(move |rt, admission| {
+            Box::pin(async move {
+                crate::shared_account_login::initialize_source(&source_app, admission, rt)?;
+                if rt.handle().account_profile(rt.account_id()).is_none() {
+                    rt.handle()
+                        .set_profile_display_name(&rt.display_name())
+                        .map_err(CommandError::from)?;
+                }
+                Ok(())
+            })
+        })
+        .await?;
+    crate::shared_account_login::apply_current(
+        handle,
+        crate::data_dir(),
+        app.inner().clone(),
+        state.inner().clone(),
+        admission.clone(),
+    )
+    .await?;
+    admission.with_runtime(|rt| Ok(rt.start_linking())).await
 }
 
 #[tauri::command]
@@ -100,13 +132,25 @@ pub async fn link_device(
     code: String,
 ) -> Result<String, CommandError> {
     let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let app = app.inner().clone();
     admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
                 let rt = runtime;
-                rt.link_device_if(&peer, &code, |commit| {
-                    admission.authorize_accept(runtime, commit)
-                })
+                rt.link_device_with_account_access_checked_if(
+                    &peer,
+                    &code,
+                    |snapshot| {
+                        crate::shared_account_login::preflight(
+                            &crate::data_dir(),
+                            &app,
+                            admission,
+                            runtime,
+                            snapshot,
+                        )
+                    },
+                    |commit| admission.authorize_accept(runtime, commit),
+                )
                 .await
                 .map_err(CommandError::from)
             })
@@ -251,6 +295,7 @@ mod recovery_accounts_tests {
                 presence_expires_at: None,
                 presence_origin_expires_at: None,
                 registration_origin: None,
+                origin_hops: None,
             }],
             name: "Alice".into(),
             post_office: false,

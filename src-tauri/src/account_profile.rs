@@ -59,16 +59,20 @@ pub async fn save_account_bio(
                 Box::pin(async move {
                     runtime
                         .handle()
-                        .save_account_bio_if(bio, |commit| {
-                            admission.authorize_accept(runtime, commit)?;
-                            // Reply after durable local acceptance; peer fanout retains admission.
-                            if let Some(completed) =
-                                completed.lock().expect("profile reply lock").take()
-                            {
-                                let _ = completed.send(Ok(()));
-                            }
-                            Ok(())
-                        })
+                        .save_account_bio_with_initial_name_if(
+                            runtime.display_name(),
+                            bio,
+                            |commit| {
+                                admission.authorize_accept(runtime, commit)?;
+                                // Reply after durable local acceptance; peer fanout retains admission.
+                                if let Some(completed) =
+                                    completed.lock().expect("profile reply lock").take()
+                                {
+                                    let _ = completed.send(Ok(()));
+                                }
+                                Ok(())
+                            },
+                        )
                         .await
                         .map_err(CommandError::from)
                 })

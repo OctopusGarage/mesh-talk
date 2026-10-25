@@ -11,6 +11,15 @@ Create an encrypted archive and keep its recovery key separately.
 
 Each backup has its own recovery key. The app does not save that key, and an old backup still needs its original key.
 
+## Use Google Drive
+
+In a configured build, choose **Google Drive** as the backup destination and connect
+through your browser. Save the separate recovery key, then choose **Back up now**.
+To restore, choose **Google Drive** as the backup source on the signed-out recovery
+screen, connect the same Google account and download a backup before verifying it.
+Google sign-in does not replace the recovery key. Backups are manual and are stored
+in Mesh-Talk's private Drive folder. Local-file backups remain available.
+
 ## Restore on a new installation
 
 1. On the signed-out screen, choose **Restore from encrypted backup**.
@@ -22,7 +31,9 @@ Restoring retains the account fingerprint but creates a new device fingerprint. 
 
 ## Know what is excluded
 
-Backups exclude machine settings, local UI customizations, pending deliveries, old device keys and files outside the managed media store. There is no vendor password-reset or recovery service. Losing both the backup and its key can make the old identity and encrypted history unrecoverable.
+Backups include Favorites, their titles and notes, and retained Favorite attachments, even if the original chat history was cleared. Expired content stays unavailable. File cards without retained bytes remain visible; the preview reports missing Favorite files separately. Backups made before Favorites backup support contain no Favorites.
+
+Backups exclude machine settings, local UI customizations, pending deliveries, old device keys and files outside Mesh-Talk's managed stores. There is no vendor password-reset or recovery service. Losing both the backup and its key can make the old identity and encrypted history unrecoverable.
 
 ## Further reference
 

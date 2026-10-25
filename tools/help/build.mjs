@@ -18,8 +18,24 @@ function navigation(data, id) {
 function articleSections(body) {
   const used = new Set();
   const sections = [];
+  const entities = {
+    "&amp;": "&",
+    "&lt;": "<",
+    "&gt;": ">",
+    "&quot;": '"',
+    "&#39;": "'",
+  };
   const html = body.replace(/<h([23])>(.*?)<\/h\1>/g, (_, level, label) => {
-    const text = label.replace(/<[^>]*>/g, "");
+    // Remove only formatting emitted by our renderer, then escape the visible
+    // label at its output boundary. Tag removal is not an HTML sanitizer.
+    const text = label.replace(
+      /<\/?(?:strong|code)>|<a href="[^"]*">|<\/a>/g,
+      "",
+    );
+    const visible = text.replace(
+      /&(?:amp|lt|gt|quot|#39);/g,
+      (entity) => entities[entity],
+    );
     const slug =
       text
         .replace(/&[^;]+;/g, "-")
@@ -30,7 +46,7 @@ function articleSections(body) {
       suffix = 2;
     while (used.has(id)) id = `${slug}-${suffix++}`;
     used.add(id);
-    if (level === "2") sections.push(`<a href="#${id}">${text}</a>`);
+    if (level === "2") sections.push(`<a href="#${id}">${e(visible)}</a>`);
     return `<h${level} id="${id}">${label}</h${level}>`;
   });
   const contents = sections.length

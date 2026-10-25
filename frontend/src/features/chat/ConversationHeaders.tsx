@@ -48,6 +48,7 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
   const [profileOpen, setProfileOpen] = useState(false);
   const owner = useAuth((s) => s.user?.id);
   const sessionGeneration = useAuth((s) => s.generation);
+  const runtimeScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
   const peers = useChat((s) => s.peers);
   const presence = usePresenceFor(id);
   const status = presenceStatus(presence);
@@ -59,6 +60,7 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
   const [trustResult, setTrustResult] = useState<{
     owner: string;
     sessionGeneration: number;
+    runtimeScope: string;
     id: string;
     fingerprint: string;
     verified: boolean;
@@ -67,6 +69,7 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
     trustResult !== null &&
     trustResult.owner === owner &&
     trustResult.sessionGeneration === sessionGeneration &&
+    trustResult.runtimeScope === runtimeScope &&
     trustResult.id === id &&
     trustResult.fingerprint === fingerprint &&
     trustResult.verified;
@@ -83,6 +86,7 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
           setTrustResult({
             owner,
             sessionGeneration,
+            runtimeScope,
             id,
             fingerprint,
             verified: tr.verified && !tr.fingerprint_changed,
@@ -92,7 +96,7 @@ export function DmHeader({ id, name }: { id: string; name: string }) {
     return () => {
       live = false;
     };
-  }, [owner, sessionGeneration, id, fingerprint]);
+  }, [owner, sessionGeneration, runtimeScope, id, fingerprint]);
   useEffect(() => setProfileOpen(false), [owner, sessionGeneration, id]);
 
   return (
@@ -133,10 +137,13 @@ export function ChannelHeader({
   dissolved,
   left,
   pendingInvite,
+  sharedReference = false,
+  memberCount,
 }: {
   id: string;
   name: string;
   memberCount: number;
+  sharedReference?: boolean;
   archived: boolean;
   dissolved: boolean;
   left: boolean;
@@ -164,17 +171,19 @@ export function ChannelHeader({
         </div>
         <div
           className="text-xs text-muted-foreground"
-          title={t("presence.knownOnlineHint")}
+          title={sharedReference ? undefined : t("presence.knownOnlineHint")}
         >
-          {dissolved
-            ? t("conversation.dissolvedChannel")
-            : archived
-              ? t("conversation.archivedChannel")
-              : left
-                ? t("conversation.leftChannel")
-                : pendingInvite
-                  ? t("conversation.pendingInvite")
-                  : groupPresenceLabel(presence, t)}
+          {sharedReference
+            ? `${t("conversation.sharedReference")} · ${t("conversation.members", { count: memberCount })}`
+            : dissolved
+              ? t("conversation.dissolvedChannel")
+              : archived
+                ? t("conversation.archivedChannel")
+                : left
+                  ? t("conversation.leftChannel")
+                  : pendingInvite
+                    ? t("conversation.pendingInvite")
+                    : groupPresenceLabel(presence, t)}
         </div>
       </div>
     </div>

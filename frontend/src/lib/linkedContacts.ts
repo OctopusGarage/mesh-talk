@@ -1,6 +1,7 @@
+import { captureRuntimeOwner } from "@/store/ownership";
 import { readWithDeadline } from "./readDeadline";
 import { subscribeSyncInvalidation } from "./syncInvalidation";
-import type { FavoriteInfo } from "./types";
+import type { FavoriteInfo, HiddenContactsSnapshot } from "./types";
 import { chat } from "@/lib/api/chat";
 import { contactPolicy, favorites } from "@/lib/api";
 import { useChat } from "@/store/chat";
@@ -35,6 +36,39 @@ async function localValues(owner: string): Promise<{
   return { values, deleted: new Set(hidden.deleted ?? []) };
 }
 
+/** Preserve saved source-device choices before exposing its pairing code. */
+export async function publishContactsBeforeLink(owner: string): Promise<void> {
+  const lease = captureRuntimeOwner();
+  const accountId = useChat.getState().myAccountId;
+  if (!accountId) throw new Error("Account identity is not ready");
+  const current = () =>
+    lease.owner === owner &&
+    lease.current() &&
+    useChat.getState().myAccountId === accountId;
+  const [records, snapshot] = await Promise.all([
+    readWithDeadline(() => chat.getAccountPreferences("contacts", owner)),
+    localValues(owner),
+  ]);
+  if (!current()) throw new Error("Account changed during contact preparation");
+  const existing = new Map(records.map((record) => [record.key, record]));
+  for (const [key, value] of snapshot.values) {
+    // Seeding is not an edit: preserve canonical values and tombstones. The
+    // native absent-only operation closes the snapshot-to-write arrival race.
+    if (!existing.has(key)) {
+      if (!current())
+        throw new Error("Account changed during contact preparation");
+      await chat.seedAccountPreference(
+        "contacts",
+        key,
+        value,
+        owner,
+        accountId,
+      );
+    }
+  }
+  if (!current()) throw new Error("Account changed during contact preparation");
+}
+
 function parseContactPreference(
   key: string,
   value: string | null,
@@ -51,18 +85,34 @@ function parseContactPreference(
     } catch {
       return {};
     }
-    const record =
-      parsed && typeof parsed === "object"
-        ? (parsed as Record<string, unknown>)
-        : {};
+    if (
+      value !== null &&
+      (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    )
+      return {};
+    const record = (parsed ?? {}) as Record<string, unknown>;
+    if (
+      ["pinned", "hidden"].some(
+        (field) =>
+          record[field] !== undefined && typeof record[field] !== "boolean",
+      )
+    )
+      return {};
+    if (
+      record.custom_alias !== undefined &&
+      record.custom_alias !== null &&
+      (typeof record.custom_alias !== "string" ||
+        Array.from(record.custom_alias).length > 256 ||
+        new TextEncoder().encode(record.custom_alias).length > 1024)
+    )
+      return {};
     return {
       favorite: {
         id,
         pinned: record.pinned === true,
         custom_alias:
-          typeof record.custom_alias === "string" &&
-          record.custom_alias.length <= 256
-            ? record.custom_alias
+          typeof record.custom_alias === "string"
+            ? record.custom_alias.trim() || null
             : null,
         hidden: record.hidden === true,
       },
@@ -88,16 +138,36 @@ function parseContactPreference(
 /** Sync local pin/alias/visibility choices through the account preference log. */
 export function startLinkedContacts(owner: string): () => void {
   let active = true;
+  const lease = captureRuntimeOwner();
+  const accountId = useChat.getState().myAccountId;
+  const current = () =>
+    active &&
+    lease.owner === owner &&
+    lease.current() &&
+    Boolean(accountId) &&
+    useChat.getState().myAccountId === accountId;
   let polling = false;
   let dirty = false;
   let initialized = false;
   const baseline = new Map<string, string>();
   const publisher = createLinkedPreferencePublisher(
-    (key, value) => chat.setAccountPreference("contacts", key, value, owner),
+    (key, value) => {
+      if (!current())
+        return Promise.reject(
+          new Error("Account changed during contact synchronization"),
+        );
+      return chat.setAccountPreference(
+        "contacts",
+        key,
+        value,
+        owner,
+        accountId,
+      );
+    },
     (error) => console.warn("Could not save linked contact preference", error),
   );
   const reconcile = async () => {
-    if (!active) return;
+    if (!current()) return;
     if (polling) {
       dirty = true;
       return;
@@ -109,14 +179,13 @@ export function startLinkedContacts(owner: string): () => void {
         readWithDeadline(() => chat.getAccountPreferences("contacts", owner)),
         localValues(owner),
       ]);
-      if (!active) return;
+      if (!current()) return;
       const local = snapshot.values;
       publisher.setEnabled(policy.contacts);
-      const remoteByKey = new Map(remote.map((record) => [record.key, record]));
       if (!initialized) {
-        for (const [key, value] of local) {
-          if (!remoteByKey.has(key)) publisher.publish(key, value);
-        }
+        // A joining installation may still retain another account's local
+        // choices. Only later committed edits are outgoing; explicit source
+        // preparation is the sole migration seed.
         for (const [key, value] of local) baseline.set(key, value);
         initialized = true;
       } else {
@@ -155,6 +224,7 @@ export function startLinkedContacts(owner: string): () => void {
         if (pinned.length)
           await favorites.apply(
             owner,
+            accountId,
             pinned,
             Object.fromEntries(
               pinned.map((record) => {
@@ -166,10 +236,12 @@ export function startLinkedContacts(owner: string): () => void {
               }),
             ),
           );
-        if (!active) return;
+        if (!current()) return;
+        let committedHidden: HiddenContactsSnapshot | undefined;
         if (hidden.length)
-          await contactPolicy.apply(
+          committedHidden = await contactPolicy.apply(
             owner,
+            accountId,
             hidden,
             Object.fromEntries(
               hidden.map((record) => {
@@ -181,20 +253,35 @@ export function startLinkedContacts(owner: string): () => void {
               }),
             ),
           );
-        if (!active) return;
+        if (!current()) return;
         // Publish complete committed projections once per imported batch.
         await Promise.all([
           pinned.length ? useChat.getState().loadFavorites() : undefined,
           hidden.length ? useContactPolicy.getState().load(owner) : undefined,
         ]);
-        if (!active) return;
+        if (!current()) return;
         for (const [index, record] of selected.entries()) {
           publisher.markApplied(record.key, record.revision, record.device_id);
           // Unsupported records remain owned by the publishing client. They are
           // not local deletions and must never become outgoing tombstones.
           if (!parsed[index].favorite && !parsed[index].hidden) continue;
-          if (record.value === null) baseline.delete(record.key);
-          else baseline.set(record.key, record.value);
+          const favorite = parsed[index].favorite;
+          const hidden = parsed[index].hidden;
+          // Compare future local snapshots with the committed representation,
+          // not the wire JSON. Optional fields, trimmed aliases and pruned empty
+          // rows must not become false local edits that overwrite newer peers.
+          if (favorite) {
+            if (!favorite.pinned && !favorite.custom_alias && !favorite.hidden)
+              baseline.delete(record.key);
+            else baseline.set(record.key, favoriteValue(favorite));
+          } else if (hidden) {
+            const committed = committedHidden?.contacts.find(
+              (entry) => entry.account_id === hidden.account,
+            );
+            if (committed)
+              baseline.set(record.key, JSON.stringify(committed.name));
+            else baseline.delete(record.key);
+          }
         }
       }
     } catch (error) {
@@ -202,7 +289,7 @@ export function startLinkedContacts(owner: string): () => void {
         console.warn("Could not reconcile linked contacts", error);
     } finally {
       polling = false;
-      if (active && dirty) {
+      if (current() && dirty) {
         dirty = false;
         queueMicrotask(() => void reconcile());
       }

@@ -14,6 +14,7 @@ import { errorMessage } from "@/lib/error";
 import { isMacOverlay, needsCustomWindowControls } from "@/lib/platform";
 import { useAuth } from "@/store/auth";
 import { RestoreBackup } from "./RestoreBackup";
+import { DeviceEnrollmentDialog } from "./DeviceEnrollmentDialog";
 import { HelpDialog } from "@/features/help/HelpDialog";
 
 /**
@@ -363,6 +364,10 @@ export function LoginScreen() {
             </TabsContent>
           </Tabs>
         </motion.div>
+
+        <div className="mt-3">
+          <DeviceEnrollmentDialog />
+        </div>
 
         <div className="mt-3">
           <RestoreBackup
