@@ -96,7 +96,8 @@ jobs:
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
           - os: linux
-            runner: ubuntu-latest
+            # Keep the AppImage glibc baseline aligned with Linux ARM64.
+            runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: linux
             runner: ubuntu-22.04-arm
@@ -148,7 +149,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # Native objects and build-script executables depend on the runner ABI.
+          key: ${{ matrix.target }}-${{ matrix.runner }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install zip on Windows
         if: runner.os == 'Windows'
