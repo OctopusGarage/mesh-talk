@@ -115,6 +115,15 @@ This is a full-package update mechanism; no delta/patch delivery is implemented.
 
 ## Download verification and installation
 
+Linux release builds use Ubuntu 22.04 for both x64 and ARM64 to retain that glibc
+baseline. Keep these build runners versioned: moving to a newer distribution can
+produce an AppImage whose bundled libraries cannot load on older systems, even
+when packaging and signature verification succeed. Compiled Cargo caches include
+the runner identity so native objects and build scripts cannot cross baselines.
+Public-package acceptance must launch the actual AppImage on a supported older
+runtime before the complete upgrade chain is considered verified. See Tauri's
+[AppImage compatibility guidance](https://v2.tauri.app/distribute/appimage/).
+
 The app saves the compatible ZIP to Downloads. The ZIP contains platform installers and
 `SHA256SUMS` (and updater payloads when enabled). The app streams it to a temporary file, checks the published size and SHA-256
 digest from GitHub's Releases API, and only then shows **Show in Downloads**. Canceling or
