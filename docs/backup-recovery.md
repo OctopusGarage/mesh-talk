@@ -31,6 +31,11 @@ Older backups made with separate per-export keys still need their original keys;
 setting up a reusable key does not reencrypt existing archives. The last successful
 backup's location, time, size and counts are also stored encrypted on this device.
 
+Creating either a local or Google Drive backup also requires
+[fresh identity verification](privacy-controls.md#verify-sensitive-operations)
+before the snapshot is exported. The recovery-key challenge remains separate:
+it checks that you saved the key, while identity verification authorizes export.
+
 ## Restore after losing a device
 
 1. On the signed-out screen, select **Restore from encrypted backup**.

@@ -130,6 +130,24 @@ it("keeps acknowledged settings until the write and canonical readback finish", 
   expect(mocks.setCallsEnabled).toHaveBeenCalledWith(true);
   expect(mocks.setRingtone).toHaveBeenCalledWith("digital");
 });
+
+it("keeps acknowledged privacy unchanged when identity verification is canceled", async () => {
+  await render();
+  mocks.update.mockRejectedValueOnce({
+    kind: "authentication-canceled",
+    message: "Verification canceled",
+  });
+  await act(async () => {
+    expect(await controller.update({ stay_signed_in: true }, "privacy")).toBe(
+      false,
+    );
+  });
+  expect(controller.settings).toEqual(initial);
+  expect(controller.errors.privacy).toBeUndefined();
+  expect(controller.savedCategory).toBeNull();
+  expect(controller.saving).toBe(false);
+  expect(mocks.get).toHaveBeenCalledTimes(1);
+});
 it("marks settings unknown after successful write with failed readback and supports refresh", async () => {
   await render();
   mocks.get.mockRejectedValueOnce(new Error("readback unavailable"));

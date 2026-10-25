@@ -33,6 +33,12 @@ account scope; they do not change a contact's public signed nickname.
 
 Download destinations, autostart, close-to-tray, stay-signed-in, update channel,
 OS authorization, local-agent grants and device sync selection remain local.
+
+Imported linked-device preferences may strengthen local privacy protections,
+but do not silently weaken them. Weaker imported preview, lock, clipboard,
+copy-confirmation or retention values retain the current local protection;
+mixed settings show Custom. An explicit local change can apply the weaker value
+after [identity verification](privacy-controls.md#verify-sensitive-operations).
 Invisible mode and reply-permission grants remain device-local under
 [privacy controls](privacy-controls.md). Attachment acceptance is a decision by
 the receiving device, and TOFU/manual safety verification remains installation-
@@ -57,6 +63,20 @@ picker shows the selected count out of 16. Search contacts and groups or use
 The list scrolls within a bounded area so large rosters do not grow the settings
 page. Search and filters never change saved permissions. Selecting or removing a
 conversation saves immediately; removing the final selection disables access.
+
+Privacy & security also shows the agent's acknowledged status and selected
+conversation count, with a link to this editor. Enabling access or expanding its
+scope requires [fresh identity verification](privacy-controls.md#verify-sensitive-operations).
+Disabling access and removing selected conversations remain available without
+an additional verification prompt.
+
+New authorizations default to **One hour**. **Until I turn it off** is an explicit
+choice; existing continuous authorizations remain continuous. The page shows
+the saved deadline and an expired state. **Renew authorization** requires identity
+verification; refreshing status, retrying a failed service, editing the selected
+conversations and restarting do not renew authorization. Recent activity shows
+content-free accepted/retried sends from the local agent interface; it does not
+identify a particular AI application or prove recipient delivery.
 
 The switch starts the desktop's existing
 integration service with a loopback HTTP adapter. No CLI or additional download

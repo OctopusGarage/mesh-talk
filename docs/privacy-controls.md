@@ -18,6 +18,41 @@ system device-owner authentication (Touch ID or the Mac login password); other
 platforms use the Mesh-Talk login password. Clipboard clearing is best effort and only clears
 text while the clipboard still holds this app's copy.
 
+Privacy & security shows the acknowledged device settings separately from an
+unapplied preset. It also shows whether saved login is enabled, the local agent's
+actual running status, and the number of selected conversations. **Manage agent
+access** opens its existing General settings editor; viewing or retrying the
+status does not grant or revoke access. A status-read failure remains unknown.
+
+Agent authorization may be temporary or continuous. Its expiry and renewal
+rules, and the content-free recent activity view, are owned by the
+[local agent guide](bot-integrations.md#lifecycle-and-authority).
+
+## Verify sensitive operations
+
+Mesh-Talk requires fresh identity verification before weakening device privacy
+settings, enabling saved login, enabling local agent access or expanding its
+selected conversations, creating a local or Google Drive backup, and starting or
+joining device linking. Changes that strengthen protection and revocation of
+agent access do not require verification. Ordinary appearance changes do not
+require verification either.
+
+macOS uses system device-owner authentication. Windows and Linux request the
+Mesh-Talk login password. Verification authorizes only the pending operation;
+it does not leave settings unlocked or unlock messages. Cancellation or failure
+does not authorize the sensitive operation. Locking, signing out or replacing
+the session invalidates pending authorization. The native backend enforces this
+boundary independently of the settings page.
+
+During device linking, the native backend verifies identity before expanding
+the selected synchronization scope. The source code stays concealed until its
+preference and history preparation completes; failed preparation retires that
+code. Successful verification followed by a later preparation/network failure
+does not roll back independently committed synchronization preferences.
+
+This verification controls supported application operations. It does not stop
+software with permission to modify application files or inspect the device.
+
 ## Protected messages
 
 Choose a protection mode beside the message composer before sending text or an image:
@@ -129,6 +164,17 @@ Files exported outside the encrypted app store and text copied to the clipboard
 can be accessed by the operating system or other apps. A company-managed device
 may observe the screen, input, files, and network activity. These controls reduce
 app-created exposure; they cannot prevent device-level monitoring.
+
+Pasted attachments and screenshots may use private plaintext staging files
+while an outgoing message is pending or retryable. App-owned staging is cleaned
+after acceptance or refusal and stale staging is removed at startup; this is not
+secure disk erasure. Inline image reads return bytes without writing a separate
+preview file. Downloaded and explicitly exported files remain plaintext at the
+chosen destination. Deleting chat history does not delete those external copies.
+
+Temporary device-keystore serialization and decoded secret buffers are wiped
+on drop. This reduces residual secret copies; it does not evict live runtime
+keys or guarantee erasure of browser, operating-system or process memory.
 
 For implementation details, see [the architecture](ARCHITECTURE.md). For backup
 limits, see [backup and recovery](backup-recovery.md).

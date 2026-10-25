@@ -126,6 +126,7 @@ fn create_backup_offline(
     username: &str,
     auth_password: &str,
     record_status: bool,
+    proof: &crate::app_lock::SensitiveAction,
 ) -> Result<BackupCreated, CommandError> {
     let parent = destination
         .parent()
@@ -161,25 +162,25 @@ fn create_backup_offline(
         .len();
     // `persist_noclobber` uses create-new semantics; a destination that appeared
     // during export is never overwritten.
-    temp.persist_noclobber(destination).map_err(|error| {
-        if error.error.kind() == std::io::ErrorKind::AlreadyExists {
-            CommandError::InvalidInput("A backup already exists at this path".into())
-        } else {
-            CommandError::Io("Could not publish backup file".into())
-        }
-    })?;
-    if sync_directory(parent).is_err() {
-        let _ = fs::remove_file(destination);
-        let _ = sync_directory(parent);
-        return Err(CommandError::Io("Could not sync backup folder".into()));
-    }
-    if authority.current(|_| ()).is_err() {
-        let _ = fs::remove_file(destination);
-        let _ = sync_directory(parent);
-        return Err(CommandError::Authorization(
-            "Backup session was replaced".into(),
-        ));
-    }
+    authority
+        .current(|_| {
+            proof.commit(|| {
+                temp.persist_noclobber(destination).map_err(|error| {
+                    if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                        CommandError::InvalidInput("A backup already exists at this path".into())
+                    } else {
+                        CommandError::Io("Could not publish backup file".into())
+                    }
+                })?;
+                if sync_directory(parent).is_err() {
+                    let _ = fs::remove_file(destination);
+                    let _ = sync_directory(parent);
+                    return Err(CommandError::Io("Could not sync backup folder".into()));
+                }
+                Ok(())
+            })
+        })
+        .map_err(CommandError::Authorization)??;
     let status = BackupStatus {
         destination: destination.display().to_string(),
         preview: preview.clone(),
@@ -189,12 +190,18 @@ fn create_backup_offline(
     // failed status update does not invalidate the successful backup.
     let manager = FileManager::new(scratch.to_path_buf());
     if record_status {
-        let _ = manager.write_encrypted_file(
-            username,
-            "meta/backup_status.enc",
-            &status,
-            auth_password,
-        );
+        let _ = authority.current(|_| {
+            proof.commit(|| {
+                manager
+                    .write_encrypted_file(
+                        username,
+                        "meta/backup_status.enc",
+                        &status,
+                        auth_password,
+                    )
+                    .map_err(|_| CommandError::Io("Could not record backup status".into()))
+            })
+        });
     }
     Ok(BackupCreated {
         recovery_key: key.display(),
@@ -212,6 +219,7 @@ pub async fn create_backup<R: tauri::Runtime>(
     node_state: tauri::State<'_, NodeState>,
     destination: String,
     recovery_key: Option<String>,
+    password: Option<String>,
 ) -> Result<BackupCreated, CommandError> {
     let generation = app_state
         .session()
@@ -230,6 +238,7 @@ pub async fn create_backup<R: tauri::Runtime>(
         recovery_key,
         true,
         Some(generation),
+        password,
     )
     .await
 }
@@ -242,6 +251,7 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
     recovery_key: String,
     record_status: bool,
     expected_generation: Option<u64>,
+    verification_password: Option<String>,
 ) -> Result<BackupCreated, CommandError> {
     let key = RecoveryKey::parse(&recovery_key)
         .map_err(|_| CommandError::InvalidInput("Recovery key format is invalid".into()))?;
@@ -254,6 +264,13 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
             "Backup session was replaced".into(),
         ));
     }
+    let proof = crate::app_lock::SensitiveAction::verify(
+        app_state,
+        &lease,
+        verification_password,
+        "export a Mesh-Talk backup",
+    )
+    .await?;
     let password = app_state
         .session()
         .matching(&lease, |info| info.node_storage_password.clone())
@@ -289,6 +306,7 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
                 &username,
                 &auth_password,
                 record_status,
+                &proof,
             )
         })
         .await

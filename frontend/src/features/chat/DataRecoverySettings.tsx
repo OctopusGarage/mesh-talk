@@ -18,7 +18,7 @@ import { recovery } from "@/lib/api";
 import { googleDrive } from "@/lib/api/googleDrive";
 import { GoogleDriveConnection } from "@/features/recovery/GoogleDriveConnection";
 import { GoogleDriveProgress } from "@/features/recovery/GoogleDriveProgress";
-import { errorMessage } from "@/lib/error";
+import { errorMessage, isVerificationCanceled } from "@/lib/error";
 import type {
   BackupCreated,
   BackupStatus,
@@ -259,7 +259,8 @@ function BackupDialog({
         onBackupCreated?.();
       }
     } catch (cause) {
-      if (current()) setError(errorMessage(cause));
+      if (current() && !isVerificationCanceled(cause))
+        setError(errorMessage(cause));
     } finally {
       if (current()) {
         pending.current = false;

@@ -5,6 +5,7 @@ import {
   isEnabled as autostartIsEnabled,
 } from "@tauri-apps/plugin-autostart";
 import type { AppSettings } from "../types";
+import { invokeSensitive } from "./sensitiveInvoke";
 
 const readFor = (owner: string | null, expectedAccount: string | null) =>
   invoke<AppSettings>("get_app_settings", { owner, expectedAccount });
@@ -12,7 +13,12 @@ const writeFor = (
   owner: string | null,
   expectedAccount: string | null,
   settings: AppSettings,
-) => invoke<void>("set_app_settings", { owner, expectedAccount, settings });
+) =>
+  invokeSensitive<void>("set_app_settings", {
+    owner,
+    expectedAccount,
+    settings,
+  });
 
 /** Reuse the native owner for portable preferences, live policy and retention. */
 export const reconcileAccountSettings = (
@@ -56,7 +62,7 @@ export function createSettingsApi(
         requireCurrent();
         const current = await readFor(owner, expectedAccount);
         requireCurrent();
-        await invoke<void>("set_app_settings", {
+        await invokeSensitive<void>("set_app_settings", {
           owner,
           expectedAccount,
           settings: { ...current, ...patch },

@@ -21,14 +21,70 @@ use std::{
 };
 use tokio::sync::Mutex;
 
+const HOUR_MS: u64 = 3_600_000;
+const MAX_EPOCH_MS: u64 = 8_640_000_000_000_000;
 const PREFERENCES: &str = "agent-access-settings.json";
 pub(super) const CLIENT_ID: &str = "desktop-local-agent";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AccessLifetime {
+    OneHour,
+    Persistent,
+}
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct Preferences {
     enabled: bool,
     destinations: Vec<Destination>,
+    // Absent lifetime is the pre-expiry persistent format.
+    lifetime: Option<AccessLifetime>,
+    expires_at_ms: Option<u64>,
+    #[serde(skip)]
+    renew: bool,
+}
+impl Preferences {
+    fn lifetime(&self) -> AccessLifetime {
+        self.lifetime.unwrap_or(if self.expires_at_ms.is_some() {
+            // Only the original format with both lifetime fields absent is persistent.
+            AccessLifetime::OneHour
+        } else {
+            AccessLifetime::Persistent
+        })
+    }
+    fn deadline(&self) -> u64 {
+        match self.lifetime() {
+            AccessLifetime::Persistent => u64::MAX,
+            AccessLifetime::OneHour => self
+                .expires_at_ms
+                // A fixed validity range cannot turn a corrupt deadline valid later.
+                .filter(|deadline| (1..=MAX_EPOCH_MS).contains(deadline))
+                .unwrap_or(0),
+        }
+    }
+    fn expired(&self) -> bool {
+        self.enabled && self.deadline() <= mesh_talk_integrations::policy::now_ms()
+    }
+    fn resolve(previous: &Self, requested: &Self) -> Self {
+        let mut next = requested.clone();
+        let fresh = next.enabled && (!previous.enabled || next.renew);
+        next.lifetime = Some(next.lifetime.unwrap_or(if fresh {
+            AccessLifetime::OneHour
+        } else {
+            previous.lifetime()
+        }));
+        next.expires_at_ms = match next.lifetime() {
+            AccessLifetime::Persistent => None,
+            AccessLifetime::OneHour
+                if fresh || previous.lifetime() == AccessLifetime::Persistent =>
+            {
+                Some(mesh_talk_integrations::policy::now_ms().saturating_add(HOUR_MS))
+            }
+            AccessLifetime::OneHour => previous.expires_at_ms,
+        };
+        next
+    }
 }
 
 #[derive(Clone, Default)]
@@ -74,13 +130,21 @@ pub(crate) struct LocalAgentAccess {
     instructions_path: String,
     instructions: String,
     error: Option<String>,
+    lifetime: AccessLifetime,
+    expires_at_ms: Option<u64>,
+    expired: bool,
+    recent_activity: Vec<mesh_talk_integrations::policy::RecentSendActivity>,
+    activity_error: Option<String>,
 }
 fn integration_error(error: mesh_talk_integrations::IntegrationError) -> CommandError {
     CommandError::Internal(format!("{}: {}", error.code, error.message))
 }
 fn read_preferences(path: &Path) -> Result<Preferences, CommandError> {
     match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Preferences::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Preferences {
+            lifetime: Some(AccessLifetime::OneHour),
+            ..Preferences::default()
+        }),
         Err(_) => Err(CommandError::Io(
             "Cannot read local agent preferences".into(),
         )),
@@ -161,17 +225,71 @@ fn validate_scope(
     Ok(())
 }
 
+fn recent_activity(
+    password: &str,
+    admission: &RuntimeAdmission,
+    controller: &Controller,
+    paths: &AccessPaths,
+    runtime: &mesh_talk_core::node::NodeRuntime,
+) -> Result<Vec<mesh_talk_integrations::policy::RecentSendActivity>, CommandError> {
+    if let Some((lease, host)) = &controller.running {
+        if lease == admission.lease() && host.is_running() {
+            return host
+                .recent_send_activity(CLIENT_ID)
+                .map_err(integration_error);
+        }
+        // A retired listener may still own its registry until cleanup completes.
+        // Never open a second writer while that supervisor remains alive.
+        if !host.is_stopped() {
+            return Err(CommandError::Internal("Activity store is retiring".into()));
+        }
+    }
+    let path = crate::config_store::account_path(
+        &paths.base,
+        admission.lease().owner(),
+        "integrations.grants",
+    )
+    .ok_or_else(|| CommandError::InvalidInput("Invalid host profile".into()))?;
+    if !path
+        .try_exists()
+        .map_err(|_| CommandError::Io("Activity store unavailable".into()))?
+    {
+        return Ok(Vec::new());
+    }
+    mesh_talk_integrations::policy::GrantRegistry::open(&path, password, runtime.account_id())
+        .and_then(|registry| registry.recent_send_activity(CLIENT_ID))
+        .map_err(integration_error)
+}
+
 async fn view(
+    app: &AppState,
     admission: &RuntimeAdmission,
     controller: &Controller,
     paths: &AccessPaths,
 ) -> Result<LocalAgentAccess, CommandError> {
+    // Session matching cannot run inside with_runtime's session authority guard.
+    let password = zeroize::Zeroizing::new(
+        app.session()
+            .matching(admission.lease(), |info| info.password.clone())
+            .map_err(CommandError::Authorization)?,
+    );
     admission
         .with_runtime(|runtime| {
             let preferences = read_preferences(&paths.preferences(admission.lease().owner())?)?;
+            let activity = recent_activity(&password, admission, controller, paths, runtime);
+            let expired = preferences.expired();
             Ok(LocalAgentAccess {
+                lifetime: preferences.lifetime(),
+                expires_at_ms: (preferences.lifetime() == AccessLifetime::OneHour)
+                    .then_some(preferences.deadline()),
+                expired,
+                recent_activity: activity.as_ref().map_or_else(|_| Vec::new(), Clone::clone),
+                activity_error: activity
+                    .err()
+                    .map(|_| "Recent local-interface activity is unavailable".into()),
                 enabled: preferences.enabled,
                 running: preferences.enabled
+                    && !expired
                     && controller.running.as_ref().is_some_and(|(lease, host)| {
                         lease == admission.lease() && host.is_running()
                     }),
@@ -182,7 +300,10 @@ async fn view(
                     .running
                     .as_ref()
                     .filter(|(lease, host)| {
-                        lease == admission.lease() && preferences.enabled && host.is_running()
+                        lease == admission.lease()
+                            && preferences.enabled
+                            && !expired
+                            && host.is_running()
                     })
                     .map(|(_, host)| {
                         instructions::render(&format!("{}/v1/help", host.http_endpoint))
@@ -198,21 +319,31 @@ async fn view(
         .await
 }
 
+fn requires_identity_verification(previous: &Preferences, next: &Preferences) -> bool {
+    (next.enabled && (next.renew || !previous.enabled || next.deadline() > previous.deadline()))
+        || next
+            .destinations
+            .iter()
+            .any(|destination| !previous.destinations.contains(destination))
+}
+
 /// One owner serializes settings and startup, so a late startup cannot undo a toggle.
 async fn apply(
     app: &AppState,
     node: &NodeState,
-    admission: RuntimeAdmission,
+    mut admission: RuntimeAdmission,
     paths: &AccessPaths,
     requested: Option<Preferences>,
+    verification_password: Option<Option<String>>,
     on_accept: AcceptanceCallback,
 ) -> Result<LocalAgentAccess, CommandError> {
     let mut controller = app.integrations.0.lock().await;
-    let (preferences, legacy) = admission
+    let (mut preferences, legacy) = admission
         .with_runtime(|runtime| {
+            let previous = read_preferences(&paths.preferences(admission.lease().owner())?)?;
             let preferences = match &requested {
-                Some(preferences) => preferences.clone(),
-                None => read_preferences(&paths.preferences(admission.lease().owner())?)?,
+                Some(preferences) => Preferences::resolve(&previous, preferences),
+                None => previous,
             };
             validate_scope(&preferences, &conversations(runtime))?;
             let legacy = requested.is_none()
@@ -222,6 +353,20 @@ async fn apply(
             Ok((preferences, legacy))
         })
         .await?;
+    if let Some(password) = verification_password {
+        let previous = admission
+            .with_runtime(|_| read_preferences(&paths.preferences(admission.lease().owner())?))
+            .await?;
+        if requires_identity_verification(&previous, &preferences) {
+            admission = admission
+                .verify_identity(password, "authorize Mesh-Talk agent access")
+                .await?;
+            // A new hour starts only after identity verification completes.
+            if let Some(requested) = &requested {
+                preferences = Preferences::resolve(&previous, requested);
+            }
+        }
+    }
     controller.error = None;
     // Startup and settings converge through this same handle. Drop the registry
     // before opening it again; there is never a second writer for its grant store.
@@ -232,7 +377,7 @@ async fn apply(
     }
     // Once admission is closed, stale requests cannot publish any new core work.
     // Removing instructions is separate from that security boundary.
-    if !preferences.enabled && !legacy {
+    if (!preferences.enabled || preferences.expired()) && !legacy {
         admission
             .with_runtime(|_| {
                 if requested.is_some() {
@@ -252,7 +397,7 @@ async fn apply(
                 Ok(())
             })
             .await?;
-        return view(&admission, &controller, paths).await;
+        return view(app, &admission, &controller, paths).await;
     }
     let setup = async {
         let password = app
@@ -263,13 +408,14 @@ async fn apply(
             let mut guard = node.0.write().await;
             let runtime = guard.as_mut().ok_or_else(CommandError::not_started)?;
             admission.checked(runtime, || Ok(()))?;
-            super::start(
+            super::start_checked(
                 app,
                 node,
                 admission.lease(),
                 runtime,
                 &paths.base,
                 &password,
+                admission.clone(),
                 on_accept,
             )
             .await
@@ -284,7 +430,7 @@ async fn apply(
                     "grant_create",
                     json!({
                         "client_id": CLIENT_ID, "destinations": preferences.destinations,
-                        "describe": true, "expires_at_ms": u64::MAX,
+                        "describe": true, "expires_at_ms": preferences.deadline(),
                     }),
                 )
                 .await
@@ -335,7 +481,10 @@ async fn apply(
             return Err(error);
         }
     }
-    view(&admission, &controller, paths).await
+    if let Some((_, host)) = &controller.running {
+        host.finish_sensitive_setup();
+    }
+    view(app, &admission, &controller, paths).await
 }
 
 #[tauri::command]
@@ -347,7 +496,7 @@ pub(crate) async fn get_local_agent_access(
     let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
     let paths = AccessPaths::current()?;
     let controller = app.integrations.0.lock().await;
-    view(&admission, &controller, &paths).await
+    view(&app, &admission, &controller, &paths).await
 }
 
 #[tauri::command]
@@ -356,6 +505,9 @@ pub(crate) async fn set_local_agent_access(
     owner: String,
     enabled: bool,
     destinations: Vec<Destination>,
+    password: Option<String>,
+    lifetime: Option<AccessLifetime>,
+    renew: Option<bool>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<LocalAgentAccess, CommandError> {
@@ -375,7 +527,11 @@ pub(crate) async fn set_local_agent_access(
             Some(Preferences {
                 enabled,
                 destinations,
+                lifetime,
+                renew: renew.unwrap_or(false),
+                ..Preferences::default()
             }),
+            Some(password),
             Arc::new(move |event| {
                 let _ = handle.emit("integration-message-accepted", event);
             }),
@@ -404,7 +560,7 @@ pub(crate) async fn restore(
             .map_err(|error| CommandError::Io(error.to_string()))?
             .join("codex/AGENTS.md");
     }
-    apply(app, node, admission, &paths, None, on_accept)
+    apply(app, node, admission, &paths, None, None, on_accept)
         .await
         .map(|_| ())
 }
@@ -496,7 +652,9 @@ mod tests {
             Some(Preferences {
                 enabled,
                 destinations,
+                ..Preferences::default()
             }),
+            None,
             Arc::new(|_| {}),
         )
         .await
@@ -510,6 +668,297 @@ mod tests {
             .post(format!("{}/v1/messages", config.endpoint)).bearer_auth(&config.token)
             .json(&json!({"destination":destination,"text":"Automation result", "idempotency_key":key}))
             .send().await.unwrap().json().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn new_access_has_absolute_one_hour_deadline_and_retry_preserves_it() {
+        let (_root, app, node, lease, paths, destination) = fixture().await;
+        let before = mesh_talk_integrations::policy::now_ms();
+        let enabled = configure(&app, &node, &lease, &paths, true, vec![destination.clone()])
+            .await
+            .unwrap();
+        let value = serde_json::to_value(&enabled).unwrap();
+        assert_eq!(value["lifetime"], "one_hour");
+        let deadline = value["expires_at_ms"].as_u64().unwrap();
+        assert!(
+            (before + 3_600_000..=mesh_talk_integrations::policy::now_ms() + 3_600_000)
+                .contains(&deadline)
+        );
+        let retry = configure(&app, &node, &lease, &paths, true, vec![destination])
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(retry).unwrap()["expires_at_ms"],
+            deadline
+        );
+        let restored = apply(
+            &app,
+            &node,
+            admission(&app, &node, &lease),
+            &paths,
+            None,
+            None,
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored.expires_at_ms, Some(deadline));
+        node.0.write().await.take().unwrap().stop().await;
+    }
+
+    #[tokio::test]
+    async fn activity_projects_only_safe_local_send_metadata_and_survives_disable() {
+        let (_root, app, node, lease, paths, destination) = fixture().await;
+        configure(&app, &node, &lease, &paths, true, vec![destination.clone()])
+            .await
+            .unwrap();
+        let config: ClientConfig = read_private_json(&paths.client).unwrap();
+        send(&config, &destination, "private-operation-key").await;
+        send(&config, &destination, "private-operation-key").await;
+        let disabled = configure(
+            &app,
+            &node,
+            &lease,
+            &paths,
+            false,
+            vec![destination.clone()],
+        )
+        .await
+        .unwrap();
+        let value = serde_json::to_value(disabled).unwrap();
+        let activity = value["recent_activity"]
+            .as_array()
+            .expect("safe activity is present");
+        assert_eq!(activity.len(), 2);
+        assert_eq!(activity[0]["action"], "retried");
+        assert_eq!(activity[1]["action"], "accepted");
+        assert_eq!(
+            activity[0]["destination"],
+            serde_json::to_value(destination).unwrap()
+        );
+        let encoded = serde_json::to_string(activity).unwrap();
+        for secret in [
+            "Automation result",
+            "private-operation-key",
+            &config.token,
+            "operation_id",
+            "message_id",
+        ] {
+            assert!(!encoded.contains(secret));
+        }
+        assert!(value["activity_error"].is_null());
+        node.0.write().await.take().unwrap().stop().await;
+    }
+
+    #[test]
+    fn lifetime_transitions_preserve_deadline_and_require_verification_only_for_expansion() {
+        let previous = Preferences {
+            enabled: true,
+            destinations: vec![],
+            lifetime: Some(AccessLifetime::OneHour),
+            expires_at_ms: Some(mesh_talk_integrations::policy::now_ms() + 60_000),
+            ..Preferences::default()
+        };
+        let retry = Preferences::resolve(
+            &previous,
+            &Preferences {
+                enabled: true,
+                ..Preferences::default()
+            },
+        );
+        assert_eq!(retry.expires_at_ms, previous.expires_at_ms);
+        assert!(!requires_identity_verification(&previous, &retry));
+        let persistent = Preferences::resolve(
+            &previous,
+            &Preferences {
+                enabled: true,
+                lifetime: Some(AccessLifetime::Persistent),
+                ..Preferences::default()
+            },
+        );
+        assert!(requires_identity_verification(&previous, &persistent));
+        let shortened = Preferences::resolve(
+            &persistent,
+            &Preferences {
+                enabled: true,
+                lifetime: Some(AccessLifetime::OneHour),
+                ..Preferences::default()
+            },
+        );
+        assert!(!requires_identity_verification(&persistent, &shortened));
+        let renewed = Preferences::resolve(
+            &previous,
+            &Preferences {
+                enabled: true,
+                renew: true,
+                ..Preferences::default()
+            },
+        );
+        assert!(requires_identity_verification(&previous, &renewed));
+        let malformed: Preferences =
+            serde_json::from_value(json!({"enabled":true,"lifetime":"one_hour"})).unwrap();
+        assert!(malformed.expired());
+        let unbounded: Preferences = serde_json::from_value(
+            json!({"enabled":true,"lifetime":"one_hour","expires_at_ms":u64::MAX}),
+        )
+        .unwrap();
+        assert!(unbounded.expired());
+        let incomplete: Preferences =
+            serde_json::from_value(json!({"enabled":true,"expires_at_ms":1})).unwrap();
+        assert!(incomplete.expired());
+    }
+
+    #[tokio::test]
+    async fn expired_saved_authorization_cannot_restart_and_can_be_disabled_despite_audit_failure()
+    {
+        let (_root, app, node, lease, paths, destination) = fixture().await;
+        configure(&app, &node, &lease, &paths, true, vec![destination.clone()])
+            .await
+            .unwrap();
+        let saved = paths.preferences(lease.owner()).unwrap();
+        let mut preferences = read_preferences(&saved).unwrap();
+        preferences.expires_at_ms = Some(1);
+        replace_private_json(&saved, &preferences).unwrap();
+        let expired = apply(
+            &app,
+            &node,
+            admission(&app, &node, &lease),
+            &paths,
+            None,
+            None,
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert!(expired.enabled && expired.expired && !expired.running);
+        assert_eq!(expired.expires_at_ms, Some(1));
+        assert!(!paths.client.exists());
+        let grants =
+            crate::config_store::account_path(&paths.base, lease.owner(), "integrations.grants")
+                .unwrap();
+        std::fs::write(grants, "damaged audit").unwrap();
+        let disabled = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            configure(&app, &node, &lease, &paths, false, vec![]),
+        )
+        .await
+        .expect("offline audit must not deadlock")
+        .unwrap();
+        assert!(!disabled.enabled && !disabled.running);
+        assert!(disabled.activity_error.is_some());
+        node.0.write().await.take().unwrap().stop().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_persistent_preferences_survive_restore_and_canceled_renewal_preserves_authority()
+     {
+        let (_root, app, node, lease, paths, destination) = fixture().await;
+        replace_private_json(
+            &paths.preferences(lease.owner()).unwrap(),
+            &json!({"enabled":true,"destinations":[destination]}),
+        )
+        .unwrap();
+        let restored = apply(
+            &app,
+            &node,
+            admission(&app, &node, &lease),
+            &paths,
+            None,
+            None,
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert!(restored.running && !restored.expired);
+        assert_eq!(restored.lifetime, AccessLifetime::Persistent);
+        assert_eq!(restored.expires_at_ms, None);
+        let before = std::fs::read(paths.preferences(lease.owner()).unwrap()).unwrap();
+        let token: ClientConfig = read_private_json(&paths.client).unwrap();
+        app.app_lock().set_identity_verifier(|| {
+            Err(CommandError::Authentication("Verification canceled".into()))
+        });
+        let result = apply(
+            &app,
+            &node,
+            admission(&app, &node, &lease),
+            &paths,
+            Some(Preferences {
+                enabled: true,
+                destinations: vec![destination],
+                renew: true,
+                ..Preferences::default()
+            }),
+            Some(None),
+            Arc::new(|_| {}),
+        )
+        .await;
+        assert!(matches!(result, Err(CommandError::Auth(_))));
+        assert_eq!(
+            std::fs::read(paths.preferences(lease.owner()).unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(
+            read_private_json::<ClientConfig>(&paths.client)
+                .unwrap()
+                .token,
+            token.token
+        );
+        node.0.write().await.take().unwrap().stop().await;
+    }
+
+    #[test]
+    fn dormant_scope_expansion_and_enabling_require_verification() {
+        let destination = Destination::Account {
+            id: "account".into(),
+        };
+        let empty = Preferences::default();
+        let dormant = Preferences {
+            enabled: false,
+            destinations: vec![destination],
+            ..Preferences::default()
+        };
+        assert!(requires_identity_verification(&empty, &dormant));
+        let active = Preferences {
+            enabled: true,
+            destinations: dormant.destinations.clone(),
+            ..Preferences::default()
+        };
+        assert!(requires_identity_verification(&dormant, &active));
+        assert!(!requires_identity_verification(&active, &dormant));
+        assert!(!requires_identity_verification(&active, &empty));
+    }
+
+    #[tokio::test]
+    async fn denied_agent_enable_preserves_preferences_credentials_and_instructions() {
+        let (_root, app, node, lease, paths, destination) = fixture().await;
+        std::fs::create_dir_all(paths.agents.parent().unwrap()).unwrap();
+        std::fs::write(&paths.agents, "existing instructions").unwrap();
+        app.app_lock().set_identity_verifier(|| {
+            Err(CommandError::Authentication("Verification canceled".into()))
+        });
+        let result = apply(
+            &app,
+            &node,
+            admission(&app, &node, &lease),
+            &paths,
+            Some(Preferences {
+                enabled: true,
+                destinations: vec![destination],
+                ..Preferences::default()
+            }),
+            Some(None),
+            Arc::new(|_| {}),
+        )
+        .await;
+        assert!(matches!(result, Err(CommandError::Auth(_))));
+        assert_eq!(
+            std::fs::read_to_string(&paths.agents).unwrap(),
+            "existing instructions"
+        );
+        assert!(!paths.client.exists());
+        assert!(!paths.preferences(lease.owner()).unwrap().exists());
+        assert!(app.integrations.0.lock().await.running.is_none());
+        node.0.write().await.take().unwrap().stop().await;
     }
 
     #[tokio::test]
@@ -861,6 +1310,7 @@ mod lifecycle_tests {
                 captured,
                 &paths,
                 Some(Preferences::default()),
+                None,
                 Arc::new(|_| {})
             )
             .await
@@ -895,6 +1345,7 @@ mod lifecycle_tests {
             RuntimeAdmission::capture_lease(&app, &node, &replacement).unwrap(),
             &paths,
             None,
+            None,
             Arc::new(|_| {}),
         )
         .await
@@ -928,6 +1379,7 @@ mod lifecycle_tests {
             &node,
             RuntimeAdmission::capture_lease(&app, &node, &lease).unwrap(),
             &paths,
+            None,
             None,
             Arc::new(|_| {}),
         )

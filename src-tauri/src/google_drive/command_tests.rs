@@ -349,6 +349,7 @@ fn registered_cloud_commands_round_trip_real_archive_and_restart_runtime() {
         json!([])
     );
     let key = RecoveryKey::generate().display();
+    source.state.app_lock().set_identity_verifier(|| Ok(()));
     let backup = source
         .invoke("google_drive_create_backup", json!({"recoveryKey":key}))
         .unwrap();
@@ -590,6 +591,7 @@ fn registered_local_recovery_and_cloud_generation_checks_share_the_same_authorit
     );
     let key = RecoveryKey::generate().display();
     let archive = fixture.root.path().join("local.mtbackup");
+    fixture.state.app_lock().set_identity_verifier(|| Ok(()));
     fixture
         .invoke(
             "create_backup",
@@ -617,6 +619,7 @@ fn registered_local_recovery_and_cloud_generation_checks_share_the_same_authorit
         key.clone(),
         false,
         Some(old + 1),
+        None,
     ))
     .err()
     .expect("stale generation must fail");
@@ -1459,4 +1462,52 @@ fn retired_rejection_cannot_forget_valid_access_and_forgetting_is_idempotent() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn denied_sensitive_backup_commands_leave_files_and_runtime_untouched() {
+    let fixture = Fixture::new();
+    let provider = Provider::new();
+    fixture.sign_in();
+    fixture.grant(&provider.client);
+    let account = fixture
+        .node
+        .0
+        .blocking_read()
+        .as_ref()
+        .unwrap()
+        .account_id()
+        .to_owned();
+    let destination = fixture.root.path().join("denied.mtbackup");
+    for command in ["create_backup", "google_drive_create_backup"] {
+        fixture.state.app_lock().set_identity_verifier(|| {
+            Err(CommandError::Authentication("Verification canceled".into()))
+        });
+        let result = fixture.invoke(
+            command,
+            json!({
+                "destination": destination,
+                "recoveryKey": RecoveryKey::generate().display(),
+            }),
+        );
+        assert_eq!(result.unwrap_err()["kind"], "auth");
+        assert!(!destination.exists());
+        assert_eq!(
+            fixture
+                .node
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .account_id(),
+            account
+        );
+        assert!(
+            !fixture
+                .root
+                .path()
+                .join("users/fixture-user/meta/backup_status.enc")
+                .exists()
+        );
+    }
 }

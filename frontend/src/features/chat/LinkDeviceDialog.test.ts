@@ -281,63 +281,70 @@ it("requires both apps to upgrade for shared credentials without offering a hist
   expect(auth.adoptLinkedAccount).not.toHaveBeenCalled();
 });
 
-it("enables source appearance before importing its saved settings when sync all is selected", async () => {
-  let enabledBeforeSeed = false;
-  vi.mocked(publishAppearanceBeforeLink).mockImplementationOnce(async () => {
-    enabledBeforeSeed = vi
-      .mocked(chat.setDeviceSyncCategory)
-      .mock.calls.some(
-        ([category, enabled]) => category === "appearance" && enabled,
-      );
+it("canceled source verification does not publish data or enable synchronization", async () => {
+  vi.mocked(chat.startLinking).mockRejectedValueOnce({
+    kind: "authentication-canceled",
+    message: "Verification canceled",
   });
   await render();
   await open();
   await showCode();
-  expect(enabledBeforeSeed).toBe(true);
-  expect(
-    vi
-      .mocked(chat.setDeviceSyncCategory)
-      .mock.calls.filter(([category]) => category === "appearance"),
-  ).toHaveLength(1);
-  expect(chat.startLinking).toHaveBeenCalledOnce();
+  expect(chat.setDeviceSyncCategory).not.toHaveBeenCalled();
+  expect(publishAppearanceBeforeLink).not.toHaveBeenCalled();
+  expect(accountDocuments.publishLegacyControls).not.toHaveBeenCalled();
 });
 
-it("durably prepares all source preferences and enables every category before showing its code", async () => {
+it("canceled joining verification does not enable synchronization", async () => {
+  pairingPeer(true);
+  vi.spyOn(chat, "linkDevice").mockRejectedValueOnce({
+    kind: "authentication-canceled",
+    message: "Verification canceled",
+  });
+  await render();
+  await open();
+  await enterPairing();
+  await act(async () => linkButton().click());
+  expect(chat.setDeviceSyncCategory).not.toHaveBeenCalled();
+});
+
+it("authenticates source sync expansion before publishing snapshots", async () => {
+  const pending = deferred<string>();
+  vi.mocked(chat.startLinking).mockReturnValueOnce(pending.promise);
+  await render();
+  await open();
+  await showCode();
+  expect(chat.startLinking).toHaveBeenCalledWith(true);
+  expect(chat.setDeviceSyncCategory).not.toHaveBeenCalled();
+  expect(publishAppearanceBeforeLink).not.toHaveBeenCalled();
+  await act(async () => pending.resolve("new-code"));
+  expect(publishAppearanceBeforeLink).toHaveBeenCalledWith("owner-a");
+  expect(
+    dialog()
+      ?.querySelector('[data-testid="pairing-code"]')
+      ?.textContent?.replace(/ /g, ""),
+  ).toBe("new-code");
+});
+
+it("conceals the authenticated source code until all snapshots are ready", async () => {
   const pending = deferred<void>();
   vi.mocked(publishContactsBeforeLink).mockReturnValue(pending.promise);
   await render();
   await open();
   await showCode();
-  expect(chat.startLinking).not.toHaveBeenCalled();
+  expect(chat.startLinking).toHaveBeenCalledWith(true);
+  expect(
+    dialog()?.querySelector('[data-testid="pairing-code"]') ?? null,
+  ).toBeNull();
   await act(async () => pending.resolve());
   expect(publishAppearanceBeforeLink).toHaveBeenCalledWith("owner-a");
   expect(publishContactsBeforeLink).toHaveBeenCalledWith("owner-a");
   expect(publishDraftsBeforeLink).toHaveBeenCalledWith("owner-a");
-  expect(
-    vi.mocked(publishDraftsBeforeLink).mock.invocationCallOrder[0],
-  ).toBeLessThan(vi.mocked(chat.startLinking).mock.invocationCallOrder[0]);
-  for (const category of [
-    "history",
-    "attachments",
-    "profile",
-    "appearance",
-    "contacts",
-  ])
-    expect(chat.setDeviceSyncCategory).toHaveBeenCalledWith(
-      category,
-      true,
-      "owner-a",
-    );
-  expect(
-    vi.mocked(chat.setDeviceSyncCategory).mock.invocationCallOrder[4],
-  ).toBeLessThan(
+  expect(vi.mocked(chat.startLinking).mock.invocationCallOrder[0]).toBeLessThan(
     vi.mocked(publishAppearanceBeforeLink).mock.invocationCallOrder[0],
   );
   expect(
-    vi.mocked(chat.setDeviceSyncCategory).mock.invocationCallOrder[
-      vi.mocked(chat.setDeviceSyncCategory).mock.invocationCallOrder.length - 1
-    ],
-  ).toBeLessThan(vi.mocked(chat.startLinking).mock.invocationCallOrder[0]);
+    dialog()?.querySelector('[data-testid="pairing-code"]'),
+  ).not.toBeNull();
 });
 
 it("prepares historical account controls before drafts or a source code", async () => {
@@ -353,10 +360,10 @@ it("prepares historical account controls before drafts or a source code", async 
     "our-account",
   );
   expect(publishDraftsBeforeLink).not.toHaveBeenCalled();
-  expect(chat.startLinking).not.toHaveBeenCalled();
   expect(
-    vi.mocked(chat.setDeviceSyncCategory).mock.invocationCallOrder[4],
-  ).toBeLessThan(
+    dialog()?.querySelector('[data-testid="pairing-code"]') ?? null,
+  ).toBeNull();
+  expect(vi.mocked(chat.startLinking).mock.invocationCallOrder[0]).toBeLessThan(
     vi.mocked(accountDocuments.publishLegacyControls).mock
       .invocationCallOrder[0],
   );
@@ -372,8 +379,11 @@ it("blocks a source code when historical account controls cannot be prepared", a
   await render();
   await open();
   await showCode();
-  expect(chat.startLinking).not.toHaveBeenCalled();
+  expect(
+    dialog()?.querySelector('[data-testid="pairing-code"]') ?? null,
+  ).toBeNull();
   expect(publishDraftsBeforeLink).not.toHaveBeenCalled();
+  expect(chat.stopLinking).toHaveBeenCalledOnce();
   expect(dialog()!.textContent).toContain(
     "Could not prepare historical controls",
   );
@@ -408,7 +418,9 @@ it.each(["session", "account"])(
       );
     await act(async () => pending.resolve());
     expect(publishDraftsBeforeLink).not.toHaveBeenCalled();
-    expect(chat.startLinking).not.toHaveBeenCalled();
+    expect(
+      dialog()?.querySelector('[data-testid="pairing-code"]') ?? null,
+    ).toBeNull();
   },
 );
 
@@ -419,7 +431,10 @@ it("does not show a pairing code when source preference preparation fails", asyn
   await render();
   await open();
   await showCode();
-  expect(chat.startLinking).not.toHaveBeenCalled();
+  expect(
+    dialog()?.querySelector('[data-testid="pairing-code"]') ?? null,
+  ).toBeNull();
+  expect(chat.stopLinking).toHaveBeenCalledOnce();
   expect(dialog()!.textContent).toContain("Could not save contacts");
 });
 
@@ -433,18 +448,12 @@ it("enables all categories on the joining device without publishing its local pr
   await open();
   await enterPairing();
   await act(async () => linkButton().click());
-  for (const category of [
-    "history",
-    "attachments",
-    "profile",
-    "appearance",
-    "contacts",
-  ])
-    expect(chat.setDeviceSyncCategory).toHaveBeenCalledWith(
-      category,
-      true,
-      "owner-a",
-    );
+  expect(chat.linkDevice).toHaveBeenCalledWith(
+    "pairing-device",
+    "0123456789abcdef0123456789abcdef",
+    true,
+  );
+  expect(chat.setDeviceSyncCategory).not.toHaveBeenCalled();
   expect(publishAppearanceBeforeLink).not.toHaveBeenCalled();
   expect(publishContactsBeforeLink).not.toHaveBeenCalled();
   expect(accountDocuments.publishLegacyControls).not.toHaveBeenCalled();
@@ -535,6 +544,7 @@ it("keeps actionable connection errors next to Link and puts raw diagnostics in 
   expect(chat.linkDevice).toHaveBeenCalledWith(
     "pairing-device",
     "0123456789abcdef0123456789abcdef",
+    true,
   );
   const error = dialog()!.querySelector("#link-device-feedback")!;
   expect(error.getAttribute("role")).toBe("alert");
@@ -662,7 +672,7 @@ it("ignores an old pairing-code failure after a new owner displays its own code"
   await render();
   await open();
   await showCode();
-  expect(publishAppearanceBeforeLink).toHaveBeenCalledWith("owner-a");
+  expect(publishAppearanceBeforeLink).not.toHaveBeenCalled();
   await replaceSession("owner-b", 2);
   await showCode();
   expect(publishAppearanceBeforeLink).toHaveBeenLastCalledWith("owner-b");
@@ -677,7 +687,7 @@ it("ignores an old pairing-code failure after a new owner displays its own code"
   expect(dialog()?.textContent).not.toContain("old pairing failed");
 });
 
-it("does not start pairing after the appearance preparation belongs to a retired owner", async () => {
+it("does not display a prepared pairing code after its owner retires", async () => {
   const oldAppearance = deferred<void>();
   vi.mocked(publishAppearanceBeforeLink).mockReturnValueOnce(
     oldAppearance.promise,
@@ -685,11 +695,17 @@ it("does not start pairing after the appearance preparation belongs to a retired
   await render();
   await open();
   await showCode();
-  expect(chat.startLinking).not.toHaveBeenCalled();
+  expect(
+    dialog()?.querySelector('[data-testid="pairing-code"]') ?? null,
+  ).toBeNull();
   await replaceSession("owner-b", 2);
   await act(async () => oldAppearance.resolve());
-  expect(chat.startLinking).not.toHaveBeenCalled();
-  expect(dialog()?.querySelector('[data-testid="pairing-code"]')).toBeNull();
+  expect(
+    dialog()?.querySelector('[data-testid="pairing-code"]') ?? null,
+  ).toBeNull();
+  expect(
+    dialog()?.querySelector('[data-testid="pairing-code"]') ?? null,
+  ).toBeNull();
 });
 
 it.each([
@@ -757,6 +773,7 @@ it("does not adopt a linked account after its originating desktop session retire
   expect(chat.linkDevice).toHaveBeenCalledWith(
     "pairing-device",
     "pairing-code",
+    true,
   );
   await replaceSession("owner-b", 2);
   await act(async () => linking.resolve("linked-account"));

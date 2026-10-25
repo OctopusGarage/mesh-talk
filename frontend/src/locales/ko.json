@@ -583,7 +583,10 @@
     "presetPending": "프리셋을 적용하면 아래의 다섯 가지 보호 설정이 변경됩니다. 개별적으로 변경하면 사용자 지정으로 전환됩니다.",
     "protectionOn": "켬",
     "protectionOff": "끔",
-    "presetNotApplied": "선택한 프리셋이 아직 적용되지 않았습니다."
+    "presetNotApplied": "선택한 프리셋이 아직 적용되지 않았습니다.",
+    "privacyEffectiveState": "아래 컨트롤에는 현재 적용된 저장 설정이 표시됩니다. 프리셋은 선택만으로 변경되지 않으며 적용해야 합니다. 로그인 저장과 로컬 에이전트 접근은 별도로 관리합니다.",
+    "savedLoginEnabled": "로그인 유지가 켜져 있습니다. 자동 로그인에는 이 기기에 인증 정보가 성공적으로 저장되어 있어야 합니다.",
+    "savedLoginDisabled": "로그인 저장이 꺼져 있습니다. 다음 실행 시 로그인해야 합니다."
   },
   "search": {
     "title": "메시지 검색",
@@ -1183,7 +1186,27 @@
     "noMatches": "일치하는 대화가 없습니다.",
     "limitReached": "한도에 도달했습니다. 다른 대화를 선택하려면 선택한 대화를 해제하세요.",
     "setupTitle": "에이전트 연결",
-    "setupHint": "이 안내를 로컬 에이전트에 복사하여 연결하세요. Mesh Talk는 실행 중이고 잠금이 해제되어 있어야 합니다."
+    "setupHint": "이 안내를 로컬 에이전트에 복사하여 연결하세요. Mesh Talk는 실행 중이고 잠금이 해제되어 있어야 합니다.",
+    "privacyStatusDescription": "로컬 에이전트는 이 서비스가 실행 중일 때 명시적으로 허용된 대화에만 접근할 수 있습니다. 기기 개인정보 보호 프리셋은 이 권한을 변경하지 않습니다.",
+    "statusFailed": "에이전트 접근 상태를 확인할 수 없습니다",
+    "grantedConversations_one": "허용된 대화 {{count}}개",
+    "grantedConversations_other": "허용된 대화 {{count}}개",
+    "manageAccess": "에이전트 접근 관리",
+    "duration": "권한 유효 기간",
+    "oneHour": "1시간",
+    "persistent": "직접 끌 때까지",
+    "expiresAt": "만료 시각",
+    "expiredAt": "만료된 시각",
+    "expired": "만료됨 · 로컬 에이전트 접근을 허용하려면 갱신하세요",
+    "renew": "권한 갱신",
+    "durationHint": "선택한 기간은 접근을 켜거나 권한을 갱신할 때 적용됩니다. 새로고침, 재시도 및 대화 변경으로는 기간이 연장되지 않습니다.",
+    "activityTitle": "로컬 에이전트 인터페이스",
+    "refreshActivity": "활동 새로고침",
+    "activityDeliveryHint": "이 로컬 인터페이스에서 최근 수락한 요청입니다. 수락이 수신자에게 전달되었음을 의미하지는 않습니다.",
+    "activityEmpty": "최근 수락한 요청이 없습니다.",
+    "activityFailed": "최근 활동을 불러오지 못했습니다. 새로고침하여 다시 시도하세요.",
+    "activityAccepted": "수락됨",
+    "activityRetried": "재시도됨"
   },
   "messageFavorites": {
     "title": "즐겨찾기",
@@ -1322,5 +1345,15 @@
     "finding": "기기를 찾는 중…",
     "linking": "이 기기를 연결하는 중… 두 앱을 모두 열어 두세요.",
     "failed": "이 기기를 연결하지 못했습니다. 원본 앱을 열어 두고 새 코드를 사용하세요."
+  },
+  "securityVerification": {
+    "title": "본인 확인",
+    "description": "이 작업을 허용하려면 Mesh-Talk 비밀번호를 입력하세요. 확인은 이 작업에만 적용됩니다.",
+    "continue": "확인 후 계속",
+    "backup": "암호화된 백업 만들기",
+    "linking": "기기 연결 허용",
+    "agent": "로컬 에이전트 접근 변경",
+    "settings": "보안 설정 변경",
+    "savedLogin": "이 기기에 로그인 정보 저장"
   }
 }

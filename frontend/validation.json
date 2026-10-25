@@ -2,6 +2,55 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-sensitive-operations",
+      "paths": [
+        "frontend/src/lib/api/sensitiveInvoke.ts",
+        "frontend/src/lib/api/sensitiveInvoke.test.ts",
+        "frontend/src/features/auth/SensitiveVerificationDialog.tsx",
+        "frontend/src/features/auth/SensitiveVerificationDialog.test.ts",
+        "frontend/src/features/chat/settings/SecuritySettings.tsx",
+        "frontend/src/features/chat/settings/SecuritySettings.test.ts",
+        "frontend/src/features/chat/LinkDeviceDialog.tsx",
+        "frontend/src/features/chat/LinkDeviceDialog.test.ts",
+        "frontend/src/lib/api/settings.ts",
+        "frontend/src/lib/api/recovery.ts",
+        "frontend/src/lib/api/googleDrive.ts",
+        "frontend/src/lib/api/localAgentAccess.ts",
+        "frontend/src/lib/api/auth.ts"
+      ],
+      "frontend": [
+        "src/lib/api/sensitiveInvoke.test.ts",
+        "src/features/auth/SensitiveVerificationDialog.test.ts",
+        "src/features/chat/settings/SecuritySettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts",
+        "src/features/chat/settings/LocalAgentSettings.test.ts",
+        "src/features/chat/LinkDeviceDialog.test.ts",
+        "src/lib/api.test.ts",
+        "src/lib/api/localAgentAccess.test.ts",
+        "src/lib/settingsTranslations.test.ts",
+        "src/lib/privacyTranslations.test.ts",
+        "src/store/auth.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Show acknowledged privacy and agent state and authorize only the exact pending sensitive operation through backend-requested identity verification.",
+        "guide": "docs/privacy-controls.md#verify-sensitive-operations",
+        "invariants": [
+          {
+            "name": "Cancellation and retired prompt/session lifetimes never resubmit credentials; ordinary changes do not prompt and verification is never cached.",
+            "reference": "docs/privacy-controls.md#verify-sensitive-operations"
+          },
+          {
+            "name": "Device-linking authentication precedes sync expansion and source code display waits for snapshot preparation.",
+            "reference": "docs/privacy-controls.md#verify-sensitive-operations"
+          }
+        ]
+      },
+      "escalation": [
+        "Exercise nested Settings/Backup/password dialogs, Escape/focus restoration and pending-operation cancellation in browser; real macOS device-owner and Windows/Linux password verification require native evidence."
+      ]
+    },
+    {
       "id": "frontend-private-device-hostnames",
       "paths": [
         "frontend/src/features/chat/PersonalDevices.tsx",
@@ -377,10 +426,12 @@
         "src/lib/api/localAgentAccess.test.ts",
         "src/lib/contactVisibility.test.ts",
         "src/store/contactPolicy.test.ts",
-        "src/lib/settingsTranslations.test.ts"
+        "src/lib/settingsTranslations.test.ts",
+        "src/features/chat/settings/SecuritySettings.test.ts",
+        "src/lib/localeParity.test.ts"
       ],
       "capability": {
-        "summary": "Enable scoped local automation through acknowledged settings and display/copy one short public API bootstrap.",
+        "summary": "Expose acknowledged scope, explicit temporary/continuous duration, read-only expiry and safe recent activity for desktop local automation.",
         "guide": "docs/settings.md#local-agent-access",
         "invariants": [
           {

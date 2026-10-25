@@ -583,7 +583,10 @@
     "presetPending": "Aplicar uma predefinição altera as cinco proteções listadas abaixo. Alterações individuais usam a opção Personalizada.",
     "protectionOn": "Ativado",
     "protectionOff": "Desativado",
-    "presetNotApplied": "A predefinição selecionada ainda não foi aplicada."
+    "presetNotApplied": "A predefinição selecionada ainda não foi aplicada.",
+    "privacyEffectiveState": "Os controles abaixo mostram as configurações salvas em vigor. Escolher uma predefinição não altera nada até você aplicá-la. O login salvo e o acesso de agentes locais são gerenciados separadamente.",
+    "savedLoginEnabled": "Manter conectado está ativado. O login automático também exige que as credenciais tenham sido salvas com sucesso neste dispositivo.",
+    "savedLoginDisabled": "O login salvo está desativado: será necessário entrar na próxima inicialização."
   },
   "search": {
     "title": "Buscar mensagens",
@@ -1183,7 +1186,27 @@
     "noMatches": "Nenhuma conversa encontrada.",
     "limitReached": "Limite atingido. Desmarque uma conversa para escolher outra.",
     "setupTitle": "Conecte seu agente",
-    "setupHint": "Copie estas instruções para seu agente local para conectar. O Mesh Talk deve permanecer aberto e desbloqueado."
+    "setupHint": "Copie estas instruções para seu agente local para conectar. O Mesh Talk deve permanecer aberto e desbloqueado.",
+    "privacyStatusDescription": "Os agentes locais só podem acessar as conversas autorizadas explicitamente enquanto este serviço estiver em execução. As predefinições de privacidade do dispositivo não alteram essas permissões.",
+    "statusFailed": "O status do acesso de agentes está indisponível",
+    "grantedConversations_one": "{{count}} conversa autorizada",
+    "grantedConversations_other": "{{count}} conversas autorizadas",
+    "manageAccess": "Gerenciar acesso de agentes",
+    "duration": "Duração da autorização",
+    "oneHour": "Uma hora",
+    "persistent": "Até eu desativar",
+    "expiresAt": "Expira em",
+    "expiredAt": "Expirou em",
+    "expired": "Autorização expirada · renove para permitir agentes locais",
+    "renew": "Renovar autorização",
+    "durationHint": "A duração escolhida se aplica ao ativar ou renovar o acesso. Atualizar, tentar novamente e alterar as conversas não estendem o prazo.",
+    "activityTitle": "Interface de agentes locais",
+    "refreshActivity": "Atualizar atividade",
+    "activityDeliveryHint": "Solicitações recentes aceitas por esta interface local. A aceitação não confirma a entrega ao destinatário.",
+    "activityEmpty": "Nenhuma solicitação aceita recentemente.",
+    "activityFailed": "Não foi possível carregar a atividade recente. Atualize para tentar novamente.",
+    "activityAccepted": "Aceita",
+    "activityRetried": "Repetida"
   },
   "messageFavorites": {
     "title": "Favoritos",
@@ -1322,5 +1345,15 @@
     "finding": "Buscando dispositivos…",
     "linking": "Vinculando este dispositivo… Mantenha os dois aplicativos abertos.",
     "failed": "Não foi possível vincular este dispositivo. Mantenha o aplicativo de origem aberto e use um novo código."
+  },
+  "securityVerification": {
+    "title": "Verifique sua identidade",
+    "description": "Digite sua senha do Mesh-Talk para autorizar esta operação. A verificação se aplica somente a esta ação.",
+    "continue": "Verificar e continuar",
+    "backup": "Criar um backup criptografado",
+    "linking": "Autorizar a vinculação de dispositivos",
+    "agent": "Alterar o acesso de agentes locais",
+    "settings": "Alterar as configurações de segurança",
+    "savedLogin": "Salvar o login neste dispositivo"
   }
 }

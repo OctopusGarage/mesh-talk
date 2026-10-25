@@ -51,6 +51,8 @@ pub enum CommandError {
     Crypto(String),
     #[serde(rename = "auth")]
     Auth(String),
+    #[serde(rename = "authentication-required")]
+    AuthenticationRequired(String),
     #[serde(rename = "authorization")]
     Authorization(String),
     #[serde(rename = "io")]
@@ -102,6 +104,7 @@ impl std::fmt::Display for CommandError {
             | CommandError::RelayUnreachable(msg)
             | CommandError::Crypto(msg)
             | CommandError::Auth(msg)
+            | CommandError::AuthenticationRequired(msg)
             | CommandError::Authorization(msg)
             | CommandError::Io(msg)
             | CommandError::NotStarted(msg)
@@ -444,6 +447,7 @@ pub(crate) fn persist_saved_login<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn retry_saved_session<R: tauri::Runtime>(
     owner: String,
+    password: Option<String>,
     app_handle: tauri::AppHandle<R>,
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
@@ -456,6 +460,19 @@ pub async fn retry_saved_session<R: tauri::Runtime>(
     if lease.owner() != owner || app_state.app_lock().is_locked() {
         return Err(CommandError::Authorization("session unavailable".into()));
     }
+    let proof = if settings_state.get().stay_signed_in {
+        Some(
+            crate::app_lock::SensitiveAction::verify(
+                &app_state,
+                &lease,
+                password,
+                "save your Mesh-Talk sign-in",
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     #[cfg(test)]
     if let Some(entered) = app_state.owner_command_captured.lock().unwrap().as_ref() {
         let _ = entered.send("saved-retry-entry");
@@ -470,12 +487,26 @@ pub async fn retry_saved_session<R: tauri::Runtime>(
             }
             node_state.check_installation(&lease)?;
             runtime.as_ref().ok_or_else(CommandError::not_started)?;
-            Ok(persist_saved_login(
-                &app_handle,
-                &settings_state,
-                &info.user,
-                &info.account_login_password,
-            ))
+            let persist = || {
+                Ok(persist_saved_login(
+                    &app_handle,
+                    &settings_state,
+                    &info.user,
+                    &info.account_login_password,
+                ))
+            };
+            if settings_state.get().stay_signed_in {
+                proof
+                    .as_ref()
+                    .ok_or_else(|| {
+                        CommandError::Authorization(
+                            "Saved-login preference changed during verification".into(),
+                        )
+                    })?
+                    .commit(persist)
+            } else {
+                persist()
+            }
         })
         .map_err(CommandError::Authorization)?
 }
@@ -1270,8 +1301,44 @@ mod tests {
     }
 
     #[test]
+    fn denied_saved_session_retry_keeps_existing_credential_unchanged() {
+        let fixture = AuthFixture::new("denied-saved-retry");
+        let owner = fixture
+            .app_state
+            .session()
+            .capture()
+            .unwrap()
+            .owner()
+            .to_owned();
+        assert!(crate::session_store::save(
+            &fixture.alice,
+            "existing credential"
+        ));
+        let last_user = fixture.settings.get().last_user;
+        fixture.app_state.app_lock().set_identity_verifier(|| {
+            Err(CommandError::Authentication("Verification canceled".into()))
+        });
+        let error = invoke_auth(
+            &fixture.webview,
+            "retry_saved_session",
+            serde_json::json!({"owner": owner}),
+        )
+        .unwrap_err();
+        assert_eq!(error["kind"], "auth");
+        assert_eq!(
+            crate::session_store::load(&fixture.alice).as_deref(),
+            Some("existing credential")
+        );
+        assert_eq!(fixture.settings.get().last_user, last_user);
+    }
+
+    #[test]
     fn registered_queued_saved_session_retry_cannot_save_after_same_account_relogin() {
         let fixture = AuthFixture::new("queued-saved-retry");
+        fixture
+            .app_state
+            .app_lock()
+            .set_identity_verifier(|| Ok(()));
         let owner = fixture
             .app_state
             .session()
@@ -1323,6 +1390,10 @@ mod tests {
             .is_err()
         );
         assert!(crate::session_store::load(&fixture.alice).is_none());
+        fixture
+            .app_state
+            .app_lock()
+            .set_identity_verifier(|| Ok(()));
         let result = invoke_auth(
             &fixture.webview,
             "retry_saved_session",

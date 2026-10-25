@@ -444,6 +444,9 @@
   "settings": {
     "originSharing": "Share my originating post office",
     "originSharingDesc": "Allow people who discover this device to see its originating post office. The office name may reveal your network or location. Participating post offices can read this information through the encrypted connection. Off by default; turning it off stops new sharing, while existing copies expire shortly.",
+    "privacyEffectiveState": "The controls below show saved settings currently in effect. Selecting a preset changes nothing until you apply it. Saved login and local agent access are managed separately.",
+    "savedLoginEnabled": "Stay signed in is on. Automatic sign-in also requires credentials to be saved successfully on this device.",
+    "savedLoginDisabled": "Saved login is off: the next launch requires you to sign in.",
     "title": "Settings",
     "description": "Manage privacy, appearance, messages, files, and app behavior.",
     "scrollMore": "Scroll for more settings",
@@ -1160,6 +1163,11 @@
     }
   },
   "agentAccess": {
+    "privacyStatusDescription": "Local agents can access only explicitly granted conversations while this service is running. Device privacy presets do not change these grants.",
+    "statusFailed": "Agent access status unavailable",
+    "grantedConversations_one": "{{count}} granted conversation",
+    "grantedConversations_other": "{{count}} granted conversations",
+    "manageAccess": "Manage agent access",
     "title": "Local agent access",
     "description": "Let local agents send text and replies through your signed-in account.",
     "selectFirst": "Select at least one conversation before enabling access.",
@@ -1183,7 +1191,22 @@
     "noMatches": "No matching conversations.",
     "limitReached": "Limit reached. Deselect a conversation to choose another.",
     "setupTitle": "Connect your agent",
-    "setupHint": "Copy these instructions into your local agent to connect. Mesh Talk must stay running and unlocked."
+    "setupHint": "Copy these instructions into your local agent to connect. Mesh Talk must stay running and unlocked.",
+    "duration": "Authorization duration",
+    "oneHour": "One hour",
+    "persistent": "Until I turn it off",
+    "expiresAt": "Expires at",
+    "expiredAt": "Expired at",
+    "expired": "Expired · renew to allow local agents",
+    "renew": "Renew authorization",
+    "durationHint": "The chosen duration applies when you enable or renew access. Refreshing, retrying, and changing conversations do not extend it.",
+    "activityTitle": "Local agent interface",
+    "refreshActivity": "Refresh activity",
+    "activityDeliveryHint": "Recent requests accepted by this local interface. Acceptance does not confirm recipient delivery.",
+    "activityEmpty": "No recent accepted requests.",
+    "activityFailed": "Recent activity could not be loaded. Refresh to try again.",
+    "activityAccepted": "Accepted",
+    "activityRetried": "Retried"
   },
   "messageFavorites": {
     "title": "Favorites",
@@ -1322,5 +1345,15 @@
     "finding": "Looking for devices…",
     "linking": "Linking this device… Keep both apps open.",
     "failed": "Couldn’t link this device. Keep the source app open and use a fresh code."
+  },
+  "securityVerification": {
+    "title": "Verify your identity",
+    "description": "Enter your Mesh-Talk password to authorize this operation. Verification applies only to this action.",
+    "continue": "Verify and continue",
+    "backup": "Create an encrypted backup",
+    "linking": "Authorize device linking",
+    "agent": "Change local agent access",
+    "settings": "Change security settings",
+    "savedLogin": "Save login on this device"
   }
 }

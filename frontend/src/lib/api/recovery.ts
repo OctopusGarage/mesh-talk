@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { invokeSensitive } from "./sensitiveInvoke";
 
 export interface BackupPreview {
   account_id: string;
@@ -48,7 +49,10 @@ export const recovery = {
     invoke<void>("set_backup_destination", { destination }),
   status: () => invoke<BackupStatus | null>("backup_status"),
   create: (destination: string, recoveryKey?: string) =>
-    invoke<BackupCreated>("create_backup", { destination, recoveryKey }),
+    invokeSensitive<BackupCreated>("create_backup", {
+      destination,
+      recoveryKey,
+    }),
   inspect: (path: string, recoveryKey: string) =>
     invoke<BackupPreview>("inspect_backup", { path, recoveryKey }),
   restore: (

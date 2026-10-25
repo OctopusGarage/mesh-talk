@@ -3158,6 +3158,12 @@ mod tests {
         for lock in [true, false] {
             for (command, body) in &cases {
                 fixture.app_state.app_lock().clear();
+                if matches!(*command, "start_linking" | "link_device") {
+                    fixture
+                        .app_state
+                        .app_lock()
+                        .set_identity_verifier(|| Ok(()));
+                }
                 let (entered_tx, entered_rx) = std::sync::mpsc::channel();
                 *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
                 let lifecycle = fixture.node.0.blocking_write();

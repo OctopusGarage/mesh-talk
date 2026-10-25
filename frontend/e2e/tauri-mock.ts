@@ -652,6 +652,15 @@ export const test = base.extend({
       const localAgentAccess = {
         enabled: false,
         running: false,
+        lifetime: "one_hour" as "one_hour" | "persistent",
+        expires_at_ms: null as number | null,
+        expired: false,
+        recent_activity: [] as {
+          at_ms: number;
+          destination: { kind: string; id: string };
+          action: "accepted" | "retried";
+        }[],
+        activity_error: null as string | null,
         destinations: [] as { kind: string; id: string }[],
         available_destinations: [
           {
@@ -667,6 +676,9 @@ export const test = base.extend({
         instructions: "",
         error: null,
       };
+      (window as unknown as Record<string, unknown>).__mockSetLocalAgentAccess =
+        (patch: Partial<typeof localAgentAccess>) =>
+          Object.assign(localAgentAccess, patch);
       let nativeLocked = false;
       let attachmentGlobalAuto = false;
       const attachmentContactAuto: Record<string, boolean> = {};
@@ -1948,7 +1960,17 @@ export const test = base.extend({
             can_open_settings: true,
           }),
           open_notification_settings: () => null,
-          get_local_agent_access: () => localAgentAccess,
+          get_local_agent_access: () => {
+            localAgentAccess.expired =
+              localAgentAccess.enabled &&
+              localAgentAccess.expires_at_ms !== null &&
+              localAgentAccess.expires_at_ms <= Date.now();
+            if (localAgentAccess.expired) {
+              localAgentAccess.running = false;
+              localAgentAccess.instructions = "";
+            }
+            return localAgentAccess;
+          },
           set_local_agent_access: (a) => {
             const destinations = a.destinations as {
               kind: string;
@@ -1956,13 +1978,31 @@ export const test = base.extend({
             }[];
             if (a.enabled && destinations.length === 0)
               throw new Error("Select a conversation");
+            const chosen =
+              a.lifetime === "persistent" || a.lifetime === "one_hour"
+                ? a.lifetime
+                : localAgentAccess.lifetime;
+            const fresh =
+              a.enabled && (!localAgentAccess.enabled || a.renew === true);
+            if (fresh || chosen !== localAgentAccess.lifetime) {
+              localAgentAccess.expires_at_ms =
+                chosen === "one_hour" && a.enabled
+                  ? Date.now() + 60 * 60 * 1000
+                  : null;
+            }
+            localAgentAccess.lifetime = chosen;
+            localAgentAccess.expired =
+              Boolean(a.enabled) &&
+              localAgentAccess.expires_at_ms !== null &&
+              localAgentAccess.expires_at_ms <= Date.now();
             Object.assign(localAgentAccess, {
               enabled: a.enabled,
-              running: a.enabled,
+              running: a.enabled && !localAgentAccess.expired,
               destinations,
-              instructions: a.enabled
-                ? 'Mesh Talk local API: "http://127.0.0.1:12345/v1/help".\nRead this help URL before using the API for user-authorized tasks.\nThe desktop app must be running and unlocked, with agent access enabled.\n'
-                : "",
+              instructions:
+                a.enabled && !localAgentAccess.expired
+                  ? 'Mesh Talk local API: "http://127.0.0.1:12345/v1/help".\nRead this help URL before using the API for user-authorized tasks.\nThe desktop app must be running and unlocked, with agent access enabled.\n'
+                  : "",
             });
             return localAgentAccess;
           },

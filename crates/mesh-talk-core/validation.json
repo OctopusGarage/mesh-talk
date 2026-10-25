@@ -725,7 +725,17 @@
         "core-storage",
         "core-transport",
         "core-account-profile"
-      ]
+      ],
+      "capability": {
+        "summary": "Preserve encrypted identity stores and clear temporary device-keystore plaintext buffers on drop.",
+        "guide": "docs/privacy-controls.md#limits",
+        "invariants": [
+          {
+            "name": "Device-keystore temporary decoded and serialized secrets are zeroized while encrypted format, identity signatures and password rejection remain compatible.",
+            "reference": "docs/privacy-controls.md#limits"
+          }
+        ]
+      }
     },
     {
       "id": "core-postoffice",

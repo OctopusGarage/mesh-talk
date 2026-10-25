@@ -420,6 +420,7 @@ pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
     node_state: tauri::State<'_, NodeState>,
     connection_id: String,
     recovery_key: Option<String>,
+    password: Option<String>,
 ) -> Result<BackupCreated, CommandError> {
     let connection = state.get(&connection_id)?;
     let job = connection.begin()?;
@@ -458,6 +459,7 @@ pub(crate) async fn google_drive_create_backup<R: tauri::Runtime>(
                 recovery_key,
                 false,
                 Some(connection.generation),
+                password,
             ))
             .await?;
         connection.current()?;
@@ -661,6 +663,16 @@ mod tests {
         finished.send(()).unwrap();
         assert!(task.await.unwrap().is_err());
     }
+    #[test]
+    fn drive_connection_rejects_authorization_revision_changes() {
+        let lock = crate::app_lock::AppLock::default();
+        let connection = Connection::new(SessionState::default(), lock.clone());
+        assert!(connection.current().is_ok());
+        lock.clear();
+        assert!(!lock.is_locked());
+        assert!(connection.current().is_err());
+    }
+
     #[test]
     fn registered_drive_commands_return_structured_errors_and_release_state() {
         let app = tauri::test::mock_builder()

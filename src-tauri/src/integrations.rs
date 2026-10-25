@@ -54,6 +54,7 @@ struct DesktopHost {
     flush: Option<mpsc::Sender<FlushRequest>>,
     on_accept: Option<AcceptanceCallback>,
     enabled: Arc<std::sync::Mutex<bool>>,
+    setup_authority: Arc<std::sync::Mutex<Option<RuntimeAdmission>>>,
 }
 impl DesktopHost {
     fn new(app: AppState, node: NodeState, lease: SessionLease, account_id: String) -> Self {
@@ -65,6 +66,7 @@ impl DesktopHost {
             flush: None,
             on_accept: None,
             enabled: Arc::new(std::sync::Mutex::new(true)),
+            setup_authority: Arc::default(),
         }
     }
     fn admission(&self) -> Result<RuntimeAdmission, IntegrationError> {
@@ -140,7 +142,14 @@ impl IntegrationHost for DesktopHost {
     }
     fn with_node<'a>(&'a self, operation: HostOperation<'a>) -> HostFuture<'a, Value> {
         Box::pin(async move {
-            self.admission()?
+            let admission = self
+                .setup_authority
+                .lock()
+                .map_err(|_| IntegrationError::new("SCOPE_DENIED", "Setup authority unavailable"))?
+                .clone();
+            admission
+                .map(Ok)
+                .unwrap_or_else(|| self.admission())?
                 .with_runtime(|runtime| {
                     let enabled = self.enabled.lock().map_err(|_| {
                         crate::commands::CommandError::Authorization(
@@ -171,10 +180,28 @@ pub(crate) struct DesktopIntegration {
     enabled: Arc<std::sync::Mutex<bool>>,
     shutdown: watch::Sender<bool>,
     stopped: watch::Receiver<bool>,
+    setup_authority: Arc<std::sync::Mutex<Option<RuntimeAdmission>>>,
 }
 impl DesktopIntegration {
+    fn finish_sensitive_setup(&self) {
+        if let Ok(mut authority) = self.setup_authority.lock() {
+            *authority = None;
+        }
+    }
     pub(crate) fn track_client_file(&self, path: PathBuf) {
         self.client_files.lock().unwrap().push(path);
+    }
+    pub(crate) fn is_stopped(&self) -> bool {
+        *self.stopped.borrow()
+    }
+    pub(crate) fn recent_send_activity(
+        &self,
+        client_id: &str,
+    ) -> Result<Vec<mesh_talk_integrations::policy::RecentSendActivity>, IntegrationError> {
+        self.service
+            .upgrade()
+            .ok_or_else(|| IntegrationError::new("SCOPE_DENIED", "Integration service retired"))?
+            .recent_send_activity(client_id)
     }
     pub(crate) fn is_running(&self) -> bool {
         !*self.stopped.borrow() && self.enabled.lock().is_ok_and(|enabled| *enabled)
@@ -228,6 +255,7 @@ impl Drop for AdminConfig {
 
 /// Called with exclusive access to the installed runtime. Both producers are owned by
 /// its retirement barrier; no listener, flush, or encrypted grant writer escapes.
+#[cfg(test)]
 pub(crate) async fn start(
     app: &AppState,
     node: &NodeState,
@@ -238,6 +266,22 @@ pub(crate) async fn start(
     on_accept: AcceptanceCallback,
 ) -> Result<DesktopIntegration, IntegrationError> {
     let admission = RuntimeAdmission::capture_lease(app, node, lease).map_err(denied)?;
+    start_checked(
+        app, node, lease, runtime, base_dir, password, admission, on_accept,
+    )
+    .await
+}
+
+pub(crate) async fn start_checked(
+    app: &AppState,
+    node: &NodeState,
+    lease: &SessionLease,
+    runtime: &mut NodeRuntime,
+    base_dir: &Path,
+    password: &str,
+    admission: RuntimeAdmission,
+    on_accept: AcceptanceCallback,
+) -> Result<DesktopIntegration, IntegrationError> {
     let account_id = runtime.account_id().to_owned();
     let grants_path =
         crate::config_store::account_path(base_dir, lease.owner(), "integrations.grants")
@@ -315,6 +359,8 @@ pub(crate) async fn start(
         .map_err(denied)??;
     let (flush, mut pending) = mpsc::channel::<FlushRequest>(64);
     let mut host = DesktopHost::new(app.clone(), node.clone(), lease.clone(), account_id);
+    let setup_authority = Arc::new(std::sync::Mutex::new(Some(admission.clone())));
+    host.setup_authority = setup_authority.clone();
     host.enabled = enabled.clone();
     host.flush = Some(flush);
     host.on_accept = Some(on_accept);
@@ -329,6 +375,7 @@ pub(crate) async fn start(
         service: Arc::downgrade(&service),
         admin_token,
         http_endpoint,
+        setup_authority,
         client_files,
         enabled: enabled.clone(),
         shutdown: stop.clone(),
