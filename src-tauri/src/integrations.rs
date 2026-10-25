@@ -431,9 +431,8 @@ pub(crate) async fn start_checked(
             }
         }),
     );
-    // The filename locates the private configuration without logging credentials
-    // or persisting the host account identifier in diagnostics.
-    log::info!("Desktop integrations enabled; account admin configuration: {filename}");
+    // Keep account-derived paths and credential-related values out of diagnostics.
+    log::info!("Desktop integrations enabled");
     Ok(handle)
 }
 

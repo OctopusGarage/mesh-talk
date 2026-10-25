@@ -749,10 +749,12 @@ fn saved_key_backup_requires_one_time_confirmation_and_remains_readable() {
             json!({"recoveryKey":setup["recovery_key"]}),
         )
         .unwrap();
+    fixture.state.app_lock().set_identity_verifier(|| Ok(()));
     let first = fixture
         .invoke("create_backup", json!({"destination":path}))
         .unwrap();
     fixture.wait_for_runtime();
+    fixture.state.app_lock().set_identity_verifier(|| Ok(()));
     let second = fixture
         .invoke(
             "create_backup",
@@ -1090,6 +1092,7 @@ fn backup_status_is_private_durable_and_reports_corruption_without_changing_the_
         )
         .unwrap();
     let path = fixture.root.path().join("status.mtbackup");
+    fixture.state.app_lock().set_identity_verifier(|| Ok(()));
     let created = fixture
         .invoke("create_backup", json!({"destination":path}))
         .unwrap();
@@ -1381,6 +1384,7 @@ fn cloud_backup_uses_the_acknowledged_native_key_without_a_webview_key_argument(
             json!({"recoveryKey":setup["recovery_key"]}),
         )
         .unwrap();
+    fixture.state.app_lock().set_identity_verifier(|| Ok(()));
     let backup = fixture
         .invoke("google_drive_create_backup", json!({}))
         .unwrap();
