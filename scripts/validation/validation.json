@@ -75,6 +75,10 @@
         "guide": "docs/updates.md",
         "invariants": [
           {
+            "name": "Linux x64 and ARM64 release builds retain the Ubuntu 22.04 glibc baseline; compiled Cargo caches are isolated by runner identity, and actual public AppImage launch remains required upgrade acceptance evidence.",
+            "reference": "docs/updates.md#download-verification-and-installation"
+          },
+          {
             "name": "Nightly preflight waits at most four hours for missing or pending exact-source checks; completed unsuccessful checks, scanning alerts and API errors fail immediately. Final publication remains an immediate strict source recheck.",
             "reference": "docs/updates.md#publish-nightly-builds"
           },
