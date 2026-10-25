@@ -628,6 +628,13 @@ role and readiness, without raw keys or private operation bodies. A failed
 observation explicitly requires reconciliation rather than restoring cached
 authority.
 
+Account group observations capture signed identity proofs and current privacy
+eligibility before acquiring the event-log mutex. The log-held projection uses
+only that immutable snapshot: it must not acquire privacy, roster or host-session
+locks, including through identity-resolution helpers. Sync projections already
+acquire privacy state before the event log; reversing that order can deadlock
+both account reconciliation and delivery, then block desktop session queries.
+
 Directory reconciliation and observed history policy are descriptive metadata,
 separate from account permission and execution readiness. Reference list/member
 projections preserve the last coherent source observation, disclose unresolved

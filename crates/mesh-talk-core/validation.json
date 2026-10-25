@@ -65,6 +65,10 @@
         "guide": "docs/module-boundaries.md#account-and-device-ownership",
         "invariants": [
           {
+            "name": "Group access and source observations capture privacy and identity state before the event-log mutex; log-held projection never reacquires privacy, roster or host-session locks.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
             "name": "A verified owner account retains its owner role on owner, member and reference-only sibling devices; reachability cannot downgrade role and descriptive inventory cannot establish it.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },

@@ -1154,3 +1154,6 @@ mod simple_controls;
 
 #[path = "tests/recovered_fanout.rs"]
 mod recovered_fanout;
+
+#[path = "tests/lock_order.rs"]
+mod lock_order;

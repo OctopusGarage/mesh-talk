@@ -102,7 +102,98 @@ fn authorization_view(
     (ids, stamp)
 }
 
+/// Immutable identity inputs captured before acquiring the public event log.
+/// Privacy sync readers acquire privacy before log; role projection must never
+/// call back into privacy or roster owners while retaining that log.
+struct GroupProofSnapshot {
+    account_public: [u8; 32],
+    current: BTreeMap<[u8; 32], crate::discovery::Announce>,
+    historical: Vec<crate::discovery::Announce>,
+    owners: Vec<crate::discovery::Announce>,
+}
+impl GroupProofSnapshot {
+    fn binding_current(&self, proof: &crate::discovery::Announce) -> bool {
+        proof.verify()
+            && proof
+                .account_cert
+                .as_ref()
+                .is_some_and(|certificate| certificate.account_ed25519_pub == self.account_public)
+            && self.current.get(&proof.ed25519_pub).is_none_or(|current| {
+                current.public() == proof.public() && current.account_id() == proof.account_id()
+            })
+    }
+}
+
 impl Node {
+    fn account_group_proof_snapshot(&self) -> GroupProofSnapshot {
+        let (memory, live) = {
+            let roster = self.roster.lock().expect("roster mutex");
+            let memory = roster.historical_announcements();
+            let live: BTreeMap<_, _> = memory
+                .iter()
+                .filter_map(|proof| {
+                    roster
+                        .announcement(&proof.public())
+                        .cloned()
+                        .map(|current| (proof.ed25519_pub, current))
+                })
+                .collect();
+            (memory, live)
+        };
+        let guard = self.privacy.state.read().expect("privacy state mutex");
+        let current: BTreeMap<_, _> = guard
+            .as_ref()
+            .map(|state| {
+                state
+                    .proofs
+                    .announcements()
+                    .into_iter()
+                    .map(|proof| (proof.ed25519_pub, proof))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let historical = if let Some(state) = guard.as_ref() {
+            let mut proofs: Vec<_> = current.values().cloned().collect();
+            if !state.policy.snapshot().invisible {
+                proofs.extend(memory.into_iter().filter(|proof| {
+                    proof.account_id().is_none() && !current.contains_key(&proof.ed25519_pub)
+                }));
+            }
+            proofs
+        } else {
+            memory
+        };
+        // Preserve historical_author's privacy eligibility, using this same
+        // directory/policy snapshot rather than reacquiring it under the log.
+        let owners = historical
+            .iter()
+            .filter(|proof| {
+                guard.as_ref().is_none_or(|state| {
+                    !state.policy.snapshot().invisible
+                        || state
+                            .proofs
+                            .account_for(&proof.public())
+                            .or_else(|| {
+                                live.get(&proof.ed25519_pub)
+                                    .filter(|announce| {
+                                        announce.public() == proof.public() && announce.verify()
+                                    })
+                                    .and_then(crate::discovery::Announce::account_id)
+                            })
+                            .is_some_and(|account| {
+                                account == self.account_id() || state.policy.allows(&account)
+                            })
+                })
+            })
+            .cloned()
+            .collect();
+        GroupProofSnapshot {
+            account_public: self.account.public().ed25519_pub,
+            current,
+            historical,
+            owners,
+        }
+    }
     pub fn account_group_access(
         &self,
         group: ConversationId,
@@ -114,10 +205,11 @@ impl Node {
             execution: AccountGroupExecution::Reconciling,
             sources: Vec::new(),
         };
+        let proofs = self.account_group_proof_snapshot();
         let heads: Vec<_> = self
             .group_control_heads(group)
             .into_iter()
-            .filter(|head| self.account_group_binding_current(&head.proof))
+            .filter(|head| proofs.binding_current(&head.proof))
             .collect();
         if heads.len() > MAX_OBSERVED_SOURCES || self.group_control_has_unreadable_head(group) {
             return Ok(access);
@@ -162,6 +254,7 @@ impl Node {
                     &projection,
                     own_head.map(|head| &head.access),
                     &heads,
+                    &proofs,
                 )
             };
             (local, projection, known)
@@ -387,15 +480,16 @@ impl Node {
         group: ConversationId,
         prior: Option<&SourceAccess>,
     ) -> Option<SourceAccess> {
+        let proofs = self.account_group_proof_snapshot();
         let heads: Vec<_> = self
             .group_control_heads(group)
             .into_iter()
-            .filter(|head| self.account_group_binding_current(&head.proof))
+            .filter(|head| proofs.binding_current(&head.proof))
             .collect();
         let log = self.log.lock().expect("log mutex");
         let projection =
             crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
-        self.account_group_snapshot(group, &log, &projection, prior, &heads)
+        self.account_group_snapshot(group, &log, &projection, prior, &heads, &proofs)
     }
     fn account_group_snapshot(
         &self,
@@ -404,6 +498,7 @@ impl Node {
         projection: &crate::node::channel::ChannelMembershipProjection,
         prior: Option<&SourceAccess>,
         heads: &[GroupControlHead],
+        proofs: &GroupProofSnapshot,
     ) -> Option<SourceAccess> {
         let state = projection.state.as_ref()?;
         let own = self.identity.public();
@@ -431,23 +526,24 @@ impl Node {
             if *device == own {
                 return Some(own_proof.clone());
             }
-            self.historical_author(&device.ed25519_pub)
-                .filter(|proof| proof.public() == *device)
+            proofs
+                .owners
+                .iter()
+                .find(|proof| proof.public() == *device)
+                .cloned()
                 .or_else(|| {
                     heads
                         .iter()
                         .flat_map(|head| {
                             std::iter::once(&head.proof).chain(head.access.owner_proof.iter())
                         })
-                        .find(|proof| {
-                            proof.public() == *device && self.account_group_binding_current(proof)
-                        })
+                        .find(|proof| proof.public() == *device && proofs.binding_current(proof))
                         .cloned()
                 })
         });
-        let mut proofs: Vec<_> = self.historical_peer_proofs();
-        proofs.push(own_proof);
-        proofs.extend(heads.iter().flat_map(|head| {
+        let mut candidate_proofs = proofs.historical.clone();
+        candidate_proofs.push(own_proof);
+        candidate_proofs.extend(heads.iter().flat_map(|head| {
             std::iter::once(head.proof.clone()).chain(
                 head.access
                     .observation
@@ -456,10 +552,10 @@ impl Node {
                     .map(|bound| bound.proof.clone()),
             )
         }));
-        proofs.extend(owner_proof.clone());
+        candidate_proofs.extend(owner_proof.clone());
         let mut members = BTreeMap::new();
         for device in state.members() {
-            let proof = proofs
+            let proof = candidate_proofs
                 .iter()
                 .find(|proof| proof.public() == *device)
                 .cloned()
@@ -482,8 +578,8 @@ impl Node {
         let members: Vec<_> = members.into_values().collect();
         let mut sources = BTreeMap::new();
         if !state.is_dissolved() {
-            for proof in proofs {
-                if !self.account_group_binding_current(&proof) {
+            for proof in candidate_proofs {
+                if !proofs.binding_current(&proof) {
                     continue;
                 }
                 if let Some(source) =
