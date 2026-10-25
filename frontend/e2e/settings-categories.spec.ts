@@ -323,7 +323,7 @@ test("backup status read failure is distinguished from no backup and can be retr
   await expect(status.getByRole("status")).toBeVisible();
 });
 
-test("backup key preparation failure keeps export disabled and a new key retries", async ({
+test("backup setup read failure keeps export disabled and retry preserves the key", async ({
   page,
 }) => {
   await enterChat(page);
@@ -332,7 +332,7 @@ test("backup key preparation failure keeps export disabled and a new key retries
   await page.evaluate(() =>
     (
       window as unknown as { __mockFailNext: (command: string) => void }
-    ).__mockFailNext("prepare_backup_key"),
+    ).__mockFailNext("backup_setup"),
   );
   await page
     .getByRole("button", { name: "Create encrypted backup", exact: true })
@@ -340,9 +340,7 @@ test("backup key preparation failure keeps export disabled and a new key retries
   await expect(page.getByRole("alert")).toContainText("network unreachable");
   await expect(page.getByTestId("recovery-export")).toBeDisabled();
   await expect(page.getByTestId("recovery-export-key")).toHaveCount(0);
-  await page
-    .getByRole("button", { name: "Generate another key", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
   await expect(page.getByTestId("recovery-export-key")).toBeVisible();
   await expect(page.getByTestId("recovery-export")).toBeDisabled();
 });
