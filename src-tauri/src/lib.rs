@@ -406,6 +406,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::link_device,
                 crate::chat_commands::get_device_sync_policy,
                 crate::chat_commands::get_device_sync_status,
+                crate::chat_commands::get_device_hostnames,
                 crate::chat_commands::get_account_login_sync_status,
                 crate::chat_commands::set_device_sync_category,
                 crate::chat_commands::get_account_preferences,

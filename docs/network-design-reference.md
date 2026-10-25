@@ -890,6 +890,20 @@ libraries/photos. Shared settings retain the existing per-key preference owner.
 The native account adapter rejects stale owner/runtime/account admissions, releases
 blob bytes only for the requested current version, and uses compare-and-set writes.
 
+Device hostnames are private account-directory metadata, separate from public
+nicknames, discovery announcements, certificates and ordinary peer profiles.
+The desktop reads its OS hostname at startup and publishes a bounded (255-byte,
+nonblank, control-free UTF-8) source-device document through the existing encrypted
+certified-sibling session. Hostnames persist encrypted for offline display and
+remain independent of optional history and appearance synchronization. Only the
+local device and certified roster entries appear in the device-list projection.
+Generic document writes cannot forge hostname metadata; its device key must match
+its writer. Native reads require the current desktop owner, runtime and expected
+cryptographic account. Other accounts cannot request hostname documents even if
+they know the account ID and establish a Noise connection. The version-5 document
+domain has an independent legacy-peer cooldown; older peers keep ordinary sync
+and existing device labels. Unavailable hostnames fall back to the existing labels.
+
 Each domain compares a deterministic digest of signed metadata. Mismatches exchange
 paged manifests, then only needed verified content; a patch carries a complete
 record for its key, never an unvalidated full-state replacement. Version order is

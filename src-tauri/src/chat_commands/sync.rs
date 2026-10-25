@@ -42,6 +42,29 @@ pub async fn get_device_sync_status(
         .await
 }
 
+/// Read private hostname metadata under the exact desktop and account admission.
+#[tauri::command]
+pub async fn get_device_hostnames(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    owner: String,
+    expected_account: String,
+) -> Result<std::collections::BTreeMap<String, String>, CommandError> {
+    RuntimeAdmission::capture(&app, &state, &owner)?
+        .blocking(move |runtime, _| {
+            if runtime.account_id() != expected_account {
+                return Err(CommandError::Authorization(
+                    "Account changed during device read".into(),
+                ));
+            }
+            runtime
+                .handle()
+                .device_hostnames()
+                .map_err(CommandError::from)
+        })
+        .await
+}
+
 /// Enable or disable one category of linked-device synchronization.
 #[tauri::command]
 pub async fn set_device_sync_category(
@@ -255,6 +278,48 @@ mod tests {
             .unwrap()
             .account_id()
             .to_owned();
+        state
+            .0
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .handle()
+            .set_device_hostname(Some("Private-Desktop"))
+            .unwrap();
+        assert!(matches!(
+            get_device_hostnames(
+                app.state::<AppState>(),
+                state.clone(),
+                "previous-owner".into(),
+                expected_account.clone()
+            )
+            .await,
+            Err(CommandError::Authorization(_))
+        ));
+        assert!(matches!(
+            get_device_hostnames(
+                app.state::<AppState>(),
+                state.clone(),
+                "sync-test".into(),
+                "previous-account".into()
+            )
+            .await,
+            Err(CommandError::Authorization(_))
+        ));
+        let hostnames = get_device_hostnames(
+            app.state::<AppState>(),
+            state.clone(),
+            "sync-test".into(),
+            expected_account.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            hostnames.values().collect::<Vec<_>>(),
+            vec!["Private-Desktop"]
+        );
+
         assert!(
             set_account_preference(
                 app.state::<AppState>(),

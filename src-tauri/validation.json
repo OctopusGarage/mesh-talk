@@ -2,6 +2,43 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-private-device-hostnames",
+      "paths": [
+        "src-tauri/src/runtime_bootstrap.rs",
+        "src-tauri/src/chat_commands/sync.rs",
+        "src-tauri/src/account_documents.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/owner_commands.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "chat_commands::sync::tests::sync_commands_read_and_update_the_managed_node",
+            "owner_commands::tests::registered_commands_queued_behind_lifecycle_lock_reject_same_owner_new_generation",
+            "owner_commands::tests::registered_account_controls_reject_generic_writes_and_removals"
+          ]
+        }
+      ],
+      "consumers": [
+        "frontend-private-device-hostnames"
+      ],
+      "capability": {
+        "summary": "Display OS hostnames only within the same account through encrypted certified-sibling device synchronization.",
+        "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
+        "invariants": [
+          {
+            "name": "Hostnames never enter public discovery or peer profiles; unrelated Noise peers and stale native owner/account admissions cannot read them.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Bounded source-device metadata persists encrypted, supports offline display, rejects generic writes and preserves legacy synchronization through an independent cooldown.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          }
+        ]
+      }
+    },
+    {
       "id": "desktop-discovery-origin",
       "paths": [
         "src-tauri/src/chat_commands/presence.rs",
@@ -204,7 +241,7 @@
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
         "invariants": [
           {
-            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device’s draft",
+            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device\u2019s draft",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
@@ -754,7 +791,9 @@
     },
     {
       "id": "desktop-updates",
-      "consumers": ["frontend-updates"],
+      "consumers": [
+        "frontend-updates"
+      ],
       "paths": [
         "src-tauri/src/updates.rs",
         "src-tauri/src/updates/",

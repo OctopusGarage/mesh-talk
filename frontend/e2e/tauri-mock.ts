@@ -1559,6 +1559,7 @@ export const test = base.extend({
                 '{"history":true,"attachments":false,"profile":true,"appearance":false,"contacts":false}',
             ),
           get_device_sync_status: () => [],
+          get_device_hostnames: () => ({}),
           get_account_login_sync_status: () => ({
             account_id: SELF.account,
             available_revision: null,

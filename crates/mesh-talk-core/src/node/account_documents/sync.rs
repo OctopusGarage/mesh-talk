@@ -13,16 +13,16 @@ use tokio::net::TcpStream;
 pub(in crate::node) struct DocumentSyncCursor {
     pub(super) domain: usize,
     pub(super) after: Option<AccountDocumentKey>,
-    pub(super) digests: [[u8; 32]; 8],
+    pub(super) digests: [[u8; 32]; 9],
     pub(in crate::node) retry_at: Option<Instant>,
     pub(in crate::node) error: Option<String>,
     error_domain: Option<AccountDocumentDomain>,
     pub(in crate::node) pending: bool,
     pub(in crate::node) up_to_date: bool,
     pub(in crate::node) requires_upgrade: bool,
-    pub(super) remotely_disabled: u8,
-    visited: u8,
-    settled: u8,
+    pub(super) remotely_disabled: u16,
+    visited: u16,
+    settled: u16,
     supported: bool,
     control_retry_at: Option<Instant>,
     control_upgrade: bool,
@@ -30,13 +30,14 @@ pub(in crate::node) struct DocumentSyncCursor {
     custody_upgrade: bool,
     inventory_retry_at: Option<Instant>,
     inventory_upgrade: bool,
+    hostname_retry_at: Option<Instant>,
 }
 impl Default for DocumentSyncCursor {
     fn default() -> Self {
         Self {
             domain: 7,
             after: None,
-            digests: [[0; 32]; 8],
+            digests: [[0; 32]; 9],
             retry_at: None,
             error: None,
             error_domain: None,
@@ -53,10 +54,18 @@ impl Default for DocumentSyncCursor {
             custody_upgrade: false,
             inventory_retry_at: None,
             inventory_upgrade: false,
+            hostname_retry_at: None,
         }
     }
 }
 impl DocumentSyncCursor {
+    fn hostname_unavailable(&mut self) {
+        self.hostname_retry_at = Some(Instant::now() + Duration::from_secs(300));
+        self.after = None;
+        self.domain = 0;
+        self.pending = true;
+        self.up_to_date = false;
+    }
     fn inventory_unavailable(&mut self) {
         self.inventory_retry_at = Some(Instant::now() + Duration::from_secs(300));
         self.inventory_upgrade = true;
@@ -104,7 +113,7 @@ impl DocumentSyncCursor {
         {
             return (SyncPhase::Error, Some(error.clone()), upgrade);
         }
-        let mut enabled = 0u8;
+        let mut enabled = 0u16;
         for (i, domain) in DOMAINS.iter().enumerate() {
             if document_enabled(*domain, policy) {
                 enabled |= 1 << i;
@@ -135,7 +144,7 @@ impl DocumentSyncCursor {
     }
 }
 
-const DOMAINS: [AccountDocumentDomain; 8] = [
+const DOMAINS: [AccountDocumentDomain; 9] = [
     AccountDocumentDomain::Draft,
     AccountDocumentDomain::ReadReceipt,
     AccountDocumentDomain::CustomizationPack,
@@ -144,6 +153,7 @@ const DOMAINS: [AccountDocumentDomain; 8] = [
     AccountDocumentDomain::DmRecall,
     AccountDocumentDomain::ChannelCustody,
     AccountDocumentDomain::GroupInventory,
+    AccountDocumentDomain::DeviceHostname,
 ];
 fn category(domain: AccountDocumentDomain) -> SyncCategory {
     match domain {
@@ -159,7 +169,10 @@ fn category(domain: AccountDocumentDomain) -> SyncCategory {
 /// Group inventory follows the mandatory account directory contract. Optional
 /// message/history and appearance domains retain their existing policy gates.
 fn document_enabled(domain: AccountDocumentDomain, policy: super::super::DeviceSyncPolicy) -> bool {
-    domain == AccountDocumentDomain::GroupInventory || policy.enabled(category(domain))
+    matches!(
+        domain,
+        AccountDocumentDomain::GroupInventory | AccountDocumentDomain::DeviceHostname
+    ) || policy.enabled(category(domain))
 }
 fn failure() -> NodeError {
     NodeError::Channel("invalid account document exchange".into())
@@ -324,12 +337,19 @@ impl Node {
         {
             cursor.inventory_retry_at = None;
         }
+        if cursor
+            .hostname_retry_at
+            .is_some_and(|at| at <= Instant::now())
+        {
+            cursor.hostname_retry_at = None;
+        }
         let policy = self.device_sync_policy();
         let mut eligible = false;
         for _ in 0..DOMAINS.len() {
             if ((4..6).contains(&cursor.domain) && cursor.control_retry_at.is_some())
                 || (cursor.domain == 6 && cursor.custody_retry_at.is_some())
                 || (cursor.domain == 7 && cursor.inventory_retry_at.is_some())
+                || (cursor.domain == 8 && cursor.hostname_retry_at.is_some())
             {
                 cursor.domain = (cursor.domain + 1) % DOMAINS.len();
                 cursor.after = None;
@@ -353,6 +373,7 @@ impl Node {
         let result = self.pull_document_exchange(peer, cursor).await;
         if result.is_err()
             && match attempted_domain {
+                AccountDocumentDomain::DeviceHostname => cursor.hostname_retry_at.is_some(),
                 AccountDocumentDomain::GroupInventory => cursor.inventory_retry_at.is_some(),
                 AccountDocumentDomain::ChannelCustody => cursor.custody_retry_at.is_some(),
                 AccountDocumentDomain::DmReaction | AccountDocumentDomain::DmRecall => {
@@ -385,6 +406,7 @@ impl Node {
         let (_, revision) = self.device_sync_policy_snapshot();
         let request = DocumentRequest {
             version: match domain {
+                AccountDocumentDomain::DeviceHostname => 5,
                 AccountDocumentDomain::GroupInventory => 4,
                 AccountDocumentDomain::ChannelCustody => 3,
                 AccountDocumentDomain::DmReaction | AccountDocumentDomain::DmRecall => 2,
@@ -410,7 +432,9 @@ impl Node {
                 if request.version >= 2
                     && matches!(&error,NodeError::Session(super::super::session::SessionError::Transport(TransportError::Io(e))) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe))
                 {
-                    if request.version == 4 {
+                    if request.version == 5 {
+                        cursor.hostname_unavailable();
+                    } else if request.version == 4 {
                         cursor.inventory_unavailable();
                     } else if request.version == 3 {
                         cursor.custody_unavailable();
@@ -439,7 +463,9 @@ impl Node {
                 Err(error) => {
                     let pre_reply_close = matches!(&error,TransportError::Io(e) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe));
                     if request.version >= 2 && pre_reply_close {
-                        if request.version == 4 {
+                        if request.version == 5 {
+                            cursor.hostname_unavailable();
+                        } else if request.version == 4 {
                             cursor.inventory_unavailable();
                         } else if request.version == 3 {
                             cursor.custody_unavailable();
@@ -462,6 +488,9 @@ impl Node {
             match frame {
                 AccountHistoryFrame::DocumentHeader { body } => {
                     cursor.supported = true;
+                    if request.version == 5 {
+                        cursor.hostname_retry_at = None;
+                    }
                     if request.version == 4 {
                         cursor.inventory_retry_at = None;
                         cursor.inventory_upgrade = false;
@@ -514,6 +543,9 @@ impl Node {
                 }
                 AccountHistoryFrame::DocumentsComplete { body } => {
                     cursor.supported = true;
+                    if request.version == 5 {
+                        cursor.hostname_retry_at = None;
+                    }
                     if request.version == 4 {
                         cursor.inventory_retry_at = None;
                         cursor.inventory_upgrade = false;
@@ -576,7 +608,10 @@ impl Node {
                         };
                         cursor.domain = (cursor.domain + 1) % DOMAINS.len();
                     }
-                    let mut supported_mask = 255u8;
+                    let mut supported_mask = 511u16;
+                    if cursor.hostname_retry_at.is_some() {
+                        supported_mask &= !256;
+                    }
                     if cursor.inventory_retry_at.is_some() {
                         supported_mask &= !128;
                     }
