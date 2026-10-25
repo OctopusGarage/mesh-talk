@@ -126,7 +126,9 @@ authorization, draft/session guards, retries and restart remain the existing nat
 A successful full fallback is not evidence that an incremental update ran: native acceptance
 must record the actual patch route and transferred bytes, then verify the exact installed
 application, changed process and ready login state. Local fixtures and AI evaluation do not
-replace isolated native or trusted published-release acceptance.
+replace isolated native or trusted published-release acceptance. CI collects workspace coverage
+in each operating system's existing test pass; Linux's full-only branch cannot represent the
+macOS/Windows delta preparation paths.
 
 ### Free updater signing setup
 
