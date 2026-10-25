@@ -106,6 +106,13 @@ fn clean_legacy_probe_retirement(error: &crate::transport::TransportError) -> bo
             && error.to_string() == "transport closed at frame boundary")
 }
 
+fn retired_legacy_handshake(error: &crate::transport::TransportError) -> bool {
+    clean_legacy_probe_retirement(error)
+        || matches!(error, crate::transport::TransportError::Io(error)
+            if matches!(error.kind(), std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted))
+}
+
 async fn accept_legacy_account_request_inner(
     listener: &tokio::net::TcpListener,
     node: &Arc<Node>,
@@ -115,7 +122,7 @@ async fn accept_legacy_account_request_inner(
         let (stream, _) = listener.accept().await.unwrap();
         let mut channel = match node.privacy_accept(stream).await {
             Ok(channel) => channel,
-            Err(error) if allow_retired_probe && clean_legacy_probe_retirement(&error) => continue,
+            Err(error) if allow_retired_probe && retired_legacy_handshake(&error) => continue,
             Err(error) => panic!("legacy fixture handshake failed: {error}"),
         };
         let bytes = match channel.recv().await {
@@ -190,12 +197,43 @@ async fn policy_fixture_retirement_rejects_truncated_frame_headers_and_payloads(
             .await
             .unwrap_err();
         assert!(!clean_legacy_probe_retirement(&error));
+        assert!(!retired_legacy_handshake(&error));
     }
     let error = crate::transport::TransportError::Io(std::io::Error::new(
         std::io::ErrorKind::UnexpectedEof,
         "incomplete payload",
     ));
     assert!(!clean_legacy_probe_retirement(&error));
+    assert!(!retired_legacy_handshake(&error));
+}
+
+#[test]
+fn policy_fixture_handshake_retirement_does_not_relax_request_or_crypto_errors() {
+    use crate::transport::TransportError;
+    use std::io::{Error, ErrorKind};
+    for kind in [
+        ErrorKind::BrokenPipe,
+        ErrorKind::ConnectionReset,
+        ErrorKind::ConnectionAborted,
+    ] {
+        let error = TransportError::Io(Error::from(kind));
+        assert!(retired_legacy_handshake(&error));
+        assert!(
+            !clean_legacy_probe_retirement(&error),
+            "handshake cancellation cannot relax first-request reads"
+        );
+    }
+    for error in [
+        TransportError::Noise("invalid handshake".into()),
+        TransportError::IdentityMismatch,
+        TransportError::AdmissionDenied,
+        TransportError::FrameTooLarge(crate::transport::MAX_FRAME + 1),
+        TransportError::Io(Error::from(ErrorKind::InvalidData)),
+        TransportError::Io(Error::from(ErrorKind::PermissionDenied)),
+    ] {
+        assert!(!retired_legacy_handshake(&error));
+        assert!(!clean_legacy_probe_retirement(&error));
+    }
 }
 
 // A malformed data fixture must complete capability negotiation first so the

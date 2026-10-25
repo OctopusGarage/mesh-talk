@@ -1327,7 +1327,7 @@ mod group_control_tests {
             .unwrap();
         assert!(
             !cursor.pending,
-            "a backoff-only turn must release its worker instead of self-requeueing"
+            "a backoff-only turn must release its worker instead of self-requeuing"
         );
         assert_eq!(cursor.retry_at, retry);
         assert_eq!(cursor.visited, 0);
