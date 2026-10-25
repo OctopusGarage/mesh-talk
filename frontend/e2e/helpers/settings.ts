@@ -7,6 +7,7 @@ export const settingsCategories = {
   notifications: "Notifications & calls",
   connection: "Connection & delivery",
   privacy: "Privacy & security",
+  integrations: "Integrations",
   files: "Files & receiving",
   history: "History & backup",
 } as const;

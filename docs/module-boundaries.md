@@ -32,7 +32,7 @@ settings/startup control and the single desktop service handle;
 `integrations/instructions.rs` owns only the marked user-level bootstrap file.
 Both transports share one integration service/registry and core sending path.
 `http.rs` owns public static discovery, request limits and fixed scoped routes;
-request schemas derive from the existing models. The General settings UI uses
+request schemas derive from the existing models. The Integrations settings UI uses
 the shared save coordinator and an explicit-owner typed adapter. See
 [desktop local access](bot-integrations.md#desktop-local-agent-access).
 

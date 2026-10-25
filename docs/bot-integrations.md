@@ -218,7 +218,7 @@ interactive event processing remains a later feature stage.
 
 ## Desktop local agent access
 
-Open **Settings → General → Local agent access**, select up to 16 existing
+Open **Settings → Integrations → Local agent access**, select up to 16 existing
 contacts or joined groups, then enable the switch. Access is off by default and
 belongs to the signed-in account on this computer. No separate bot, CLI install,
 MCP host or HTTP server process is required. Only the desktop Rust backend runs
@@ -236,8 +236,7 @@ complete `http://127.0.0.1:PORT/v1/help` URL. **Copy instructions** copies exact
 that bootstrap for another agent. It includes no credentials or conversation IDs.
 
 Enabling also upserts one marked block in the Codex user-level `AGENTS.md` under
-`CODEX_HOME`, or `~/.codex/AGENTS.md` when that variable is unset. The settings
-panel shows the actual path. Existing unrelated instructions and Unix file
+`CODEX_HOME`, or `~/.codex/AGENTS.md` when that variable is unset. **View agent instructions** shows the actual path. Existing unrelated instructions and Unix file
 permissions are preserved; repeated toggles do not append duplicate blocks.
 Disabling removes only Mesh-Talk's block and stops local admission. Malformed or
 externally duplicated markers produce an error rather than guessing which user

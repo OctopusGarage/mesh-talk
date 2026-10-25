@@ -575,6 +575,7 @@
       "notifications": "Notifications & calls",
       "connection": "Connection & delivery",
       "privacy": "Privacy & security",
+      "integrations": "Integrations",
       "files": "Files & receiving",
       "history": "History & backup"
     },
@@ -1175,7 +1176,14 @@
     "copied": "Copied",
     "copyFailed": "Could not copy. Select the instructions above and copy them manually.",
     "group": "Group",
-    "person": "Person"
+    "person": "Person",
+    "selectedCount": "{{count}} / 16 selected",
+    "search": "Search contacts and groups",
+    "selectedOnly": "Selected only",
+    "noMatches": "No matching conversations.",
+    "limitReached": "Limit reached. Deselect a conversation to choose another.",
+    "setupTitle": "Connect your agent",
+    "setupHint": "Copy these instructions into your local agent to connect. Mesh Talk must stay running and unlocked."
   },
   "messageFavorites": {
     "title": "Favorites",

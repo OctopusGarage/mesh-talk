@@ -13,6 +13,7 @@ import {
 import { SETTINGS_CATEGORIES, type SettingsCategory } from "./settings/model";
 import { useSettingsController } from "./settings/useSettingsController";
 import { SettingsError } from "./settings/primitives";
+import { LocalAgentSettings } from "./settings/LocalAgentSettings";
 import { GeneralSettings } from "./settings/GeneralSettings";
 import { AppearanceSettings } from "./settings/AppearanceSettings";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -79,6 +80,9 @@ export function SettingsDialog({
         }}
       />
     ),
+    integrations: controller.settings ? (
+      <LocalAgentSettings controller={controller} />
+    ) : null,
     files: <FileSettings controller={controller} />,
     history: <HistorySettings controller={controller} />,
   }[category];

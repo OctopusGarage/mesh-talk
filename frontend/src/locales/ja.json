@@ -575,6 +575,7 @@
       "notifications": "通知と通話",
       "connection": "接続と配信",
       "privacy": "プライバシーとセキュリティ",
+      "integrations": "連携",
       "files": "ファイルと受信",
       "history": "履歴とバックアップ"
     },
@@ -1175,7 +1176,14 @@
     "copied": "コピーしました",
     "copyFailed": "コピーできませんでした。上の案内を選択して手動でコピーしてください。",
     "group": "グループ",
-    "person": "連絡先"
+    "person": "連絡先",
+    "selectedCount": "{{count}} / 16 件を選択中",
+    "search": "連絡先とグループを検索",
+    "selectedOnly": "選択済みのみ",
+    "noMatches": "一致する会話はありません。",
+    "limitReached": "上限に達しました。別の会話を選ぶには、選択を解除してください。",
+    "setupTitle": "エージェントを接続",
+    "setupHint": "この手順をローカルエージェントにコピーして接続します。Mesh Talk は起動したままロックを解除しておく必要があります。"
   },
   "messageFavorites": {
     "title": "お気に入り",

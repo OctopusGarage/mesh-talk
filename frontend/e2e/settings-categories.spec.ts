@@ -36,7 +36,7 @@ for (const viewport of [
   { width: 1440, height: 1000 },
   { width: 760, height: 520 },
 ]) {
-  test(`seven settings categories expose one page at ${viewport.width}x${viewport.height}`, async ({
+  test(`all settings categories expose one page at ${viewport.width}x${viewport.height}`, async ({
     page,
   }) => {
     await page.setViewportSize(viewport);
@@ -55,6 +55,7 @@ for (const viewport of [
         notifications: "#setting-notifications",
         connection: "#setting-post-office",
         privacy: "#setting-privacy-level",
+        integrations: "#setting-local-agent-access",
         files: '[data-testid="global-attachment-receive"]',
         history: '[data-testid="settings-retention-select"]',
       };

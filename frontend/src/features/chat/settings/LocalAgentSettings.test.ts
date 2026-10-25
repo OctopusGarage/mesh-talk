@@ -78,6 +78,16 @@ async function render() {
     root.render(createElement(LocalAgentSettings, { controller })),
   );
 }
+async function search(value: string) {
+  const input = host.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
 it("requires an explicit conversation before enabling and sends the exact selected scope", async () => {
   await render();
   expect(
@@ -105,7 +115,9 @@ it("discloses and copies the same short help bootstrap without exposing credenti
     instructions: "Mesh-Talk local API: http://127.0.0.1:12345/v1/help",
   };
   await render();
-  const details = host.querySelector("details")!;
+  const details = host.querySelector<HTMLDetailsElement>(
+    '[data-testid="agent-instructions"]',
+  )!;
   expect(details.open).toBe(false);
   details.open = true;
   await act(async () =>
@@ -486,4 +498,117 @@ it("keeps a hidden granted scope manageable until explicitly revoked", async () 
   await act(async () => checkbox.click());
   expect(mocks.set).toHaveBeenLastCalledWith("alice", false, []);
   expect(host.textContent).not.toContain("Bob");
+});
+
+it("keeps a large roster collapsed and searches without changing existing grants", async () => {
+  access.available_destinations = Array.from({ length: 300 }, (_, index) => ({
+    destination: { kind: index % 2 ? "channel" : "account", id: String(index) },
+    label: index === 299 ? "喵星球" : `Contact ${index}`,
+  }));
+  access.destinations = [access.available_destinations[0].destination];
+  await render();
+  const picker = host.querySelector<HTMLDetailsElement>(
+    '[data-testid="agent-conversation-picker"]',
+  )!;
+  expect(picker).not.toBeNull();
+  expect(picker.open).toBe(false);
+  expect(picker.querySelector("summary")!.textContent).toContain(
+    "1 / 16 selected",
+  );
+  picker.open = true;
+  await search("  喵星球  ");
+  expect(picker.querySelectorAll('input[type="checkbox"]')).toHaveLength(1);
+  await act(async () =>
+    picker.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(),
+  );
+  expect(mocks.set).toHaveBeenLastCalledWith("alice", false, [
+    access.available_destinations[0].destination,
+    access.available_destinations[299].destination,
+  ]);
+  await search("CONTACT 298");
+  expect(picker.querySelectorAll('input[type="checkbox"]')).toHaveLength(1);
+  await search("no-such-conversation");
+  expect(picker.textContent).toContain("No matching conversations.");
+  expect(picker.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
+  await search("");
+  expect(picker.querySelectorAll('input[type="checkbox"]')).toHaveLength(300);
+});
+
+it("filters to selected conversations and allows removing an unavailable grant at the limit", async () => {
+  access.destinations = Array.from({ length: 16 }, (_, index) => ({
+    kind: "account",
+    id: String(index),
+  }));
+  await render();
+  expect(
+    host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled,
+  ).toBe(true);
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>('[data-testid="agent-selected-only"]')!
+      .click(),
+  );
+  expect(host.querySelectorAll('input[type="checkbox"]')).toHaveLength(16);
+  const checkbox = host.querySelector<HTMLInputElement>(
+    'input[type="checkbox"]',
+  )!;
+  expect(checkbox.disabled).toBe(false);
+  await act(async () => checkbox.click());
+  expect(mocks.set.mock.lastCall![2]).toHaveLength(15);
+  expect(host.querySelectorAll('input[type="checkbox"]')).toHaveLength(15);
+});
+
+it("reports writes to Integrations and exposes setup without expanding technical details", async () => {
+  access = {
+    ...access,
+    enabled: true,
+    running: true,
+    destinations: [destination],
+    instructions: "public help",
+  };
+  const action = vi.spyOn(controller, "runSettingAction");
+  await render();
+  const details = host.querySelector<HTMLDetailsElement>(
+    '[data-testid="agent-instructions"]',
+  )!;
+  expect(details.open).toBe(false);
+  expect(
+    details.contains(
+      host.querySelector('[data-testid="copy-agent-instructions"]'),
+    ),
+  ).toBe(false);
+  expect(details.textContent).toContain(access.instructions_path);
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="copy-agent-instructions"]',
+      )!
+      .click(),
+  );
+  expect(mocks.copy).toHaveBeenCalledWith("public help");
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>("#setting-local-agent-access")!
+      .click(),
+  );
+  expect(action.mock.lastCall![0]).toBe("integrations");
+});
+
+it("shows saving locally instead of claiming the previous service status is current", async () => {
+  access = {
+    ...access,
+    enabled: true,
+    running: true,
+    destinations: [destination],
+  };
+  await render();
+  controller = { ...controller, saving: true };
+  await render();
+  expect(
+    host.querySelector('[data-testid="agent-access-status"]')!.textContent,
+  ).toContain("Saving");
+  expect(
+    host.querySelector<HTMLButtonElement>("#setting-local-agent-access")!
+      .disabled,
+  ).toBe(true);
 });

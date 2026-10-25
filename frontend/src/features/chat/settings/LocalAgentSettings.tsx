@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Copy, Plug } from "lucide-react";
+import { Copy, LoaderCircle, Plug } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -11,11 +11,9 @@ import {
   type AgentDestination,
   type LocalAgentAccess,
 } from "@/lib/api/localAgentAccess";
+import { AgentConversationPicker } from "./AgentConversationPicker";
 import { SettingsRow } from "./primitives";
 import type { SettingsController } from "./useSettingsController";
-
-const key = (destination: AgentDestination) =>
-  `${destination.kind}:${destination.id}`;
 
 /** UI for the existing integration owner; it never starts a separate participant. */
 export function LocalAgentSettings({
@@ -87,7 +85,7 @@ export function LocalAgentSettings({
     setCopyState("idle");
     try {
       await c.runSettingAction(
-        "general",
+        "integrations",
         async () => {
           try {
             return await localAgentAccess.set(owner, enabled, destinations);
@@ -123,11 +121,13 @@ export function LocalAgentSettings({
     }
   };
   const busy = c.saving || loading;
-  const selected = new Set(access?.destinations.map(key));
-  // Hiding is presentation only. Existing grants stay visible for revocation.
-  const options = (access?.available_destinations ?? []).filter(
+  // Hidden contacts cannot acquire new grants; existing scopes stay revocable.
+  const availableDestinations = (access?.available_destinations ?? []).filter(
     ({ destination }) =>
-      selected.has(key(destination)) ||
+      access?.destinations.some(
+        (selected) =>
+          selected.kind === destination.kind && selected.id === destination.id,
+      ) ||
       destination.kind === "channel" ||
       isContactVisible(
         destination.id,
@@ -135,22 +135,15 @@ export function LocalAgentSettings({
         policy.owner === c.owner && policy.loaded,
       ),
   );
-  for (const destination of access?.destinations ?? []) {
-    if (!options.some((item) => key(item.destination) === key(destination)))
-      options.push({
-        destination,
-        label: t("agentAccess.unavailableConversation", { id: destination.id }),
-      });
-  }
   return (
-    <section className="mt-5 border-t pt-2" data-testid="local-agent-settings">
+    <section className="min-w-0 space-y-3" data-testid="local-agent-settings">
       <SettingsRow
         id="setting-local-agent-access"
         icon={<Plug className="h-4 w-4" />}
         title={t("agentAccess.title")}
         desc={t("agentAccess.description")}
         reason={
-          access && !access.enabled && selected.size === 0
+          access && !access.enabled && access.destinations.length === 0
             ? t("agentAccess.selectFirst")
             : undefined
         }
@@ -159,7 +152,9 @@ export function LocalAgentSettings({
             id="setting-local-agent-access"
             checked={access?.enabled ?? false}
             disabled={
-              busy || !access || (!access.enabled && selected.size === 0)
+              busy ||
+              !access ||
+              (!access.enabled && access.destinations.length === 0)
             }
             onCheckedChange={(enabled) =>
               void save(enabled, access?.destinations ?? [])
@@ -188,13 +183,26 @@ export function LocalAgentSettings({
       )}
       {access && (
         <div className="space-y-3 py-2">
-          <p className="text-xs text-muted-foreground" role="status">
+          <p
+            className="flex items-center gap-2 text-xs text-muted-foreground"
+            role="status"
+            aria-live="polite"
+            data-testid="agent-access-status"
+          >
+            {busy && (
+              <LoaderCircle
+                aria-hidden="true"
+                className="h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none"
+              />
+            )}
             {t(
-              access.running
-                ? "agentAccess.running"
-                : access.enabled
-                  ? "agentAccess.unavailable"
-                  : "agentAccess.off",
+              busy
+                ? "settings.saving"
+                : access.running
+                  ? "agentAccess.running"
+                  : access.enabled
+                    ? "agentAccess.unavailable"
+                    : "agentAccess.off",
             )}
           </p>
           {(access.error || (access.enabled && !access.running)) && (
@@ -217,65 +225,31 @@ export function LocalAgentSettings({
               </Button>
             </div>
           )}
-          <fieldset disabled={busy} className="min-w-0 space-y-2">
-            <legend className="mb-2 text-xs font-medium">
-              {t("agentAccess.conversations")}
-            </legend>
-            {options.length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                {t("agentAccess.noConversations")}
-              </p>
-            )}
-            <div className="max-h-40 space-y-1 overflow-y-auto">
-              {options.map(({ destination, label }) => (
-                <label
-                  key={key(destination)}
-                  className="flex min-w-0 cursor-pointer items-start gap-2 py-1 text-xs"
-                >
-                  <input
-                    type="checkbox"
-                    className="mt-0.5 shrink-0 accent-primary"
-                    checked={selected.has(key(destination))}
-                    disabled={
-                      !selected.has(key(destination)) && selected.size >= 16
-                    }
-                    onChange={(event) => {
-                      const next = event.target.checked
-                        ? [...access.destinations, destination]
-                        : access.destinations.filter(
-                            (item) => key(item) !== key(destination),
-                          );
-                      void save(access.enabled && next.length > 0, next);
-                    }}
-                  />
-                  <span className="min-w-0 break-words">
-                    {label}{" "}
-                    <span className="ml-2 text-muted-foreground">
-                      {t(
-                        destination.kind === "channel"
-                          ? "agentAccess.group"
-                          : "agentAccess.person",
-                      )}
-                    </span>
-                  </span>
-                </label>
-              ))}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {t("agentAccess.scopeHint")}
-            </p>
-          </fieldset>
-          <p className="break-words text-xs leading-relaxed text-muted-foreground">
-            {t("agentAccess.fileHint", { path: access.instructions_path })}
+          <AgentConversationPicker
+            key={c.identity}
+            access={{
+              ...access,
+              available_destinations: availableDestinations,
+            }}
+            busy={busy}
+            onChange={(destinations) =>
+              void save(access.enabled && destinations.length > 0, destinations)
+            }
+          />
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("agentAccess.scopeHint")}
           </p>
           {access.instructions && (
-            <details className="min-w-0 text-xs" key={access.instructions}>
-              <summary className="cursor-pointer rounded-sm py-2 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                {t("agentAccess.showInstructions")}
-              </summary>
-              <pre className="my-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-md bg-muted p-3 text-xs leading-relaxed">
-                {access.instructions}
-              </pre>
+            <section
+              className="space-y-2 border-t pt-4"
+              aria-labelledby="agent-setup-heading"
+            >
+              <h3 id="agent-setup-heading" className="text-[13px] font-medium">
+                {t("agentAccess.setupTitle")}
+              </h3>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t("agentAccess.setupHint")}
+              </p>
               <Button
                 size="sm"
                 variant="outline"
@@ -290,12 +264,32 @@ export function LocalAgentSettings({
                     : "agentAccess.copy",
                 )}
               </Button>
+              <span className="sr-only" aria-live="polite">
+                {copyState === "copied" ? t("agentAccess.copied") : ""}
+              </span>
               {copyState === "failed" && (
-                <p role="alert" className="mt-2 text-destructive">
+                <p role="alert" className="text-xs text-destructive">
                   {t("agentAccess.copyFailed")}
                 </p>
               )}
-            </details>
+              <details
+                data-testid="agent-instructions"
+                className="min-w-0 text-xs"
+                key={access.instructions}
+              >
+                <summary className="cursor-pointer rounded-sm py-2 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  {t("agentAccess.showInstructions")}
+                </summary>
+                <pre className="my-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-md bg-muted p-3 text-xs leading-relaxed">
+                  {access.instructions}
+                </pre>
+                <p className="break-words text-xs leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
+                  {t("agentAccess.fileHint", {
+                    path: access.instructions_path,
+                  })}
+                </p>
+              </details>
+            </section>
           )}
         </div>
       )}
