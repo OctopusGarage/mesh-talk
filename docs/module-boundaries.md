@@ -637,3 +637,12 @@ may project reference member facts for display under runtime admission; group
 authorization, keys and mutations remain exclusively with the existing channel
 owners. The frontend distinguishes this read-only reference from a backup archive
 and removes its explanation when real validated group state arrives.
+
+
+`node/account_documents/device_hostname.rs` owns bounded private per-device hostname
+publication and certified-roster projection. The desktop runtime bootstrap reads
+OS hostnames; admitted sync IPC releases them only for the expected current account.
+`PersonalDevices` renders them without changing identity, account nicknames or
+presence semantics. Hostnames reuse encrypted account-document persistence and the
+existing certified sibling transport; public discovery and profiles never carry
+them. See [private account synchronization](network-design-reference.md#g-linking-and-ongoing-account-synchronization).

@@ -732,6 +732,7 @@ mod tests {
                     super::owner_delivery_statuses,
                     crate::chat_commands::get_device_sync_policy,
                     crate::chat_commands::get_device_sync_status,
+                    crate::chat_commands::get_device_hostnames,
                     crate::chat_commands::set_device_sync_category,
                     crate::chat_commands::get_account_preferences,
                     crate::chat_commands::set_account_preference,
@@ -1318,6 +1319,7 @@ mod tests {
             "dm_recall",
             "channel_custody",
             "group_inventory",
+            "device_hostname",
         ] {
             let mut key = serde_json::json!({"kind":kind,"peer_account":"11".repeat(16),"target":"22".repeat(32),"actor_account":account});
             if kind == "dm_reaction" {
@@ -1328,6 +1330,9 @@ mod tests {
             }
             if kind == "group_inventory" {
                 key = serde_json::json!({"kind":kind,"channel":"22".repeat(32),"source_device":"44".repeat(16)});
+            }
+            if kind == "device_hostname" {
+                key = serde_json::json!({"kind":kind,"device_id":"44".repeat(16)});
             }
             for command in ["put_account_document", "remove_account_document"] {
                 let result = fixture.invoke(command,serde_json::json!({"owner":"alice","expectedAccount":account,"key":key,"payloadBase64":"e30=","expected":null}));
@@ -3497,6 +3502,10 @@ mod tests {
             (
                 "get_device_sync_status",
                 serde_json::json!({"owner":"alice"}),
+            ),
+            (
+                "get_device_hostnames",
+                serde_json::json!({"owner":"alice", "expectedAccount":fixture.node.0.blocking_read().as_ref().unwrap().account_id()}),
             ),
             (
                 "set_device_sync_category",

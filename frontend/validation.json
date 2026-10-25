@@ -2,6 +2,34 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-private-device-hostnames",
+      "paths": [
+        "frontend/src/features/chat/PersonalDevices.tsx",
+        "frontend/src/features/chat/PersonalDevices.test.ts",
+        "frontend/src/lib/api/chat.ts"
+      ],
+      "frontend": [
+        "src/features/chat/PersonalDevices.test.ts"
+      ],
+      "escalation": [
+        "Check hostname wrapping and local-device labeling in the device popover on native linked devices; browser mocks do not prove private transport."
+      ],
+      "capability": {
+        "summary": "Display OS hostnames only within the same account through encrypted certified-sibling device synchronization.",
+        "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
+        "invariants": [
+          {
+            "name": "Hostnames never enter public discovery or peer profiles; unrelated Noise peers and stale native owner/account admissions cannot read them.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Bounded source-device metadata persists encrypted, supports offline display, rejects generic writes and preserves legacy synchronization through an independent cooldown.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          }
+        ]
+      }
+    },
+    {
       "id": "frontend-account-group-inventory",
       "paths": [
         "frontend/src/lib/types.ts",

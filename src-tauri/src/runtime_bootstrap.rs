@@ -164,6 +164,15 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
         .await
         {
             Ok(mut runtime) => {
+                let _ = authority.current(|_| {
+                    if runtime
+                        .handle()
+                        .set_device_hostname(os_hostname().as_deref())
+                        .is_err()
+                    {
+                        log::warn!("Private device hostname publication failed");
+                    }
+                });
                 // Upgrade an original, still-unlinked desktop profile once. A
                 // joining device already has both certified devices and must
                 // never seed its previous local nickname into the kept account.
@@ -514,6 +523,27 @@ async fn forward_state_changes<R: tauri::Runtime>(
             return;
         }
     }
+}
+
+/// Read only the OS hostname; never derive private labels from public nicknames.
+fn os_hostname() -> Option<String> {
+    #[cfg(unix)]
+    let value = {
+        let mut buffer = [0u8; 256];
+        // SAFETY: buffer is writable for the entire supplied length. Require a
+        // terminating NUL so a truncated hostname is not published as complete.
+        if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
+            return None;
+        }
+        let end = buffer.iter().position(|byte| *byte == 0)?;
+        std::str::from_utf8(&buffer[..end]).ok()?.to_owned()
+    };
+    #[cfg(windows)]
+    let value = std::env::var("COMPUTERNAME").ok()?;
+    #[cfg(not(any(unix, windows)))]
+    let value = String::new();
+    (!value.trim().is_empty() && value.len() <= 255 && !value.chars().any(char::is_control))
+        .then_some(value)
 }
 
 #[cfg(test)]

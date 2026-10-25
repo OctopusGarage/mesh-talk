@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 mod controls;
 mod custody;
+mod device_hostname;
 mod inventory;
 pub use inventory::{GroupInventoryMember, GroupInventoryReference};
 pub(super) mod store;
@@ -25,6 +26,7 @@ pub enum AccountDocumentDomain {
     DmRecall,
     ChannelCustody,
     GroupInventory,
+    DeviceHostname,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
@@ -68,6 +70,9 @@ pub enum AccountDocumentKey {
         channel: String,
         source_device: String,
     },
+    DeviceHostname {
+        device_id: String,
+    },
 }
 impl DocumentConversation {
     fn valid(&self) -> bool {
@@ -86,6 +91,7 @@ fn hex(value: &str, len: usize) -> bool {
 impl AccountDocumentKey {
     pub fn domain(&self) -> AccountDocumentDomain {
         match self {
+            Self::DeviceHostname { .. } => AccountDocumentDomain::DeviceHostname,
             Self::Draft { .. } => AccountDocumentDomain::Draft,
             Self::ReadReceipt { .. } => AccountDocumentDomain::ReadReceipt,
             Self::CustomizationPack { .. } => AccountDocumentDomain::CustomizationPack,
@@ -98,6 +104,7 @@ impl AccountDocumentKey {
     }
     fn valid(&self) -> bool {
         match self {
+            Self::DeviceHostname { device_id } => hex(device_id, 32),
             Self::GroupInventory {
                 channel,
                 source_device,
@@ -150,6 +157,7 @@ impl AccountDocumentKey {
     }
     fn limit(&self) -> usize {
         match self {
+            Self::DeviceHostname { .. } => 255,
             Self::GroupInventory { .. } => 128 * 1024,
             Self::ChannelCustody { .. } => 4096,
             Self::Draft { .. } => 64 * 1024,
@@ -166,10 +174,12 @@ impl AccountDocumentKey {
                 | Self::DmRecall { .. }
                 | Self::ChannelCustody { .. }
                 | Self::GroupInventory { .. }
+                | Self::DeviceHostname { .. }
         )
     }
     fn protocol_version(&self) -> u8 {
         match self {
+            Self::DeviceHostname { .. } => 5,
             Self::GroupInventory { .. } => 4,
             Self::ChannelCustody { .. } => 3,
             Self::DmReaction { .. } | Self::DmRecall { .. } => 2,
@@ -228,6 +238,7 @@ impl AccountDocumentMeta {
             && self.revision <= 9_007_199_254_740_991
             && hex(&self.writer_device, 32)
             && (!matches!(&self.key, AccountDocumentKey::GroupInventory { source_device, .. } if source_device != &self.writer_device))
+            && (!matches!(&self.key, AccountDocumentKey::DeviceHostname { device_id } if device_id != &self.writer_device))
             && self.content_len as usize <= self.key.limit()
             && (self.content_len != 0
                 || self.content_hash

@@ -140,6 +140,13 @@ test("Message Yourself shows certified online and offline devices without exposi
     ).__TAURI_INTERNALS__;
     const invoke = api.invoke;
     api.invoke = (command, args) => {
+      if (command === "get_device_hostnames")
+        return Promise.resolve({
+          device_self_0001: "Kingson-MacBook",
+          "linked-online-device": "Office-PC",
+          "previously-linked-device": "Offline-Laptop",
+          device_bob_2222: "Other-account-private-host",
+        });
       if (command === "get_device_sync_status")
         return Promise.resolve([
           {
@@ -188,6 +195,16 @@ test("Message Yourself shows certified online and offline devices without exposi
   await expect(
     panel.locator('[data-device-id="previously-linked-device"]'),
   ).toContainText("Offline");
+  await expect(
+    panel.locator('[data-device-id="device_self_0001"]'),
+  ).toContainText("Kingson-MacBook · This device");
+  await expect(
+    panel.locator('[data-device-id="linked-online-device"]'),
+  ).toContainText("Office-PC");
+  await expect(
+    panel.locator('[data-device-id="previously-linked-device"]'),
+  ).toContainText("Offline-Laptop");
+  await expect(panel).not.toContainText("Other-account-private-host");
   await expect(panel).not.toContainText("device_bob_2222");
   await expect(panel).not.toContainText("device_carol_3333");
   await page.screenshot({

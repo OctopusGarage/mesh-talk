@@ -25,6 +25,7 @@ fn editable(key: &AccountDocumentKey) -> Result<(), CommandError> {
             | AccountDocumentKey::DmRecall { .. }
             | AccountDocumentKey::ChannelCustody { .. }
             | AccountDocumentKey::GroupInventory { .. }
+            | AccountDocumentKey::DeviceHostname { .. }
     ) {
         return Err(CommandError::Authorization(
             "account controls require verified event ingestion".into(),

@@ -2,6 +2,42 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-private-device-hostnames",
+      "paths": [
+        "crates/mesh-talk-core/src/node/account_documents/device_hostname.rs",
+        "crates/mesh-talk-core/src/node/account_documents/mod.rs",
+        "crates/mesh-talk-core/src/node/account_documents/store.rs",
+        "crates/mesh-talk-core/src/node/account_documents/sync.rs",
+        "crates/mesh-talk-core/src/node/account_documents/wire.rs",
+        "crates/mesh-talk-core/src/node/account_documents/tests.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::account_documents::"
+          ]
+        }
+      ],
+      "consumers": [
+        "desktop-private-device-hostnames"
+      ],
+      "capability": {
+        "summary": "Display OS hostnames only within the same account through encrypted certified-sibling device synchronization.",
+        "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
+        "invariants": [
+          {
+            "name": "Hostnames never enter public discovery or peer profiles; unrelated Noise peers and stale native owner/account admissions cannot read them.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Bounded source-device metadata persists encrypted, supports offline display, rejects generic writes and preserves legacy synchronization through an independent cooldown.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          }
+        ]
+      }
+    },
+    {
       "id": "core-account-group-inventory",
       "paths": [
         "crates/mesh-talk-core/src/node/account_documents/inventory.rs",

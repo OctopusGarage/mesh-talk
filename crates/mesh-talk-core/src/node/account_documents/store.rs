@@ -23,9 +23,9 @@ pub(in crate::node) struct AccountDocumentStore {
     account: [u8; 32],
     records: usize,
     journal_bytes: usize,
-    counts: [usize; 8],
+    counts: [usize; 9],
     live_bytes: u64,
-    digest_xor: [[u8; 32]; 8],
+    digest_xor: [[u8; 32]; 9],
     incomplete: BTreeSet<AccountDocumentKey>,
 }
 fn metadata_hash(meta: &AccountDocumentMeta) -> [u8; 32] {
@@ -101,9 +101,9 @@ impl AccountDocumentStore {
             account: *account,
             records: rows.len(),
             journal_bytes,
-            counts: [0; 8],
+            counts: [0; 9],
             live_bytes: 0,
-            digest_xor: [[0; 32]; 8],
+            digest_xor: [[0; 32]; 9],
             incomplete: BTreeSet::new(),
         };
         for bytes in rows {
@@ -296,6 +296,9 @@ impl AccountDocumentStore {
         self.validate(&meta)?;
         if meta.key.is_private_control()
             && !match meta.key {
+                AccountDocumentKey::DeviceHostname { .. } => {
+                    super::device_hostname::valid_payload(&meta, payload)
+                }
                 AccountDocumentKey::GroupInventory { .. } => {
                     super::inventory::valid_payload(&meta, payload)
                 }

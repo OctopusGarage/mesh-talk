@@ -155,6 +155,11 @@ export const chat = {
     invoke<AccountLoginSyncStatus>("get_account_login_sync_status", { owner }),
   getDeviceSyncPolicy: (owner: string) =>
     invoke<DeviceSyncPolicy>("get_device_sync_policy", { owner }),
+  getDeviceHostnames: (owner: string, expectedAccount: string) =>
+    invoke<Record<string, string>>("get_device_hostnames", {
+      owner,
+      expectedAccount,
+    }),
   getDeviceSyncStatus: (owner: string) =>
     invoke<DeviceSyncStatus[]>("get_device_sync_status", { owner }),
   setDeviceSyncCategory: (

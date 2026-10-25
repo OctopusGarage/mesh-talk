@@ -17,6 +17,7 @@ impl DocumentRequest {
         }
         let request: Self = serde_json::from_slice(body).ok()?;
         ((match request.domain {
+            AccountDocumentDomain::DeviceHostname => request.version == 5,
             AccountDocumentDomain::GroupInventory => request.version == 4,
             AccountDocumentDomain::ChannelCustody => request.version == 3,
             AccountDocumentDomain::DmReaction | AccountDocumentDomain::DmRecall => {
