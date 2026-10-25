@@ -271,7 +271,7 @@
         "scripts/diagnostics/health-workflow.test.mjs"
       ],
       "escalation": [
-        "Run actionlint and affected workflow regressions; source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
+        "Run actionlint and affected workflow regressions; preserve full mutation sample completion, strict report validation and bounded per-test/per-suite execution. Size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
       ]
     },
     {

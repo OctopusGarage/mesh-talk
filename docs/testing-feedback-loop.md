@@ -499,6 +499,18 @@ The Rust build cache maps the workspace root to `target/`, matching
 configuration key; native release, mutation and sanitizer caches stay separate.
 Cached build output never replaces executing checks on the current revision.
 
+Mutation testing retains one rotating workspace sample across four runners. Its
+120-minute job budget covers setup, the unmutated baseline and the complete sample;
+it does not extend the 60-second per-test or 240-second per-suite deadlines. The
+October 25 sample selected 16–17 mutants per runner, with builds up to 130 seconds
+and successful suites around 180–217 seconds. A 60-minute job canceled unfinished
+shards despite passing baselines. Reassess this budget from selected counts and
+build/test timings as the workspace grows; incomplete reports still fail the gate.
+Loopback UDP reply fixtures connect their receiving socket to their own listener
+so concurrent discovery traffic cannot masquerade as a reply. Tests must still
+reject extra replies from that listener after a refresh.
+
+
 To assess performance after deployment, compare at least several unchanged-scope
 runs with warm caches and a cold-cache run. Record time from PR update to all
 required checks passing, queue delay, slowest browser shard, native build/test
