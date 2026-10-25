@@ -762,6 +762,7 @@
         "frontend/src/features/chat/MembersDialog.test.ts",
         "frontend/src/features/chat/channelMemberProjection.ts",
         "frontend/e2e/member-account-projection.spec.ts",
+        "frontend/e2e/dissolve-channel.spec.ts",
         "frontend/src/features/chat/channelPermissions.ts",
         "frontend/src/features/chat/channelPermissions.test.ts",
         "frontend/src/features/chat/Sidebar.tsx",
