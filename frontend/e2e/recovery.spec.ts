@@ -32,11 +32,23 @@ test.beforeEach(async ({ page }) => {
       ).__TAURI_INTERNALS__;
       const original = ipc.invoke;
       let created = false;
+      let confirmed = false;
+      let destination = "local";
       ipc.invoke = async (command, args) => {
         if (command === "plugin:dialog|open") return "/tmp/account.mtbackup";
         if (command === "plugin:dialog|save")
           return "/tmp/new-account.mtbackup";
         if (command === "prepare_backup_key") return key;
+        if (command === "backup_setup")
+          return { recovery_key: key, confirmed, destination };
+        if (command === "confirm_backup_key") {
+          confirmed = true;
+          return;
+        }
+        if (command === "set_backup_destination") {
+          destination = String(args.destination);
+          return;
+        }
         if (command === "backup_status")
           return created
             ? {
@@ -67,9 +79,10 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
-test("export asks for the key challenge before writing the backup", async ({
+test("export saves the recovery key once and reopens ready for another backup", async ({
   page,
-}) => {
+}, testInfo) => {
+  await page.setViewportSize({ width: 760, height: 520 });
   await page.goto("/");
   await page.getByTestId("login-username").fill("tester");
   await page.getByTestId("login-password").fill("password123");
@@ -81,14 +94,39 @@ test("export asks for the key challenge before writing the backup", async ({
     .last()
     .click();
   await expect(page.getByTestId("recovery-export-key")).toContainText(KEY);
+  await expect(page.getByTestId("recovery-export")).toBeInViewport();
+  await expect(page.getByTestId("recovery-key-saved")).toBeInViewport();
+  await expect(page.getByRole("dialog").last()).toHaveCSS("opacity", "1");
+  await page
+    .getByRole("dialog")
+    .last()
+    .screenshot({
+      path: testInfo.outputPath("local-first-backup-minimum-window.png"),
+    });
   await expect(page.getByTestId("recovery-export")).toBeDisabled();
-  await page.getByTestId("recovery-key-check").fill("22222222-77777777");
+  await page.getByTestId("recovery-key-saved").check();
   await page.getByTestId("recovery-export").click();
   await expect(page.getByText("Backup saved and verified")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(
     page.getByTestId("settings-page-history").getByText(/Last backup:/),
   ).toContainText("new-account.mtbackup");
+  await page
+    .getByRole("button", { name: "Create encrypted backup" })
+    .last()
+    .click();
+  await expect(page.getByTestId("recovery-key-saved")).toHaveCount(0);
+  await expect(page.getByTestId("recovery-export-key")).toHaveCount(0);
+  await expect(page.getByTestId("recovery-export")).toBeEnabled();
+  await expect(page.getByRole("dialog").last()).toHaveCSS("opacity", "1");
+  await page
+    .getByRole("dialog")
+    .last()
+    .screenshot({
+      path: testInfo.outputPath("local-repeat-backup-minimum-window.png"),
+    });
+  await page.getByTestId("recovery-export").click();
+  await expect(page.getByText("Backup saved and verified")).toBeVisible();
 });
 
 test("restore verifies the archive, shows its limits, and offers a fresh identity if needed", async ({
@@ -188,7 +226,7 @@ test("onboarding keeps backup confirmation visible until the user closes it", as
     .getByTestId("account-protection")
     .getByRole("button", { name: "Create encrypted backup" })
     .click();
-  await page.getByTestId("recovery-key-check").fill("22222222-77777777");
+  await page.getByTestId("recovery-key-saved").check();
   await page.getByTestId("recovery-export").click();
   await expect(page.getByText("Backup saved and verified")).toBeVisible();
   await expect(page.getByRole("dialog")).toBeVisible();

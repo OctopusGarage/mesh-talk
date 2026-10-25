@@ -160,11 +160,21 @@ _Avoid_: Message Yourself, self-chat, pinned contact or pinned conversation.
 See [Favorites](docs/favorites.md).
 
 **Recovery archive**:
-A user-created encrypted snapshot protected by a separate recovery key. Restore
-retains account identity but creates a new device identity.
+A user-created encrypted snapshot protected by a separate recovery key. Desktop
+backups reuse a key acknowledged once and retained in encrypted local-user storage;
+older archives still need their original keys. Restore retains account identity
+but creates a new device identity. See [backup and recovery](docs/backup-recovery.md).
 _Avoid_: device clone, device revocation, live synchronization.
 
 ## Networking and availability
+
+**Sticker media**:
+A single encrypted image attachment with a source identity and text fallback.
+Its exact content is bound by the attachment checksum. Receiving and retaining
+the image is independent from installing its source pack in the sticker picker.
+Legacy ID-only stickers remain dependent on installed artwork. See the
+[delivery contract](docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery).
+_Avoid_: installed pack, delivered image and locally available bytes as synonyms.
 
 **Host machine**:
 A physical or virtual computer that can run multiple participant processes with
@@ -205,6 +215,14 @@ _Avoid_: physical LAN, guaranteed connection, direct-message conversation.
 The source of a learned route, such as local discovery, a routed query or a
 post-office introduction. An address prefix is not provenance.
 _Avoid_: physical location inferred from an IP address.
+
+**Registration origin**:
+An explicitly shared, short-lived relationship between a participant device and
+the post office with which it registered. Both parties authenticate the binding;
+forwarding preserves its original expiry. It is distinct from the immediate
+directory introducer and does not establish physical location. Sharing defaults
+off and is controlled by the registering participant device.
+_Avoid_: geographic origin, home network, delivery route, inferred location.
 
 **Post office**:
 A peer-operated participant that temporarily retains opaque encrypted events.

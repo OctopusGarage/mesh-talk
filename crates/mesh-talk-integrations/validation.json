@@ -37,25 +37,49 @@
     },
     {
       "id": "integration-policy",
-      "paths": ["crates/mesh-talk-integrations/src/policy.rs"],
+      "paths": [
+        "crates/mesh-talk-integrations/src/policy.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-integrations",
-          "filters": ["policy::"]
+          "filters": [
+            "policy::"
+          ]
         }
       ],
-      "consumers": ["integration-service"],
+      "consumers": [
+        "integration-service"
+      ],
       "escalation": [
         "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
-      ]
+      ],
+      "capability": {
+        "summary": "Enforce grant expiration at authorization and provide a bounded metadata-only recent-send projection from the encrypted registry.",
+        "guide": "docs/bot-integrations.md#lifecycle-and-authority",
+        "invariants": [
+          {
+            "name": "A captured commit authority cannot outlive its grant deadline or regain authority after a process-local clock rollback.",
+            "reference": "docs/bot-integrations.md#lifecycle-and-authority"
+          },
+          {
+            "name": "Recent desktop sends are filtered by exact client and exclude bodies, bearer credentials, operation IDs and message IDs.",
+            "reference": "docs/bot-integrations.md#revoke-inspect-and-stop"
+          }
+        ]
+      }
     },
     {
       "id": "integration-service",
-      "paths": ["crates/mesh-talk-integrations/src/service.rs"],
+      "paths": [
+        "crates/mesh-talk-integrations/src/service.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-integrations",
-          "filters": ["service::"]
+          "filters": [
+            "service::"
+          ]
         }
       ],
       "consumers": [
@@ -70,11 +94,15 @@
     },
     {
       "id": "integration-host",
-      "paths": ["crates/mesh-talk-integrations/src/host.rs"],
+      "paths": [
+        "crates/mesh-talk-integrations/src/host.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-integrations",
-          "filters": ["host::"]
+          "filters": [
+            "host::"
+          ]
         }
       ],
       "consumers": [],
@@ -84,39 +112,56 @@
     },
     {
       "id": "integration-ipc",
-      "paths": ["crates/mesh-talk-integrations/src/ipc.rs"],
+      "paths": [
+        "crates/mesh-talk-integrations/src/ipc.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-integrations",
-          "filters": ["ipc::"]
+          "filters": [
+            "ipc::"
+          ]
         }
       ],
-      "consumers": ["integration-client", "desktop-integrations"],
+      "consumers": [
+        "integration-client",
+        "desktop-integrations"
+      ],
       "escalation": [
         "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
       ]
     },
     {
       "id": "integration-client",
-      "paths": ["crates/mesh-talk-integrations/src/client.rs"],
+      "paths": [
+        "crates/mesh-talk-integrations/src/client.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-integrations",
-          "filters": ["client::"]
+          "filters": [
+            "client::"
+          ]
         }
       ],
-      "consumers": ["mcp-adapter"],
+      "consumers": [
+        "mcp-adapter"
+      ],
       "escalation": [
         "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
       ]
     },
     {
       "id": "integration-private-files",
-      "paths": ["crates/mesh-talk-integrations/src/private_files.rs"],
+      "paths": [
+        "crates/mesh-talk-integrations/src/private_files.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-integrations",
-          "filters": ["private_files::"]
+          "filters": [
+            "private_files::"
+          ]
         }
       ],
       "consumers": [
@@ -133,14 +178,22 @@
     },
     {
       "id": "integration-model",
-      "paths": ["crates/mesh-talk-integrations/src/model.rs"],
+      "paths": [
+        "crates/mesh-talk-integrations/src/model.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-integrations",
-          "filters": ["model::"]
+          "filters": [
+            "model::"
+          ]
         }
       ],
-      "consumers": ["integration-policy", "integration-client", "integration-http"],
+      "consumers": [
+        "integration-policy",
+        "integration-client",
+        "integration-http"
+      ],
       "escalation": [
         "Public grant/request/response serialization requires private IPC and MCP schema compatibility evidence."
       ]
@@ -171,7 +224,11 @@
       "rust": [
         {
           "package": "mesh-talk-integrations",
-          "filters": ["host::", "ipc::", "policy::"]
+          "filters": [
+            "host::",
+            "ipc::",
+            "policy::"
+          ]
         }
       ],
       "escalation": [

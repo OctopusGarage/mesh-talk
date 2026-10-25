@@ -101,6 +101,17 @@ pub(in crate::node) fn validated_manifest(bytes: &[u8]) -> Option<AnyManifest> {
     if manifest.size() > MAX_FILE_SIZE || manifest.chunk_count() == 0 {
         return None;
     }
+    if crate::file::sticker::is_sticker_name(manifest.name())
+        && (manifest.protection().is_some()
+            || !crate::file::sticker::valid_manifest(
+                manifest.name(),
+                manifest.mime(),
+                manifest.size(),
+                manifest.kind() == Some(FileKind::Media),
+            ))
+    {
+        return None;
+    }
     match manifest.unprotected() {
         AnyManifest::V1(m) if m.chunk_count != chunk_count_for(m.size) => return None,
         AnyManifest::V2(m) | AnyManifest::V3(FileManifestV3 { v2: m, .. })
@@ -669,7 +680,20 @@ impl Node {
         if protection.is_some() {
             validate_protected_image_path(path, kind)?;
         }
-        let (mut manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
+        let account_conv = super::conversation::account_conversation_id(
+            &self.account.account_id(),
+            target_account_id,
+        );
+        let (mut manifest, file_conv) = self
+            .stage_file_for_host_blocking(
+                path,
+                kind,
+                on_progress,
+                account_conv,
+                Some(target_account_id.to_owned()),
+                expires_at_ms,
+            )
+            .await?;
         if protection.is_some() {
             self.validate_staged_protected_image(&manifest)?;
             manifest.v2.name = format!(
@@ -677,10 +701,6 @@ impl Node {
                 path.extension().and_then(|s| s.to_str()).unwrap_or("img")
             );
         }
-        let account_conv = super::conversation::account_conversation_id(
-            &self.account.account_id(),
-            target_account_id,
-        );
         let id = self.accept_staged_manifest_with_protection_if(
             &dests,
             account_conv,
@@ -1041,7 +1061,9 @@ impl Node {
         if protection.is_some() {
             validate_protected_image_path(path, kind)?;
         }
-        let (mut manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
+        let (mut manifest, file_conv) = self
+            .stage_file_for_host_blocking(path, kind, on_progress, channel, None, expires_at_ms)
+            .await?;
         if protection.is_some() {
             self.validate_staged_protected_image(&manifest)?;
             manifest.v2.name = format!(
@@ -1109,6 +1131,52 @@ impl Node {
         .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
     }
 
+    async fn stage_file_for_host_blocking(
+        self: &Arc<Self>,
+        path: &Path,
+        kind: FileKind,
+        mut on_progress: impl FnMut(FileProgress) + Send + 'static,
+        host: ConversationId,
+        account: Option<String>,
+        deadline: Option<u64>,
+    ) -> Result<(FileManifestV3, ConversationId), NodeError> {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !crate::file::sticker::is_sticker_name(name) {
+            return self.stage_file_blocking(path, kind, on_progress).await;
+        }
+        let permit = self
+            .runtime_work
+            .admit()
+            .ok_or_else(|| NodeError::File("participant runtime is stopping".into()))?;
+        let node = Arc::clone(self);
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let bytes = super::sticker_media::snapshot(&path, kind)?
+                .ok_or_else(|| NodeError::InvalidInput("invalid sticker name".into()))?;
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if let Some(manifest) =
+                node.reusable_sticker(host, account.as_deref(), name, &bytes, deadline)
+            {
+                on_progress(FileProgress {
+                    done: manifest.v2.chunk_count,
+                    total: manifest.v2.chunk_count,
+                });
+                let file = manifest.v2.file_conv;
+                return Ok((manifest, file));
+            }
+            node.stage_sticker_snapshot(name, &bytes, on_progress)
+        })
+        .await
+        .map_err(|error| NodeError::File(format!("stage join error: {error}")))?
+    }
+
     /// Stream `path` from disk, sealing each `CHUNK_SIZE` piece (deterministic-nonce v2
     /// AEAD) into a fresh per-file conversation as one chunk event, hashing each chunk
     /// (and the whole file) as we go. Never holds more than one chunk in memory.
@@ -1119,6 +1187,13 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress),
     ) -> Result<(FileManifestV3, ConversationId), NodeError> {
+        if let Some(bytes) = super::sticker_media::snapshot(path, kind)? {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            return self.stage_sticker_snapshot(name, &bytes, on_progress);
+        }
         if path.is_dir() {
             let archive = crate::file::directory::pack(path)?;
             let name = crate::file::directory::archive_name(path)?;
@@ -1132,7 +1207,7 @@ impl Node {
         self.stage_regular_file(path, kind, on_progress, None)
     }
 
-    fn stage_regular_file(
+    pub(super) fn stage_regular_file(
         &self,
         path: &Path,
         kind: FileKind,
@@ -1282,17 +1357,24 @@ impl Node {
     pub fn read_media(&self, file_conv: ConversationId) -> Option<Vec<u8>> {
         // Cleanup retires manifest metadata before removing the encrypted blob.
         // Missing policy metadata must never turn a protected image into ordinary media.
-        let protected = self
+        let manifest = self
             .files
             .lock()
             .expect("files lock")
             .manifest(&file_conv)?
-            .protection()
-            .is_some();
-        if protected || self.expired_received_file(file_conv) {
+            .clone();
+        if manifest.protection().is_some() || self.expired_received_file(file_conv) {
             return None;
         }
-        self.media.read(file_conv)
+        let bytes = self.media.read(file_conv)?;
+        if crate::file::sticker::is_sticker_name(manifest.name()) {
+            if bytes.len() as u64 != manifest.size() || file_checksum(&bytes) != manifest.checksum()
+            {
+                return None;
+            }
+            super::sticker_media::validate(manifest.name(), manifest.mime(), &bytes).ok()?;
+        }
+        Some(bytes)
     }
 
     /// Whether durable media bytes for `file_conv` exist (drives the UI's store-vs-chunk
@@ -1330,7 +1412,10 @@ impl Node {
             return false; // attachment — never written to the media store
         }
         if self.media.contains(file_conv) && self.has_verified_file_completion(file_conv) {
-            return false; // already durable
+            self.complete_sticker_aliases(file_conv);
+            if !self.pending_sticker_aliases(file_conv) {
+                return false; // every retained offer is already complete
+            }
         }
         let candidates = self.completion_candidates(file_conv);
         // Need all chunks present; `read_file` enforces completeness + verifies integrity.
@@ -1457,6 +1542,7 @@ impl Node {
                 if file_checksum(&out) != manifest.checksum() {
                     return Err(NodeError::File("checksum mismatch".into()));
                 }
+                super::sticker_media::validate(manifest.name(), manifest.mime(), &out)?;
                 Ok(out)
             }
         }
@@ -1841,6 +1927,15 @@ mod part_guard_tests {
 mod personal_files_tests;
 
 fn validate_protected_image_path(path: &Path, kind: FileKind) -> Result<(), NodeError> {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(crate::file::sticker::is_sticker_name)
+    {
+        return Err(NodeError::InvalidInput(
+            "protected stickers are unsupported".into(),
+        ));
+    }
     let mime = mime_from_name(
         path.file_name()
             .and_then(|name| name.to_str())

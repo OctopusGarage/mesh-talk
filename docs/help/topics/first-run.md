@@ -14,7 +14,7 @@ Create a local identity, find someone nearby, and send your first message.
 
 The **More** button beside your account and connection status opens **Link a device**, **Connection**, **Settings**, **Help**, and **About**. On desktop systems, right-click the tray icon to open its menu. If the icon is hidden, use the app's More menu.
 
-Settings has seven categories and saves ordinary changes automatically after the backend acknowledges them. Read any confirmation before changing a privacy preset or shortening history retention.
+Settings groups preferences by task, including Integrations for local agent access, and saves ordinary changes automatically after the backend acknowledges them. Read any confirmation before changing a privacy preset or shortening history retention.
 
 ## Keep access to your identity
 

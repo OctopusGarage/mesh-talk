@@ -60,6 +60,7 @@ mod delivery_runtime;
 #[cfg(test)]
 mod delivery_runtime_tests;
 pub(crate) mod delivery_store;
+pub(crate) mod discovery_origin;
 pub(crate) mod dm;
 pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
@@ -80,6 +81,8 @@ pub(crate) mod linking;
 pub(crate) mod media_store;
 pub(crate) mod message;
 pub(crate) mod name_directory;
+mod network_cost;
+pub use network_cost::{GroupFileSharingStatus, NetworkCost};
 pub(crate) mod node;
 mod opaque_relay;
 pub(crate) mod pairing;
@@ -114,6 +117,9 @@ pub(crate) mod sentlog;
 pub(crate) mod serving;
 pub(crate) mod session;
 mod session_pool;
+mod sticker_media;
+#[cfg(test)]
+mod sticker_media_tests;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod transport;
@@ -138,6 +144,7 @@ pub use delivery_observation::{
     DeliveryObservation, DeliveryObservationKind, DeliveryRecoveryReason,
 };
 pub use delivery_store::DeliveryStatus;
+pub use discovery_origin::{OriginConsent, RegistrationOrigin};
 pub use dm_envelope::{DmEnvelope, DmRoute, ReactionEnvelope, RecallEnvelope};
 pub use dm_ratchet::DmRatchet;
 pub use filebook::{FileBook, ReceivedFile};
@@ -154,8 +161,8 @@ pub use participant_runtime::{
 };
 pub use postbox::{
     elected_post_office, run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway,
-    run_federated_relay_accept_loop_with_directory, run_network_relay_accept_loop_with_directory,
-    run_relay_accept_loop,
+    run_federated_relay_accept_loop_with_directory, run_named_bridge_relay_accept_loop,
+    run_network_relay_accept_loop_with_directory, run_relay_accept_loop,
 };
 pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapshot};
 pub use privacy_runtime::AccountBindingChange;

@@ -44,6 +44,7 @@ export function requiredBrowserPaths(tier) {
     ["screenshot-portable.spec.ts", "Enter sends a staged screenshot after capture loses input focus"],
     ["screenshot-portable.spec.ts", "screenshot selection annotation and explicit send produce cropped PNG"],
     ["screenshot-portable.spec.ts", "hidden screenshot capture cancels without sending"],
+    ["screenshot-portable.spec.ts", "clipboard denial retains the edited screenshot for retry without staging"],
     ["screenshot-portable.spec.ts", "sender previews a screenshot when media IPC returns fallback byte arrays"],
     ["screenshot-portable.spec.ts", "rectangle arrow text and undo remain usable before send"],
     ["screenshot-portable.spec.ts", "unavailable capture is disabled and failed send preserves staged screenshot"],

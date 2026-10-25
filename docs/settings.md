@@ -11,11 +11,12 @@ settings to confirm the value before editing it again.
 
 | Category              | Controls                                                                                                   |
 | --------------------- | ---------------------------------------------------------------------------------------------------------- |
-| General               | Display language, launch at OS login, close to tray and scoped local agent access.                                 |
+| General               | Display language, launch at OS login, and close to tray.                                 |
 | Appearance            | Theme/library, available theme wallpapers and wallpaper visibility.                                        |
 | Notifications & calls | Notifications, message previews, experimental calling and ringtone.                                        |
 | Connection & delivery | Invisible mode, reply permissions, discovery scope, relay master/send/receive and preferred post office.   |
 | Privacy & security    | Privacy preset, idle/hidden locking, sensitive copy/clipboard, stay signed in and hidden contacts.  |
+| Integrations          | Scoped local agent access, allowed conversations and agent setup instructions.                            |
 | Files & receiving     | Attachment receiving default and download destination. Individual conversations retain their own override. |
 | History & backup      | Local retention, encrypted backup, last-backup metadata and restore guidance.                              |
 
@@ -32,6 +33,12 @@ account scope; they do not change a contact's public signed nickname.
 
 Download destinations, autostart, close-to-tray, stay-signed-in, update channel,
 OS authorization, local-agent grants and device sync selection remain local.
+
+Imported linked-device preferences may strengthen local privacy protections,
+but do not silently weaken them. Weaker imported preview, lock, clipboard,
+copy-confirmation or retention values retain the current local protection;
+mixed settings show Custom. An explicit local change can apply the weaker value
+after [identity verification](privacy-controls.md#verify-sensitive-operations).
 Invisible mode and reply-permission grants remain device-local under
 [privacy controls](privacy-controls.md). Attachment acceptance is a decision by
 the receiving device, and TOFU/manual safety verification remains installation-
@@ -49,15 +56,36 @@ see [backup and recovery](backup-recovery.md).
 
 ## Local agent access
 
-In **General**, choose the contacts or joined groups a local agent may send to,
-then enable **Local agent access**. The switch starts the desktop's existing
+In **Integrations**, expand **Allowed conversations** to choose the contacts or joined
+groups a local agent may send to, then enable **Local agent access**. The collapsed
+picker shows the selected count out of 16. Search contacts and groups or use
+**Selected only** to review and remove grants, including unavailable conversations.
+The list scrolls within a bounded area so large rosters do not grow the settings
+page. Search and filters never change saved permissions. Selecting or removing a
+conversation saves immediately; removing the final selection disables access.
+
+Privacy & security also shows the agent's acknowledged status and selected
+conversation count, with a link to this editor. Enabling access or expanding its
+scope requires [fresh identity verification](privacy-controls.md#verify-sensitive-operations).
+Disabling access and removing selected conversations remain available without
+an additional verification prompt.
+
+New authorizations default to **One hour**. **Until I turn it off** is an explicit
+choice; existing continuous authorizations remain continuous. The page shows
+the saved deadline and an expired state. **Renew authorization** requires identity
+verification; refreshing status, retrying a failed service, editing the selected
+conversations and restarting do not renew authorization. Recent activity shows
+content-free accepted/retried sends from the local agent interface; it does not
+identify a particular AI application or prove recipient delivery.
+
+The switch starts the desktop's existing
 integration service with a loopback HTTP adapter. No CLI or additional download
 is needed. Agents can send text and replies; they cannot read chat history.
-Hidden contacts are omitted from new scope choices. Already granted conversations
-stay listed for explicit removal; hiding alone does not revoke an agent's access.
 
-**View agent instructions** expands a short bootstrap containing the live API help
-URL; **Copy instructions** copies the same text. Enabling also maintains a single
+**Copy instructions** is available directly under **Connect your agent** after
+access is enabled. **View agent instructions** expands the same short bootstrap
+containing the live API help URL and the managed-file explanation. Technical
+paths remain inside this disclosure. Enabling also maintains a single
 Mesh-Talk block in the displayed Codex user-level `AGENTS.md`. Disabling stops
 admission, removes the scoped credential and removes only that block, preserving
 other instructions. Saved choices belong to the signed-in account on this device.
@@ -214,8 +242,10 @@ Cancel leaves the old value. **Create a backup first** opens the existing backup
 workflow without saving the shorter retention window. Increasing retention or
 selecting Forever does not require a destructive-change confirmation.
 
-Last-backup status is available without generating a new recovery key. Export
-still requires a fresh key and the existing key-confirmation challenge. The
+Last-backup status is available without preparing a recovery key. First-time
+backup setup asks the user to save and acknowledge one reusable recovery key;
+later exports use the encrypted saved key without a typing challenge. The selected
+destination and signed-in Google connection are remembered for manual backups. The
 native destination picker is guarded against duplicate requests and stale
 owner/view completions. Restoration starts on the sign-in screen, as described
 in [backup and recovery](backup-recovery.md).

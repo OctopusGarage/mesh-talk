@@ -8,6 +8,11 @@ Device privacy, invisible mode and hidden contacts solve different problems.
 2. Select a device privacy preset, read its effects and choose **Apply preset**.
 3. Review idle locking, locking when hidden, sensitive-copy confirmation and clipboard clearing.
 
+The page also shows saved-login preferences and actual local-agent status, with
+a link to manage its selected conversations. A preset selection takes effect
+only after **Apply preset** succeeds. Weakening protections requires
+[identity verification](../../privacy-controls.md#verify-sensitive-operations).
+
 Use **More → Lock now** to hide chat content while background delivery continues. Unlock with the account password or supported configured device authentication.
 
 ## Send a message with concealed content

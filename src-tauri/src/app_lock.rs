@@ -11,6 +11,8 @@ struct LockInner {
     authorization_revision: u64,
     last_activity: Instant,
     call_active: bool,
+    #[cfg(test)]
+    identity_verifier: Option<Box<dyn FnOnce() -> Result<(), CommandError> + Send>>,
 }
 
 impl Default for LockInner {
@@ -21,6 +23,8 @@ impl Default for LockInner {
             authorization_revision: 0,
             last_activity: Instant::now(),
             call_active: false,
+            #[cfg(test)]
+            identity_verifier: None,
         }
     }
 }
@@ -38,6 +42,14 @@ fn due(inner: &LockInner, settings: &crate::settings::AppSettings, hidden: bool)
 pub struct AppLock(Arc<Mutex<LockInner>>);
 
 impl AppLock {
+    #[cfg(test)]
+    pub(crate) fn set_identity_verifier(
+        &self,
+        verifier: impl FnOnce() -> Result<(), CommandError> + Send + 'static,
+    ) {
+        self.0.lock().unwrap().identity_verifier = Some(Box::new(verifier));
+    }
+
     pub(crate) fn authorization_revision(&self) -> Result<u64, CommandError> {
         self.0
             .lock()
@@ -234,6 +246,73 @@ pub async fn unlock_app(
         .map_err(CommandError::Authorization)?
 }
 
+/// A proof belongs only to the operation that requested it and to the exact
+/// unlocked session/revision captured before its native or password prompt.
+#[derive(Clone)]
+pub(crate) struct SensitiveAction {
+    app: AppState,
+    lease: SessionLease,
+    revision: u64,
+}
+
+impl SensitiveAction {
+    pub(crate) async fn verify(
+        app: &AppState,
+        lease: &SessionLease,
+        password: Option<String>,
+        reason: &'static str,
+    ) -> Result<Self, CommandError> {
+        let proof = Self {
+            app: app.clone(),
+            lease: lease.clone(),
+            revision: app.app_lock().authorization_revision()?,
+        };
+        proof.checked(|| Ok(()))?;
+        #[cfg(test)]
+        {
+            let verifier = app.app_lock().0.lock().unwrap().identity_verifier.take();
+            if let Some(verifier) = verifier {
+                verifier()?;
+                proof.checked(|| Ok(()))?;
+                return Ok(proof);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        if password.is_none() {
+            return Err(CommandError::AuthenticationRequired(
+                "Verify your identity to continue".into(),
+            ));
+        }
+        verify_session_identity(app, lease, password, reason).await?;
+        proof.checked(|| Ok(()))?;
+        Ok(proof)
+    }
+
+    pub(crate) fn checked<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        self.app
+            .session()
+            .matching(&self.lease, |_| {
+                self.app
+                    .app_lock()
+                    .with_unchanged_revision(self.revision, operation)
+            })
+            .map_err(CommandError::Authorization)?
+    }
+
+    /// Used when the caller already holds the exact session guard.
+    pub(crate) fn commit<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        self.app
+            .app_lock()
+            .with_unchanged_revision(self.revision, operation)
+    }
+}
+
 /// Reuse app-lock authentication for one operation without changing lock state.
 pub(crate) async fn verify_session_identity(
     app: &AppState,
@@ -331,6 +410,117 @@ pub fn reject_if_locked<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn sensitive_fixture() -> (tempfile::TempDir, AppState, SessionLease) {
+        let root = tempfile::tempdir().unwrap();
+        let app = AppState::new(crate::services::auth_service::AuthService::new(Arc::new(
+            mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().into()),
+            ),
+        )));
+        let user = crate::services::user::User {
+            user_id: "owner".into(),
+            name: "owner".into(),
+            account_login_name: None,
+            display_name: "Owner".into(),
+            address: "fixture".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        let lease = app.session().publish("token".into(), user, "pw".into());
+        (root, app, lease)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn sensitive_password_challenge_is_distinct_from_invalid_credentials() {
+        let (_root, app, lease) = sensitive_fixture();
+        let challenge = SensitiveAction::verify(&app, &lease, None, "fixture")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(challenge).unwrap()["kind"],
+            "authentication-required"
+        );
+        let invalid =
+            SensitiveAction::verify(&app, &lease, Some("wrong password".into()), "fixture")
+                .await
+                .err()
+                .unwrap();
+        assert_eq!(serde_json::to_value(invalid).unwrap()["kind"], "auth");
+    }
+
+    #[tokio::test]
+    async fn sensitive_authentication_rejects_lock_unlock_during_prompt() {
+        let (_root, app, lease) = sensitive_fixture();
+        let lock = app.app_lock().clone();
+        let captured = lease.clone();
+        app.app_lock().set_identity_verifier(move || {
+            lock.lock(captured.clone())?;
+            lock.unlock(&captured)?;
+            Ok(())
+        });
+        assert!(
+            SensitiveAction::verify(&app, &lease, None, "fixture")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn sensitive_authentication_rejects_replacement_session_during_prompt() {
+        let (_root, app, lease) = sensitive_fixture();
+        let session = app.session().clone();
+        app.app_lock().set_identity_verifier(move || {
+            let info = session.get().unwrap();
+            session.publish("replacement".into(), info.user, info.password);
+            Ok(())
+        });
+        assert!(
+            SensitiveAction::verify(&app, &lease, None, "fixture")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn sensitive_commit_rejects_lock_transition_after_successful_prompt() {
+        let (_root, app, lease) = sensitive_fixture();
+        app.app_lock().set_identity_verifier(|| Ok(()));
+        let proof = SensitiveAction::verify(&app, &lease, None, "fixture")
+            .await
+            .unwrap();
+        app.app_lock().lock(lease.clone()).unwrap();
+        app.app_lock().unlock(&lease).unwrap();
+        let mut changed = false;
+        assert!(
+            proof
+                .checked(|| {
+                    changed = true;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!changed);
+    }
+
+    #[test]
+    fn sensitive_action_does_not_survive_lock_revision_change() {
+        let lock = AppLock::default();
+        let revision = lock.authorization_revision().unwrap();
+        lock.clear();
+        let mut committed = false;
+        assert!(
+            lock.with_unchanged_revision(revision, || {
+                committed = true;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!committed);
+    }
+
     #[test]
     fn reveal_revision_rejects_a_lock_then_unlock_transition() {
         let lock = AppLock::default();

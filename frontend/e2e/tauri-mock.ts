@@ -362,6 +362,24 @@ export const test = base.extend({
           media: boolean;
         };
       };
+      const stagedFiles = new Map<string, number[]>();
+      const stickerMediaFiles = new Map<string, number[]>();
+      const stickerFileMetadata = (path: unknown, fileConv: string) => {
+        const name = String(path).split(/[\\/]/).pop() || "file";
+        const bytes = stagedFiles.get(String(path));
+        if (!name.startsWith("mt-sticker-v1-") || !bytes) return {};
+        stickerMediaFiles.set(fileConv, [...bytes]);
+        const ext = name.split(".").pop()!;
+        const mime = (
+          {
+            png: "image/png",
+            jpg: "image/jpeg",
+            webp: "image/webp",
+            gif: "image/gif",
+          } as Record<string, string>
+        )[ext];
+        return { name, size: bytes.length, mime };
+      };
       let mid = 100;
       const msg = (over: Partial<Msg>): Msg => ({
         id: `m${++mid}`,
@@ -640,6 +658,7 @@ export const test = base.extend({
         post_office_receive_enabled: true,
         physical_lan_only: false,
         bridge_discovery_enabled: false,
+        origin_sharing_enabled: false,
         ringtone: "classic",
         privacy_level: "balanced",
         notification_preview: true,
@@ -651,6 +670,15 @@ export const test = base.extend({
       const localAgentAccess = {
         enabled: false,
         running: false,
+        lifetime: "one_hour" as "one_hour" | "persistent",
+        expires_at_ms: null as number | null,
+        expired: false,
+        recent_activity: [] as {
+          at_ms: number;
+          destination: { kind: string; id: string };
+          action: "accepted" | "retried";
+        }[],
+        activity_error: null as string | null,
         destinations: [] as { kind: string; id: string }[],
         available_destinations: [
           {
@@ -666,6 +694,9 @@ export const test = base.extend({
         instructions: "",
         error: null,
       };
+      (window as unknown as Record<string, unknown>).__mockSetLocalAgentAccess =
+        (patch: Partial<typeof localAgentAccess>) =>
+          Object.assign(localAgentAccess, patch);
       let nativeLocked = false;
       let attachmentGlobalAuto = false;
       const attachmentContactAuto: Record<string, boolean> = {};
@@ -965,6 +996,8 @@ export const test = base.extend({
           ).join(""),
         );
 
+      let backupConfirmed = false;
+      let backupDestination = "local";
       const responses: Record<string, (a: Record<string, unknown>) => unknown> =
         {
           owner_node_identity: (a) => ({
@@ -1048,6 +1081,7 @@ export const test = base.extend({
                 mime: a.protection ? "image/png" : "application/octet-stream",
                 file_conv: fileConv,
                 media: Boolean(a.media),
+                ...stickerFileMetadata(a.path, fileConv),
               },
             });
             (msgs[`ch:${a.channelId}`] ||= []).push(row);
@@ -1099,6 +1133,7 @@ export const test = base.extend({
                   mime: a.protection ? "image/png" : "application/octet-stream",
                   file_conv: fileConv,
                   media: Boolean(a.media),
+                  ...stickerFileMetadata(a.path, fileConv),
                 },
               }),
             );
@@ -1365,7 +1400,9 @@ export const test = base.extend({
           read_file: () => new ArrayBuffer(0),
           // The durable chat-media store accessor. The mock has no store, so reject like the
           // real "no stored media" path → the preview hook falls back to read_file.
-          read_media: () => {
+          read_media: (a) => {
+            const stickerBytes = stickerMediaFiles.get(String(a.fileConv));
+            if (stickerBytes) return stickerBytes;
             if (dataMode === "screenshot-ipc-fallback") {
               return (
                 (window as unknown as { __lastWrittenFileBytes?: number[] })
@@ -1380,9 +1417,14 @@ export const test = base.extend({
             (
               window as unknown as { __lastWrittenFileBytes?: number[] }
             ).__lastWrittenFileBytes = a.bytes as number[];
-            return `/tmp/${String(a.name || "pasted.png")}`;
+            const path = `/tmp/${String(a.name || "pasted.png")}`;
+            stagedFiles.set(path, [...(a.bytes as number[])]);
+            return path;
           },
-          delete_temp_file: ok,
+          delete_temp_file: (a) => {
+            stagedFiles.delete(String(a.path));
+            return null;
+          },
           screenshot_available: () => dataMode !== "screenshot-unavailable",
           // A deterministic 320x180 PNG, generated in-browser so the mock always
           // supplies a decodable image for the selection and annotation flow.
@@ -1556,6 +1598,7 @@ export const test = base.extend({
                 '{"history":true,"attachments":false,"profile":true,"appearance":false,"contacts":false}',
             ),
           get_device_sync_status: () => [],
+          get_device_hostnames: () => ({}),
           get_account_login_sync_status: () => ({
             account_id: SELF.account,
             available_revision: null,
@@ -1914,6 +1957,22 @@ export const test = base.extend({
           // Synthetic recovery fixture; never use this key outside browser tests.
           prepare_backup_key: () =>
             "11111111-22222222-33333333-44444444-55555555-66666666-77777777-88888888",
+          backup_setup: () => ({
+            recovery_key:
+              "11111111-22222222-33333333-44444444-55555555-66666666-77777777-88888888",
+            confirmed: backupConfirmed,
+            destination: backupDestination,
+          }),
+          confirm_backup_key: () => {
+            backupConfirmed = true;
+          },
+          set_backup_destination: (a) => {
+            backupDestination = String(a.destination);
+          },
+          google_drive_available: () => false,
+          google_drive_resume: () => false,
+          google_drive_disconnect: ok,
+          google_drive_forget: ok,
           backup_status: () => null,
 
           // settings
@@ -1928,7 +1987,17 @@ export const test = base.extend({
             can_open_settings: true,
           }),
           open_notification_settings: () => null,
-          get_local_agent_access: () => localAgentAccess,
+          get_local_agent_access: () => {
+            localAgentAccess.expired =
+              localAgentAccess.enabled &&
+              localAgentAccess.expires_at_ms !== null &&
+              localAgentAccess.expires_at_ms <= Date.now();
+            if (localAgentAccess.expired) {
+              localAgentAccess.running = false;
+              localAgentAccess.instructions = "";
+            }
+            return localAgentAccess;
+          },
           set_local_agent_access: (a) => {
             const destinations = a.destinations as {
               kind: string;
@@ -1936,13 +2005,31 @@ export const test = base.extend({
             }[];
             if (a.enabled && destinations.length === 0)
               throw new Error("Select a conversation");
+            const chosen =
+              a.lifetime === "persistent" || a.lifetime === "one_hour"
+                ? a.lifetime
+                : localAgentAccess.lifetime;
+            const fresh =
+              a.enabled && (!localAgentAccess.enabled || a.renew === true);
+            if (fresh || chosen !== localAgentAccess.lifetime) {
+              localAgentAccess.expires_at_ms =
+                chosen === "one_hour" && a.enabled
+                  ? Date.now() + 60 * 60 * 1000
+                  : null;
+            }
+            localAgentAccess.lifetime = chosen;
+            localAgentAccess.expired =
+              Boolean(a.enabled) &&
+              localAgentAccess.expires_at_ms !== null &&
+              localAgentAccess.expires_at_ms <= Date.now();
             Object.assign(localAgentAccess, {
               enabled: a.enabled,
-              running: a.enabled,
+              running: a.enabled && !localAgentAccess.expired,
               destinations,
-              instructions: a.enabled
-                ? 'Mesh Talk local API: "http://127.0.0.1:12345/v1/help".\nRead this help URL before using the API for user-authorized tasks.\nThe desktop app must be running and unlocked, with agent access enabled.\n'
-                : "",
+              instructions:
+                a.enabled && !localAgentAccess.expired
+                  ? 'Mesh Talk local API: "http://127.0.0.1:12345/v1/help".\nRead this help URL before using the API for user-authorized tasks.\nThe desktop app must be running and unlocked, with agent access enabled.\n'
+                  : "",
             });
             return localAgentAccess;
           },
@@ -2212,6 +2299,35 @@ export const test = base.extend({
       ) => {
         Object.assign(presenceMap, next);
       };
+
+      (window as unknown as Record<string, unknown>).__mockInjectStickerMedia =
+        (conv: string, name: string, bytes: number[], mime: string) => {
+          const fileConv = `received-sticker-${++mid}`;
+          stickerMediaFiles.set(fileConv, [...bytes]);
+          const entry = msg({
+            file: {
+              name,
+              size: bytes.length,
+              mime,
+              file_conv: fileConv,
+              media: true,
+            },
+          });
+          (msgs[conv] ||= []).push(entry);
+          for (const listener of listeners["file-received"] ?? [])
+            listener.cb({
+              from: BOB.device_id,
+              conv: conv.slice(4),
+              is_channel: false,
+              event_id: entry.id,
+              file_conv: fileConv,
+              name,
+              size: bytes.length,
+              mime,
+              media: true,
+            });
+          return entry.id;
+        };
 
       // Inject an inbound message into the store (so a subsequent history reload returns it),
       // mirroring how the real backend persists a received message before emitting its event.

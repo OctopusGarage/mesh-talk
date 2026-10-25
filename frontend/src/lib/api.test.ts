@@ -343,6 +343,7 @@ describe("chat command mapping", () => {
     expect(invoke).toHaveBeenCalledWith("link_device", {
       peer: "peer1",
       code: "CODE",
+      syncAll: false,
     });
   });
 });

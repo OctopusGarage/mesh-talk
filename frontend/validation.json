@@ -271,6 +271,8 @@
     {
       "id": "frontend-screenshot-submission",
       "paths": [
+        "frontend/src/features/chat/ScreenshotEditor.tsx",
+        "frontend/src/features/chat/ScreenshotEditor.test.ts",
         "frontend/src/features/chat/Composer.tsx",
         "frontend/src/features/chat/ComposerScreenshot.test.ts",
         "frontend/e2e/screenshot-portable.spec.ts"
@@ -279,9 +281,13 @@
         "src/features/chat/ComposerScreenshot.test.ts"
       ],
       "capability": {
-        "summary": "Send a staged screenshot with Enter even when native capture leaves focus on the page background.",
+        "summary": "Copy the confirmed edited screenshot to the clipboard, stage the same PNG, and send explicitly even after native capture loses input focus.",
         "guide": "docs/help/topics/screenshots.md",
         "invariants": [
+          {
+            "name": "Confirmation copies the final PNG before staging; cancellation leaves the clipboard unchanged and copy failures retain the editor for retry",
+            "reference": "docs/help/topics/screenshots.md"
+          },
           {
             "name": "Background Enter sends only staged screenshots and preserves IME confirmation, Shift+Enter, focused controls and modal ownership",
             "reference": "docs/help/topics/screenshots.md"
@@ -289,13 +295,14 @@
         ]
       },
       "escalation": [
-        "Run screenshot browser scenarios in Chromium and WebKit; mocked focus loss does not establish native fullscreen restoration behavior."
+        "Run screenshot browser scenarios in Chromium and WebKit; mocked focus loss does not establish native fullscreen restoration behavior. Verify pasting a confirmed cropped/annotated PNG into another native app on supported desktop platforms."
       ]
     },
     {
       "id": "frontend-local-agent-access",
       "paths": [
         "frontend/src/features/chat/settings/LocalAgentSettings.tsx",
+        "frontend/src/features/chat/settings/AgentConversationPicker.tsx",
         "frontend/src/features/chat/settings/LocalAgentSettings.test.ts",
         "frontend/src/lib/api/localAgentAccess.ts",
         "frontend/src/lib/api/localAgentAccess.test.ts",
@@ -307,10 +314,12 @@
         "src/lib/api/localAgentAccess.test.ts",
         "src/lib/contactVisibility.test.ts",
         "src/store/contactPolicy.test.ts",
-        "src/lib/settingsTranslations.test.ts"
+        "src/lib/settingsTranslations.test.ts",
+        "src/features/chat/settings/SecuritySettings.test.ts",
+        "src/lib/localeParity.test.ts"
       ],
       "capability": {
-        "summary": "Enable scoped local automation through acknowledged settings and display/copy one short public API bootstrap.",
+        "summary": "Expose acknowledged scope, explicit temporary/continuous duration, read-only expiry and safe recent activity for desktop local automation.",
         "guide": "docs/settings.md#local-agent-access",
         "invariants": [
           {
@@ -319,6 +328,10 @@
           },
           {
             "name": "Closed/replaced views cannot publish stale results and auxiliary file failures reload canonical readiness.",
+            "reference": "docs/settings.md#local-agent-access"
+          },
+          {
+            "name": "Integrations owns local agent setup and save feedback; conversation selection stays collapsed by default with a selected count, searchable bounded results and selected-only review; filtering preserves grants and the 16-conversation limit.",
             "reference": "docs/settings.md#local-agent-access"
           }
         ]
@@ -559,6 +572,7 @@
         "frontend/src/features/chat/MembersDialog.test.ts",
         "frontend/src/features/chat/channelMemberProjection.ts",
         "frontend/e2e/member-account-projection.spec.ts",
+        "frontend/e2e/dissolve-channel.spec.ts",
         "frontend/src/features/chat/channelPermissions.ts",
         "frontend/src/features/chat/channelPermissions.test.ts",
         "frontend/src/features/chat/Sidebar.tsx",
@@ -1027,24 +1041,34 @@
     {
       "id": "frontend-google-drive-backup",
       "paths": [
+        "frontend/e2e/settings-categories.spec.ts",
         "frontend/src/features/recovery/",
         "frontend/src/lib/api/googleDrive.ts",
         "frontend/src/features/chat/DataRecoverySettings.tsx",
         "frontend/src/features/auth/RestoreBackup.tsx",
         "frontend/e2e/google-drive-backup.spec.ts",
         "frontend/src/lib/api/recovery.ts",
-        "frontend/e2e/recovery.spec.ts"
+        "frontend/e2e/recovery.spec.ts",
+        "frontend/src/features/auth/RestoreBackup.test.ts",
+        "frontend/src/lib/api/recovery.test.ts"
       ],
       "frontend": [
-        "src/features/recovery/GoogleDriveConnection.test.ts"
+        "src/features/recovery/GoogleDriveConnection.test.ts",
+        "src/features/chat/settingsRecoveryFlows.test.ts",
+        "src/features/auth/RestoreBackup.test.ts",
+        "src/lib/api/recovery.test.ts"
       ],
       "capability": {
-        "summary": "Explicitly connect Google Drive, confirm a separate recovery key and upload or download encrypted archives through the existing recovery dialogs.",
+        "summary": "Connect Google Drive and save a recovery key once, then manually back up with native retained setup and restore through a single download-and-verify action.",
         "guide": "docs/backup-recovery.md#google-drive-backup-and-restore",
         "invariants": [
           {
-            "name": "Connecting and transferring require user actions; retiring a view disconnects its grant and ignores late results.",
+            "name": "Initial Google authorization and every backup require user actions; later views silently resume remembered grants, while retiring a view cancels only its operation connection and ignores late results.",
             "reference": "docs/backup-recovery.md#google-drive-security-and-boundaries"
+          },
+          {
+            "name": "Recovery keys are acknowledged once, hidden on later visits and reused natively; failed setup cannot create an unrecoverable backup.",
+            "reference": "docs/backup-recovery.md#create-a-backup"
           },
           {
             "name": "Cloud restoration uses the existing verified archive preview and explicit new-profile commit.",
@@ -1372,12 +1396,248 @@
       "escalation": [
         "Verify switching, reload persistence, short-window creation and sidebar/settings layout in Portuguese and Korean. Browser mocks cover interface behavior, not native operating-system menus or translated article content."
       ]
+    },
+    {
+      "id": "frontend-group-file-network-cost",
+      "paths": [
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/MembersDialog.test.ts",
+        "frontend/e2e/group-network-cost.spec.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/types.ts"
+      ],
+      "frontend": [
+        "src/features/chat/MembersDialog.test.ts",
+        "src/store/channelRefresh.test.ts"
+      ],
+      "capability": {
+        "summary": "Distinguish temporary local file-sharing protection from durable group sharing intent and offer an owner-bound temporary override.",
+        "guide": "docs/help/topics/channels.md#network-data-protection",
+        "invariants": [
+          {
+            "name": "Metered/unknown status is local-device-only, preserves the saved sharing toggle, and failed exceptions do not claim permission.",
+            "reference": "docs/help/topics/channels.md#network-data-protection"
+          }
+        ]
+      },
+      "escalation": [
+        "Exercise group switching, network-cost invalidations and temporary override in a native app; mocked member rendering does not establish OS detection or transfer protection."
+      ]
+    },
+    {
+      "id": "frontend-sticker-media",
+      "paths": [
+        "frontend/src/lib/stickerMedia.ts",
+        "frontend/src/lib/stickerMedia.test.ts",
+        "frontend/src/lib/directoryAttachment.ts",
+        "frontend/src/lib/directoryAttachment.test.ts",
+        "frontend/src/features/chat/FilesTray.tsx",
+        "frontend/src/features/chat/ConversationHistoryDialog.tsx",
+        "frontend/src/features/chat/favorites/FavoriteAttachment.tsx",
+        "frontend/src/features/chat/MediaSticker.tsx",
+        "frontend/src/features/chat/MediaSticker.test.ts",
+        "frontend/src/features/chat/mediaFile.tsx",
+        "frontend/src/features/chat/mediaFileRead.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/e2e/stickers.spec.ts",
+        "frontend/e2e/tauri-mock.ts"
+      ],
+      "frontend": [
+        "src/lib/stickerMedia.test.ts",
+        "src/lib/directoryAttachment.test.ts",
+        "src/features/chat/MediaSticker.test.ts",
+        "src/features/chat/mediaFileRead.test.ts",
+        "src/features/chat/mediaFile.test.ts",
+        "src/lib/stickerPacks.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/outgoingIntent.test.ts"
+      ],
+      "capability": {
+        "summary": "Send selected sticker artwork as bounded ordinary media while preserving legacy sticker identities and account-owned file retry.",
+        "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
+        "invariants": [
+          {
+            "name": "A canonical bounded media filename carries source identity and fallback; the image manifest remains byte identity. Incoming artwork never installs or resolves a pack.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "Selected artwork is snapshotted before asynchronous staging; stale account work cannot dispatch, retained file intents retry the same bytes, and retention removes visible blob URLs.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/stickers.spec.ts for receive without installed packs and pack-removal preservation; use existing protected-message/media and native file-delivery acceptance where those boundaries change. Unit tests do not prove native end-to-end transfer."
+      ]
+    },
+    {
+      "id": "frontend-sensitive-operations",
+      "paths": [
+        "frontend/src/lib/api/sensitiveInvoke.ts",
+        "frontend/src/lib/api/sensitiveInvoke.test.ts",
+        "frontend/src/features/auth/SensitiveVerificationDialog.tsx",
+        "frontend/src/features/auth/SensitiveVerificationDialog.test.ts",
+        "frontend/src/features/chat/settings/SecuritySettings.tsx",
+        "frontend/src/features/chat/settings/SecuritySettings.test.ts",
+        "frontend/src/features/chat/LinkDeviceDialog.tsx",
+        "frontend/src/features/chat/LinkDeviceDialog.test.ts",
+        "frontend/src/lib/api/settings.ts",
+        "frontend/src/lib/api/recovery.ts",
+        "frontend/src/lib/api/googleDrive.ts",
+        "frontend/src/lib/api/localAgentAccess.ts",
+        "frontend/src/lib/api/auth.ts"
+      ],
+      "frontend": [
+        "src/lib/api/sensitiveInvoke.test.ts",
+        "src/features/auth/SensitiveVerificationDialog.test.ts",
+        "src/features/chat/settings/SecuritySettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts",
+        "src/features/chat/settings/LocalAgentSettings.test.ts",
+        "src/features/chat/LinkDeviceDialog.test.ts",
+        "src/lib/api.test.ts",
+        "src/lib/api/localAgentAccess.test.ts",
+        "src/lib/settingsTranslations.test.ts",
+        "src/lib/privacyTranslations.test.ts",
+        "src/store/auth.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Show acknowledged privacy and agent state and authorize only the exact pending sensitive operation through backend-requested identity verification.",
+        "guide": "docs/privacy-controls.md#verify-sensitive-operations",
+        "invariants": [
+          {
+            "name": "Cancellation and retired prompt/session lifetimes never resubmit credentials; ordinary changes do not prompt and verification is never cached.",
+            "reference": "docs/privacy-controls.md#verify-sensitive-operations"
+          },
+          {
+            "name": "Device-linking authentication precedes sync expansion and source code display waits for snapshot preparation.",
+            "reference": "docs/privacy-controls.md#verify-sensitive-operations"
+          }
+        ]
+      },
+      "escalation": [
+        "Exercise nested Settings/Backup/password dialogs, Escape/focus restoration and pending-operation cancellation in browser; real macOS device-owner and Windows/Linux password verification require native evidence."
+      ]
+    },
+    {
+      "id": "frontend-private-device-hostnames",
+      "paths": [
+        "frontend/src/features/chat/PersonalDevices.tsx",
+        "frontend/src/features/chat/PersonalDevices.test.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/e2e/personal-messages.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/PersonalDevices.test.ts"
+      ],
+      "escalation": [
+        "Check hostname wrapping and local-device labeling in the device popover on native linked devices; browser mocks do not prove private transport."
+      ],
+      "capability": {
+        "summary": "Display OS hostnames only within the same account through encrypted certified-sibling device synchronization.",
+        "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
+        "invariants": [
+          {
+            "name": "Hostnames never enter public discovery or peer profiles; unrelated Noise peers and stale native owner/account admissions cannot read them.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Bounded source-device metadata persists encrypted, supports offline display, rejects generic writes and preserves legacy synchronization through an independent cooldown.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          }
+        ]
+      }
+    },
+    {
+      "id": "frontend-discovery-origin",
+      "paths": [
+        "frontend/src/features/chat/memberProfileDetails.ts",
+        "frontend/src/features/chat/MemberProfileDialog.tsx",
+        "frontend/src/store/presence.ts",
+        "frontend/src/features/chat/settings/NetworkSettings.tsx",
+        "frontend/e2e/person-presence.spec.ts",
+        "frontend/e2e/settings-recovery.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/memberProfileDetails.test.ts",
+        "src/features/chat/MemberProfileDialog.test.ts",
+        "src/store/presence.test.ts",
+        "src/features/chat/settings/NetworkSettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts"
+      ],
+      "capability": {
+        "summary": "Expose only verified, independently expiring registration origins and keep participant-controlled disclosure off by default.",
+        "guide": "docs/network-design-reference.md#optional-registration-origin-disclosure",
+        "invariants": [
+          {
+            "name": "Original office and immediate introducer remain distinct; IPC silence cannot renew origin disclosure",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          },
+          {
+            "name": "Sharing belongs to the active participant and stale owners or missing legacy settings cannot enable it",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          }
+        ]
+      },
+      "escalation": [
+        "Run encrypted multi-hop core scenarios and a native settings/profile smoke check; mocked IPC alone does not prove Windows office deployment."
+      ]
+    },
+    {
+      "id": "frontend-settings-shell",
+      "paths": [
+        "frontend/src/features/chat/SettingsDialog.tsx",
+        "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/features/chat/settings/model.ts",
+        "frontend/src/features/chat/settings/model.test.ts",
+        "frontend/src/lib/settingsTranslations.test.ts",
+        "frontend/e2e/helpers/settings.ts",
+        "frontend/e2e/settings-categories.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/settings/model.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts",
+        "src/features/chat/settingsDialogSession.test.ts",
+        "src/lib/settingsTranslations.test.ts"
+      ],
+      "capability": {
+        "summary": "Navigate task-based settings with one mounted category and category-owned save feedback.",
+        "guide": "docs/settings.md",
+        "invariants": [
+          {
+            "name": "General contains routine app preferences; Integrations owns agent access, permissions and setup. Only the active category is mounted and all locales provide its navigation label.",
+            "reference": "docs/settings.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run affected settings-categories and local-agent-access browser scenarios at desktop and narrow widths in light and dark themes."
+      ]
     }
   ],
   "prScenarios": [
     {
+      "id": "group-file-network-cost-acceptance",
+      "paths": [
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/e2e/group-network-cost.spec.ts"
+      ],
+      "browser": [
+        "e2e/group-network-cost.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
       "id": "frontend-screenshot-submission-acceptance",
       "paths": [
+        "frontend/src/features/chat/ScreenshotEditor.tsx",
+        "frontend/src/features/chat/ScreenshotEditor.test.ts",
         "frontend/src/features/chat/Composer.tsx",
         "frontend/src/features/chat/ComposerScreenshot.test.ts",
         "frontend/e2e/screenshot-portable.spec.ts"
@@ -1772,6 +2032,7 @@
     {
       "id": "frontend-google-drive-acceptance",
       "paths": [
+        "frontend/e2e/settings-categories.spec.ts",
         "frontend/src/features/recovery/",
         "frontend/src/lib/api/googleDrive.ts",
         "frontend/src/features/chat/DataRecoverySettings.tsx",
@@ -1780,7 +2041,8 @@
       ],
       "browser": [
         "e2e/google-drive-backup.spec.ts",
-        "e2e/recovery.spec.ts"
+        "e2e/recovery.spec.ts",
+        "e2e/settings-categories.spec.ts"
       ]
     },
     {

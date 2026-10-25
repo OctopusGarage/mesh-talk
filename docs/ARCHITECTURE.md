@@ -776,7 +776,12 @@ receive policy in an encrypted, account-local sidecar; an explicit file decision
 the global policy and the sender-account override. Raster images sent as media are
 automatic up to 16 MiB; SVG and larger images require approval. The recipient checks
 the first decrypted chunk against the claimed raster signature before durably ingesting it,
-while text and stickers remain ordinary message events. A current sender publishes the
+while text and legacy ID-only stickers remain ordinary message events. New
+[sticker media](CUSTOMIZATION_PACKS.md#sticker-message-delivery) uses the same
+encrypted media manifest and chunk path, with bounded presentation metadata in
+the filename so deployed media-capable clients still show the image. Same-host,
+same-deadline verified transfer reuse does not share keys between conversations.
+A current sender publishes the
 manifest first, then asks the exact authenticated recipient device for consent before
 synchronizing chunk events. When the clients cannot connect directly, the recipient
 returns a signed decision through the existing recipient-encrypted pairwise mailbox;
@@ -1253,9 +1258,11 @@ limit; authenticated checkpoint compaction remains a separate protocol decision.
 ### Manual encrypted backup and recovery
 
 `recovery/{snapshot,archive,key}.rs` defines a versioned logical snapshot inside
-an authenticated `MTBACK1` stream. Every export uses a fresh 256-bit recovery key;
-the user saves that key separately from the `.mtbackup` file. The application never
-stores the key. Archive chunks are bounded, encrypted with AES-256-GCM using an
+an authenticated `MTBACK1` stream. Desktop setup generates one 256-bit recovery
+key, which the user saves separately and acknowledges once. The desktop host
+retains it in password-encrypted local-user storage for later manual exports.
+Every archive still has a fresh random salt; older per-export keys remain valid
+for their original archives. Archive chunks are bounded, encrypted with AES-256-GCM using an
 HKDF-derived key, and closed by a separately keyed authenticated digest. A missing
 final seal, wrong key, altered frame, duplicate record, or invalid signed event is
 rejected before a restored profile can be published.

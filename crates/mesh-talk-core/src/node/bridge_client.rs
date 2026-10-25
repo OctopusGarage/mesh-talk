@@ -132,6 +132,36 @@ impl BridgePolicyStamp {
 }
 
 impl Node {
+    /// Optional disclosure of this device's registering office, never a location.
+    pub fn origin_sharing_enabled(&self) -> bool {
+        self.origin_sharing_enabled.load(Ordering::Acquire)
+    }
+
+    pub async fn set_origin_sharing_enabled(&self, enabled: bool) {
+        self.set_origin_sharing_enabled_if(enabled, |commit| commit())
+            .await
+            .expect("unconditionally authorized origin setting");
+    }
+
+    /// Acknowledgement follows active writes; old prepared frames fail their
+    /// channel generation check even if the preference is toggled off and on.
+    pub async fn set_origin_sharing_enabled_if(
+        &self,
+        enabled: bool,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        let _guard = self.privacy.gate.write().await;
+        authorize(&mut || {
+            if self.origin_sharing_enabled.swap(enabled, Ordering::AcqRel) != enabled {
+                self.privacy.generation.fetch_add(1, Ordering::SeqCst);
+                self.sessions.clear();
+                self.bridge_generation.fetch_add(1, Ordering::AcqRel);
+                self.bridge_notify.notify_one();
+            }
+            Ok(())
+        })
+    }
+
     pub(in crate::node) fn bridge_directory_allowed(&self) -> bool {
         !self.physical_lan_only()
             && self.post_office_enabled.load(Ordering::Acquire)
@@ -441,6 +471,13 @@ impl Node {
                         expiry.origin_hops,
                     );
                 }
+                // An accepted omission (including a legacy response) clears
+                // optional origin data without withdrawing ordinary discovery.
+                roster.set_registration_origin(
+                    id,
+                    relay.addr,
+                    expiries.get(id).and_then(|expiry| expiry.origin.clone()),
+                );
             }
         }
         let ids = staged.peers.keys().cloned().collect();
@@ -471,6 +508,9 @@ impl Node {
                 return Err(QueryFailure::Unavailable);
             }
             let requests = [
+                // Construct consent only after the guarded dial below. Preparing
+                // it here could carry an old opt-in across a new channel epoch.
+                bridge_directory::origin_request_header(),
                 bridge_directory::provenance_request(),
                 bridge_directory::freshness_request(),
                 bridge_directory::request(),
@@ -505,8 +545,30 @@ impl Node {
             .privacy_dial(relay.addr, &relay.public)
             .await
             .map_err(|_| QueryFailure::Unavailable)?;
+        let request = if request == bridge_directory::origin_request_header() {
+            let _guard = self.privacy.gate.read().await;
+            if !channel.io_admitted() || !self.bridge_directory_allowed() {
+                return Err(QueryFailure::Unavailable);
+            }
+            let origin_office = {
+                let roster = self.roster.lock().expect("roster lock not poisoned");
+                let candidates = self.post_office_candidates(&roster);
+                candidates
+                    .iter()
+                    .find(|peer| peer.has_lan_route())
+                    .or_else(|| candidates.first())
+                    .map(|peer| peer.public.clone())
+            };
+            bridge_directory::origin_request(
+                &self.identity,
+                &relay.public,
+                self.origin_sharing_enabled() && origin_office.as_ref() == Some(&relay.public),
+            )
+        } else {
+            request.to_vec()
+        };
         channel
-            .send(request)
+            .send(&request)
             .await
             .map_err(|_| QueryFailure::Unavailable)?;
         let mut response = bridge_directory::DirectoryResponse::new(relay.public.clone());
@@ -553,6 +615,109 @@ mod tests {
     use crate::identity::device::DeviceIdentity;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn origin_sharing_defaults_off_and_opt_out_serializes_with_active_sends() {
+        let temp = tempfile::tempdir().unwrap();
+        let node = directory_client(temp.path());
+        assert!(!node.origin_sharing_enabled());
+        node.set_origin_sharing_enabled(true).await;
+        let policy = BridgePolicyStamp::capture(&node);
+        let generation = node.privacy.generation.load(Ordering::SeqCst);
+        let active_send = node.privacy.gate.read().await;
+        let mut disable = Box::pin(node.set_origin_sharing_enabled(false));
+        assert!(futures_util::poll!(&mut disable).is_pending());
+        assert!(node.origin_sharing_enabled());
+        drop(active_send);
+        disable.await;
+        assert!(!node.origin_sharing_enabled());
+        assert!(!policy.current(&node));
+        assert!(node.privacy.generation.load(Ordering::SeqCst) > generation);
+
+        let rejected = node
+            .set_origin_sharing_enabled_if(true, |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "stale desktop session",
+                ))
+            })
+            .await;
+        assert!(rejected.is_err());
+        assert!(!node.origin_sharing_enabled());
+    }
+
+    #[tokio::test]
+    async fn origin_consent_uses_one_local_office_and_opt_out_preserves_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let node = directory_client(temp.path());
+        let mut servers = Vec::new();
+        let mut directories = Vec::new();
+        let mut offices = Vec::new();
+        for (local, name) in [(true, "Windows 10 office"), (false, "Forwarding office")] {
+            let id = DeviceIdentity::generate();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let announcement = Announce::new_post_office_with_account(
+                &id,
+                &Account::generate(),
+                name,
+                addr.port(),
+            );
+            if local {
+                node.roster
+                    .lock()
+                    .unwrap()
+                    .update(&announcement, addr.ip(), &node.user_id());
+            } else {
+                node.roster.lock().unwrap().update_routed(
+                    &announcement,
+                    addr.ip(),
+                    &node.user_id(),
+                );
+                node.set_bridge_hub_id(Some(&id.user_id())).unwrap();
+            }
+            let directory = crate::postoffice::federation::FederationDirectory::new();
+            directory.set_office_name(name);
+            let (ed, x) = id.secret_bytes();
+            let office = Arc::new(Mutex::new(
+                crate::postoffice::PostOffice::open(&temp.path().join(id.user_id()), "pw", id)
+                    .unwrap(),
+            ));
+            offices.push(announcement.public());
+            directories.push(directory.clone());
+            servers.push(tokio::spawn(
+                super::super::postbox::run_federated_relay_accept_loop_with_directory(
+                    DeviceIdentity::from_secret_bytes(ed, x),
+                    listener,
+                    office,
+                    Arc::new(HashSet::new()),
+                    directory,
+                ),
+            ));
+        }
+        for enabled in [false, true, false] {
+            node.set_origin_sharing_enabled(enabled).await;
+            node.refresh_bridge_directory().await;
+            for (index, directory) in directories.iter().enumerate() {
+                let entries = directory.shared().lock().unwrap().export_with_origins(
+                    Instant::now(),
+                    super::super::discovery_origin::unix_now(),
+                );
+                let entry = entries
+                    .iter()
+                    .find(|entry| entry.presence.announce.user_id == node.user_id())
+                    .expect("origin opt-out must preserve ordinary registration");
+                assert_eq!(entry.origin.is_some(), enabled && index == 0);
+                if let Some(origin) = &entry.origin {
+                    assert_eq!(origin.office_user_id(), offices[0].user_id());
+                    assert_eq!(origin.office_name(), "Windows 10 office");
+                }
+            }
+        }
+        for server in servers {
+            server.abort();
+        }
+    }
 
     #[tokio::test]
     async fn expired_directory_membership_retains_origin_bound_presentation_until_explicit_disable()
@@ -866,7 +1031,8 @@ mod tests {
                     .unwrap();
                 let request = channel.recv().await.unwrap();
                 received.lock().unwrap().push(request.clone());
-                if request == bridge_directory::provenance_request()
+                if request.starts_with(bridge_directory::origin_request_header())
+                    || request == bridge_directory::provenance_request()
                     || request == bridge_directory::freshness_request()
                 {
                     continue;
@@ -881,6 +1047,7 @@ mod tests {
         assert_eq!(
             *requests.lock().unwrap(),
             vec![
+                bridge_directory::origin_request(&node.identity, &proof.public(), false),
                 bridge_directory::provenance_request().to_vec(),
                 bridge_directory::freshness_request().to_vec(),
                 bridge_directory::request().to_vec(),
@@ -1004,6 +1171,7 @@ mod tests {
                 bridge_directory::PresenceDeadline {
                     expires_at: Instant::now() + DIRECTORY_MEMBERSHIP_TTL,
                     origin_secs: 15,
+                    origin: None,
                     origin_hops: None,
                 },
             )]);

@@ -32,9 +32,19 @@ settings/startup control and the single desktop service handle;
 `integrations/instructions.rs` owns only the marked user-level bootstrap file.
 Both transports share one integration service/registry and core sending path.
 `http.rs` owns public static discovery, request limits and fixed scoped routes;
-request schemas derive from the existing models. The General settings UI uses
+request schemas derive from the existing models. The Integrations settings UI uses
 the shared save coordinator and an explicit-owner typed adapter. See
 [desktop local access](bot-integrations.md#desktop-local-agent-access).
+
+The local access owner persists absolute authorization deadlines and preserves
+them across service retries and session/runtime restarts. Only an explicitly
+verified enable, duration extension or renewal can extend authority. The shared
+integration grant authorizer checks expiry again at core acceptance. The desktop
+activity view uses the existing registry's bounded content-free send projection:
+read the live service registry while its supervisor exists, and open the saved
+registry only after its writer has stopped under the same controller serialization.
+The UI never creates a second grant-store owner or attributes a shared credential
+to a particular AI application. See [authorization lifetime](bot-integrations.md#lifecycle-and-authority).
 
 The headless CLI uses the core directly. A protocol change should not require
 Tauri; a presentation change should not alter the wire protocol. Not every helper
@@ -72,7 +82,7 @@ Paths below are relative to the repository root. `core/` abbreviates
 | Durable outgoing delivery                      | `core/node/delivery_store.rs`, `delivery_runtime.rs`, `delivery_receipt.rs`, `delivery_observation.rs`                                                                          | Storage owns persisted transitions; runtime owns bounded direct/relay progress and scheduling; receipts own exact completion evidence. Runtime observations describe exact attempts under the [delivery observation contract](network-design-reference.md#runtime-delivery-observations). |
 | Post-office routing/federation                 | `core/postoffice/` (including signed network membership in `network.rs`), `core/node/postbox.rs`, `opaque_relay.rs`, `bridge_directory.rs`, `bridge_client.rs`, `relay_policy.rs`                                                     | Reuse relay eligibility, opaque projection and incremental mailbox admission; directory participation does not grant relay or conversation authority.                                                                                  |
 | Transport/session reuse                        | `core/transport/`, `core/node/transport.rs`, `session_pool.rs`, `session.rs`, `account_session.rs`                                                                                                    | Reuse authenticated bounded sessions; `session_pool.rs` also owns exact-endpoint authentication admission before TCP permits. Feature modules do not open ad hoc sockets or create their own retry loops.                                                                                                                      |
-| Files/folders                                  | `core/file/`, `core/node/files.rs`, `filebook.rs`, `file_consent.rs`, `file_completion.rs`                                                                                      | Consent, chunk integrity and recipient completion remain distinct transitions. Presentation intake belongs to `ui/features/chat/attachments/useAttachmentIntake.ts`; the store retains intent acceptance/retry.                        |
+| Files/folders                                  | `core/file/`, `core/node/files.rs`, `sticker_media.rs`, `filebook.rs`, `file_consent.rs`, `file_completion.rs`                                                                                      | Consent, chunk integrity and recipient completion remain distinct transitions. Presentation intake belongs to `ui/features/chat/attachments/useAttachmentIntake.ts`; the store retains intent acceptance/retry.                        |
 | History/search/recall/reactions                | `core/node/queries.rs`, `search.rs`, `recall.rs`, `reactions.rs`                                                                                                                | Query through core; [recent-search references](ARCHITECTURE.md#recent-search-references) reuse canonical history identity and coverage. Frontend uses verified account bindings and centralized contact visibility.                                                                                                                                        |
 | Linking and sibling replay                     | `core/node/pairing.rs`, `linking.rs`, `enrollment.rs`, `account_sync*.rs`, `account_preferences.rs`, `account_access.rs`                                                                           | Pairing authority and replay policy stay separate from the dialog. Host adoption belongs to `src-tauri/src/linked_account.rs`; signed-out enrollment belongs to `device_enrollment.rs` and reuses the recovery publication journal; private login application belongs to `shared_account_login.rs`.                                                                                            |
 | Calls                                          | `core/node/call.rs`, `ui/store/calls.ts`, `ui/features/chat/WebRtcTestDialog.tsx`                                                                                               | Core owns authenticated signaling; the call store owns call lifecycle and WebRTC media; the test dialog owns local media diagnostics. Do not reuse mailbox custody as live signaling.                                                  |
@@ -103,6 +113,18 @@ unlocking the application. The frontend message view owns the temporary
 conversation caches, reply
 quotes or notification previews. The [privacy guide](privacy-controls.md#protected-messages)
 owns the product behavior and limitations.
+
+Sensitive settings, saved-login retry, agent grants, backup publication and
+device linking reuse the per-operation proof in `src-tauri/src/app_lock.rs`.
+`runtime_admission.rs` carries its exact session and lock revision through native
+commit boundaries; it is never a renderer-issued or reusable unlock token.
+`settings.rs` owns effective downgrade decisions and the local protection floor
+for imported preferences. Generic preference IPC cannot write its `settings.*`
+namespace. `ui/lib/api/sensitiveInvoke.ts` retries only the captured operation
+when the backend requests a password; the app-owned
+`ui/features/auth/SensitiveVerificationDialog.tsx` supplies the prompt and cancels
+it on session retirement. The [sensitive-operation contract](privacy-controls.md#verify-sensitive-operations)
+owns user behavior and platform limits.
 
 `ui/store/conversationHistory.ts` owns active history reloads, bounded background
 coverage scans and expansion to a requested Event. It shares history selection
@@ -370,6 +392,16 @@ views: no overlapping requests in one subscription and no results applied after
 that subscription closes. Store-level owner/session checks remain mandatory;
 serial polling is not an authorization mechanism.
 
+Optional registration-origin disclosure stays with the existing network owners:
+`core/node/discovery_origin.rs` owns bounded consent and office signatures;
+`bridge_directory.rs` and `postoffice/federation.rs` own negotiated carriage and
+fixed expiry; `bridge_client.rs` owns source-side publication permission.
+Roster observations retain the validated proof without creating routing authority.
+Desktop presence IPC projects only office identity, name and remaining lifetime;
+the frontend ages this lifetime independently during failed refreshes. The existing
+account settings owner persists the default-off device choice. See
+[registration-origin disclosure](network-design-reference.md#optional-registration-origin-disclosure).
+
 ## 4. Parallel development contract
 
 1. **Find the owner first.** Consult the table, inspect its public interface and
@@ -443,8 +475,10 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   leases, staging cleanup and source-specific media intent; store intents retain
   accepted paths and retry ownership. Screenshot edits retain their originating
   conversation rather than targeting whichever conversation is active later.
-  Confirmed screenshots join the composer's pending files; only the normal Send
-  action hands them to delivery. `screenshot/` owns image-coordinate geometry,
+  `ScreenshotEditor.tsx` copies the final cropped/annotated PNG to the clipboard
+  on confirmation before staging the same bytes; copy failures retain the editor
+  for retry and cancellation never writes the clipboard. Confirmed screenshots
+  join the composer's pending files; only the normal Send action hands them to delivery. `screenshot/` owns image-coordinate geometry,
   annotation painting, floating controls and temporary fullscreen restoration.
 - `DiagnosticsDialog.tsx` delegates observations and native actions to
   `diagnostics/useDiagnosticsController.ts`. Each opening owns independent
@@ -551,6 +585,15 @@ Desktop `src-tauri/src/message_favorites.rs` owns admitted IPC adaptation;
 `ui/features/chat/favorites/` owns collection/selection/editing. These do not reuse
 contact pin/alias preferences or Message Yourself as a collection store.
 [Favorites](favorites.md) owns the limits, retention and synchronization contract.
+
+## Network cost protection
+
+`core/node/network_cost.rs` owns temporary group attachment export eligibility,
+independent of signed replica preferences and local retention. Desktop
+`src-tauri/src/network_cost/` owns native observations within the installed
+runtime's host-task lifetime. Existing group sync projections enforce the policy
+in both directions; channel member IPC exposes only local-device status and
+session-authorized overrides. See [network cost protection](network-design-reference.md#cost-aware-group-attachment-sharing).
 
 ## Public help
 
@@ -700,10 +743,15 @@ The [profile and verification guide](peer-trust.md) owns meanings and evidence l
 
 ## Google Drive recovery transport
 
-`src-tauri/src/google_drive/` owns ephemeral desktop OAuth grants, exact-session
-admission, bounded Drive HTTP transfers and temporary encrypted file lifetimes.
+`src-tauri/src/google_drive/` owns remembered password-encrypted local OAuth
+refresh grants, ephemeral operation connections, exact-session admission, bounded
+Drive HTTP transfers and temporary encrypted file lifetimes. Its `remembered.rs`
+keeps Google credentials native and separate from recovery archives.
 `src-tauri/src/recovery.rs` remains the owner of consistent snapshot/runtime restart,
-archive verification and transactional profile restore; `core/recovery/` owns format
+archive verification and transactional profile restore. Its `recovery/setup.rs`
+owns the reusable local recovery key, one-time acknowledgement and selected
+destination, using the existing password-encrypted local-user storage and exact
+session/lock authority. `core/recovery/` owns format
 and cryptography. `ui/lib/api/googleDrive.ts` adapts IPC, and
 `ui/features/recovery/` provides shared connection/progress presentation for the
 existing export/restore dialogs. See [backup and recovery](backup-recovery.md#google-drive-security-and-boundaries).
@@ -762,3 +810,12 @@ may project reference member facts for display under runtime admission; group
 authorization, keys and mutations remain exclusively with the existing channel
 owners. The frontend distinguishes this read-only reference from a backup archive
 and removes its explanation when real validated group state arrives.
+
+
+`node/account_documents/device_hostname.rs` owns bounded private per-device hostname
+publication and certified-roster projection. The desktop runtime bootstrap reads
+OS hostnames; admitted sync IPC releases them only for the expected current account.
+`PersonalDevices` renders them without changing identity, account nicknames or
+presence semantics. Hostnames reuse encrypted account-document persistence and the
+existing certified sibling transport; public discovery and profiles never carry
+them. See [private account synchronization](network-design-reference.md#g-linking-and-ongoing-account-synchronization).

@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 mod controls;
 mod custody;
+mod device_hostname;
 mod group_control;
 mod group_operations;
 mod inventory;
@@ -27,7 +28,19 @@ pub enum AccountDocumentDomain {
     DmRecall,
     ChannelCustody,
     GroupInventory,
+    DeviceHostname,
     GroupControl,
+}
+impl AccountDocumentDomain {
+    /// Hostname and group-control domains independently shipped digest byte8.
+    /// Preserve those opaque, explicitly domain-scoped hints independently of
+    /// their distinct in-memory cursor/index positions after merging the domains.
+    fn digest_discriminator(self) -> u8 {
+        match self {
+            Self::DeviceHostname | Self::GroupControl => 8,
+            _ => self as u8,
+        }
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
@@ -71,6 +84,9 @@ pub enum AccountDocumentKey {
         channel: String,
         source_device: String,
     },
+    DeviceHostname {
+        device_id: String,
+    },
     GroupControl {
         channel: String,
         source_device: String,
@@ -97,6 +113,7 @@ fn hex(value: &str, len: usize) -> bool {
 impl AccountDocumentKey {
     pub fn domain(&self) -> AccountDocumentDomain {
         match self {
+            Self::DeviceHostname { .. } => AccountDocumentDomain::DeviceHostname,
             Self::Draft { .. } => AccountDocumentDomain::Draft,
             Self::ReadReceipt { .. } => AccountDocumentDomain::ReadReceipt,
             Self::CustomizationPack { .. } => AccountDocumentDomain::CustomizationPack,
@@ -112,6 +129,7 @@ impl AccountDocumentKey {
     }
     fn valid(&self) -> bool {
         match self {
+            Self::DeviceHostname { device_id } => hex(device_id, 32),
             Self::GroupInventory {
                 channel,
                 source_device,
@@ -172,6 +190,7 @@ impl AccountDocumentKey {
     }
     fn limit(&self) -> usize {
         match self {
+            Self::DeviceHostname { .. } => 255,
             Self::GroupInventory { .. } => 128 * 1024,
             Self::GroupControl { .. } => super::account_group::wire::MAX_HEAD_BYTES,
             Self::GroupOperation { .. } => 4 * 1024 * 1024,
@@ -192,10 +211,12 @@ impl AccountDocumentKey {
                 | Self::GroupInventory { .. }
                 | Self::GroupControl { .. }
                 | Self::GroupOperation { .. }
+                | Self::DeviceHostname { .. }
         )
     }
     fn protocol_version(&self) -> u8 {
         match self {
+            Self::DeviceHostname { .. } => 5,
             Self::GroupInventory { .. } => 4,
             Self::GroupControl { .. } | Self::GroupOperation { .. } => 5,
             Self::ChannelCustody { .. } => 3,
@@ -256,6 +277,7 @@ impl AccountDocumentMeta {
             && hex(&self.writer_device, 32)
             && (!matches!(&self.key, AccountDocumentKey::GroupInventory { source_device, .. } if source_device != &self.writer_device))
             && (!matches!(&self.key, AccountDocumentKey::GroupControl { source_device, .. } if source_device != &self.writer_device))
+            && (!matches!(&self.key, AccountDocumentKey::DeviceHostname { device_id } if device_id != &self.writer_device))
             && self.content_len as usize <= self.key.limit()
             && (self.content_len != 0
                 || self.content_hash

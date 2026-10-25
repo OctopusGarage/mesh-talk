@@ -125,11 +125,11 @@ pub(in crate::node) struct AccountDocumentStore {
     account: [u8; 32],
     records: usize,
     journal_bytes: usize,
-    counts: [usize; 9],
+    counts: [usize; 10],
     live_bytes: u64,
     operation_keys: usize,
     operation_bytes: u64,
-    digest_xor: [[u8; 32]; 9],
+    digest_xor: [[u8; 32]; 10],
     incomplete: BTreeSet<AccountDocumentKey>,
     local_receipts: BTreeMap<AccountDocumentKey, RetainedPublicationReceipt>,
     // Bounded by current inventory keys; never exported in document metadata.
@@ -213,11 +213,11 @@ impl AccountDocumentStore {
             account: *account,
             records: rows.len(),
             journal_bytes,
-            counts: [0; 9],
+            counts: [0; 10],
             live_bytes: 0,
             operation_keys: 0,
             operation_bytes: 0,
-            digest_xor: [[0; 32]; 9],
+            digest_xor: [[0; 32]; 10],
             incomplete: BTreeSet::new(),
             local_receipts: BTreeMap::new(),
             inventory_source_floors: BTreeSet::new(),
@@ -343,7 +343,7 @@ impl AccountDocumentStore {
         let index = domain as usize;
         let mut hash = Sha256::new();
         hash.update(b"mesh-talk-account-document-index-v1");
-        hash.update([index as u8]);
+        hash.update([domain.digest_discriminator()]);
         hash.update(self.digest_xor[index]);
         hash.update((self.counts[index] as u64).to_be_bytes());
         hash.finalize().into()
@@ -377,7 +377,7 @@ impl AccountDocumentStore {
         }
         let mut hash = Sha256::new();
         hash.update(b"mesh-talk-account-document-index-v1");
-        hash.update([domain as u8]);
+        hash.update([domain.digest_discriminator()]);
         hash.update(xor);
         hash.update(count.to_be_bytes());
         hash.finalize().into()
@@ -710,6 +710,9 @@ impl AccountDocumentStore {
                 AccountDocumentKey::GroupControl { .. } => {
                     super::group_control::valid_payload(&meta, payload)
                 }
+                AccountDocumentKey::DeviceHostname { .. } => {
+                    super::device_hostname::valid_payload(&meta, payload)
+                }
                 AccountDocumentKey::GroupInventory { .. } => {
                     super::inventory::valid_payload(&meta, payload)
                 }
@@ -966,6 +969,57 @@ impl AccountDocumentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn historical_appended_domain_digest(meta: &AccountDocumentMeta) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"mesh-talk-account-document-index-v1");
+        // Both pre-merge implementations independently appended their domain at8.
+        hash.update([8]);
+        hash.update(metadata_hash(meta));
+        hash.update(1u64.to_be_bytes());
+        hash.finalize().into()
+    }
+    #[test]
+    fn device_hostname_digest_preserves_exact_premerge_byte_eight() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = super::super::tests::node(dir.path(), &Account::generate());
+        node.set_device_hostname(Some("private host")).unwrap();
+        let store = node.account_documents.lock().unwrap();
+        let meta = store
+            .meta(&AccountDocumentKey::DeviceHostname {
+                device_id: node.user_id(),
+            })
+            .unwrap();
+        assert_eq!(AccountDocumentDomain::DeviceHostname as usize, 8);
+        assert_eq!(
+            store.digest(AccountDocumentDomain::DeviceHostname),
+            historical_appended_domain_digest(&meta)
+        );
+    }
+    #[tokio::test]
+    async fn group_control_digest_preserves_exact_premerge_byte_eight_at_new_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = super::super::tests::node(dir.path(), &Account::generate());
+        let group = node
+            .create_channel("digest compatibility", vec![])
+            .await
+            .unwrap();
+        node.publish_account_group_access_for(group);
+        let store = node.account_documents.lock().unwrap();
+        let meta = store
+            .meta(&AccountDocumentKey::GroupControl {
+                channel: hex::encode(group.as_bytes()),
+                source_device: node.user_id(),
+            })
+            .unwrap();
+        assert_eq!(AccountDocumentDomain::GroupControl as usize, 9);
+        let expected = historical_appended_domain_digest(&meta);
+        assert_eq!(store.digest(AccountDocumentDomain::GroupControl), expected);
+        assert_eq!(
+            store.digest_scope(AccountDocumentDomain::GroupControl, false),
+            expected
+        );
+    }
+
     #[test]
     fn account_document_index_reopen_counts_physical_encrypted_bytes() {
         let dir = tempfile::tempdir().unwrap();

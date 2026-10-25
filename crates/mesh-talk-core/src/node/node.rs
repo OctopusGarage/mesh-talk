@@ -335,6 +335,7 @@ pub struct Node {
     pub(in crate::node) emitted: Mutex<HashSet<EventId>>,
     pub(in crate::node) file_incoming: mpsc::UnboundedSender<ReceivedFile>,
     pub(in crate::node) files: Mutex<FileBook>,
+    pub(super) group_file_sharing: super::network_cost::GroupFileSharingPolicy,
     /// Per-file conversations we've seen a manifest for but don't yet hold all chunks of —
     /// surfaced this session and awaiting their data. A background task pulls these DIRECTLY
     /// from peers (the post-office drain only covers files when a PO exists; on a plain
@@ -387,6 +388,7 @@ pub struct Node {
     pub(in crate::node) bridge_dm_pull_peers: Mutex<HashMap<UserId, std::time::Instant>>,
     pub(in crate::node) physical_lan_only: std::sync::atomic::AtomicBool,
     pub(in crate::node) bridge_discovery_enabled: std::sync::atomic::AtomicBool,
+    pub(in crate::node) origin_sharing_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) bridge_hub_id: Mutex<Option<String>>,
     pub(in crate::node) bridge_notify: tokio::sync::Notify,
     pub(in crate::node) bridge_refresh:
@@ -897,6 +899,7 @@ impl Node {
             emitted: Mutex::new(emitted),
             file_incoming,
             files: Mutex::new(files),
+            group_file_sharing: Default::default(),
             pending_files: Mutex::new(HashSet::new()),
             file_pull_notify: tokio::sync::Notify::new(),
             file_pull_cursor: std::sync::atomic::AtomicUsize::new(0),
@@ -925,6 +928,7 @@ impl Node {
             bridge_dm_pull_peers: Mutex::new(HashMap::new()),
             physical_lan_only: std::sync::atomic::AtomicBool::new(false),
             bridge_discovery_enabled: std::sync::atomic::AtomicBool::new(false),
+            origin_sharing_enabled: std::sync::atomic::AtomicBool::new(false),
             bridge_hub_id: Mutex::new(None),
             bridge_notify: tokio::sync::Notify::new(),
             bridge_refresh: tokio::sync::Mutex::new(Default::default()),

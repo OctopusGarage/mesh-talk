@@ -21,7 +21,7 @@ import type {
   DeviceSyncStatus,
   SyncCategory,
 } from "@/lib/api/chat";
-import { errorKind, errorMessage } from "@/lib/error";
+import { errorKind, errorMessage, isVerificationCanceled } from "@/lib/error";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { shortId } from "@/lib/format";
 import { isContactPeer } from "@/lib/contactVisibility";
@@ -282,16 +282,6 @@ function OwnedLinkDeviceDialog({
     [],
   );
 
-  const enableAllSync = async (current: () => boolean) => {
-    for (const { category } of SYNC_OPTIONS) {
-      if (!current()) return false;
-      const policy = await chat.setDeviceSyncCategory(category, true, owner);
-      if (!current()) return false;
-      setSyncPolicy(policy);
-    }
-    return true;
-  };
-
   const showCode = async () => {
     if (creatingCodeRef.current) return;
     const session = dialogSession.current;
@@ -302,6 +292,8 @@ function OwnedLinkDeviceDialog({
     setCreatingCode(true);
     setMsg(null);
     setMsgIsError(false);
+    let started = false;
+    let displayed = false;
     try {
       if (stopRef.current) await stopRef.current;
       if (
@@ -310,16 +302,23 @@ function OwnedLinkDeviceDialog({
         session !== dialogSession.current
       )
         return;
+      // Native authentication precedes sync expansion. Keep the code concealed
+      // until all source snapshots are ready, and revoke it if preparation fails.
+      const nextCode = await chat.startLinking(syncAll);
+      started = true;
       if (
-        syncAll &&
-        !(await enableAllSync(
-          () =>
-            ownsSourceAccount() &&
-            openRef.current &&
-            session === dialogSession.current,
-        ))
+        !ownsSourceAccount() ||
+        !openRef.current ||
+        session !== dialogSession.current
       )
         return;
+      setCode(null);
+      if (syncAll)
+        setSyncPolicy(
+          Object.fromEntries(
+            SYNC_OPTIONS.map(({ category }) => [category, true]),
+          ) as DeviceSyncPolicy,
+        );
       if (syncAll || syncPolicy?.appearance)
         await publishAppearanceBeforeLink(owner);
       if (
@@ -355,16 +354,17 @@ function OwnedLinkDeviceDialog({
         if (report.unmapped)
           setMsg(t("linkDevice.draftsUnmapped", { count: report.unmapped }));
       }
-      const nextCode = await chat.startLinking();
       if (
         ownsSourceAccount() &&
         openRef.current &&
         session === dialogSession.current
-      )
+      ) {
         setCode(nextCode);
-      else if (ownsSourceAccount()) await stopLinking();
+        displayed = true;
+      }
     } catch (e) {
       if (
+        !isVerificationCanceled(e) &&
         ownsSourceAccount() &&
         openRef.current &&
         session === dialogSession.current
@@ -373,6 +373,7 @@ function OwnedLinkDeviceDialog({
         setMsg(errorMessage(e));
       }
     } finally {
+      if (started && !displayed && ownsSourceAccount()) await stopLinking();
       creatingCodeRef.current = false;
       setCreatingCode(false);
     }
@@ -398,8 +399,6 @@ function OwnedLinkDeviceDialog({
       await useDrafts.getState().flush();
       if (!current()) return;
       if (useDrafts.getState().error) throw new Error(t("drafts.saveFailed"));
-      if (syncAll && !(await enableAllSync(current))) return;
-      if (!current()) return;
       const peer = useChat
         .getState()
         .peers.find((candidate) => candidate.user_id === selectedPeer.user_id);
@@ -413,7 +412,7 @@ function OwnedLinkDeviceDialog({
           kind: "peer-unknown",
           message: "Selected device changed during account setup",
         };
-      await chat.linkDevice(joinPeer, pairingCode);
+      await chat.linkDevice(joinPeer, pairingCode, syncAll);
       if (!ownsSession()) return;
       await auth.adoptLinkedAccount();
       if (openRef.current && session === dialogSession.current) {
@@ -421,7 +420,11 @@ function OwnedLinkDeviceDialog({
         setJoinCode("");
       }
     } catch (e) {
-      if (openRef.current && session === dialogSession.current) {
+      if (
+        !isVerificationCanceled(e) &&
+        openRef.current &&
+        session === dialogSession.current
+      ) {
         setLinkError(() => e ?? new Error(errorMessage(e)));
       }
     } finally {

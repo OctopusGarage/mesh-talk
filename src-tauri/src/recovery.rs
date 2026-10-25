@@ -1,5 +1,7 @@
 //! Manual encrypted backup and transactional offline restore.
 
+pub(crate) mod setup;
+
 use crate::chat_commands::{NodeState, RuntimeAuthority};
 use crate::commands::CommandError;
 use crate::runtime_bootstrap::spawn_node_runtime;
@@ -124,6 +126,7 @@ fn create_backup_offline(
     username: &str,
     auth_password: &str,
     record_status: bool,
+    proof: &crate::app_lock::SensitiveAction,
 ) -> Result<BackupCreated, CommandError> {
     let parent = destination
         .parent()
@@ -159,25 +162,25 @@ fn create_backup_offline(
         .len();
     // `persist_noclobber` uses create-new semantics; a destination that appeared
     // during export is never overwritten.
-    temp.persist_noclobber(destination).map_err(|error| {
-        if error.error.kind() == std::io::ErrorKind::AlreadyExists {
-            CommandError::InvalidInput("A backup already exists at this path".into())
-        } else {
-            CommandError::Io("Could not publish backup file".into())
-        }
-    })?;
-    if sync_directory(parent).is_err() {
-        let _ = fs::remove_file(destination);
-        let _ = sync_directory(parent);
-        return Err(CommandError::Io("Could not sync backup folder".into()));
-    }
-    if authority.current(|_| ()).is_err() {
-        let _ = fs::remove_file(destination);
-        let _ = sync_directory(parent);
-        return Err(CommandError::Authorization(
-            "Backup session was replaced".into(),
-        ));
-    }
+    authority
+        .current(|_| {
+            proof.commit(|| {
+                temp.persist_noclobber(destination).map_err(|error| {
+                    if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                        CommandError::InvalidInput("A backup already exists at this path".into())
+                    } else {
+                        CommandError::Io("Could not publish backup file".into())
+                    }
+                })?;
+                if sync_directory(parent).is_err() {
+                    let _ = fs::remove_file(destination);
+                    let _ = sync_directory(parent);
+                    return Err(CommandError::Io("Could not sync backup folder".into()));
+                }
+                Ok(())
+            })
+        })
+        .map_err(CommandError::Authorization)??;
     let status = BackupStatus {
         destination: destination.display().to_string(),
         preview: preview.clone(),
@@ -187,12 +190,18 @@ fn create_backup_offline(
     // failed status update does not invalidate the successful backup.
     let manager = FileManager::new(scratch.to_path_buf());
     if record_status {
-        let _ = manager.write_encrypted_file(
-            username,
-            "meta/backup_status.enc",
-            &status,
-            auth_password,
-        );
+        let _ = authority.current(|_| {
+            proof.commit(|| {
+                manager
+                    .write_encrypted_file(
+                        username,
+                        "meta/backup_status.enc",
+                        &status,
+                        auth_password,
+                    )
+                    .map_err(|_| CommandError::Io("Could not record backup status".into()))
+            })
+        });
     }
     Ok(BackupCreated {
         recovery_key: key.display(),
@@ -209,8 +218,18 @@ pub async fn create_backup<R: tauri::Runtime>(
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, NodeState>,
     destination: String,
-    recovery_key: String,
+    recovery_key: Option<String>,
+    password: Option<String>,
 ) -> Result<BackupCreated, CommandError> {
+    let generation = app_state
+        .session()
+        .capture()
+        .map_err(CommandError::Authentication)?
+        .generation();
+    let recovery_key = match recovery_key {
+        Some(key) => key,
+        None => setup::saved_key(&app_state, &node_state, generation).await?,
+    };
     create_backup_with_status(
         app_handle,
         &app_state,
@@ -218,7 +237,8 @@ pub async fn create_backup<R: tauri::Runtime>(
         destination,
         recovery_key,
         true,
-        None,
+        Some(generation),
+        password,
     )
     .await
 }
@@ -231,6 +251,7 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
     recovery_key: String,
     record_status: bool,
     expected_generation: Option<u64>,
+    verification_password: Option<String>,
 ) -> Result<BackupCreated, CommandError> {
     let key = RecoveryKey::parse(&recovery_key)
         .map_err(|_| CommandError::InvalidInput("Recovery key format is invalid".into()))?;
@@ -243,6 +264,13 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
             "Backup session was replaced".into(),
         ));
     }
+    let proof = crate::app_lock::SensitiveAction::verify(
+        app_state,
+        &lease,
+        verification_password,
+        "export a Mesh-Talk backup",
+    )
+    .await?;
     let password = app_state
         .session()
         .matching(&lease, |info| info.node_storage_password.clone())
@@ -278,6 +306,7 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
                 &username,
                 &auth_password,
                 record_status,
+                &proof,
             )
         })
         .await
@@ -299,38 +328,33 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn backup_status(
     app_state: tauri::State<'_, AppState>,
+    node_state: tauri::State<'_, NodeState>,
 ) -> Result<Option<BackupStatus>, CommandError> {
-    let lease = app_state
-        .session()
-        .capture()
-        .map_err(CommandError::Authentication)?;
-    let (username, password) = app_state
-        .session()
-        .matching(&lease, |info| {
-            (info.user.name.clone(), info.password.trim().to_string())
-        })
-        .map_err(CommandError::Authentication)?;
-    tokio::task::spawn_blocking(move || {
-        let manager = FileManager::new(crate::data_dir());
-        if !manager.file_exists(&username, "meta/backup_status.enc") {
-            return Ok(None);
-        }
-        manager
-            .read_encrypted_file(&username, "meta/backup_status.enc", &password)
-            .map(Some)
-            .map_err(|_| CommandError::Io("Could not read backup status".into()))
-    })
+    setup::with_storage(
+        &app_state,
+        &node_state,
+        None,
+        |manager, username, password| {
+            if !manager.file_exists(username, "meta/backup_status.enc") {
+                return Ok(None);
+            }
+            manager
+                .read_encrypted_file(username, "meta/backup_status.enc", password)
+                .map(Some)
+                .map_err(|_| CommandError::Io("Could not read backup status".into()))
+        },
+    )
     .await
-    .map_err(|_| CommandError::Internal("Backup status worker stopped".into()))?
 }
 
 #[tauri::command]
-pub fn prepare_backup_key(app_state: tauri::State<'_, AppState>) -> Result<String, CommandError> {
-    app_state
-        .session()
-        .capture()
-        .map_err(CommandError::Authentication)?;
-    Ok(RecoveryKey::generate().display())
+pub async fn prepare_backup_key(
+    app_state: tauri::State<'_, AppState>,
+    node_state: tauri::State<'_, NodeState>,
+) -> Result<String, CommandError> {
+    Ok(setup::backup_setup(app_state, node_state)
+        .await?
+        .recovery_key)
 }
 
 #[tauri::command]
@@ -542,6 +566,9 @@ fn restore_offline(
     auth.authenticate_user(username, password).map_err(|_| {
         CommandError::Auth("Restored local credentials could not be verified".into())
     })?;
+    // The user has supplied this key successfully. Retain it with the staged
+    // credentials so the next backup does not demand another recovery setup.
+    setup::retain_restored_key(stage.path(), username, password, key)?;
     sync_tree(&stage.path().join("users").join(username))
         .map_err(|_| CommandError::Io("Could not sync restored credentials".into()))?;
     sync_tree(&staged_profile)
@@ -703,6 +730,11 @@ mod tests {
         .unwrap();
         assert_eq!(recovered.account_id(), original_account);
         assert_eq!(recovered.user_id(), complete.device_id);
+        let setup: setup::BackupSetup = FileManager::new(target.clone())
+            .read_encrypted_file("alice", "meta/backup_setup.enc", "new password")
+            .expect("restoration retains the supplied key for later manual backups");
+        assert!(setup.confirmed);
+        assert_eq!(setup.recovery_key, key.display());
     }
 
     #[test]

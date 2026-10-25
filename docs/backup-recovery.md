@@ -1,8 +1,9 @@
 # Backup and recovery
 
 Mesh-Talk has no account server. Your local password unlocks this installation;
-it does not recover data from a lost device. Create a manual encrypted backup
-while you still have access to an unlocked device. Save it locally or, in a
+it does not recover data from a lost device. Create an encrypted backup
+while you still have access to an unlocked device. Backups run only when you choose
+**Back up now**; there is no background schedule. Save it locally or, in a
 configured build, upload it directly to your Google Drive.
 
 For first-use sign-in, saved credentials and the optional account-protection
@@ -10,15 +11,30 @@ reminder, see [Keep access to your account](help/topics/first-run.md#keep-access
 
 ## Create a backup
 
-1. Open **Settings → History & backup → Create encrypted backup**.
-2. Read the included and excluded data list. Save the displayed recovery key
-   somewhere separate from the backup file, then enter the requested key groups.
-3. Choose a new `.mtbackup` destination. Messaging pauses briefly while Mesh-Talk
-   takes a consistent snapshot. Wait for **Backup saved and verified**.
+1. Open **Settings → History & backup → Create encrypted backup** and choose
+   **Google Drive** or **Local file** as the destination.
+2. During first-time setup, save the displayed recovery key somewhere separate
+   from your backups, such as a password manager. Confirm **I saved my recovery key**.
+   You will need this key if you lose this installation; Google sign-in cannot
+   decrypt your history.
+3. Choose **Back up now**. For a local file, choose a new `.mtbackup` destination.
+   Messaging pauses briefly for a consistent snapshot, then restarts. Wait for
+   the success message before closing the app.
 
-Each export generates its own key. A later export does not change the key needed
-for an older file. Mesh-Talk stores only the last successful backup's location,
-time, size, and counts on this device; it never stores the recovery key.
+Later backups reuse the saved recovery key. Mesh-Talk remembers your destination
+and protects the key in this local user's encrypted storage, unlocked by your local
+password. You do not need to generate a key or type key groups for each backup.
+You can view the saved key again from the backup dialog. Keep your separate copy:
+the locally saved key cannot help if the device or local profile is lost.
+
+Older backups made with separate per-export keys still need their original keys;
+setting up a reusable key does not reencrypt existing archives. The last successful
+backup's location, time, size and counts are also stored encrypted on this device.
+
+Creating either a local or Google Drive backup also requires
+[fresh identity verification](privacy-controls.md#verify-sensitive-operations)
+before the snapshot is exported. The recovery-key challenge remains separate:
+it checks that you saved the key, while identity verification authorizes export.
 
 ## Restore after losing a device
 
@@ -28,6 +44,9 @@ time, size, and counts on this device; it never stores the recovery key.
    counts, and missing media count.
 3. Choose a new local username and password. The username must be unused on this
    installation. Confirm restore, then sign in with those new credentials.
+
+A successful restore retains the recovery key you supplied in the new local user's
+encrypted storage, so later backups do not ask you to set up another key.
 
 The recovered account fingerprint stays the same. A new device fingerprint is
 created. Old device keys and live encryption ratchets are never copied. Channel
@@ -93,24 +112,33 @@ Backups run only when requested; there is no schedule or background cloud sync.
 1. Open **Settings → History & backup → Create encrypted backup**.
 2. Set **Backup destination** to **Google Drive**, then **Connect Google Drive**.
    Choose the intended Google account in your system browser and grant access.
-3. Save the newly generated recovery key separately and complete the key challenge.
+   Mesh-Talk remembers the connection for this local user.
+3. If this is your first backup, save the recovery key and acknowledge it once.
 4. Choose **Back up now**. Messaging pauses only for the consistent local snapshot,
    then restarts while the encrypted file uploads. Wait for the cloud success message.
 
+For later backups, open the dialog and choose **Back up now**. Mesh-Talk restores
+its saved Google connection without opening the browser. Expired or revoked access
+requires reconnecting; temporary network errors can be retried. Disconnecting or
+changing Google accounts explicitly forgets the remembered connection on this
+installation. Merely closing the dialog or cancelling a transfer retains it.
+
 To restore on another installation, open **Restore from encrypted backup** on the
 signed-out screen and set **Backup source** to **Google Drive**. Connect the same
-Google account, select an archive and choose **Download selected backup**. Enter
-that archive's recovery key, verify the preview and explicitly confirm restoration
+Google account, select an archive, enter its recovery key and choose **Continue**.
+Mesh-Talk downloads and authenticates the archive before showing its preview.
+Review the preview and explicitly confirm restoration
 with an unused local username and new password. The existing account/device and
 channel-recovery rules above apply unchanged. Cloud listing names and sizes are
 provider metadata; account identity and content counts are trusted only after
 archive authentication.
 
-**Cancel transfer** stops cloud work and disconnects its temporary grant. If a local
+**Cancel transfer** stops cloud work and retires its temporary operation connection. If a local
 snapshot is already running, it finishes safely and restarts messaging before the
 cancellation returns. Confirmed local profile restoration completes transactionally;
 it is not interrupted during publication. Reconnect to retry or change Google accounts.
-Closing the dialog retires its connection. Local-file export and restore stay available
+Closing the dialog retires its active operation connection, while the encrypted
+remembered grant remains available for later manual backups. Local-file export and restore stay available
 when Google cannot be reached or the build has no Google configuration.
 
 ### Google Drive security and boundaries
@@ -119,16 +147,19 @@ when Google cannot be reached or the build has no Google configuration.
   `appDataFolder`, accessible through Mesh-Talk rather than the Drive file browser.
 - Google receives encrypted archive bytes, archive names, sizes and ordinary service
   request metadata. Recovery keys and local passwords are never sent to Google.
-  Each archive still needs its own original recovery key. Google sign-in alone cannot
+  Each archive needs the recovery key used when it was created. Google sign-in alone cannot
   recover an account or decrypt history.
 - OAuth authorization uses the system browser, PKCE, an unpredictable state and a
-  temporary IPv4 loopback callback. Tokens remain in native memory for the dialog's
-  connection, which expires after 30 minutes; they are not stored in settings or backups.
-  Disconnecting removes local access, not the Google account's consent grant. Consent
-  can be revoked in Google Account settings.
+  temporary IPv4 loopback callback. The native host remembers the refresh token
+  in this local user's password-encrypted storage and refreshes expiring access
+  tokens without another browser sign-in. Tokens never reach frontend settings,
+  localStorage or recovery archives. Signed-out restore connections are temporary
+  and never borrow a signed-in user's saved grant. Explicitly disconnecting forgets
+  local remembered access; it does not revoke consent in Google Account settings.
 - Connections are tied to the exact desktop session generation, including signed-out
   restore sessions. Logout, lock/session replacement and view retirement invalidate
-  further work. Work already admitted may finish; it cannot publish into a replacement
+  further work. The saved grant may be reused only after signing in and unlocking
+  the same local profile. Work already admitted may finish; it cannot publish into a replacement
   profile. Temporary encrypted files are removed when their owning operation retires.
 - Uploads create new archive files. A remote archive becomes selectable only after
   its size and SHA-256 checksum match the locally verified encrypted archive.

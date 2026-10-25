@@ -54,8 +54,9 @@ it("keeps installed archives and pending edits scoped across account changes and
   const use = createPacksStore(io);
   const store = use.getState();
   store.setScope("owner", "first");
-  await store.install(archive());
-  expect((await store.pendingChanges())[0].archive).toEqual(archive());
+  const installedArchive = archive();
+  await store.install(installedArchive);
+  expect((await store.pendingChanges())[0].archive).toEqual(installedArchive);
   store.setScope("owner", "other");
   await store.load();
   expect(use.getState().packs).toEqual([]);

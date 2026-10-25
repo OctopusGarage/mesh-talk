@@ -75,7 +75,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 post_office_enabled: false,
                 ..Default::default()
             });
-        match mesh_talk_core::node::NodeRuntime::start_configured_guarded_with_network_observed(
+        match mesh_talk_core::node::NodeRuntime::start_configured_guarded_with_network_cost_observed(
             mesh_talk_core::node::RuntimeConfig {
                 base_dir: &base_dir,
                 account_id: &account_id,
@@ -142,6 +142,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 post_office_receive_enabled: relay_settings.post_office_receive_enabled,
                 physical_lan_only: relay_settings.physical_lan_only,
             },
+            mesh_talk_core::node::NetworkCost::Unknown,
             |identity| {
                 authority.observe_identity(identity).map_err(|_| {
                     mesh_talk_core::node::RuntimeError::Io(std::io::Error::new(
@@ -164,6 +165,15 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
         .await
         {
             Ok(mut runtime) => {
+                let _ = authority.current(|_| {
+                    if runtime
+                        .handle()
+                        .set_device_hostname(os_hostname().as_deref())
+                        .is_err()
+                    {
+                        log::warn!("Private device hostname publication failed");
+                    }
+                });
                 // Upgrade an original, still-unlinked desktop profile once. A
                 // joining device already has both certified devices and must
                 // never seed its previous local nickname into the kept account.
@@ -180,6 +190,11 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 // Subscribe before installing/launching the host producer so no
                 // invalidation can fall between capturing the receiver and spawn.
                 let (installed, installation) = tokio::sync::watch::channel(false);
+                let cost_node = runtime.handle();
+                runtime.register_host_task(tokio::spawn(after_install(
+                    installation.clone(),
+                    crate::network_cost::observe(cost_node),
+                )));
                 let changes = runtime.handle().subscribe_channel_changes();
                 let crypto_account_id = runtime.account_id().to_owned();
                 let device_id = runtime.user_id().to_owned();
@@ -514,6 +529,27 @@ async fn forward_state_changes<R: tauri::Runtime>(
             return;
         }
     }
+}
+
+/// Read only the OS hostname; never derive private labels from public nicknames.
+fn os_hostname() -> Option<String> {
+    #[cfg(unix)]
+    let value = {
+        let mut buffer = [0u8; 256];
+        // SAFETY: buffer is writable for the entire supplied length. Require a
+        // terminating NUL so a truncated hostname is not published as complete.
+        if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
+            return None;
+        }
+        let end = buffer.iter().position(|byte| *byte == 0)?;
+        std::str::from_utf8(&buffer[..end]).ok()?.to_owned()
+    };
+    #[cfg(windows)]
+    let value = std::env::var("COMPUTERNAME").ok()?;
+    #[cfg(not(any(unix, windows)))]
+    let value = String::new();
+    (!value.trim().is_empty() && value.len() <= 255 && !value.chars().any(char::is_control))
+        .then_some(value)
 }
 
 #[cfg(test)]

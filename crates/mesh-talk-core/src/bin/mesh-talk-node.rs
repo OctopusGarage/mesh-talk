@@ -17,7 +17,6 @@ use mesh_talk_core::node::{
     ReceivedDm, discovery_socket,
 };
 use mesh_talk_core::node::{
-    run_bridge_relay_accept_loop, run_bridge_relay_accept_loop_with_gateway,
     run_federated_relay_accept_loop_with_directory, run_network_relay_accept_loop_with_directory,
     run_relay_accept_loop,
 };
@@ -85,6 +84,9 @@ struct Args {
     /// Share this public node with an opted-in post-office bridge directory.
     #[arg(long)]
     bridge_discovery: bool,
+    /// Disclose this device's originating post office to directory viewers.
+    #[arg(long, requires = "bridge_discovery")]
+    share_discovery_origin: bool,
     /// Preferred bridge relay fingerprint; other verified relays remain fallbacks.
     #[arg(long, requires = "bridge_discovery", value_parser = parse_fingerprint)]
     bridge_hub_id: Option<String>,
@@ -466,6 +468,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let visibility = Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false));
     node.configure_privacy(data_dir, password, &announce, visibility.clone())?;
     node.set_bridge_discovery_enabled(args.bridge_discovery);
+    node.set_origin_sharing_enabled(args.share_discovery_origin)
+        .await;
     node.set_bridge_hub_id(args.bridge_hub_id.as_deref())
         .expect("clap validated the bridge hub fingerprint");
 
@@ -828,6 +832,7 @@ async fn run_post_office(
 
     if let Some(network) = network {
         let directory = FederationDirectory::new();
+        directory.set_office_name(&args.name);
         emit(
             "post-office network ready: automatic approved-member discovery; software integrity not attested",
         );
@@ -854,6 +859,7 @@ async fn run_post_office(
         let directory = gateway
             .map(FederationDirectory::with_gateway)
             .unwrap_or_default();
+        directory.set_office_name(&args.name);
         let trusted = Arc::new(
             args.federation_peers
                 .iter()
@@ -882,11 +888,15 @@ async fn run_post_office(
 
     // Serve relay connections until killed. This loop never returns; the trailing
     // Ok(()) is unreachable in practice (the process is stopped by a signal).
-    if let Some(gateway) = gateway {
-        run_bridge_relay_accept_loop_with_gateway(transport_identity, listener, store, gateway)
-            .await;
-    } else if args.bridge {
-        run_bridge_relay_accept_loop(transport_identity, listener, store).await;
+    if gateway.is_some() || args.bridge {
+        mesh_talk_core::node::run_named_bridge_relay_accept_loop(
+            transport_identity,
+            listener,
+            store,
+            gateway,
+            &args.name,
+        )
+        .await;
     } else {
         run_relay_accept_loop(transport_identity, listener, store).await;
     }
@@ -1541,6 +1551,31 @@ mod tests {
             "0",
         ];
         assert!(Args::try_parse_from(gateway).is_ok());
+    }
+
+    #[test]
+    fn origin_sharing_requires_explicit_opt_in_and_bridge_discovery() {
+        let base = [
+            "mesh-talk-node",
+            "--keystore",
+            "client.keystore",
+            "--password",
+            "pw",
+            "--name",
+            "client",
+        ];
+        assert!(!Args::try_parse_from(base).unwrap().share_discovery_origin);
+        assert!(
+            Args::try_parse_from(base.into_iter().chain(["--share-discovery-origin"])).is_err()
+        );
+        assert!(
+            Args::try_parse_from(
+                base.into_iter()
+                    .chain(["--bridge-discovery", "--share-discovery-origin",])
+            )
+            .unwrap()
+            .share_discovery_origin
+        );
     }
 
     #[cfg(unix)]

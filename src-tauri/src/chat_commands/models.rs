@@ -121,6 +121,9 @@ pub struct ChannelMemberInfo {
     pub account_id: Option<String>,
     pub pending: bool,
     pub replica_enabled: bool,
+    /// This exact local device only; remote members' network cost is private.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_sharing: Option<mesh_talk_core::node::GroupFileSharingStatus>,
 }
 
 /// Membership and management rights projected by the core authority owner.
