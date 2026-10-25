@@ -174,6 +174,11 @@ impl HttpsRelease {
             releases: RELEASES,
             public_key: key,
             supported: true,
+            base_source: delta::BaseSource {
+                tag: env!("MESH_TALK_BUILD_TAG"),
+                executable: Path::new(""),
+            },
+            available_space: |path| fs4::available_space(path),
         }
     }
 }
@@ -496,3 +501,7 @@ async fn prepared_install_errors_preserve_the_stage_without_restarting() {
     clear_stage().await;
     registration_retired();
 }
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[path = "delta_https_tests.rs"]
+mod delta_https_tests;

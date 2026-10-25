@@ -411,6 +411,7 @@ export interface UpdateCheck {
 }
 
 export interface DownloadProgress {
+  phase?: "preparing" | "fallback";
   downloaded: number;
   total: number;
 }

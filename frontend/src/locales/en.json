@@ -967,6 +967,8 @@
       "current": "You're up to date ({{version}}).",
       "available": "Version {{version}} is available",
       "download": "Download update",
+      "preparing": "Preparing update…",
+      "fallback": "Downloading full update…",
       "downloading": "Downloading and verifying",
       "cancel": "Cancel download",
       "verified": "Download verified and ready to install",

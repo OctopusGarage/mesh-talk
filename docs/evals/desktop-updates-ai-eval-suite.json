@@ -34,10 +34,19 @@
         "crates/mesh-talk-core/src/node/account_documents/store.rs",
         "crates/mesh-talk-core/src/node/media_store.rs",
         "scripts/release/release-api.mjs",
-        "src-tauri/src/updates/native_https_tests.rs"
+        "src-tauri/src/updates/native_https_tests.rs",
+        "src-tauri/src/updates/delta_catalog.rs",
+        "src-tauri/src/updates/delta_codec.rs",
+        "src-tauri/src/updates/delta_prepare.rs",
+        "src-tauri/examples/delta-artifact.rs",
+        "scripts/release/delta.mjs",
+        "src-tauri/src/updates/delta_https_tests.rs",
+        "scripts/release/delta_assets.py",
+        "scripts/diagnostics/release-delta.test.mjs",
+        "src-tauri/src/updates/delta_metadata.rs"
       ],
       "min_score": 0.9,
-      "scenario": "Review the application-owned signed full-package updater without paid OS publisher certificates. The official Tauri 2.14 SDK verify/restore_update/install APIs verify version-bound signatures and perform native replacement. Inspect caller policy and tests, distinguish delegated SDK guarantees from absent physical/hosted evidence. Windows invokes on_before_exit before ShellExecute, which can fail/cancel: resources must stay usable until successful handoff. After successful Windows handoff the old process exits, so do not claim canceled installers can always show retry in the old UI. Source and SDK fixture evidence cannot certify real production discovery, session restoration, OS authorization or publication. Report only confirmed material bugs, with concrete file/symbol evidence; distinguish missing context/runtime evidence.",
+      "scenario": "Review the application-owned signed native updater with optional executable-prefix delta preparation without paid OS publisher certificates. The official Tauri 2.14 SDK verify/restore_update/install APIs verify version-bound signatures and perform native replacement. Inspect caller policy and tests, distinguish delegated SDK guarantees from absent physical/hosted evidence. Windows invokes on_before_exit before ShellExecute, which can fail/cancel: resources must stay usable until successful handoff. After successful Windows handoff the old process exits, so do not claim canceled installers can always show retry in the old UI. Source and SDK fixture evidence cannot certify real production discovery, session restoration, OS authorization or publication. Report only confirmed material bugs, with concrete file/symbol evidence; distinguish missing context/runtime evidence. Authenticate the bounded version-bound catalog before parsing; bind exact full fallback/native target/base/patch identities and verify patch/output before existing SDK verification. Distinguish ordinary optional transport failures from user cancellation and authenticated contradictions. A fallback success does not certify a delta route; source and fixtures do not prove hosted native acceptance.",
       "rubric": [
         "Canonical newer published release/channel/platform identity is revalidated and signed version equals the complete logical Stable/Nightly identity.",
         "An embedded free updater public key authenticates bounded verified bytes; unsupported or unconfigured clients retain manual fallback; renderer IPC cannot supply install paths, URLs, keys, signatures or bytes.",
@@ -45,7 +54,8 @@
         "Draft writes are flushed and current calls/transfers defer restart; failed installs retain safe retry/manual recovery.",
         "Windows pre-launch hook does not destroy Tauri resources before a possible ShellExecute/UAC failure; window geometry is saved separately, and post-handoff cancellation limits are explicit.",
         "Trusted release sources alone receive signing secrets, full logical versions are signed, all platform payloads/signatures match verified ZIP bytes, and publication gates remain mandatory.",
-        "Documentation accurately states bootstrap, free key custody, OS trust prompts, full-package delivery and required native/hosted acceptance; no source/mock score is presented as runtime acceptance."
+        "Documentation accurately states bootstrap, free key custody, OS trust prompts, incremental preparation and canonical compressed full fallback and required native/hosted acceptance; no source/mock score is presented as runtime acceptance.",
+        "Executable snapshots are read-only and hash/apply the same bytes; bounded single-frame reconstruction runs off the GUI thread. Only worthwhile patches are used against compressed full bytes; optional absence/capability/network/decoder failures fall back once, while cancellation and catalog/native signature failures stop."
       ]
     }
   ]

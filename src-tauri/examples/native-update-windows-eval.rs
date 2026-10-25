@@ -1,5 +1,63 @@
 //! Disposable Windows NSIS acceptance harness. Uses its own install identity and profile.
 
+// Optional fixture branch exercises the production decoder before the real SDK install.
+#[cfg(target_os = "windows")]
+#[path = "../src/updates/delta_codec.rs"]
+mod delta_codec;
+
+#[cfg(target_os = "windows")]
+fn fixture_payload(root: &std::path::Path, full_name: &str) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    use std::{fs, io};
+    let metadata = root.join("delta-fixture.json");
+    if !metadata.is_file() {
+        return fs::read(root.join(full_name)).unwrap();
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&fs::read(metadata).unwrap()).unwrap();
+    let size = metadata["target_size"].as_u64().unwrap();
+    let hash = metadata["target_sha256"].as_str().unwrap();
+    let canonical_size = metadata["canonical_full_size"].as_u64().unwrap();
+    let base = fs::read(std::env::current_exe().unwrap()).unwrap();
+    let patch = fs::read(root.join("update.patch.zst")).unwrap();
+    assert!(!patch.is_empty());
+    assert!(
+        (patch.len() as u64) * 10 <= canonical_size * 7,
+        "fixture delta must save at least 30% against canonical compressed full"
+    );
+    assert!(
+        delta_codec::reconstruct(&vec![0; base.len()], &patch, io::sink(), size, hash, || {
+            false
+        })
+        .is_err()
+    );
+    assert!(
+        delta_codec::reconstruct(
+            &base,
+            &patch[..patch.len() - 1],
+            io::sink(),
+            size,
+            hash,
+            || false
+        )
+        .is_err()
+    );
+    assert!(
+        delta_codec::reconstruct(&base, &patch, io::sink(), size, &"0".repeat(64), || false)
+            .is_err()
+    );
+    let mut bytes = Vec::new();
+    delta_codec::reconstruct(&base, &patch, &mut bytes, size, hash, || false).unwrap();
+    fs::write(root.join("reconstructed-native-payload"), &bytes).unwrap();
+    fs::write(root.join("delta-evidence.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "scope": "isolated native SDK fixture; production decoder; no release discovery or public delta acceptance",
+        "base_sha256": hex::encode(Sha256::digest(&base)),
+        "patch_bytes": patch.len(), "canonical_compressed_full_bytes": canonical_size,
+        "reconstructed_bytes": bytes.len(), "reconstructed_sha256": hex::encode(Sha256::digest(&bytes)),
+        "negative_cases": ["wrong base", "truncated patch", "wrong target digest"]
+    })).unwrap()).unwrap();
+    bytes
+}
+
 #[cfg(target_os = "windows")]
 fn main() {
     use std::{fs, io::Write, path::Path, time::Duration};
@@ -72,7 +130,7 @@ fn main() {
                     handle.exit(0);
                     return;
                 }
-                let bytes = fs::read(root.join("update.nsis.exe")).unwrap();
+                let bytes = fixture_payload(&root, "update.nsis.exe");
                 let signature = fs::read_to_string(root.join("update.sig")).unwrap();
                 let key = fs::read_to_string(root.join("public.key")).unwrap();
                 let old_version = semver::Version::parse(&old).unwrap();

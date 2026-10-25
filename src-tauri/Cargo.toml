@@ -47,6 +47,9 @@ serde_json = "1" # persist app settings as JSON in the app config dir
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "system-proxy", "query", "form"] }
 semver = "1"
 sha2 = { workspace = true }
+minisign-verify = "0.3" # release helper uses the SDK-compatible signed-version trust root
+fs4 = { version = "1.1", default-features = false } # quota-aware private staging budget
+zstd = { version = "0.14.3", default-features = false }
 zeroize = { workspace = true }
 tempfile = { workspace = true } # atomic replacement of per-account contact policy
 # "Stay signed in": store the login password in the OS keychain (macOS Keychain,
@@ -110,3 +113,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "mesh-talk"
 path = "src/main.rs"
+
+[[example]]
+name = "delta-artifact"
+test = true

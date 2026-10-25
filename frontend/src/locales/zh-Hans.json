@@ -967,6 +967,8 @@
       "current": "已是最新版本（{{version}}）。",
       "available": "新版本 {{version}} 已发布",
       "download": "下载更新",
+      "preparing": "正在准备更新…",
+      "fallback": "正在下载完整更新…",
       "downloading": "正在下载并校验",
       "cancel": "取消下载",
       "verified": "下载已校验，可以安装",

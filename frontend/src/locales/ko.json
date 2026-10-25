@@ -967,6 +967,8 @@
       "current": "최신 버전입니다 ({{version}}).",
       "available": "버전 {{version}} 사용 가능",
       "download": "업데이트 다운로드",
+      "preparing": "업데이트 준비 중…",
+      "fallback": "전체 업데이트 다운로드 중…",
       "downloading": "다운로드 및 검증 중",
       "cancel": "다운로드 취소",
       "verified": "다운로드 검증 완료 및 설치 준비됨",

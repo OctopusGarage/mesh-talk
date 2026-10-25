@@ -123,10 +123,10 @@ jobs:
       # 3.6️⃣ Install protoc
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: brew install protobuf zstd sevenzip
       - name: Install protoc (Windows)
         if: runner.os == 'Windows'
-        run: choco install protoc
+        run: choco install protoc zstandard -y
 
       # Linux needs the Tauri GTK/WebKit stack (+ protoc) to build the AppImage/deb/rpm.
       - name: Install Tauri system dependencies (Linux)
@@ -209,6 +209,16 @@ jobs:
 
       - name: Collect version-bound updater artifacts
         run: node scripts/release/updater.mjs collect ${{ matrix.target }}
+
+      - name: Build native delta verification helper
+        if: runner.os != 'Linux' && env.MESH_TALK_UPDATER_PUBLIC_KEY != ''
+        run: node scripts/release/updater.mjs delta-helper
+
+      - name: Produce verified optional native delta artifacts
+        if: runner.os != 'Linux'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/release/updater.mjs delta ${{ matrix.target }}
 
       # 8️⃣ Generate SHA256 checksums
       - name: Generate SHA256 checksums
@@ -313,7 +323,7 @@ jobs:
 
           # Bind standalone updater bytes and signatures to the same verified ZIP.
           shopt -s nullglob
-          updater_files=(release/mesh-talk-update_*)
+          updater_files=(release/mesh-talk-update_* release/mesh-talk-update-raw_* release/mesh-talk-patch_*)
           if [[ "${#updater_files[@]}" -gt 0 ]]; then
             zip "$ZIP_NAME" "${updater_files[@]}"
             cp "${updater_files[@]}" release_zips/
@@ -338,6 +348,14 @@ jobs:
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: "release_zips/*.zip"
+
+      - name: Attest standalone updater and optional delta provenance
+        if: env.MESH_TALK_UPDATER_PUBLIC_KEY != ''
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            release_zips/mesh-talk-update*
+            release_zips/mesh-talk-patch_*
 
       # 📦 SBOM (CycloneDX): full dependency inventory for supply-chain auditing. Generated
       # once on Linux x64 (deps are platform-independent) and shipped with the release.
