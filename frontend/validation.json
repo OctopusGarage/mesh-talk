@@ -132,7 +132,8 @@
       "paths": [
         "frontend/src/features/chat/PersonalDevices.tsx",
         "frontend/src/features/chat/PersonalDevices.test.ts",
-        "frontend/src/lib/api/chat.ts"
+        "frontend/src/lib/api/chat.ts",
+        "frontend/e2e/personal-messages.spec.ts"
       ],
       "frontend": [
         "src/features/chat/PersonalDevices.test.ts"

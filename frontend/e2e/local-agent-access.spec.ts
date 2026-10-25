@@ -262,8 +262,13 @@ test("temporary access preserves its deadline across refresh and scope edits", a
 }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "integrations");
   const panel = page.getByTestId("local-agent-settings");
   await expect(panel.locator("#agent-access-duration")).toHaveValue("one_hour");
+  await panel
+    .getByTestId("agent-conversation-picker")
+    .locator("summary")
+    .click();
   await panel.getByRole("checkbox", { name: /bob/i }).check();
   await panel.locator("#setting-local-agent-access").click();
   const initial = await mockAccess(page);
@@ -304,6 +309,7 @@ test("expired authorization stays revocable and activity renders only safe metad
     ],
   });
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "integrations");
   const panel = page.getByTestId("local-agent-settings");
   await expect(panel.getByRole("status")).toContainText("Expired");
   await expect(panel.locator("pre")).toHaveCount(0);

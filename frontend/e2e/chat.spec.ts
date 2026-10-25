@@ -357,7 +357,9 @@ test.describe("Mesh-Talk UI flow", () => {
 
   test("screenshot button opens a two-option menu and captures", async ({
     page,
+    context,
   }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await enterChat(page);
     await openBobDm(page);
     // The screenshot button lives in the composer toolbar.
@@ -428,7 +430,11 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("composer-screenshot")).toBeDisabled();
   });
 
-  test("screenshot stays staged when sending fails", async ({ page }) => {
+  test("screenshot stays staged when sending fails", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await enterChat(page, "tester", "/?data=screenshot-write-fails");
     await openBobDm(page);
     await revealComposerTools(page);

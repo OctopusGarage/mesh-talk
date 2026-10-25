@@ -481,9 +481,11 @@ mod tests {
         let identity = DeviceIdentity::generate();
         let account = Account::generate();
         let expected_id = identity.user_id();
-        let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Reserve the port without listening so parallel fixtures cannot claim it
+        // between the gateway check and the refused-connection assertion.
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let local_tcp_port = reserved.local_addr().unwrap().port();
-        drop(reserved);
         let proof =
             Announce::new_post_office_with_account(&identity, &account, "remote", local_tcp_port);
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();

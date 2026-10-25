@@ -285,15 +285,21 @@ async fn sticker_media_delivers_after_source_removal_without_receiver_installati
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
+    let bob_account = Account::generate();
     let bob_secret = bob.secret_bytes();
-    let ba_secret = ba.secret_bytes();
-    let target = ba.account_id();
+    let bob_account_secret = bob_account.secret_bytes();
+    let target = bob_account.account_id();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 4000);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+    );
     let (a, _, _) = super::test_support::node_with_files(ad.path(), alice, aa, &bp);
-    let (b, _, mut received) = super::test_support::node_with_files(bd.path(), bob, ba, &ap);
+    let (b, _, mut received) =
+        super::test_support::node_with_files(bd.path(), bob, bob_account, &ap);
     let (path, bytes) = sticker(ad.path(), 0);
     // Accept while the receiver is not serving. No source path is needed afterward.
     let (id, file) = a
@@ -363,7 +369,7 @@ async fn sticker_media_delivers_after_source_removal_without_receiver_installati
     let reopened = open(
         bd.path(),
         DeviceIdentity::from_secret_bytes(bob_secret.0, bob_secret.1),
-        Account::from_secret_bytes(ba_secret),
+        Account::from_secret_bytes(bob_account_secret),
     );
     assert_eq!(reopened.read_media(file).unwrap(), bytes);
 }
@@ -377,13 +383,18 @@ async fn sticker_alias_after_chunk_reclamation_gets_exact_completion_control() {
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let target = ba.account_id();
+    let bob_account = Account::generate();
+    let target = bob_account.account_id();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 4000);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+    );
     let (a, _, _) = super::test_support::node_with_files(ad.path(), alice, aa, &bp);
-    let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, ba, &ap);
+    let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, bob_account, &ap);
     let (path, bytes) = sticker(ad.path(), 0);
     let (first, file) = a
         .enqueue_file_to_account(&target, &path, FileKind::Media)
@@ -439,13 +450,18 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
     let alice = DeviceIdentity::generate();
     let aa = Account::generate();
     let bob = DeviceIdentity::generate();
-    let ba = Account::generate();
-    let target = ba.account_id();
+    let bob_account = Account::generate();
+    let target = bob_account.account_id();
     let ap = Announce::new_with_account(&alice, &aa, "Alice", 4000);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bp = Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+    let bp = Announce::new_with_account(
+        &bob,
+        &bob_account,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+    );
     let (a, _, _) = super::test_support::node_with_files(ad.path(), alice, aa, &bp);
-    let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, ba, &ap);
+    let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, bob_account, &ap);
     let (path, bytes) = sticker(ad.path(), 0);
     let (first, file) = a
         .enqueue_file_to_account(&target, &path, FileKind::Media)
