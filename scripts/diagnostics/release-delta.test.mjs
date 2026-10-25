@@ -128,16 +128,25 @@ test(
         };
       });
       let corrupt = false;
+      // GitHub returns full asset metadata and release notes. A legitimate
+      // bounded 100-release history can exceed the former 4 MiB budget.
+      let history = JSON.stringify([
+        { tag_name: "v0.4.4", draft: false, prerelease: false, assets },
+        ...Array.from({ length: 99 }, (_, index) => ({
+          tag_name: `v0.0.${index}`,
+          draft: false,
+          prerelease: false,
+          assets: [],
+          body: "Release notes ".repeat(3500),
+        })),
+      ]);
+      assert.ok(Buffer.byteLength(history) > 4 * 1024 * 1024);
       globalThis.fetch = async (url) => {
         if (
           url ===
           "https://api.github.com/repos/example/project/releases?per_page=100"
         )
-          return new Response(
-            JSON.stringify([
-              { tag_name: "v0.4.4", draft: false, prerelease: false, assets },
-            ]),
-          );
+          return new Response(history);
         const asset = assets.find((a) => a.browser_download_url === url);
         assert.ok(asset, "only exact immutable release URLs may be fetched");
         return new Response(
@@ -176,6 +185,8 @@ test(
         produceDelta(args),
         /prior updater (size|digest) mismatch/,
       );
+      history = "x".repeat(16 * 1024 * 1024 + 1);
+      await assert.rejects(produceDelta(args), /delta download exceeds limit/);
     } finally {
       globalThis.fetch = originalFetch;
       if (originalPublic === undefined)

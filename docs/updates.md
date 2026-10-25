@@ -95,7 +95,7 @@ through the ordinary full update; subsequent updates can use its installed execu
 The catalog is authenticated with the existing updater public key and full logical target
 version before its declarations are parsed. It binds the release kind, OS/architecture,
 canonical compressed fallback, optional native target and at most two older executable bases.
-Release tooling reads at most 100 releases in 4 MiB of metadata and examines at most eight
+Release tooling reads at most 100 releases in 16 MiB of metadata and examines at most eight
 matching older candidates to find two authenticated bases. Prior payload downloads are bounded
 to 256 MiB and signatures to 16 KiB. Only a cryptographically valid legacy signature lacking
 a signed logical version is skipped as ineligible; other authentication failures stop the build.

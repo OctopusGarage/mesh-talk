@@ -228,7 +228,9 @@ export async function produceDelta({
     const releases = JSON.parse(
       await download(
         `https://api.github.com/repos/${repository}/releases?per_page=100`,
-        4 * 1024 * 1024,
+        // Up to 100 complete release/asset records; keep this producer-only
+        // budget separate from the client's small signed catalog ceiling.
+        16 * 1024 * 1024,
         true,
       ),
     );
