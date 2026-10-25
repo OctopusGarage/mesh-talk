@@ -318,9 +318,12 @@ export function beginSendIntent(
     file:
       payload.kind === "file"
         ? {
-            name: payload.path.split(/[\\\\/]/).pop() || "File",
-            size: 0,
-            mime: "",
+            name:
+              payload.stickerMedia?.name ||
+              payload.path.split(/[\\\\/]/).pop() ||
+              "File",
+            size: payload.stickerMedia?.size ?? 0,
+            mime: payload.stickerMedia?.mime ?? "",
             fileConv: "",
             media: payload.media,
           }

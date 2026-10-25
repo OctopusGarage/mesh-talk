@@ -27,6 +27,14 @@ pub const RECALL_WINDOW_MS: u64 = 2 * 60 * 1000;
 
 const RECALL_LOG_MAGIC: &[u8; 6] = b"MTRECL";
 
+/// Sticker artwork preserves message recall while ordinary attachments keep
+/// their existing contract. Validation prevents a filename alone granting it.
+fn recallable_manifest(bytes: &[u8]) -> bool {
+    super::files::validated_manifest(bytes).is_some_and(|manifest| {
+        manifest.protection().is_some() || crate::file::sticker::is_sticker_name(manifest.name())
+    })
+}
+
 /// The plaintext payload of a channel/DM `Delete` event: the message being recalled.
 /// Sealed like a reaction before it ships.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,8 +221,7 @@ impl Node {
                 .find(|row| {
                     row.event_id == target
                         && row.from == self.user_id()
-                        && super::files::validated_manifest(&row.plaintext)
-                            .is_some_and(|m| m.protection().is_some())
+                        && recallable_manifest(&row.plaintext)
                 })
                 .map(|row| row.wall_clock)
         });
@@ -288,17 +295,13 @@ impl Node {
     ) -> Result<(), NodeError> {
         authorize(&mut || Ok(()))?;
         let me = Author::from_ed25519(self.identity.public().ed25519_pub);
-        let protected_file_target = self
+        let recallable_file_target = self
             .received_files
             .lock()
             .expect("received files lock")
             .entries_ref(&channel)
             .iter()
-            .any(|row| {
-                row.event_id == target
-                    && super::files::validated_manifest(&row.plaintext)
-                        .is_some_and(|m| m.protection().is_some())
-            });
+            .any(|row| row.event_id == target && recallable_manifest(&row.plaintext));
         let wall = {
             let log = self.log.lock().expect("log mutex not poisoned");
             let event = log
@@ -310,7 +313,7 @@ impl Node {
                 ));
             }
             if event.kind != EventKind::Message
-                && !(event.kind == EventKind::FileManifest && protected_file_target)
+                && !(event.kind == EventKind::FileManifest && recallable_file_target)
             {
                 return Err(NodeError::Channel("not a message".into()));
             }
@@ -575,8 +578,7 @@ impl Node {
             let files = self.received_files.lock().expect("received files lock");
             for row in files.entries_ref(&acct_conv) {
                 if targets.contains(&row.event_id)
-                    && super::files::validated_manifest(&row.plaintext)
-                        .is_some_and(|m| m.protection().is_some())
+                    && recallable_manifest(&row.plaintext)
                     && let Some(account) = authors.get(&row.from)
                 {
                     author_of.insert(row.event_id, (account.clone(), row.wall_clock));

@@ -776,7 +776,12 @@ receive policy in an encrypted, account-local sidecar; an explicit file decision
 the global policy and the sender-account override. Raster images sent as media are
 automatic up to 16 MiB; SVG and larger images require approval. The recipient checks
 the first decrypted chunk against the claimed raster signature before durably ingesting it,
-while text and stickers remain ordinary message events. A current sender publishes the
+while text and legacy ID-only stickers remain ordinary message events. New
+[sticker media](CUSTOMIZATION_PACKS.md#sticker-message-delivery) uses the same
+encrypted media manifest and chunk path, with bounded presentation metadata in
+the filename so deployed media-capable clients still show the image. Same-host,
+same-deadline verified transfer reuse does not share keys between conversations.
+A current sender publishes the
 manifest first, then asks the exact authenticated recipient device for consent before
 synchronizing chunk events. When the clients cannot connect directly, the recipient
 returns a signed decision through the existing recipient-encrypted pairwise mailbox;

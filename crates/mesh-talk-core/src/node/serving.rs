@@ -857,6 +857,7 @@ impl Node {
                 continue;
             }
             if !is_channel {
+                self.complete_sticker_aliases(manifest.file_conv());
                 continue;
             } // live journal recovery owns DM file publication
             if !own_device {
@@ -952,11 +953,17 @@ impl Node {
                     return;
                 }
                 if self.media.contains(fc) && self.has_verified_file_completion(fc) {
-                    self.pending_files
-                        .lock()
-                        .expect("pending files mutex not poisoned")
-                        .remove(&fc);
-                    return;
+                    let progressed = self.complete_sticker_aliases(fc);
+                    let pending = self.pending_sticker_aliases(fc);
+                    if !pending {
+                        self.pending_files
+                            .lock()
+                            .expect("pending files mutex not poisoned")
+                            .remove(&fc);
+                    }
+                    if progressed || !pending {
+                        return;
+                    }
                 }
                 if self.file_progress(fc).is_none_or(|p| p.done < p.total) {
                     let candidates = self.file_recovery_sources(fc, cursor / 8);

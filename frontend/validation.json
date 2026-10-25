@@ -2,6 +2,56 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-sticker-media",
+      "paths": [
+        "frontend/src/lib/stickerMedia.ts",
+        "frontend/src/lib/stickerMedia.test.ts",
+        "frontend/src/lib/directoryAttachment.ts",
+        "frontend/src/lib/directoryAttachment.test.ts",
+        "frontend/src/features/chat/FilesTray.tsx",
+        "frontend/src/features/chat/ConversationHistoryDialog.tsx",
+        "frontend/src/features/chat/favorites/FavoriteAttachment.tsx",
+        "frontend/src/features/chat/MediaSticker.tsx",
+        "frontend/src/features/chat/MediaSticker.test.ts",
+        "frontend/src/features/chat/mediaFile.tsx",
+        "frontend/src/features/chat/mediaFileRead.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/conversationModel.ts",
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/e2e/stickers.spec.ts",
+        "frontend/e2e/tauri-mock.ts"
+      ],
+      "frontend": [
+        "src/lib/stickerMedia.test.ts",
+        "src/lib/directoryAttachment.test.ts",
+        "src/features/chat/MediaSticker.test.ts",
+        "src/features/chat/mediaFileRead.test.ts",
+        "src/features/chat/mediaFile.test.ts",
+        "src/lib/stickerPacks.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/outgoingIntent.test.ts"
+      ],
+      "capability": {
+        "summary": "Send selected sticker artwork as bounded ordinary media while preserving legacy sticker identities and account-owned file retry.",
+        "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
+        "invariants": [
+          {
+            "name": "A canonical bounded media filename carries source identity and fallback; the image manifest remains byte identity. Incoming artwork never installs or resolves a pack.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "Selected artwork is snapshotted before asynchronous staging; stale account work cannot dispatch, retained file intents retry the same bytes, and retention removes visible blob URLs.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/stickers.spec.ts for receive without installed packs and pack-removal preservation; use existing protected-message/media and native file-delivery acceptance where those boundaries change. Unit tests do not prove native end-to-end transfer."
+      ]
+    },
+    {
       "id": "frontend-discovery-origin",
       "paths": [
         "frontend/src/features/chat/memberProfileDetails.ts",

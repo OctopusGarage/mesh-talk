@@ -4521,3 +4521,138 @@ it("revokes an old staged identity when a full reply races a newer pending start
     vi.useRealTimers();
   }
 });
+
+// Hybrid sticker delivery keeps the chosen bytes in the ordinary retryable file intent.
+it("sends installed sticker bytes as media and retries that snapshot after pack removal", async () => {
+  const { usePacks } = await import("./packs");
+  const { decodeStickerMedia } = await import("@/lib/stickerMedia");
+  usePacks.setState({
+    packs: [
+      {
+        kind: "sticker",
+        id: "cats",
+        name: "Cats",
+        format: 1,
+        version: "1",
+        stickers: [
+          {
+            id: "wave",
+            label: "Wave",
+            fallback: "👋",
+            url: "data:image/png;base64,AQID",
+          },
+        ],
+      },
+    ],
+  });
+  let fail = true;
+  invoke.mockImplementation((cmd: string) => {
+    if (cmd === "write_temp_file")
+      return Promise.resolve("/tmp/mt-sticker.png");
+    if (cmd === "owner_enqueue_file")
+      return fail
+        ? Promise.reject(new Error("offline"))
+        : Promise.resolve({ id: "file-event", fileConv: "file-conv" });
+    return Promise.resolve([]);
+  });
+  useChat.setState({
+    active: { kind: "account", id: "target", name: "Target" },
+  });
+  await useChat.getState().sendSticker("pack:cats:wave", "👋", 12345678900000);
+  expect(
+    invoke.mock.calls.find(([cmd]) => cmd === "write_temp_file")?.[1],
+  ).toMatchObject({ bytes: [1, 2, 3], ext: "png" });
+  const failed = useChat.getState().messages["account:target"][0];
+  expect(failed.failed).toBe(true);
+  expect(decodeStickerMedia(failed.file!)).toEqual({
+    id: "pack:cats:wave",
+    fallback: "👋",
+  });
+  expect(
+    invoke.mock.calls.some(([cmd]) => cmd === "owner_enqueue_sticker"),
+  ).toBe(false);
+  usePacks.setState({ packs: [] });
+  fail = false;
+  await useChat.getState().retry(failed.clientId!);
+  const fileCalls = invoke.mock.calls.filter(
+    ([cmd]) => cmd === "owner_enqueue_file",
+  );
+  expect(fileCalls).toHaveLength(2);
+  expect(fileCalls[1][1]).toMatchObject({
+    path: "/tmp/mt-sticker.png",
+    media: true,
+    expiresAtMs: 12345678900000,
+  });
+});
+it("reports corrupt installed artwork without sending an id-only fallback", async () => {
+  const { usePacks } = await import("./packs");
+  usePacks.setState({
+    packs: [
+      {
+        kind: "sticker",
+        id: "cats",
+        name: "Cats",
+        format: 1,
+        version: "1",
+        stickers: [
+          {
+            id: "wave",
+            label: "Wave",
+            fallback: "👋",
+            url: "data:image/png;base64,",
+          },
+        ],
+      },
+    ],
+  });
+  useChat.setState({
+    active: { kind: "account", id: "target", name: "Target" },
+  });
+  await useChat.getState().sendSticker("pack:cats:wave", "👋");
+  expect(useChat.getState().error).toMatch(/sticker/i);
+  expect(invoke).not.toHaveBeenCalled();
+  usePacks.setState({ packs: [] });
+});
+it("discards staged sticker bytes after the account owner changes", async () => {
+  const { usePacks } = await import("./packs");
+  usePacks.setState({
+    packs: [
+      {
+        kind: "sticker",
+        id: "cats",
+        format: 1,
+        version: "1",
+        name: "Cats",
+        stickers: [
+          {
+            id: "wave",
+            label: "Wave",
+            fallback: "👋",
+            url: "data:image/png;base64,AQID",
+          },
+        ],
+      },
+    ],
+  });
+  let finish!: (path: string) => void;
+  invoke.mockImplementation((cmd: string) =>
+    cmd === "write_temp_file"
+      ? new Promise<string>((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve(),
+  );
+  useChat.setState({
+    active: { kind: "account", id: "target", name: "Target" },
+  });
+  const sending = useChat.getState().sendSticker("pack:cats:wave", "👋");
+  useAuth.setState({ generation: 1 });
+  finish("/tmp/stale-sticker.png");
+  await sending;
+  expect(invoke.mock.calls.map(([cmd]) => cmd)).toEqual([
+    "write_temp_file",
+    "delete_temp_file",
+  ]);
+  expect(useChat.getState().intents).toEqual({});
+  usePacks.setState({ packs: [] });
+});

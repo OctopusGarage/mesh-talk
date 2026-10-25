@@ -107,6 +107,9 @@ pub(crate) mod sentlog;
 pub(crate) mod serving;
 pub(crate) mod session;
 mod session_pool;
+mod sticker_media;
+#[cfg(test)]
+mod sticker_media_tests;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod transport;
