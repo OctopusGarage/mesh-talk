@@ -30,6 +30,9 @@
         "src-tauri/src/drafts.rs",
         "frontend/src/store/updateRestart.test.ts",
         "crates/mesh-talk-core/src/storage/record_log.rs",
+        "crates/mesh-talk-core/src/node/account_documents/mod.rs",
+        "crates/mesh-talk-core/src/node/account_documents/store.rs",
+        "crates/mesh-talk-core/src/node/media_store.rs",
         "scripts/release/release-api.mjs",
         "src-tauri/src/updates/native_https_tests.rs"
       ],
