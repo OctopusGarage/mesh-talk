@@ -31,6 +31,8 @@ use std::time::{Duration, Instant};
 
 const MAGIC: &[u8; 6] = b"MTLOG1";
 const PROFILE_COMPACTION_COOLDOWN: Duration = Duration::from_secs(10);
+const PROFILE_REWRITE_COOLDOWN: Duration = Duration::from_secs(60);
+const PROFILE_RECLAIM_RATIO: usize = 8;
 
 /// A durable event log: an in-memory [`EventLog`] backed by an encrypted,
 /// append-only [`EncryptedRecordLog`]. On append it validates, persists, then
@@ -43,11 +45,30 @@ pub struct PersistentEventLog {
     log: EventLog,
     file: EncryptedRecordLog<Event>,
     pending_profile_compactions: HashSet<ConversationId>,
-    last_profile_compactions: HashMap<ConversationId, Instant>,
+    last_profile_compaction_scan: Option<Instant>,
+    last_profile_rewrite_attempt: Option<Instant>,
+    #[cfg(test)]
+    rewrite_count: usize,
     fingerprint_cache: Mutex<HashMap<ConversationId, ([u8; 32], usize)>>,
+    #[cfg(test)]
+    sync_event_exports: std::cell::Cell<usize>,
 }
 
 impl PersistentEventLog {
+    #[cfg(test)]
+    pub(crate) fn sync_metadata_observations(
+        &self,
+        conversation: &ConversationId,
+    ) -> (Option<([u8; 32], usize)>, usize) {
+        (
+            self.fingerprint_cache
+                .lock()
+                .unwrap()
+                .get(conversation)
+                .copied(),
+            self.sync_event_exports.get(),
+        )
+    }
     #[cfg(test)]
     pub(crate) fn before_rewrite_rename(&mut self, hook: Box<dyn FnOnce() + Send + Sync>) {
         self.file.before_rewrite_rename = Some(hook);
@@ -77,8 +98,13 @@ impl PersistentEventLog {
             log,
             file,
             pending_profile_compactions: HashSet::new(),
-            last_profile_compactions: HashMap::new(),
+            last_profile_compaction_scan: None,
+            last_profile_rewrite_attempt: None,
+            #[cfg(test)]
+            rewrite_count: 0,
             fingerprint_cache: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            sync_event_exports: std::cell::Cell::new(0),
         })
     }
 
@@ -223,6 +249,10 @@ impl PersistentEventLog {
         let (rebuilt, ordered) = Self::index_retained(kept, EventLog::default())?;
         self.file.rewrite(&ordered)?;
         self.log = rebuilt;
+        #[cfg(test)]
+        {
+            self.rewrite_count += 1;
+        }
         Ok(())
     }
 
@@ -282,16 +312,23 @@ impl PersistentEventLog {
             .fingerprint_cache
             .lock()
             .expect("fingerprint cache lock not poisoned");
-        *cache.entry(*conversation).or_insert_with(|| {
-            let ids: Vec<_> = self
-                .log
-                .events(conversation)
-                .iter()
-                .map(|event| event.id)
-                .collect();
-            let len = ids.len();
-            (crate::eventlog::sync::fingerprint(ids), len)
-        })
+        if let Some(cached) = cache.get(conversation) {
+            return *cached;
+        }
+        let ids: Vec<_> = self
+            .log
+            .events(conversation)
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        let len = ids.len();
+        let fingerprint = (crate::eventlog::sync::fingerprint(ids), len);
+        // Unknown remote mailbox probes must not grow a cache entry per supplied
+        // ID. Retained nonempty conversations are bounded by the owning store.
+        if len > 0 {
+            cache.insert(*conversation, fingerprint);
+        }
+        fingerprint
     }
 
     /// Mark a conversation for profile compaction. Requests are coalesced until the
@@ -301,35 +338,45 @@ impl PersistentEventLog {
         self.pending_profile_compactions.insert(conversation);
     }
 
-    /// Compact at most one pending profile conversation. A failed compaction remains pending
-    /// for a later retry; successful no-op attempts are consumed because the authoritative
-    /// check found nothing currently worth rewriting. Successful compactions for the same
-    /// conversation are rate-limited so a burst of syncs cannot repeatedly rewrite the file.
+    /// Drain eligible profile requests in at most one whole-file rewrite. The
+    /// byte-amortization threshold and global rewrite cooldown bound maintenance
+    /// independently of how many conversations old peers keep reintroducing.
     pub fn drain_one_profile_compaction(&mut self) -> Result<Option<usize>, LogError> {
         self.drain_one_profile_compaction_at(Instant::now())
     }
 
     fn drain_one_profile_compaction_at(&mut self, now: Instant) -> Result<Option<usize>, LogError> {
-        let Some(conversation) = self
+        if self
+            .last_profile_rewrite_attempt
+            .is_some_and(|last| now.saturating_duration_since(last) < PROFILE_REWRITE_COOLDOWN)
+        {
+            return Ok(None);
+        }
+        if self
+            .last_profile_compaction_scan
+            .is_some_and(|last| now.saturating_duration_since(last) < PROFILE_COMPACTION_COOLDOWN)
+        {
+            return Ok(None);
+        }
+        let conversations = self
             .pending_profile_compactions
             .iter()
             .copied()
-            .find(|conv| {
-                self.last_profile_compactions
-                    .get(conv)
-                    .is_none_or(|last| now.duration_since(*last) >= PROFILE_COMPACTION_COOLDOWN)
-            })
-        else {
+            .collect::<Vec<_>>();
+        if conversations.is_empty() {
             return Ok(None);
-        };
-        match self.compact_superseded_profiles(&conversation) {
-            Ok(dropped) => {
-                self.pending_profile_compactions.remove(&conversation);
-                self.last_profile_compactions.insert(conversation, now);
-                Ok(Some(dropped))
-            }
-            Err(error) => Err(error),
         }
+        self.last_profile_compaction_scan = Some(now);
+        let dropped = self.compact_profile_conversations(&conversations, Some(now))?;
+        for conversation in conversations {
+            // Keep amortization candidates across scans so independent small
+            // profile changes can eventually justify one shared rewrite. A
+            // successful rewrite can also expose previously referenced leaves.
+            if self.superseded_profile_ids(&conversation).is_empty() {
+                self.pending_profile_compactions.remove(&conversation);
+            }
+        }
+        Ok(Some(dropped))
     }
 
     #[cfg(test)]
@@ -407,42 +454,83 @@ impl PersistentEventLog {
     /// unreferenced leaves per author. Compatibility avatars name their paired signed
     /// cards as parents, which stay until superseded children have been removed.
     /// The event log cannot classify ciphertext.
-    /// Rewrites only when at least
-    /// `COMPACT_PROFILE_MIN` are droppable, to amortize the rebuild. Returns the count dropped.
+    /// Rewrites only when at least `COMPACT_PROFILE_MIN` events and one eighth
+    /// of the whole log's estimated bytes are reclaimable. Small profile changes
+    /// must not repeatedly rewrite unrelated attachment/history ciphertext.
+    /// Returns the count dropped; the latest pair and referenced events always remain.
     pub fn compact_superseded_profiles(
         &mut self,
         conversation: &ConversationId,
     ) -> Result<usize, LogError> {
-        let drop: HashSet<EventId> = {
-            let events = self.log.events(conversation);
-            let referenced: HashSet<EventId> = events
-                .iter()
-                .flat_map(|e| e.parents.iter().copied())
-                .collect();
-            let mut newest: HashMap<Author, Vec<EventId>> = HashMap::new();
-            for e in &events {
-                if e.kind == EventKind::Profile && !referenced.contains(&e.id) {
-                    let pair = newest.entry(e.author).or_default();
-                    if pair.len() == 2 {
-                        pair.remove(0);
-                    }
-                    pair.push(e.id); // (lamport, id) order ⇒ last pair is newest
+        self.compact_profile_conversations(&[*conversation], None)
+    }
+
+    fn superseded_profile_ids(&self, conversation: &ConversationId) -> HashSet<EventId> {
+        let events = self.log.events(conversation);
+        let referenced: HashSet<EventId> = events
+            .iter()
+            .flat_map(|e| e.parents.iter().copied())
+            .collect();
+        let mut newest: HashMap<Author, Vec<EventId>> = HashMap::new();
+        for e in &events {
+            if e.kind == EventKind::Profile && !referenced.contains(&e.id) {
+                let pair = newest.entry(e.author).or_default();
+                if pair.len() == 2 {
+                    pair.remove(0);
                 }
+                pair.push(e.id); // (lamport, id) order ⇒ last pair is newest
             }
-            events
-                .iter()
-                .filter(|e| {
-                    e.kind == EventKind::Profile
-                        && !referenced.contains(&e.id)
-                        && !newest
-                            .get(&e.author)
-                            .is_some_and(|pair| pair.contains(&e.id))
-                })
-                .map(|e| e.id)
-                .collect()
-        };
+        }
+        events
+            .iter()
+            .filter(|e| {
+                e.kind == EventKind::Profile
+                    && !referenced.contains(&e.id)
+                    && !newest
+                        .get(&e.author)
+                        .is_some_and(|pair| pair.contains(&e.id))
+            })
+            .map(|e| e.id)
+            .collect()
+    }
+
+    fn compact_profile_conversations(
+        &mut self,
+        conversations: &[ConversationId],
+        maintenance_at: Option<Instant>,
+    ) -> Result<usize, LogError> {
+        let drop: HashSet<_> = conversations
+            .iter()
+            .flat_map(|conversation| self.superseded_profile_ids(conversation))
+            .collect();
         if drop.len() < COMPACT_PROFILE_MIN {
             return Ok(0);
+        }
+        // Estimate encoded record cost from lengths, without copying or
+        // serializing any ciphertext until a rewrite is worth its global cost.
+        let (total_bytes, reclaimed_bytes) = self
+            .log
+            .conversations()
+            .into_iter()
+            .flat_map(|conversation| self.log.events(&conversation))
+            .fold((0usize, 0usize), |(total, reclaimed), event| {
+                let bytes = event
+                    .ciphertext
+                    .len()
+                    .saturating_add(event.parents.len().saturating_mul(32))
+                    .saturating_add(256);
+                (
+                    total.saturating_add(bytes),
+                    reclaimed.saturating_add(if drop.contains(&event.id) { bytes } else { 0 }),
+                )
+            });
+        if reclaimed_bytes < total_bytes.div_ceil(PROFILE_RECLAIM_RATIO) {
+            return Ok(0);
+        }
+        // Failed writes also consume the maintenance budget while all requests
+        // remain pending, preventing an expensive I/O failure retry loop.
+        if let Some(now) = maintenance_at {
+            self.last_profile_rewrite_attempt = Some(now);
         }
         let kept: Vec<Event> = self
             .log
@@ -458,16 +546,20 @@ impl PersistentEventLog {
             })
             .collect();
         self.rewrite_kept(kept)?;
-        self.fingerprint_cache
+        let cache = self
+            .fingerprint_cache
             .get_mut()
-            .expect("fingerprint cache lock not poisoned")
-            .remove(conversation);
+            .expect("fingerprint cache lock not poisoned");
+        for conversation in conversations {
+            cache.remove(conversation);
+        }
         Ok(drop.len())
     }
 }
 
 /// Minimum droppable superseded profiles before [`PersistentEventLog::compact_superseded_profiles`]
-/// rewrites the log — bounds stale profiles per author while amortizing the rebuild cost.
+/// may rewrite the log. The byte-amortization gate separately bounds retained garbage
+/// relative to the whole encrypted log rather than imposing a fixed stale-event ceiling.
 const COMPACT_PROFILE_MIN: usize = 8;
 
 // NOTE: this impl is structurally identical to `impl SyncStore for EventLog`
@@ -493,11 +585,29 @@ impl SyncStore for PersistentEventLog {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
     ) -> Vec<Event> {
+        #[cfg(test)]
+        self.sync_event_exports
+            .set(self.sync_event_exports.get() + 1);
         super::sync::causal_events(self.events(conversation))
             .into_iter()
             .filter(|e| !have.contains(&e.id))
             .cloned()
             .collect()
+    }
+    fn events_excluding_bounded(
+        &self,
+        conversation: &ConversationId,
+        have: &HashSet<EventId>,
+        event_budget: usize,
+        max_frames: usize,
+    ) -> Vec<Event> {
+        super::sync::bounded_events(
+            super::sync::causal_events(self.events(conversation))
+                .into_iter()
+                .filter(|event| !have.contains(&event.id)),
+            event_budget,
+            max_frames,
+        )
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         self.append(event)
@@ -1077,6 +1187,172 @@ mod tests {
         assert_eq!(log.events(&conv).len(), 4);
     }
 
+    fn append_profile_batch(
+        log: &mut PersistentEventLog,
+        author: &DeviceIdentity,
+        conversation: ConversationId,
+        start: u64,
+    ) {
+        for seq in start..start + 10 {
+            log.append(Event::new(
+                author,
+                conversation,
+                seq,
+                vec![],
+                seq,
+                0,
+                EventKind::Profile,
+                format!("avatar{seq}").into_bytes(),
+            ))
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_compaction_does_not_rewrite_large_history_for_tiny_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+        let id = DeviceIdentity::generate();
+        log.append(mk(&id, 1, 1, &vec![42; 1024 * 1024])).unwrap();
+        let conversation = ConversationId::new([2; 32]);
+        append_profile_batch(&mut log, &id, conversation, 1);
+        log.sync().unwrap();
+        let before = std::fs::read(&path).unwrap();
+        log.request_profile_compaction(conversation);
+        assert_eq!(
+            log.drain_one_profile_compaction().unwrap(),
+            Some(0),
+            "eight tiny stale profiles must not rewrite unrelated megabytes"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert_eq!(log.events(&conversation).len(), 10);
+        assert_eq!(log.pending_profile_compactions(), 1);
+    }
+
+    #[test]
+    fn profile_compaction_accumulates_deferred_garbage_across_conversations() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PersistentEventLog::open(&dir.path().join("log"), "pw").unwrap();
+        let id = DeviceIdentity::generate();
+        let history = vec![42; 1024 * 1024];
+        log.append(mk(&id, 1, 1, &history)).unwrap();
+        let now = Instant::now();
+        let first = ConversationId::new([2; 32]);
+        let second = ConversationId::new([3; 32]);
+        for (index, conversation) in [first, second].into_iter().enumerate() {
+            for seq in 1..=10 {
+                log.append(Event::new(
+                    &id,
+                    conversation,
+                    seq,
+                    vec![],
+                    seq,
+                    0,
+                    EventKind::Profile,
+                    vec![7; 16 * 1024],
+                ))
+                .unwrap();
+            }
+            log.request_profile_compaction(conversation);
+            let result = log
+                .drain_one_profile_compaction_at(now + Duration::from_secs(index as u64 * 11))
+                .unwrap();
+            assert_eq!(result, Some(if index == 0 { 0 } else { 16 }));
+        }
+        assert_eq!(log.rewrite_count, 1);
+        assert_eq!(log.pending_profile_compactions(), 0);
+        assert_eq!(log.events(&first).len(), 2);
+        assert_eq!(log.events(&second).len(), 2);
+    }
+
+    #[test]
+    fn failed_profile_compaction_batch_preserves_all_requests_and_retries_after_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+        let id = DeviceIdentity::generate();
+        let first = ConversationId::new([1; 32]);
+        let second = ConversationId::new([2; 32]);
+        for conversation in [first, second] {
+            append_profile_batch(&mut log, &id, conversation, 1);
+            log.request_profile_compaction(conversation);
+        }
+        log.sync().unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let blocked = path.with_extension("compact-tmp");
+        std::fs::create_dir(&blocked).unwrap();
+        let now = Instant::now();
+        assert!(log.drain_one_profile_compaction_at(now).is_err());
+        assert_eq!(log.pending_profile_compactions(), 2);
+        assert_eq!(log.rewrite_count, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(log.events(&first).len(), 10);
+        assert_eq!(log.events(&second).len(), 10);
+        std::fs::remove_dir(blocked).unwrap();
+        assert_eq!(
+            log.drain_one_profile_compaction_at(now + Duration::from_secs(1))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            log.drain_one_profile_compaction_at(now + Duration::from_secs(61))
+                .unwrap(),
+            Some(16)
+        );
+        assert_eq!(log.pending_profile_compactions(), 0);
+        assert_eq!(log.rewrite_count, 1);
+        drop(log);
+        let reopened = PersistentEventLog::open(&path, "pw").unwrap();
+        assert_eq!(reopened.events(&first).len(), 2);
+        assert_eq!(reopened.events(&second).len(), 2);
+    }
+
+    #[test]
+    fn profile_compaction_batches_pending_conversations_into_one_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PersistentEventLog::open(&dir.path().join("log"), "pw").unwrap();
+        let id = DeviceIdentity::generate();
+        let first = ConversationId::new([1; 32]);
+        let second = ConversationId::new([2; 32]);
+        for conversation in [first, second] {
+            append_profile_batch(&mut log, &id, conversation, 1);
+            log.request_profile_compaction(conversation);
+        }
+        assert_eq!(log.drain_one_profile_compaction().unwrap(), Some(16));
+        assert_eq!(log.rewrite_count, 1);
+        assert_eq!(log.pending_profile_compactions(), 0);
+        assert_eq!(log.events(&first).len(), 2);
+        assert_eq!(log.events(&second).len(), 2);
+    }
+
+    #[test]
+    fn profile_compaction_rewrite_cooldown_is_shared_across_conversations() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PersistentEventLog::open(&dir.path().join("log"), "pw").unwrap();
+        let id = DeviceIdentity::generate();
+        let first = ConversationId::new([1; 32]);
+        let second = ConversationId::new([2; 32]);
+        let now = Instant::now();
+        append_profile_batch(&mut log, &id, first, 1);
+        log.request_profile_compaction(first);
+        assert_eq!(log.drain_one_profile_compaction_at(now).unwrap(), Some(8));
+        append_profile_batch(&mut log, &id, second, 1);
+        log.request_profile_compaction(second);
+        assert_eq!(
+            log.drain_one_profile_compaction_at(now + Duration::from_secs(1))
+                .unwrap(),
+            None,
+            "a new conversation cannot bypass the whole-file rewrite cooldown"
+        );
+        assert_eq!(log.pending_profile_compactions(), 1);
+        assert_eq!(
+            log.drain_one_profile_compaction_at(now + Duration::from_secs(61))
+                .unwrap(),
+            Some(8)
+        );
+    }
+
     #[test]
     fn profile_compaction_requests_are_coalesced() {
         let dir = tempfile::tempdir().unwrap();
@@ -1090,10 +1366,28 @@ mod tests {
 
         assert_eq!(log.pending_profile_compactions(), 2);
         assert_eq!(log.drain_one_profile_compaction().unwrap(), Some(0));
-        assert_eq!(log.pending_profile_compactions(), 1);
-        assert_eq!(log.drain_one_profile_compaction().unwrap(), Some(0));
         assert_eq!(log.pending_profile_compactions(), 0);
         assert_eq!(log.drain_one_profile_compaction().unwrap(), None);
+    }
+
+    #[test]
+    fn profile_compaction_noop_scans_are_rate_limited_across_conversations() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PersistentEventLog::open(&dir.path().join("log"), "pw").unwrap();
+        let now = Instant::now();
+        log.request_profile_compaction(ConversationId::new([1; 32]));
+        assert_eq!(log.drain_one_profile_compaction_at(now).unwrap(), Some(0));
+        log.request_profile_compaction(ConversationId::new([2; 32]));
+        assert_eq!(
+            log.drain_one_profile_compaction_at(now + Duration::from_secs(1))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            log.drain_one_profile_compaction_at(now + Duration::from_secs(11))
+                .unwrap(),
+            Some(0)
+        );
     }
 
     #[test]

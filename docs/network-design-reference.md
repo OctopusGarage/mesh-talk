@@ -1870,6 +1870,26 @@ A deleted local record or recalled event does not recall already copied data fro
 
 The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
 
+### Idle mailbox work and rejected pages
+
+Post offices answer capability and whole-mailbox fingerprint probes through the
+persistent event log's indexed metadata and cached digest. A probe for unchanged
+mail must not export or clone ciphertext history. Appends, retention rewrites and
+reopening retain the persistent log's existing cache invalidation rules. Unknown
+and empty mailbox probes do not populate the retained digest cache.
+Post-office and unfiltered event-log responses select a causal prefix within the
+existing frame and burst budgets before cloning ciphertext; unrelated tail
+payloads remain borrowed. Custom policy projections retain their admission rules
+through the default bounded-export adapter.
+
+An opaque mailbox exchange retains IDs of wrappers whose inner events cannot yet
+be admitted, so a rejected page cannot repeatedly occupy every response while
+later valid events wait. These hints belong only to that mailbox operation and
+remain bounded; they do not claim acceptance, custody or recipient delivery.
+A later operation retries the rejected events after permissions, causal parents
+or local storage recover. Existing signature, conversation and attachment policy
+checks remain authoritative.
+
 ### Session reuse contract
 
 A retained session is exclusive to one borrower and reusable only after a complete successful sequential sync exchange has consumed its responses. The key/admission checks include full public identity, endpoint, current policy generation and authenticated account/role consistency. Canceled operations, malformed replies, pending unexpected bytes, EOF and stale policy/bindings cause eviction. Idle expiry releases capacity even without another checkout. When an authenticated
@@ -2173,8 +2193,12 @@ UI projection once. Linked imports preserve device-local contact deletions;
 local committed mutations wake publication immediately.
 
 Federation wakes on durable mailbox, directory and effective route changes,
-coalesces bursts, caches unchanged inventories and continues full mailbox batches
-without waiting for the idle fallback. Complete outgoing and inbound exchanges
+coalesces bursts and caches unchanged inventories. Consecutive full mailbox
+batches continue with a per-edge delay growing from 100 milliseconds to at most
+five seconds, so inconsistent inventories or retention churn cannot create
+unbounded immediate reconciliation. A drained batch resets that delay. Mail and
+presence notifications do not bypass a saturated edge's continuation deadline;
+other healthy edges retain independent progress. Complete outgoing and inbound exchanges
 have absolute deadlines and rotate mailbox attempts across failures. Bridge
 negotiation distinguishes transport/malformed/policy failures from supported
 compatibility fallback and retains bounded per-relay retry state. Discovery keeps

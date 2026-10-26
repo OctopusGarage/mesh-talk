@@ -759,7 +759,17 @@
         "core-postoffice",
         "core-recovery",
         "core-storage"
-      ]
+      ],
+      "capability": {
+        "summary": "Preserve encrypted causal history while amortizing profile maintenance against whole-log rewrite cost.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Profile maintenance batches eligible conversations, preserves required ancestors and latest leaves, checks reclaimed-byte cost before cloning, and globally paces successful or failed rewrite attempts without changing the encrypted format",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      }
     },
     {
       "id": "core-file",
@@ -827,26 +837,34 @@
     {
       "id": "core-postoffice",
       "paths": [
-        "crates/mesh-talk-core/src/postoffice/"
+        "crates/mesh-talk-core/src/postoffice/",
+        "crates/mesh-talk-core/src/bin/mesh-talk-node/federation_runtime.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
-            "postoffice::"
+            "postoffice::",
+            "node::opaque_relay::",
+            "node::session::tests::"
           ]
         }
       ],
       "escalation": [
+        "Federation continuation cadence changes require cargo test -p mesh-talk-core --bin mesh-talk-node federation_runtime:: in addition to library metadata, paging and admission regressions.",
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance. Network trust changes also require cargo test -p mesh-talk-core --test relay_network --test relay_network_cli --test federation_config_cli and the mesh-talk-node federation_runtime:: binary tests. Membership exchanges must reject forged, copied, expired, revoked and foreign-network credentials before bulk metadata disclosure."
       ],
       "consumers": [
         "core-node"
       ],
       "capability": {
-        "summary": "Authorize equal relay reconciliation through explicit pins or mutually verified operator-approved network memberships.",
+        "summary": "Authorize equal relay reconciliation and bound idle mailbox checks and rejected-page retries without weakening event admission.",
         "guide": "docs/post-office-federation.md",
         "invariants": [
+          {
+            "name": "Unchanged mailbox metadata probes reuse persistent indexes and digests without exporting ciphertext; bounded responses clone only their causal page; rejected inner events are deferred only within a bounded mailbox operation and retried by a later operation",
+            "reference": "docs/network-design-reference.md#idle-mailbox-work-and-rejected-pages"
+          },
           {
             "name": "Network membership binds the authenticated device and checks authority, expiry and revocation before inventory or presence disclosure",
             "reference": "docs/post-office-federation.md#automatic-membership-in-an-approved-network"

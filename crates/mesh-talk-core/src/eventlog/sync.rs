@@ -186,6 +186,24 @@ pub trait SyncStore {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
     ) -> Vec<Event>;
+    /// Export only the causal prefix needed for at most `max_frames` greedy
+    /// frames, each with `event_budget` bytes. The first event of each frame
+    /// is retained even when oversized, matching ordinary sync's progress rule.
+    /// Implementations may select borrowed events before cloning ciphertext;
+    /// the default preserves existing custom-store admission and ordering.
+    fn events_excluding_bounded(
+        &self,
+        conversation: &ConversationId,
+        have: &HashSet<EventId>,
+        event_budget: usize,
+        max_frames: usize,
+    ) -> Vec<Event> {
+        cap_event_frames(
+            self.events_excluding(conversation, have),
+            event_budget,
+            max_frames,
+        )
+    }
     /// Validate and store a received event (the store's normal append gate).
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError>;
 }
@@ -217,15 +235,37 @@ impl SyncStore for EventLog {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
     ) -> Vec<Event> {
+        #[cfg(test)]
+        UNBOUNDED_EXPORTS.with(|count| count.set(count.get() + 1));
         causal_events(self.events(conversation))
             .into_iter()
             .filter(|e| !have.contains(&e.id))
             .cloned()
             .collect()
     }
+    fn events_excluding_bounded(
+        &self,
+        conversation: &ConversationId,
+        have: &HashSet<EventId>,
+        event_budget: usize,
+        max_frames: usize,
+    ) -> Vec<Event> {
+        bounded_events(
+            causal_events(self.events(conversation))
+                .into_iter()
+                .filter(|event| !have.contains(&event.id)),
+            event_budget,
+            max_frames,
+        )
+    }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         self.append(event)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static UNBOUNDED_EXPORTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Traverse the complete retained DAG before policy or requester-have filtering.
@@ -245,21 +285,56 @@ fn encoded_event_size(event: &Event) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-/// The longest prefix of `events` whose summed encoded size fits `budget`. Always
-/// returns at least the first event when `events` is non-empty (progress guarantee —
-/// a single event is bounded by `CHUNK_SIZE` < a frame by construction).
-fn cap_events(events: Vec<Event>, budget: usize) -> Vec<Event> {
-    let mut out = Vec::new();
+/// The longest greedy prefix fitting at most `max_frames` frame budgets.
+/// Retain an oversized first event per frame to preserve the sync progress rule.
+fn frame_prefix<T>(
+    events: impl IntoIterator<Item = T>,
+    budget: usize,
+    max_frames: usize,
+    size: impl Fn(&T) -> usize,
+) -> impl Iterator<Item = T> {
     let mut used = 0usize;
-    for event in events {
-        let size = encoded_event_size(&event);
-        if !out.is_empty() && used.saturating_add(size) > budget {
-            break;
+    let mut frames = 0usize;
+    let mut frame_has_event = false;
+    events.into_iter().take_while(move |event| {
+        if max_frames == 0 {
+            return false;
         }
-        used = used.saturating_add(size);
-        out.push(event);
-    }
-    out
+        let bytes = size(event);
+        if frame_has_event && used.saturating_add(bytes) > budget {
+            frames += 1;
+            if frames == max_frames {
+                return false;
+            }
+            used = 0;
+        }
+        used = used.saturating_add(bytes);
+        frame_has_event = true;
+        true
+    })
+}
+
+fn cap_event_frames(events: Vec<Event>, budget: usize, max_frames: usize) -> Vec<Event> {
+    frame_prefix(events, budget, max_frames, encoded_event_size).collect()
+}
+
+#[cfg(test)]
+fn cap_events(events: Vec<Event>, budget: usize) -> Vec<Event> {
+    cap_event_frames(events, budget, 1)
+}
+
+/// Select borrowed causal events before cloning, so frame truncation never
+/// allocates the ciphertext tail of a large missing-history backlog.
+pub(crate) fn bounded_events<'a>(
+    events: impl IntoIterator<Item = &'a Event>,
+    event_budget: usize,
+    max_frames: usize,
+) -> Vec<Event> {
+    frame_prefix(events, event_budget, max_frames, |event| {
+        encoded_event_size(event)
+    })
+    .cloned()
+    .collect()
 }
 
 /// Build the opening request: the ids this store holds for `conversation`.
@@ -280,12 +355,12 @@ pub fn handle_request_bounded(
     frame_budget: usize,
 ) -> SyncResponse {
     let requester_have: HashSet<EventId> = request.have.iter().copied().collect();
-    let all_missing = store.events_excluding(&request.conversation, &requester_have);
     let responder_have = store.event_ids(&request.conversation);
     // The responder's `have` is streamed in its own frames (node::session), so it no
     // longer competes with events for this frame's budget — events get the whole frame.
     let event_budget = frame_budget.saturating_sub(SYNC_MARGIN);
-    let events = cap_events(all_missing, event_budget);
+    let events =
+        store.events_excluding_bounded(&request.conversation, &requester_have, event_budget, 1);
     SyncResponse {
         conversation: request.conversation,
         events,
@@ -352,8 +427,9 @@ pub fn handle_response_bounded_burst(
 ) -> (ApplyReport, Vec<SyncFollowup>) {
     let report = ingest_all(store, &response.events);
     let remote_have: HashSet<EventId> = response.have.iter().copied().collect();
-    let all_missing = store.events_excluding(&response.conversation, &remote_have);
     let budget = frame_budget.saturating_sub(SYNC_MARGIN);
+    let all_missing =
+        store.events_excluding_bounded(&response.conversation, &remote_have, budget, max_frames);
     let mut frames = Vec::new();
     let mut events = Vec::new();
     let mut used = 0usize;
@@ -1180,5 +1256,93 @@ mod tests {
         assert_eq!(resp.have.len(), 5);
         // Unbounded returns everything.
         assert_eq!(handle_request(&store, &request).events.len(), 5);
+    }
+
+    #[test]
+    fn bounded_memory_export_does_not_materialize_the_missing_ciphertext_tail() {
+        let (mut store, conversation) = build_store_with_events(40);
+        let ordered = causal_events(store.events(&conversation));
+        let budget = encoded_event_size(ordered[0]);
+        UNBOUNDED_EXPORTS.with(|count| count.set(0));
+        let page = store.events_excluding_bounded(&conversation, &HashSet::new(), budget, 1);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id, ordered[0].id);
+        assert_eq!(
+            UNBOUNDED_EXPORTS.with(|count| count.get()),
+            0,
+            "bounded memory export must select before cloning the missing history"
+        );
+        let request = SyncRequest {
+            conversation,
+            have: vec![],
+        };
+        let response = handle_request_bounded(&store, &request, budget + SYNC_MARGIN);
+        assert_eq!(response.events.len(), 1);
+        let empty = SyncResponse {
+            conversation,
+            events: vec![],
+            have: vec![],
+        };
+        let (_, frames) =
+            handle_response_bounded_burst(&mut store, &empty, budget + SYNC_MARGIN, 3);
+        assert_eq!(frames.len(), 3);
+        assert!(frames.iter().all(|frame| frame.events.len() == 1));
+        assert_eq!(
+            UNBOUNDED_EXPORTS.with(|count| count.get()),
+            0,
+            "request and followup paths must use bounded ciphertext export"
+        );
+    }
+
+    #[test]
+    fn bounded_frame_prefix_matches_greedy_burst_packing() {
+        let (store, conversation) = build_store_with_events(7);
+        let ordered = causal_events(store.events(&conversation));
+        let budget = encoded_event_size(ordered[0]) + 1;
+        let prefix: Vec<_> = frame_prefix(ordered.iter().copied(), budget, 3, |event| {
+            encoded_event_size(event)
+        })
+        .collect();
+        assert_eq!(prefix.len(), 3);
+        for (selected, expected) in prefix.iter().zip(&ordered) {
+            assert!(std::ptr::eq(*selected, *expected));
+        }
+        assert!(bounded_events(ordered.iter().copied(), budget, 0).is_empty());
+        assert_eq!(
+            bounded_events(ordered.iter().copied(), 1, 2).len(),
+            2,
+            "an oversized first event still occupies one bounded frame"
+        );
+    }
+
+    #[test]
+    fn bounded_followup_backlog_converges_without_unbounded_exports() {
+        let (mut source, conversation) = build_store_with_events(40);
+        let mut target = EventLog::default();
+        let frame_budget = encoded_event_size(source.events(&conversation)[0]) + SYNC_MARGIN;
+        UNBOUNDED_EXPORTS.with(|count| count.set(0));
+        for _ in 0..40 {
+            let request = build_request(&source, conversation);
+            let response = handle_request_bounded(&target, &request, frame_budget);
+            let (report, frames) =
+                handle_response_bounded_burst(&mut source, &response, frame_budget, 3);
+            assert!(report.rejected.is_empty());
+            assert!(frames.len() <= 3);
+            for frame in frames {
+                assert_eq!(frame.events.len(), 1);
+                let report = handle_followup(&mut target, &frame);
+                assert_eq!(report.applied, 1);
+                assert!(report.rejected.is_empty());
+            }
+            if target.event_ids(&conversation).len() == 40 {
+                break;
+            }
+        }
+        assert_converged(&source, &target);
+        assert_eq!(
+            UNBOUNDED_EXPORTS.with(|count| count.get()),
+            0,
+            "multi-frame catch-up must never copy the unused ciphertext backlog"
+        );
     }
 }

@@ -467,8 +467,9 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
 - **Persistence** (`persist.rs`) — `MTLOG1 ‖ salt ‖ [len ‖ nonce ‖ AES-256-GCM(event)]…`,
   append-only; a torn trailing record (crash mid-write) is dropped on reload and re-synced.
   Profile sync queues compaction requests. `Node::run_accept_loop` owns a maintenance
-  loop shared by desktop, CLI, and SDK hosts: every 3 seconds it drains at most one
-  conversation on the blocking pool, with a 10-second per-conversation cooldown.
+  loop shared by desktop, CLI, and SDK hosts: every 3 seconds it coalesces eligible
+  conversations into at most one cost-bounded rewrite on the blocking pool. The
+  [storage budgets](#storage-replay-and-query-budgets) govern eligibility and cadence.
   Dropping the accept-loop future stops scheduling maintenance; an already-running
   blocking rewrite finishes atomically. The log mutex serializes rewrites with appends
   within one Node, but is not shared with a replacement Node opening the same files.
@@ -1254,6 +1255,20 @@ rows retain their established sorted-before-dedup precedence even when arrival
 order differs from authored time; pending accepted rows follow durable rows.
 Signed DAG ancestry is not pruned to satisfy a local memory
 limit; authenticated checkpoint compaction remains a separate protocol decision.
+
+Profile maintenance preserves referenced ancestors and the latest two safe
+profile leaves per author. Pending conversations share one atomic rewrite rather
+than rewriting the entire log separately for each conversation. Maintenance
+requires at least eight removable leaves whose estimated event bytes reclaim at
+least one eighth of the retained log; smaller obsolete profiles wait for a later
+amortized batch. Eligibility checks use borrowed metadata, with a ten-second
+global scan cooldown. Reclaimable requests below the byte threshold remain
+pending so later conversations can contribute to the same batch. Expensive
+maintenance rewrite attempts share a
+sixty-second global cooldown, including failed attempts; failures preserve all
+pending requests and the original durable log for retry. Explicit compaction
+uses the same byte-cost test without the background timer. Encrypted formats,
+causal closure and latest-profile projection remain unchanged.
 
 ### Manual encrypted backup and recovery
 

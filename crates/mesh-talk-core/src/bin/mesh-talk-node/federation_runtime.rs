@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 const MAX_SEED_PROBES: usize = 8;
 const MAX_RELAY_SYNCS: usize = 8;
 const MAX_KNOWN_EDGES: usize = 2048;
+const MAX_CONTINUATION_DELAY: Duration = Duration::from_secs(5);
 type EdgeKey = (SocketAddr, [u8; 32], [u8; 32]);
 
 struct Edge {
@@ -21,8 +22,29 @@ struct Edge {
     pending: bool,
     active: bool,
     failures: u32,
+    continuation_batches: u32,
     retry_at: Instant,
     observed: Instant,
+}
+
+impl Edge {
+    fn succeeded(&mut self, count: usize, now: Instant) {
+        self.failures = 0;
+        if count == MAX_MAILBOXES_PER_EXCHANGE {
+            // A full batch is not proof that inventories are converging: a peer
+            // may reject data or retain less than its neighbor. Pace successive
+            // batches independently per edge instead of reconnecting forever.
+            self.continuation_batches = self.continuation_batches.saturating_add(1);
+            let delay =
+                Duration::from_millis(100u64 << self.continuation_batches.saturating_sub(1).min(6))
+                    .min(MAX_CONTINUATION_DELAY);
+            self.retry_at = now + delay;
+            self.pending = true;
+        } else {
+            self.continuation_batches = 0;
+            self.retry_at = now;
+        }
+    }
 }
 
 struct Probe {
@@ -70,6 +92,7 @@ fn observe_edge(edges: &mut HashMap<EdgeKey, Edge>, addr: SocketAddr, peer: Publ
             pending: true,
             active: false,
             failures: 0,
+            continuation_batches: 0,
             retry_at: Instant::now(),
             observed: Instant::now(),
         },
@@ -236,12 +259,11 @@ pub(super) async fn run_federation_loop(
                 edge.active = false;
                 match result {
                     Ok(count) => {
-                        edge.failures = 0;
-                        edge.retry_at = Instant::now();
-                        edge.pending |= count == MAX_MAILBOXES_PER_EXCHANGE;
+                        edge.succeeded(count, Instant::now());
                     }
                     Err(error) => {
                         log::debug!("federation sync at {}: {error}", key.0);
+                        edge.continuation_batches = 0;
                         edge.failures = edge.failures.saturating_add(1);
                         edge.retry_at = Instant::now() + retry_delay(edge.failures);
                         edge.pending = true;
@@ -307,6 +329,72 @@ mod tests {
             )
             .unwrap(),
         ))
+    }
+
+    #[test]
+    fn full_batch_continuation_backs_off_without_delaying_a_drained_edge() {
+        let now = Instant::now();
+        let mut edges = HashMap::new();
+        let saturated = DeviceIdentity::generate().public();
+        let healthy = DeviceIdentity::generate().public();
+        let saturated_addr = "127.0.0.1:47479".parse().unwrap();
+        let healthy_addr = "127.0.0.1:47480".parse().unwrap();
+        observe_edge(&mut edges, saturated_addr, saturated.clone());
+        observe_edge(&mut edges, healthy_addr, healthy.clone());
+        let saturated = edges
+            .get_mut(&(saturated_addr, saturated.ed25519_pub, saturated.x25519_pub))
+            .unwrap();
+        let mut completed_at = now;
+        for delay_ms in [100, 200, 400, 800, 1600, 3200, 5000, 5000] {
+            saturated.pending = false; // The exchange consumes the pending turn.
+            saturated.succeeded(MAX_MAILBOXES_PER_EXCHANGE, completed_at);
+            assert!(saturated.pending);
+            assert_eq!(
+                saturated.retry_at.duration_since(completed_at),
+                Duration::from_millis(delay_ms),
+                "a full batch alone must not authorize an immediate endless continuation"
+            );
+            // Mail accepted by this same exchange publishes a dirty wake. Merely
+            // making it pending again must not erase its continuation deadline.
+            saturated.pending = true;
+            completed_at = saturated.retry_at;
+        }
+        let saturated_retry = saturated.retry_at;
+        let healthy = edges
+            .get_mut(&(healthy_addr, healthy.ed25519_pub, healthy.x25519_pub))
+            .unwrap();
+        healthy.pending = false;
+        healthy.succeeded(0, now);
+        healthy.pending = true; // New mail after an idle complete exchange.
+        assert!(healthy.retry_at <= now);
+        assert!(saturated_retry > now);
+    }
+
+    #[test]
+    fn draining_a_full_batch_backlog_resets_its_continuation_delay() {
+        let peer = DeviceIdentity::generate().public();
+        let addr = "127.0.0.1:47479".parse().unwrap();
+        let mut edges = HashMap::new();
+        observe_edge(&mut edges, addr, peer.clone());
+        let edge = edges
+            .get_mut(&(addr, peer.ed25519_pub, peer.x25519_pub))
+            .unwrap();
+        let mut now = Instant::now();
+        for _ in 0..8 {
+            edge.pending = false;
+            edge.succeeded(MAX_MAILBOXES_PER_EXCHANGE, now);
+            now = edge.retry_at;
+        }
+        edge.pending = false;
+        edge.succeeded(MAX_MAILBOXES_PER_EXCHANGE - 1, now);
+        assert!(!edge.pending);
+        assert_eq!(edge.retry_at, now);
+        edge.pending = false;
+        edge.succeeded(MAX_MAILBOXES_PER_EXCHANGE, now);
+        assert_eq!(
+            edge.retry_at.duration_since(now),
+            Duration::from_millis(100)
+        );
     }
 
     #[tokio::test]

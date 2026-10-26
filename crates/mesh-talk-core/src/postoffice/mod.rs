@@ -541,6 +541,20 @@ impl PostOffice {
 }
 
 impl SyncStore for PostOffice {
+    // Metadata probes must use the durable log's indexes/cache. Trait defaults
+    // export every ciphertext body just to discover supported event kinds.
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+        self.log.requires_channel_v2(conversation)
+    }
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
+        self.log.requires_channel_v3(conversation)
+    }
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
+        self.log.requires_channel_v4(conversation)
+    }
+    fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
+        self.log.fingerprint_and_len(conversation)
+    }
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
         self.log
             .get(id)
@@ -556,6 +570,16 @@ impl SyncStore for PostOffice {
         have: &HashSet<EventId>,
     ) -> Vec<Event> {
         SyncStore::events_excluding(&self.log, conversation, have)
+    }
+    fn events_excluding_bounded(
+        &self,
+        conversation: &ConversationId,
+        have: &HashSet<EventId>,
+        event_budget: usize,
+        max_frames: usize,
+    ) -> Vec<Event> {
+        self.log
+            .events_excluding_bounded(conversation, have, event_budget, max_frames)
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         if self.opaque_only && !opaque::envelope_shape(&event) {
@@ -598,6 +622,182 @@ mod tests {
             EventKind::Message,
             body.to_vec(),
         )
+    }
+
+    #[test]
+    fn bounded_mailbox_exports_clone_only_the_requested_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut office = PostOffice::open(
+            &dir.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let author = DeviceIdentity::generate();
+        let body = vec![7; 32 * 1024];
+        let mut expected = Vec::new();
+        for seq in 1..=16 {
+            let event = message(&author, seq, vec![], seq, &body);
+            expected.push(event.id);
+            office.accept(event).unwrap();
+        }
+        let have = HashSet::from([expected.remove(0)]);
+        for max_frames in [0, 1, 2, 4] {
+            let page = office.events_excluding_bounded(
+                &conv(),
+                &have,
+                crate::transport::MAX_PLAINTEXT,
+                max_frames,
+            );
+            assert_eq!(
+                page.iter().map(|event| event.id).collect::<Vec<_>>(),
+                expected[..max_frames]
+            );
+        }
+        assert_eq!(
+            office.log.sync_metadata_observations(&conv()).1,
+            0,
+            "bounded mailbox pages must not export every retained ciphertext first"
+        );
+    }
+
+    #[test]
+    fn unknown_mailbox_probes_do_not_retain_fingerprint_cache_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let office = PostOffice::open(
+            &dir.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let empty = crate::eventlog::sync::fingerprint(vec![]);
+        for index in 0u64..512 {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&index.to_le_bytes());
+            let conversation = ConversationId::new(bytes);
+            assert_eq!(
+                SyncStore::fingerprint_and_len(&office, &conversation),
+                (empty, 0)
+            );
+            assert_eq!(
+                office.log.sync_metadata_observations(&conversation),
+                (None, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn idle_sync_metadata_reuses_indexes_without_exporting_ciphertext() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut office = PostOffice::open(
+            &dir.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let author = DeviceIdentity::generate();
+        let body = vec![7; 32 * 1024];
+        office
+            .accept(message(&author, 1, vec![], 1, &body))
+            .unwrap();
+        let expected = office.log.fingerprint_and_len(&conv());
+        // Reopening gives the relay a cold digest cache and retained ciphertext.
+        let (ed, x) = office.identity.secret_bytes();
+        drop(office);
+        let office = PostOffice::open(
+            &dir.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::from_secret_bytes(ed, x),
+        )
+        .unwrap();
+        assert_eq!(office.log.sync_metadata_observations(&conv()), (None, 0));
+        for _ in 0..8 {
+            assert!(!SyncStore::requires_channel_v2(&office, &conv()));
+            assert!(!SyncStore::requires_channel_v3(&office, &conv()));
+            assert!(!SyncStore::requires_channel_v4(&office, &conv()));
+            assert_eq!(SyncStore::fingerprint_and_len(&office, &conv()), expected);
+        }
+        assert_eq!(
+            office.log.sync_metadata_observations(&conv()),
+            (Some(expected), 0),
+            "idle metadata must warm the durable digest cache without exporting event bodies",
+        );
+    }
+
+    #[test]
+    fn sync_metadata_tracks_capabilities_append_expiry_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.log");
+        let identity = DeviceIdentity::generate();
+        let (ed, x) = identity.secret_bytes();
+        let author = DeviceIdentity::generate();
+        let start = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut office = PostOffice::open_at(&path, "pw", identity, start).unwrap();
+        let empty = SyncStore::fingerprint_and_len(&office, &conv());
+        assert_eq!(empty.1, 0);
+        for (index, kind) in [
+            EventKind::ChannelReplica,
+            EventKind::ChannelHistoryPolicy,
+            EventKind::ChannelAccountAuthority,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let event = Event::new(
+                &author,
+                conv(),
+                index as u64 + 1,
+                vec![],
+                index as u64 + 1,
+                0,
+                kind,
+                vec![],
+            );
+            office.record_at(event.clone(), start).unwrap();
+            assert!(office.log.sync_metadata_observations(&conv()).0.is_none());
+            assert!(SyncStore::requires_channel_v2(&office, &conv()));
+            assert_eq!(SyncStore::requires_channel_v3(&office, &conv()), index >= 1);
+            assert_eq!(SyncStore::requires_channel_v4(&office, &conv()), index >= 2);
+            let expected = office.log.fingerprint_and_len(&conv());
+            assert_eq!(SyncStore::fingerprint_and_len(&office, &conv()), expected);
+            assert_eq!(expected.1, index + 1);
+            assert_ne!(expected.0, empty.0);
+            assert_eq!(
+                office.record_at(event, start).unwrap(),
+                AppendOutcome::Duplicate
+            );
+            assert_eq!(
+                office.log.sync_metadata_observations(&conv()).0,
+                Some(expected)
+            );
+        }
+        let retained = SyncStore::fingerprint_and_len(&office, &conv());
+        drop(office);
+        let mut reopened =
+            PostOffice::open_at(&path, "pw", DeviceIdentity::from_secret_bytes(ed, x), start)
+                .unwrap();
+        assert!(SyncStore::requires_channel_v2(&reopened, &conv()));
+        assert!(SyncStore::requires_channel_v3(&reopened, &conv()));
+        assert!(SyncStore::requires_channel_v4(&reopened, &conv()));
+        assert_eq!(SyncStore::fingerprint_and_len(&reopened, &conv()), retained);
+        reopened.prune_expired_at(start + MAX_RELAY_AGE).unwrap();
+        assert!(reopened.log.sync_metadata_observations(&conv()).0.is_none());
+        assert_eq!(SyncStore::fingerprint_and_len(&reopened, &conv()), empty);
+        assert!(!SyncStore::requires_channel_v2(&reopened, &conv()));
+        assert!(!SyncStore::requires_channel_v3(&reopened, &conv()));
+        assert!(!SyncStore::requires_channel_v4(&reopened, &conv()));
+        drop(reopened);
+        let expired = PostOffice::open_at(
+            &path,
+            "pw",
+            DeviceIdentity::from_secret_bytes(ed, x),
+            start + MAX_RELAY_AGE,
+        )
+        .unwrap();
+        assert_eq!(SyncStore::fingerprint_and_len(&expired, &conv()), empty);
+        assert!(!SyncStore::requires_channel_v2(&expired, &conv()));
+        assert!(!SyncStore::requires_channel_v3(&expired, &conv()));
+        assert!(!SyncStore::requires_channel_v4(&expired, &conv()));
     }
 
     #[test]
