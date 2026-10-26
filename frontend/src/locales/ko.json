@@ -889,6 +889,9 @@
     "noDeviceChanges": "기록된 기기 변경 사항이 없습니다."
   },
   "members": {
+    "groupSettings": "그룹 설정",
+    "backToMembers": "멤버로 돌아가기",
+    "yourPreferences": "내 설정",
     "historyTitle": "새 멤버에게 공유할 기록",
     "historyHelp": "새 멤버에게 공유할 최근 메시지를 선택하세요. 기존 멤버의 기록은 변경되지 않습니다.",
     "historyLoading": "기록 설정 불러오는 중…",
@@ -909,7 +912,7 @@
     "activity_transferred": "{{actor}} 님이 {{target}} 님에게 소유권을 이전했습니다",
     "activity_left": "{{actor}} 님이 채널에서 나갔습니다",
     "activity_accepted": "{{actor}} 님이 초대를 수락했습니다",
-    "replicaDisabled": "사본 공유 꺼짐",
+    "replicaDisabled": "공유가 꺼져 있습니다",
     "disableReplica": "공유 중지",
     "enableReplica": "공유 재개",
     "fileSharingMetered": "데이터를 절약하기 위해 첨부 파일 자동 공유가 일시 중지되었습니다",
@@ -918,7 +921,7 @@
     "fileSharingHelp": "메시지와 직접 보내는 파일은 계속 전송됩니다. 임시 허용은 이 기기의 모든 그룹에 적용되며, 네트워크 요금 상태가 바뀌거나 로그아웃하면 종료됩니다. 일일 업로드 용량 제한은 없습니다.",
     "fileSharingAllow": "일시적으로 허용",
     "fileSharingProtect": "데이터 보호 재개",
-    "replicaError": "공유 설정을 업데이트하지 못했습니다. 멤버 목록을 다시 열고 재시도하세요.",
+    "replicaError": "공유 설정을 업데이트하지 못했습니다. 다시 시도하세요.",
     "replicaHelp": "공유하면 멤버가 이 기기에서 놓친 메시지와 저장된 첨부 파일을 복구할 수 있습니다. 꺼도 새 메시지는 계속 수신됩니다.",
     "pendingAcceptance": "수락 대기 중",
     "trigger": "멤버",
@@ -936,9 +939,6 @@
     "leave": "채널 나가기",
     "confirmLeave": "이 채널에서 나갈까요? 더 이상 새 메시지를 받지 못합니다. 로컬 기록은 이 기기에 남습니다.",
     "transferBeforeLeave": "이 채널에서 나가기 전에 다른 멤버에게 소유권을 이전하세요.",
-    "devices": "기기 ({{count}})",
-    "deviceIdentity": "기기 {{id}}",
-    "addLinkedDevice": "연결된 기기 추가",
     "referencePartial": "알려진 구성원만 표시됩니다. 크기 제한으로 인해 공유된 구성원 목록은 일부만 포함합니다.",
     "detailsReconciling": "그룹 정보를 조정하고 있습니다. 마지막으로 확인된 정책이 표시됩니다.",
     "historyUnavailable": "그룹 기록 정책을 아직 확인할 수 없습니다. 연결된 기기를 온라인으로 유지한 후 다시 시도하세요."

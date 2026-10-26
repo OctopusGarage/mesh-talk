@@ -596,6 +596,7 @@
         "frontend/src/store/channelActions.ts",
         "frontend/src/store/channelActions.test.ts",
         "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/GroupPreferences.tsx",
         "frontend/src/features/chat/MembersDialog.test.ts",
         "frontend/src/features/chat/channelMemberProjection.ts",
         "frontend/e2e/member-account-projection.spec.ts",
@@ -1098,6 +1099,7 @@
         "frontend/src/features/chat/ChannelHistorySettings.test.ts",
         "frontend/e2e/channel-history.spec.ts",
         "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/GroupPreferences.tsx",
         "frontend/src/lib/api/chat.ts",
         "frontend/src/lib/types.ts",
         "frontend/src/features/chat/channelPermissions.ts",
@@ -1403,6 +1405,7 @@
       "id": "frontend-group-file-network-cost",
       "paths": [
         "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/GroupPreferences.tsx",
         "frontend/src/features/chat/MembersDialog.test.ts",
         "frontend/e2e/group-network-cost.spec.ts",
         "frontend/src/lib/api/chat.ts",
@@ -1624,6 +1627,7 @@
       "id": "group-file-network-cost-acceptance",
       "paths": [
         "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/GroupPreferences.tsx",
         "frontend/e2e/group-network-cost.spec.ts"
       ],
       "browser": ["e2e/group-network-cost.spec.ts"],

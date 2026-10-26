@@ -889,6 +889,9 @@
     "noDeviceChanges": "Nenhuma alteração de dispositivo registrada."
   },
   "members": {
+    "groupSettings": "Configurações do grupo",
+    "backToMembers": "Voltar aos membros",
+    "yourPreferences": "Suas preferências",
     "historyTitle": "Histórico para novos membros",
     "historyHelp": "Escolha quais mensagens recentes compartilhar com novos membros. Isso não altera o histórico dos membros atuais.",
     "historyLoading": "Carregando configuração do histórico…",
@@ -909,7 +912,7 @@
     "activity_transferred": "{{actor}} transferiu a propriedade para {{target}}",
     "activity_left": "{{actor}} saiu do canal",
     "activity_accepted": "{{actor}} aceitou o convite",
-    "replicaDisabled": "Réplica desativada",
+    "replicaDisabled": "O compartilhamento está desativado",
     "disableReplica": "Parar compartilhamento",
     "enableReplica": "Retomar compartilhamento",
     "fileSharingMetered": "Compartilhamento automático de anexos pausado para economizar dados",
@@ -918,7 +921,7 @@
     "fileSharingHelp": "As mensagens e os arquivos que você envia continuam sendo transferidos. A permissão temporária vale para todos os grupos neste dispositivo até que o custo da rede mude ou você saia da conta. Não há limite diário de upload.",
     "fileSharingAllow": "Permitir temporariamente",
     "fileSharingProtect": "Retomar proteção de dados",
-    "replicaError": "Não foi possível atualizar o compartilhamento. Reabra a lista de membros e tente novamente.",
+    "replicaError": "Não foi possível atualizar o compartilhamento. Tente novamente.",
     "replicaHelp": "O compartilhamento ajuda os membros a recuperar mensagens perdidas e anexos salvos neste dispositivo. Desativá-lo não interrompe o recebimento de mensagens.",
     "pendingAcceptance": "Aguardando aceitação",
     "trigger": "Membros",
@@ -936,9 +939,6 @@
     "leave": "Sair do canal",
     "confirmLeave": "Sair deste canal? Você deixará de receber novas mensagens. Seu histórico local permanece neste dispositivo.",
     "transferBeforeLeave": "Transfira a propriedade para outro membro antes de sair deste canal.",
-    "devices": "Dispositivos ({{count}})",
-    "deviceIdentity": "Dispositivo {{id}}",
-    "addLinkedDevice": "Adicionar dispositivo vinculado",
     "referencePartial": "Apenas membros conhecidos são exibidos. Esta lista compartilhada é parcial devido aos limites de tamanho.",
     "detailsReconciling": "Os dados do grupo estão sendo reconciliados. A última política confirmada é exibida.",
     "historyUnavailable": "A política de histórico do grupo ainda não está disponível. Mantenha um dispositivo vinculado online e tente novamente."

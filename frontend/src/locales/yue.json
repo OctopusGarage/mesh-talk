@@ -889,6 +889,9 @@
     "noDeviceChanges": "冇已記錄嘅裝置變更。"
   },
   "members": {
+    "groupSettings": "群組設定",
+    "backToMembers": "返去成員名單",
+    "yourPreferences": "我嘅偏好",
     "historyTitle": "新成員嘅歷史訊息",
     "historyHelp": "揀選分享畀新成員嘅最近訊息。呢個設定唔會改動現有成員嘅歷史訊息。",
     "historyLoading": "載入歷史訊息設定中…",
@@ -909,7 +912,7 @@
     "activity_transferred": "{{actor}} 將群主轉畀 {{target}}",
     "activity_left": "{{actor}} 退出咗頻道",
     "activity_accepted": "{{actor}} 接受咗邀請",
-    "replicaDisabled": "副本已關閉",
+    "replicaDisabled": "已停止分享",
     "disableReplica": "停止分享",
     "enableReplica": "恢復分享",
     "fileSharingMetered": "已暫停自動提供附件副本，慳返啲流量",
@@ -918,7 +921,7 @@
     "fileSharingHelp": "訊息同你自己傳送嘅檔案會繼續傳送。暫時許可適用於呢部裝置嘅所有群組，網絡收費狀態一變或者你登出就會失效。呢個功能冇每日上傳上限。",
     "fileSharingAllow": "暫時允許",
     "fileSharingProtect": "恢復流量保護",
-    "replicaError": "更新唔到共享設定。請重新開啟成員列表再試。",
+    "replicaError": "更新分享設定失敗，請再試。",
     "replicaHelp": "開啟分享後，其他成員可以從呢部裝置補返錯過嘅訊息同已儲存嘅附件。關閉分享都仲可以收訊息。",
     "pendingAcceptance": "等緊接受",
     "trigger": "成員",
@@ -936,9 +939,6 @@
     "leave": "退出頻道",
     "confirmLeave": "退出呢個頻道？你唔會再收到新訊息。本機歷史記錄會保留。",
     "transferBeforeLeave": "退出前請先將群主轉畀其他成員。",
-    "devices": "裝置（{{count}} 部）",
-    "deviceIdentity": "裝置 {{id}}",
-    "addLinkedDevice": "加入已連結裝置",
     "referencePartial": "只顯示已知成員。受大小限制，呢份共享成員清單並唔完整。",
     "detailsReconciling": "正在核對群組資料，目前顯示最後確認嘅政策。",
     "historyUnavailable": "暫時未取得群組歷史記錄政策。請保持一部已關聯裝置在線，再試一次。"

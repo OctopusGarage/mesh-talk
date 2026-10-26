@@ -889,6 +889,9 @@
     "noDeviceChanges": "沒有已記錄的裝置變更。"
   },
   "members": {
+    "groupSettings": "群組設定",
+    "backToMembers": "返回成員列表",
+    "yourPreferences": "我的偏好",
     "historyTitle": "新成員可見的歷史訊息",
     "historyHelp": "選擇與新成員分享的近期訊息。這不會變更現有成員的歷史訊息。",
     "historyLoading": "正在載入歷史訊息設定…",
@@ -909,7 +912,7 @@
     "activity_transferred": "{{actor}} 將群主轉讓給 {{target}}",
     "activity_left": "{{actor}} 退出了頻道",
     "activity_accepted": "{{actor}} 接受了邀請",
-    "replicaDisabled": "副本已關閉",
+    "replicaDisabled": "已停止分享",
     "disableReplica": "停止分享",
     "enableReplica": "恢復分享",
     "fileSharingMetered": "已暫停自動提供附件副本，以節省流量",
@@ -918,7 +921,7 @@
     "fileSharingHelp": "訊息和你自己傳送的檔案繼續傳輸。暫時許可適用於此裝置上的所有群組，在網路費用狀態變更或登出後失效。此功能不設定每日上傳上限。",
     "fileSharingAllow": "暫時允許",
     "fileSharingProtect": "恢復流量保護",
-    "replicaError": "無法更新共享設定。請重新開啟成員列表後重試。",
+    "replicaError": "無法更新分享設定，請重試。",
     "replicaHelp": "分享後，其他成員可從此裝置復原錯過的訊息和已儲存的附件。關閉分享仍可接收訊息。",
     "pendingAcceptance": "等待接受",
     "trigger": "成員",
@@ -936,9 +939,6 @@
     "leave": "退出頻道",
     "confirmLeave": "退出此頻道？你將不再收到新訊息。本機歷史記錄會保留。",
     "transferBeforeLeave": "退出前請先將群主轉讓給其他成員。",
-    "devices": "裝置（{{count}} 台）",
-    "deviceIdentity": "裝置 {{id}}",
-    "addLinkedDevice": "新增連結裝置",
     "referencePartial": "僅顯示已知成員。受大小限制，此共享成員清單並不完整。",
     "detailsReconciling": "正在核對群組資料，目前顯示最後確認的政策。",
     "historyUnavailable": "尚未取得群組歷史記錄政策。請保持一台關聯裝置在線，然後重試。"

@@ -5,7 +5,7 @@ test.use({ viewport: { width: 1100, height: 800 } });
 
 test("linked devices render as one member and native owner-account authority applies on a sibling", async ({
   page,
-}) => {
+}, testInfo) => {
   await enterChat(page);
   await page.evaluate(
     ({ account, device, channel }) => {
@@ -73,17 +73,29 @@ test("linked devices render as one member and native owner-account authority app
     0,
   );
   await expect(dialog.getByTestId(`member-dm-${BOB.device}`)).toHaveCount(1);
-  await dialog
-    .getByTestId("member-devices-account:acc_self_aaaa1111")
-    .locator("summary")
-    .click();
-  const linked = dialog.getByTestId("member-device-device_self_linked");
-  await expect(linked).toBeVisible();
+  await expect(dialog.locator('[data-testid^="member-devices-"]')).toHaveCount(
+    0,
+  );
+  await expect(dialog.getByText(/Devices \(/)).toHaveCount(0);
   await expect(
-    linked.getByRole("button", { name: /Transfer ownership/ }),
+    dialog.getByText(/device_self_linked|device_self_0001/),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByRole("combobox", { name: "History for new members" }),
   ).toHaveCount(0);
   await expect(dialog.getByTestId("dissolve-channel-trigger")).toBeVisible();
-  await expect(linked.getByRole("button", { name: /Remove/ })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("members-desktop.png") });
+  await page.setViewportSize({ width: 620, height: 700 });
+  await page.screenshot({ path: testInfo.outputPath("members-narrow.png") });
+  await dialog.getByTestId("group-settings-trigger").click();
+  await expect(
+    dialog.getByRole("heading", { name: "Group settings", exact: true }),
+  ).toBeVisible();
+  await expect(dialog.locator('[data-testid^="member-devices-"]')).toHaveCount(
+    0,
+  );
+  await dialog.getByTestId("group-members-back").click();
+  await expect(dialog.getByTestId("group-settings-trigger")).toBeFocused();
   await expect(
     dialog.getByTestId("member-remove-account-acc_self_aaaa1111"),
   ).toHaveCount(0);

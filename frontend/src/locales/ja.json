@@ -889,6 +889,9 @@
     "noDeviceChanges": "デバイス変更の記録はありません。"
   },
   "members": {
+    "groupSettings": "グループ設定",
+    "backToMembers": "メンバーに戻る",
+    "yourPreferences": "自分の設定",
     "historyTitle": "新しいメンバーに共有する履歴",
     "historyHelp": "新しいメンバーに共有する最近のメッセージを選択します。既存のメンバーの履歴は変わりません。",
     "historyLoading": "履歴の設定を読み込み中…",
@@ -909,7 +912,7 @@
     "activity_transferred": "{{actor}} が所有権を {{target}} に譲渡",
     "activity_left": "{{actor}} がチャンネルを退出",
     "activity_accepted": "{{actor}} が招待を承諾",
-    "replicaDisabled": "複製オフ",
+    "replicaDisabled": "共有はオフです",
     "disableReplica": "共有を停止",
     "enableReplica": "共有を再開",
     "fileSharingMetered": "データ使用量を抑えるため、添付ファイルの自動共有を一時停止しています",
@@ -918,7 +921,7 @@
     "fileSharingHelp": "メッセージや自分が送信するファイルの転送は継続します。一時的な許可はこの端末のすべてのグループに適用され、ネットワークの課金・通信制限の状態が変わるか、ログアウトすると終了します。1 日のアップロード量の上限はありません。",
     "fileSharingAllow": "一時的に許可",
     "fileSharingProtect": "データ節約を再開",
-    "replicaError": "共有設定を更新できませんでした。メンバー一覧を開き直して、もう一度お試しください。",
+    "replicaError": "共有設定を更新できませんでした。もう一度お試しください。",
     "replicaHelp": "共有すると、他のメンバーはこの端末から未受信のメッセージや保存済みの添付ファイルを復元できます。停止してもメッセージは受信できます。",
     "pendingAcceptance": "承諾待ち",
     "trigger": "メンバー",
@@ -936,9 +939,6 @@
     "leave": "チャンネルから退出",
     "confirmLeave": "このチャンネルから退出しますか？新しいメッセージは届かなくなります。履歴はこの端末に残ります。",
     "transferBeforeLeave": "退出する前に、別のメンバーへオーナー権限を移してください。",
-    "devices": "デバイス（{{count}}台）",
-    "deviceIdentity": "デバイス {{id}}",
-    "addLinkedDevice": "リンク済みデバイスを追加",
     "referencePartial": "既知のメンバーのみ表示しています。サイズ制限により、共有された名簿は一部のみです。",
     "detailsReconciling": "グループ情報を照合しています。最後に確認できたポリシーを表示しています。",
     "historyUnavailable": "グループの履歴ポリシーはまだ取得できていません。リンク済みの端末をオンラインにして、再試行してください。"

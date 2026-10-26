@@ -889,6 +889,9 @@
     "noDeviceChanges": "没有已记录的设备变更。"
   },
   "members": {
+    "groupSettings": "群设置",
+    "backToMembers": "返回成员列表",
+    "yourPreferences": "我的偏好",
     "historyTitle": "新成员可见的历史消息",
     "historyHelp": "选择与新成员共享的近期消息。这不会更改现有成员的历史消息。",
     "historyLoading": "正在加载历史消息设置…",
@@ -909,7 +912,7 @@
     "activity_transferred": "{{actor}} 将群主转让给 {{target}}",
     "activity_left": "{{actor}} 退出了频道",
     "activity_accepted": "{{actor}} 接受了邀请",
-    "replicaDisabled": "副本已关闭",
+    "replicaDisabled": "已停止分享",
     "disableReplica": "停止共享",
     "enableReplica": "恢复共享",
     "fileSharingMetered": "已暂停自动提供附件副本，以节省流量",
@@ -918,7 +921,7 @@
     "fileSharingHelp": "消息和你自己发送的文件继续传输。临时许可适用于此设备上的所有群，在网络费用状态变化或退出登录后失效。此功能不设置每日上传上限。",
     "fileSharingAllow": "临时允许",
     "fileSharingProtect": "恢复流量保护",
-    "replicaError": "无法更新共享设置。请重新打开成员列表后重试。",
+    "replicaError": "无法更新分享设置，请重试。",
     "replicaHelp": "共享后，其他成员可从此设备恢复错过的消息和已保存的附件。关闭共享仍可接收消息。",
     "pendingAcceptance": "等待接受",
     "trigger": "成员",
@@ -936,9 +939,6 @@
     "leave": "退出频道",
     "confirmLeave": "退出此频道？你将不再接收新消息。本机历史记录会保留。",
     "transferBeforeLeave": "退出前请先将群主转让给其他成员。",
-    "devices": "设备（{{count}} 台）",
-    "deviceIdentity": "设备 {{id}}",
-    "addLinkedDevice": "添加关联设备",
     "referencePartial": "仅显示已知成员。受大小限制，此共享成员列表并不完整。",
     "detailsReconciling": "正在核对群资料，当前显示最后确认的策略。",
     "historyUnavailable": "尚未取得群历史记录策略。请保持一台关联设备在线，然后重试。"

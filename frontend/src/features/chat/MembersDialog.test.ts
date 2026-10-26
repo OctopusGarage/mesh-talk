@@ -169,6 +169,31 @@ vi.mock("@/components/ui/dialog", () => {
 });
 
 import { MembersDialog } from "./MembersDialog";
+import { GroupPreferences } from "./GroupPreferences";
+
+async function openGroupSettings(container: HTMLElement) {
+  const trigger = container.querySelector<HTMLButtonElement>(
+    '[data-testid="group-settings-trigger"]',
+  );
+  expect(trigger).not.toBeNull();
+  await act(async () => trigger!.click());
+}
+
+function preferences() {
+  return createElement(GroupPreferences, {
+    channelId: chatState.active.id,
+    myId: chatState.myId,
+    channelOwner: chatState.channelOwner,
+    dissolved: false,
+    sharedReference: false,
+    referenceOnly: false,
+    canManage: true,
+    selfAccepted: true,
+    ownMember: chatState.members.find(
+      (member) => member.user_id === chatState.myId,
+    ),
+  });
+}
 
 const defaultMembers = chatState.members.map((member) => ({ ...member }));
 const defaultPeers = chatState.peers.map((peer) => ({ ...peer }));
@@ -252,7 +277,7 @@ it("projects three signed devices as two people with one stable owner badge", ()
   expect(html).toContain("Canonical owner");
   expect(html).not.toContain("Messi10");
   expect(html).not.toContain('data-testid="member-dm-linked-device"');
-  expect(html).toContain('data-testid="member-device-linked-device"');
+  expect(html).not.toContain('data-testid="member-device-linked-device"');
 });
 
 it("keeps unbound devices separate even when their display names match", () => {
@@ -299,9 +324,7 @@ it("removes an account through one atomic action and transfers to a verified mem
       container.querySelectorAll('[data-testid^="member-dm-"]'),
     ).toHaveLength(1);
     expect(
-      container
-        .querySelector('[data-testid="member-device-peer-pending"]')
-        ?.querySelector('[title="Transfer ownership"]'),
+      container.querySelector('[data-testid="member-device-peer-pending"]'),
     ).toBeNull();
     const transfer = container.querySelector<HTMLButtonElement>(
       '[data-testid="member-transfer-account-peer-account"]',
@@ -354,7 +377,7 @@ it("does not grant owner controls to another device of the owner's account", () 
   );
 });
 
-it("deduplicates invite people while exposing additional devices under existing accounts", async () => {
+it("deduplicates invite people and never offers existing-account devices as extra members", async () => {
   chatState.peers = [
     ...defaultPeers,
     { ...defaultPeers[0], user_id: "peer-linked" },
@@ -374,15 +397,11 @@ it("deduplicates invite people while exposing additional devices under existing 
     ).toHaveLength(1);
     expect(
       container.querySelector('[data-testid="member-add-device-owner-linked"]'),
-    ).not.toBeNull();
-    await act(async () =>
-      container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="member-add-device-owner-linked"]',
-        )!
-        .click(),
-    );
-    expect(chatState.addMember).toHaveBeenCalledExactlyOnceWith("owner-linked");
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid^="member-devices-"]'),
+    ).toBeNull();
+    expect(chatState.addMember).not.toHaveBeenCalled();
   } finally {
     await act(async () => root.unmount());
   }
@@ -416,7 +435,7 @@ it("offers dissolution to the owner of an active channel", () => {
   expect(html).toContain('data-testid="dissolve-channel-trigger"');
 });
 
-it("shows a member's signed replica opt-out", () => {
+it("keeps another member's sharing preference out of the member list", () => {
   chatState.members = [
     ...chatState.members,
     {
@@ -427,7 +446,9 @@ it("shows a member's signed replica opt-out", () => {
     },
   ];
   const html = renderToStaticMarkup(createElement(MembersDialog));
-  expect(html).toContain('data-testid="member-replica-disabled-peer-device"');
+  expect(html).not.toContain(
+    'data-testid="member-replica-disabled-peer-device"',
+  );
 });
 
 it("shows a newer store membership after the dialog's initial fetch", async () => {
@@ -578,6 +599,7 @@ it("loads live replica state, toggles the local replica, and preserves it on a f
     expect(channelApi.channelMembers).toHaveBeenCalledWith("channel");
     expect(channelApi.channelActivity).toHaveBeenCalledWith("channel");
 
+    await openGroupSettings(container);
     const toggle = () =>
       Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
         (button) => button.textContent?.includes("sharing"),
@@ -587,11 +609,7 @@ it("loads live replica state, toggles the local replica, and preserves it on a f
       "channel",
       false,
     );
-    expect(
-      container.querySelector(
-        '[data-testid="member-replica-disabled-owner-device"]',
-      ),
-    ).not.toBeNull();
+    expect(container.textContent).toContain("Sharing is off");
 
     channelApi.setChannelReplicaEnabled.mockRejectedValueOnce(
       new Error("offline"),
@@ -601,11 +619,7 @@ it("loads live replica state, toggles the local replica, and preserves it on a f
       "channel",
       true,
     );
-    expect(
-      container.querySelector(
-        '[data-testid="member-replica-disabled-owner-device"]',
-      ),
-    ).not.toBeNull();
+    expect(container.textContent).toContain("Sharing is off");
     expect(container.textContent).toContain("Could not update");
   } finally {
     await act(async () => root.unmount());
@@ -767,10 +781,12 @@ it("does not show the previous channel's activity while the new channel loads", 
   try {
     await act(async () => root.render(createElement(MembersDialog)));
     await act(async () => dialog.onOpenChange?.(true));
+    await openGroupSettings(container);
     expect(container.textContent).toContain("Me created this channel");
 
     chatState.active = { kind: "channel", id: "other", name: "Other" };
     await act(async () => root.render(createElement(MembersDialog)));
+    await openGroupSettings(container);
     expect(container.textContent).not.toContain("Me created this channel");
   } finally {
     await act(async () => root.unmount());
@@ -983,8 +999,7 @@ it("shows a temporary file-sharing pause without presenting the saved replica pr
       },
     },
   ];
-  const { MembersDialog } = await import("./MembersDialog");
-  const html = renderToStaticMarkup(createElement(MembersDialog));
+  const html = renderToStaticMarkup(preferences());
   expect(html).toContain("Automatic attachment sharing is paused to save data");
   expect(html).toContain("There is no daily upload cap");
   expect(html).toContain("Allow temporarily");
@@ -1010,6 +1025,7 @@ it("keeps unknown cost explicit and sends an owner-bound exception without claim
   const root = createRoot(container);
   try {
     await act(async () => root.render(createElement(MembersDialog)));
+    await openGroupSettings(container);
     expect(container.textContent).toContain("network cost is unknown");
     const allow = Array.from(container.querySelectorAll("button")).find(
       (button) => button.textContent === "Allow temporarily",
@@ -1046,6 +1062,7 @@ it("lets the local device revoke an exception while manual share-off hides tempo
   const root = createRoot(container);
   try {
     await act(async () => root.render(createElement(MembersDialog)));
+    await openGroupSettings(container);
     expect(container.textContent).toContain(
       "Automatic attachment sharing is temporarily allowed",
     );
@@ -1237,7 +1254,7 @@ it("offers an account transfer on a shared owner sibling and retains its pending
   }
 });
 
-it("keeps account member order and read-only device details identical on a sibling reference", () => {
+it("keeps account member order and privacy identical on a sibling reference", () => {
   chatState.members = [
     { user_id: "owner-device", account_id: "owner-account", name: "Me" },
     { user_id: "peer-device", account_id: "peer-account", name: "Alice" },
@@ -1264,10 +1281,8 @@ it("keeps account member order and read-only device details identical on a sibli
   expect(reference).toContain("2 members");
   expect(reference).toContain("1 known online");
   for (const html of [local, reference]) {
-    expect(html).toContain(
-      'data-testid="member-devices-account:owner-account"',
-    );
-    expect(html).toContain('data-testid="member-devices-account:peer-account"');
+    expect(html).not.toContain('data-testid="member-devices-');
+    expect(html).not.toContain("Devices (");
   }
   expect(reference).not.toContain("Disable replica");
 });
@@ -1291,8 +1306,76 @@ it("shows authenticated group activity on a sibling reference", async () => {
   try {
     await act(async () => root.render(createElement(MembersDialog)));
     await act(async () => dialog.onOpenChange?.(true));
+    expect(container.textContent).not.toContain("Activity");
+    await openGroupSettings(container);
     expect(container.textContent).toContain("Activity");
     expect(container.textContent).toContain("created this channel");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("keeps the member list about people without device details or personal settings", () => {
+  chatState.members = [
+    ...defaultMembers,
+    {
+      user_id: "linked-device",
+      account_id: "owner-account",
+      name: "Other login",
+    },
+    {
+      user_id: "peer-device",
+      account_id: "peer-account",
+      name: "Alice",
+      replica_enabled: false,
+    },
+  ];
+  const container = document.createElement("div");
+  container.innerHTML = renderToStaticMarkup(createElement(MembersDialog));
+  expect(container.querySelectorAll("[data-member-row]")).toHaveLength(2);
+  expect(
+    container.querySelectorAll('[data-testid="member-owner-badge"]'),
+  ).toHaveLength(1);
+  expect(
+    container.querySelector('[data-testid^="member-devices-"]'),
+  ).toBeNull();
+  expect(
+    container.querySelector('[data-testid^="member-replica-disabled-"]'),
+  ).toBeNull();
+  expect(container.textContent).not.toMatch(
+    /Devices|linked-device|owner-device|History for new members|Stop sharing/,
+  );
+  expect(container.textContent).not.toContain("owne … ount");
+  expect(
+    container.querySelector('[data-testid="group-settings-trigger"]'),
+  ).not.toBeNull();
+});
+
+it("keeps group preferences behind a separate settings view and returns to members", async () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () => dialog.onOpenChange?.(true));
+    expect(container.textContent).not.toContain("History for new members");
+    const settings = container.querySelector<HTMLButtonElement>(
+      '[data-testid="group-settings-trigger"]',
+    );
+    expect(settings).not.toBeNull();
+    await act(async () => settings!.click());
+    expect(container.textContent).toContain("Group settings");
+    expect(container.textContent).toContain("History for new members");
+    expect(container.querySelectorAll("[data-member-row]")).toHaveLength(0);
+    expect(
+      container.querySelector('[data-testid^="member-devices-"]'),
+    ).toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="group-members-back"]')!
+        .click(),
+    );
+    expect(container.querySelectorAll("[data-member-row]")).toHaveLength(1);
+    expect(container.textContent).not.toContain("History for new members");
   } finally {
     await act(async () => root.unmount());
   }

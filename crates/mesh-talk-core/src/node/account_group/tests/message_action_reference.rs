@@ -556,12 +556,15 @@ async fn reference_message_action(recall: bool) {
     tasks.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Admission temporarily overrides cached support without awaiting. A single
+// runtime thread keeps live capability responses from replacing that override
+// between cache mutation and synchronous executor selection.
+#[tokio::test]
 async fn reference_member_reacts_over_noise_with_private_projection_and_history_off() {
     reference_message_action(false).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn reference_member_recall_pins_original_author_over_ready_sibling_with_history_off() {
     reference_message_action(true).await;
 }

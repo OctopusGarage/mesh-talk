@@ -889,6 +889,9 @@
     "noDeviceChanges": "No recorded device changes."
   },
   "members": {
+    "groupSettings": "Group settings",
+    "backToMembers": "Back to members",
+    "yourPreferences": "Your preferences",
     "historyTitle": "History for new members",
     "historyHelp": "Choose the recent messages shared with new members. This does not change existing members’ history.",
     "historyLoading": "Loading history setting…",
@@ -909,7 +912,7 @@
     "activity_transferred": "{{actor}} transferred ownership to {{target}}",
     "activity_left": "{{actor}} left the channel",
     "activity_accepted": "{{actor}} accepted the invitation",
-    "replicaDisabled": "Replica off",
+    "replicaDisabled": "Sharing is off",
     "disableReplica": "Stop sharing",
     "enableReplica": "Resume sharing",
     "fileSharingMetered": "Automatic attachment sharing is paused to save data",
@@ -918,7 +921,7 @@
     "fileSharingHelp": "Messages and files you send continue. Temporary permission applies to all groups on this device until network cost changes or you sign out. There is no daily upload cap.",
     "fileSharingAllow": "Allow temporarily",
     "fileSharingProtect": "Resume data protection",
-    "replicaError": "Could not update sharing. Reopen the member list and try again.",
+    "replicaError": "Could not update sharing. Try again.",
     "replicaHelp": "Sharing helps members recover missed messages and saved attachments from this device. Turning it off does not stop incoming messages.",
     "pendingAcceptance": "Awaiting acceptance",
     "trigger": "Members",
@@ -936,9 +939,6 @@
     "leave": "Leave channel",
     "confirmLeave": "Leave this channel? You will stop receiving new messages. Your local history remains on this device.",
     "transferBeforeLeave": "Transfer ownership to another member before you leave this channel.",
-    "devices": "Devices ({{count}})",
-    "deviceIdentity": "Device {{id}}",
-    "addLinkedDevice": "Add linked device",
     "referencePartial": "Only known members are shown. This shared roster is partial because of size limits.",
     "detailsReconciling": "Group details are being reconciled. The last confirmed policy is shown.",
     "historyUnavailable": "The group history policy is not available yet. Keep a linked device online, then retry."

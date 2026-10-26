@@ -19,7 +19,7 @@ format support cannot be verified, creation fails before a group is written.
 
 ## Review membership
 
-Open the channel's members control in the conversation header. Member profiles show known account and device identities. A known endpoint can belong to a relay; it is not proof of the person's physical location.
+Open the channel's members control in the conversation header. Each account appears once, with its nickname, avatar, presence and role. Select a person to view their profile or start a private conversation. Device totals, device identities and other members' sharing preferences are not shown in this list. Open **Group settings** for your preferences and the group history policy.
 
 Membership belongs to your account. Linking another device does not require the
 group owner to invite or approve that device again. An accepted, reachable device
@@ -69,7 +69,7 @@ availability guarantee.
 
 ## History for new members
 
-The owner can open the channel's member controls and change **History for new members**.
+The owner can open **Members → Group settings** and change **History for new members**.
 Other members can view this setting. Pending invitees and closed channels cannot change it.
 
 | Setting                        | Earlier text messages included                                         |
@@ -114,7 +114,7 @@ and older sync versions receive an upgrade response rather than unknown events.
 
 ## Share retained history
 
-Open the members control and find your own accepted membership. **Stop sharing** disables this device's **Share a copy** participation; **Resume sharing** enables it again. Sharing lets authorized members obtain retained channel history and available attachments from this device. Turning it off does not stop incoming messages or recovery of your own authorized history. Upgrade all members before using these controls with older clients.
+Open **Members → Group settings → Your preferences**. **Stop sharing** disables this device's **Share a copy** participation; **Resume sharing** enables it again. Sharing lets authorized members obtain retained channel history and available attachments from this device. Turning it off does not stop incoming messages or recovery of your own authorized history. Upgrade all members before using these controls with older clients.
 
 A reachable member must retain the needed events and keys and permit sharing for member recovery to work. An opaque post office can hold encrypted copies but cannot grant membership or recover missing endpoint identity keys. A retained message or file card does not guarantee that attachment contents remain available.
 
@@ -126,7 +126,7 @@ network cost. Messages and your original file sends continue. **Share a copy**
 stays enabled and cached files remain subject to their normal retention rules.
 Sharing resumes automatically when the network is reported unrestricted.
 
-The members dialog shows the pause on this device. **Allow temporarily** permits
+Your group preferences show the pause on this device. **Allow temporarily** permits
 file assistance across all groups on this device until the reported cost status
 changes or you sign out. **Resume data protection** revokes the exception sooner.
 An exception never overrides **Stop sharing** or group access permissions.
