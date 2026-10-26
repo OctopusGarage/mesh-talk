@@ -2,6 +2,51 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-call-media",
+      "paths": [
+        "frontend/src/store/calls.ts",
+        "frontend/src/store/calls.test.ts",
+        "frontend/src/features/chat/CallDialog.tsx",
+        "frontend/src/features/chat/CallConnectionNotice.tsx",
+        "frontend/src/features/chat/CallDialog.test.ts",
+        "frontend/e2e/call-dialog-harness.tsx",
+        "frontend/e2e/helpers/call-media-harness.ts",
+        "frontend/e2e/call-media.spec.ts",
+        "frontend/e2e/call-readiness.spec.ts",
+        "frontend/e2e/call-media-physical.spec.ts",
+        "docs/help/topics/calls.md"
+      ],
+      "frontend": [
+        "src/store/calls.test.ts",
+        "src/features/chat/CallDialog.test.ts",
+        "src/lib/localeParity.test.ts",
+        "src/features/chat/WebRtcTestDialog.test.ts",
+        "src/store/settings.test.ts"
+      ],
+      "capability": {
+        "summary": "Play remote voice and video through the shipped call dialog, preserve audio-only fallback, and release playback and capture on termination.",
+        "guide": "docs/help/topics/calls.md#media-playback-and-cleanup",
+        "invariants": [
+          {
+            "name": "A connected remote audio stream has an unmuted playback element even without video; replacement and unmount pause and detach the old stream.",
+            "reference": "docs/help/topics/calls.md#media-playback-and-cleanup"
+          },
+          {
+            "name": "Media connection failure terminates the call as failed and releases local capture and peer connections; browser acceptance uses the production playback UI.",
+            "reference": "docs/help/topics/calls.md#media-playback-and-cleanup"
+          },
+          {
+            "name": "Calls with only explicitly unavailable direct routes explain the limitation before capture; legacy unknown and routed candidates remain attemptable, and session-bound retries resolve current routes. Cross-LAN calls still require live direct authenticated signaling and an independent host-candidate media route; mailboxes provide neither signaling fallback nor TURN.",
+            "reference": "docs/network-design-reference.md#f-calls-live-signaling-and-separate-media"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/call-media.spec.ts for real browser voice/video/fallback playback and hangup cleanup. Synthetic capture and substituted signaling do not establish native permissions, speaker audibility or physical cross-LAN acceptance.",
+        "Use opt-in call-media-physical.spec.ts with prepared SDK fixtures and exact LAN addresses (MESH_TALK_MEDIA_TOPOLOGY=lan) for two-machine voice/video acceptance, or Tailscale addresses for routed media evidence; check physical microphone, camera, acoustic playback and hangup in each claimed native WebView separately."
+      ]
+    },
+    {
       "id": "frontend-group-file-network-cost",
       "paths": [
         "frontend/src/features/chat/MembersDialog.tsx",
@@ -1599,6 +1644,26 @@
     }
   ],
   "prScenarios": [
+    {
+      "id": "frontend-call-media-acceptance",
+      "paths": [
+        "frontend/src/store/calls.ts",
+        "frontend/src/store/calls.test.ts",
+        "frontend/src/features/chat/CallDialog.tsx",
+        "frontend/src/features/chat/CallConnectionNotice.tsx",
+        "frontend/src/features/chat/CallDialog.test.ts",
+        "frontend/e2e/call-dialog-harness.tsx",
+        "frontend/e2e/helpers/call-media-harness.ts",
+        "frontend/e2e/call-media.spec.ts",
+        "frontend/e2e/call-readiness.spec.ts",
+        "frontend/e2e/call-media-physical.spec.ts",
+        "docs/help/topics/calls.md"
+      ],
+      "browser": [
+        "e2e/call-media.spec.ts",
+        "e2e/call-readiness.spec.ts"
+      ]
+    },
     {
       "id": "group-file-network-cost-acceptance",
       "paths": [

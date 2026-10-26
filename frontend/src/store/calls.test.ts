@@ -856,6 +856,87 @@ describe("call deadlines cancel remote ringing", () => {
 });
 
 describe("terminal negotiation and timer ownership", () => {
+  it("retains an owner-bound outgoing retry intent after signaling failure and clears it on dismissal", async () => {
+    const target = { name: "Bob", accountId: "bob", deviceIds: ["bob-device"] };
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "send_call_signal") throw new Error("unreachable");
+    });
+    await useCalls.getState().startCall(target, false);
+    expect(useCalls.getState()).toMatchObject({
+      failureKind: "connection",
+      retryTarget: {
+        target,
+        video: false,
+        owner: "alice",
+        generation: useAuth.getState().generation,
+      },
+    });
+    useCalls.getState().clearEnded();
+    expect(useCalls.getState().retryTarget).toBeNull();
+  });
+
+  it("distinguishes capture denial from connection failure", async () => {
+    getUserMedia.mockRejectedValue(new Error("microphone denied"));
+    await useCalls
+      .getState()
+      .startCall({ name: "Bob", accountId: "bob", deviceIds: ["bob"] }, false);
+    expect(useCalls.getState().failureKind).toBe("capture");
+    useCalls.getState().teardown();
+    expect(useCalls.getState().retryTarget).toBeNull();
+  });
+
+  for (const connected of [false, true]) {
+    it(`reports a media connection failure ${connected ? "after connection" : "during negotiation"} and releases capture`, async () => {
+      const peers: FakePc[] = [];
+      const close = vi.fn();
+      class ObservedPc extends FakePc {
+        constructor() {
+          super();
+          peers.push(this);
+        }
+        close = close;
+      }
+      vi.stubGlobal("RTCPeerConnection", ObservedPc);
+      const stop = vi.fn();
+      getUserMedia.mockResolvedValueOnce({
+        getTracks: () => [{ stop }],
+        getAudioTracks: () => [],
+        getVideoTracks: () => [],
+      });
+      await useCalls
+        .getState()
+        .startCall(
+          { name: "Bob", accountId: "bob", deviceIds: ["bob-device"] },
+          false,
+        );
+      const callId = useCalls.getState().callId;
+      const peer = peers[0];
+      if (connected) {
+        useCalls.getState().onSignal({
+          from: "bob-device",
+          payload: JSON.stringify({ callId, kind: "answer", sdp: "ANSWER" }),
+        });
+        peer.connectionState = "connected";
+        peer.onconnectionstatechange?.();
+      }
+      invoke.mockClear();
+      peer.connectionState = "failed";
+      peer.onconnectionstatechange?.();
+      expect(useCalls.getState()).toMatchObject({
+        phase: "idle",
+        endedReason: "failed",
+        localStream: null,
+        remoteStream: null,
+      });
+      expect(stop).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledOnce();
+      expect(invoke).toHaveBeenCalledWith("send_call_signal", {
+        target: "bob-device",
+        payload: JSON.stringify({ callId, kind: "bye", reason: "failed" }),
+      });
+    });
+  }
+
   it("an invalid first answer cancels the loser and terminates the selected device", async () => {
     class InvalidPc extends FakePc {
       setRemoteDescription = vi.fn(async () => {
