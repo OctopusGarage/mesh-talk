@@ -244,8 +244,10 @@ pub struct Node {
     pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) post_office_send_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) post_office_receive_enabled: std::sync::atomic::AtomicBool,
-    /// Session-only IDs of relay envelopes already processed. Losing this cache
-    /// on restart causes a safe re-download, never a lost inner event.
+    /// Optional encrypted mappings, validated against retained history on open.
+    pub(in crate::node) opaque_receive_cache:
+        Mutex<super::opaque_receive_cache::OpaqueReceiveCache>,
+    /// Active transfer hints. Discarding them causes safe re-downloads.
     pub(in crate::node) opaque_seen: Mutex<HashMap<ConversationId, HashSet<EventId>>>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
     // files (dm/channels/files/queries/linking/serving) can reach them; they stay
@@ -484,7 +486,16 @@ impl Node {
             origin_res,
             contacts_res,
             recovered_ids_res,
+            opaque_cache_res,
         ) = std::thread::scope(|s| {
+            let h_opaque = s.spawn(|| {
+                super::opaque_receive_cache::OpaqueReceiveCache::open(
+                    log_path,
+                    password,
+                    &identity.public(),
+                    &account.account_id(),
+                )
+            });
             let h_log = s.spawn(|| PersistentEventLog::open(log_path, password));
             let h_sent = s.spawn(|| SentLog::open(sent_path, password));
             let h_sess = s.spawn(|| RatchetSessions::open(&dir.join("ratchet.sessions"), password));
@@ -551,10 +562,13 @@ impl Node {
                 h_origin.join(),
                 h_contacts.join(),
                 h_recovered_ids.join(),
+                h_opaque.join(),
             )
         });
         // A join() error means the opening thread panicked; re-raise the panic so it
         // is not silently swallowed. A normal open failure surfaces as the inner Err.
+        let opaque_receive_cache =
+            opaque_cache_res.unwrap_or_else(|e| std::panic::resume_unwind(e));
         let mut log = log_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut sentlog = sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -791,6 +805,7 @@ impl Node {
             &account.public().ed25519_pub,
         )?;
         let account_document_updates = tokio::sync::watch::channel(0).0;
+        let opaque_seen = opaque_receive_cache.restored(&log);
         let node = Arc::new(Self {
             expiry_clock_start: (std::time::Instant::now(), now_millis()),
             expiry_first_seen: Mutex::new(HashMap::new()),
@@ -906,7 +921,8 @@ impl Node {
             post_office_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_send_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_receive_enabled: std::sync::atomic::AtomicBool::new(true),
-            opaque_seen: Mutex::new(HashMap::new()),
+            opaque_seen: Mutex::new(opaque_seen),
+            opaque_receive_cache: Mutex::new(opaque_receive_cache),
             preferred_routes: Mutex::new(HashMap::new()),
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),

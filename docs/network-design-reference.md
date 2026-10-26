@@ -1890,6 +1890,24 @@ A later operation retries the rejected events after permissions, causal parents
 or local storage recover. Existing signature, conversation and attachment policy
 checks remain authoritative.
 
+Successfully opened wrappers whose inner events are retained in the local event
+log also produce optional encrypted receive hints in a sidecar next to that log.
+Hints bind the complete local device, account and derived mailbox identity. On
+Node recreation, only mappings whose inner IDs still exist after local replay
+seed the receive set. Missing local history therefore remains recoverable even
+when an older hint file survives. Invalid envelopes, ignored file-consent controls,
+staged events outside the main log and rejected admissions are not persisted as
+receive hints. Existing operation-local retry rules continue to apply.
+
+The sidecar appends only new ID mappings, without storing message content or
+rewriting history. It is limited to 250,000 mappings and 64 MiB; saturation stops
+new hint writes. Duplicate hints perform no disk writes. Corrupt, foreign-owner
+or unavailable files are preserved and disable this optimization for that run;
+receive continues through ordinary validation. Hints need no per-event fsync and
+may be lost on a crash: they never acknowledge custody or delivery. This reduces
+repeat mailbox transfer after restart, while encrypted history replay, local
+index reconstruction and uncached controls still require startup work.
+
 ### Session reuse contract
 
 A retained session is exclusive to one borrower and reusable only after a complete successful sequential sync exchange has consumed its responses. The key/admission checks include full public identity, endpoint, current policy generation and authenticated account/role consistency. Canceled operations, malformed replies, pending unexpected bytes, EOF and stale policy/bindings cause eviction. Idle expiry releases capacity even without another checkout. When an authenticated

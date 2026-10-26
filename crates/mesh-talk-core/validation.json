@@ -1214,6 +1214,10 @@
             "reference": "docs/network-design-reference.md#session-reuse-contract"
           },
           {
+            "name": "Optional bounded encrypted mailbox receive hints survive restart only with retained inner-event evidence and exact device/account ownership; corrupt, unavailable or saturated caches never block ordinary receive or missing-history recovery",
+            "reference": "docs/network-design-reference.md#idle-mailbox-work-and-rejected-pages"
+          },
+          {
             "name": "Healthy relay receiving keeps its own cadence while a valid slow alternative retains bounded progress; unrelated roster churn cannot cancel eligible work, current policy/network changes retire owned requests, and mailbox switches retain a dedicated receive-worker wake for prompt cancellation and resumption",
             "reference": "docs/network-design-reference.md#session-reuse-contract"
           }

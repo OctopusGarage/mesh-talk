@@ -69,8 +69,8 @@ impl WrapperCache {
 }
 
 /// `seen` avoids pulling the same retained blobs every three seconds. The
-/// signed inner event remains the durable truth; the cache is only an in-memory
-/// transfer hint and can be discarded without losing delivery.
+/// signed inner event remains the durable truth; restored hints are checked
+/// against retained inner events and can be discarded without losing delivery.
 struct OpaqueRoundStore<'a> {
     node: &'a Node,
     relay: PublicIdentity,
@@ -402,6 +402,7 @@ impl Node {
         drop(outer_store);
         let mut inner: Vec<(EventId, Event)> = Vec::new();
         let mut processed = Vec::new();
+        let mut retained = Vec::new();
         for outer in wrappers {
             match progress.mailbox.open(&outer) {
                 Ok(event) => inner.push((outer.id, event)),
@@ -446,8 +447,10 @@ impl Node {
                 .has(&event.id)
             {
                 processed.push(outer_id);
+                retained.push((outer_id, event.id));
                 continue;
             }
+            let inner_id = event.id;
             let conv = event.conversation_id;
             let admission = store
                 .lock()
@@ -463,12 +466,26 @@ impl Node {
                 progress.defer_event(outer_id)?;
             } else {
                 processed.push(outer_id);
+                if self
+                    .log
+                    .lock()
+                    .expect("log lock not poisoned")
+                    .has(&inner_id)
+                {
+                    retained.push((outer_id, inner_id));
+                }
                 self.emit_new_messages(conv);
                 self.process_channel_reception(conv, "catch_up");
                 self.process_file_events_reception(conv, "catch_up");
                 self.process_profile_events(conv);
                 self.persist_media_if_complete(conv);
             }
+        }
+        if !retained.is_empty() {
+            self.opaque_receive_cache
+                .lock()
+                .expect("opaque cache lock not poisoned")
+                .remember(progress.mailbox.id(), &retained);
         }
         if !processed.is_empty() {
             let mut cache = self
@@ -535,6 +552,195 @@ mod permission_tests {
     use super::*;
     use crate::identity::{account::Account, device::DeviceIdentity};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn opaque_receive_restart_skips_payload_and_recovers_missing_inner() {
+        struct ObservedRelay {
+            log: EventLog,
+            exported: std::cell::Cell<usize>,
+        }
+        impl SyncStore for ObservedRelay {
+            fn requires_channel_v2(&self, _: &ConversationId) -> bool {
+                false
+            }
+            fn requires_channel_v3(&self, _: &ConversationId) -> bool {
+                false
+            }
+            fn requires_channel_v4(&self, _: &ConversationId) -> bool {
+                false
+            }
+            fn event_ids(&self, conv: &ConversationId) -> Vec<EventId> {
+                SyncStore::event_ids(&self.log, conv)
+            }
+            fn events_excluding(
+                &self,
+                conv: &ConversationId,
+                have: &HashSet<EventId>,
+            ) -> Vec<Event> {
+                self.log.events_excluding(conv, have)
+            }
+            fn events_excluding_bounded(
+                &self,
+                conv: &ConversationId,
+                have: &HashSet<EventId>,
+                bytes: usize,
+                frames: usize,
+            ) -> Vec<Event> {
+                let events = self.log.events_excluding_bounded(conv, have, bytes, frames);
+                self.exported.set(self.exported.get() + events.len());
+                events
+            }
+            fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+                self.log.append(event)
+            }
+        }
+        for federated in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let identity = DeviceIdentity::generate();
+            let keys = identity.secret_bytes();
+            let account = Account::generate();
+            let account_key = account.secret_bytes();
+            let remote = DeviceIdentity::generate();
+            let proof = crate::discovery::Announce::new_with_account(
+                &remote,
+                &Account::generate(),
+                "Remote",
+                47475,
+            );
+            let relay = DeviceIdentity::generate();
+            let relay_public = relay.public();
+            let mailbox = if federated {
+                RelayMailbox::federated(&identity, &remote.public())
+            } else {
+                RelayMailbox::new(&identity, &remote.public(), &relay_public)
+            }
+            .unwrap();
+            let conv = super::super::conversation::dm_conversation_id(
+                &identity.public(),
+                &remote.public(),
+            );
+            let inner = Event::new(
+                &remote,
+                conv,
+                1,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                vec![7; 32000],
+            );
+            let outer = mailbox.wrap(&inner).unwrap();
+            let mut relay_log = EventLog::default();
+            relay_log.append(outer.clone()).unwrap();
+            let relay_log = Arc::new(Mutex::new(ObservedRelay {
+                log: relay_log,
+                exported: std::cell::Cell::new(0),
+            }));
+            let newer = Event::new(
+                &remote,
+                conv,
+                2,
+                vec![inner.id],
+                2,
+                0,
+                EventKind::Message,
+                vec![8; 32000],
+            );
+            for pass in 0..5 {
+                if pass == 2 {
+                    relay_log
+                        .lock()
+                        .unwrap()
+                        .log
+                        .append(mailbox.wrap(&newer).unwrap())
+                        .unwrap();
+                }
+                if pass == 3 {
+                    // A surviving sidecar must never hide locally missing history.
+                    std::fs::remove_file(root.path().join("events.log")).unwrap();
+                }
+                if pass == 4 {
+                    // Corruption disables the optional cache, without preventing login or receive.
+                    std::fs::write(root.path().join("events.log.opaque-receive"), b"corrupt")
+                        .unwrap();
+                }
+                let (node, _, _) = super::super::test_support::node_with_files(
+                    root.path(),
+                    DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+                    Account::from_secret_bytes(account_key),
+                    &proof,
+                );
+                node.cached_peer_snapshot_async().await.unwrap();
+                let before = relay_log.lock().unwrap().exported.get();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let store = relay_log.clone();
+                let relay_keys = relay.secret_bytes();
+                let task = tokio::spawn(async move {
+                    let (server, _) = listener.accept().await.unwrap();
+                    let relay = DeviceIdentity::from_secret_bytes(relay_keys.0, relay_keys.1);
+                    let mut channel = crate::transport::SecureChannel::accept(server, &relay)
+                        .await
+                        .unwrap();
+                    while matches!(
+                        super::super::session::serve_one(&mut channel, &store).await,
+                        Ok(super::super::session::Served::Handled(_))
+                    ) {}
+                });
+                let client = tokio::net::TcpStream::connect(address).await.unwrap();
+                let mut channel = crate::transport::SecureChannel::connect(
+                    client,
+                    &node.identity,
+                    Some(&relay_public),
+                )
+                .await
+                .unwrap();
+                let receiving_mailbox = if federated {
+                    RelayMailbox::federated(&node.identity, &remote.public())
+                } else {
+                    RelayMailbox::new(&node.identity, &remote.public(), &relay_public)
+                }
+                .unwrap();
+                node.opaque_mailbox_round(&mut channel, &remote.public(), None, receiving_mailbox)
+                    .await
+                    .unwrap();
+                if pass >= 2 && !node.log.lock().unwrap().has(&newer.id) {
+                    // Outer IDs do not encode the inner DAG. If a child arrives
+                    // on an earlier page, a fresh operation retries it after its
+                    // parent has been admitted; rejected hints never persist.
+                    let mailbox = if federated {
+                        RelayMailbox::federated(&node.identity, &remote.public())
+                    } else {
+                        RelayMailbox::new(&node.identity, &remote.public(), &relay_public)
+                    }
+                    .unwrap();
+                    node.opaque_mailbox_round(&mut channel, &remote.public(), None, mailbox)
+                        .await
+                        .unwrap();
+                }
+                drop(channel);
+                task.await.unwrap();
+                let after = relay_log.lock().unwrap().exported.get();
+                assert!(node.log.lock().unwrap().has(&inner.id));
+                if pass >= 2 {
+                    assert!(node.log.lock().unwrap().has(&newer.id));
+                }
+                let transferred = after - before;
+                if pass <= 2 {
+                    assert_eq!(
+                        transferred,
+                        usize::from(pass != 1),
+                        "exact wrapper count for pass {pass}, federated={federated}"
+                    );
+                } else {
+                    assert!(
+                        (2..=3).contains(&transferred),
+                        "missing-inner/corrupt-cache fallback transfers both wrappers, retrying a child-first page if necessary"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn opaque_capability_probe_does_not_wrap_inner_controls() {
