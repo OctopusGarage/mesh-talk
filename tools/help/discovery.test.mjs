@@ -81,7 +81,7 @@ test("public site builds share the manual and honor a custom project subpath", a
   assert.match(html, /rel="alternate" type="text\/markdown" href="index.md"/);
   assert.match(html, /rel="describedby" type="text\/plain" href="llms.txt"/);
   assert.ok(html.includes(`<link rel="canonical" href="${url}"`));
-  assert.doesNotMatch(html, /https:\/\/octopusgarage.github.io\/mesh-talk\//);
+  assert.doesNotMatch(html, /https:\/\/octopusgarage\.github\.io\/mesh-talk\//);
   const schema = JSON.parse(
     html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)[1],
   );
@@ -107,10 +107,11 @@ test("public site builds share the manual and honor a custom project subpath", a
   const locations = [...sitemap.matchAll(/<loc>(.*?)<\/loc>/g)].map(
     (m) => m[1],
   );
-  assert.equal(new Set(locations).size, locations.length);
-  assert.ok(locations.includes(url));
+  const locationSet = new Set(locations);
+  assert.equal(locationSet.size, locations.length);
+  assert.ok(locationSet.has(url));
   for (const topic of data.topics)
-    assert.ok(locations.includes(`${url}help/${topic.id}.html`));
+    assert.ok(locationSet.has(`${url}help/${topic.id}.html`));
   for (const location of locations) {
     const relative = location.slice(url.length) || "index.html";
     await access(join(out, relative));
