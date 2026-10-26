@@ -946,10 +946,10 @@
   "createChannel": {
     "trigger": "Nuevo canal",
     "title": "Nuevo canal",
-    "description": "Invita dispositivos al canal. Cada dispositivo debe aceptar; los demás dispositivos de la misma cuenta necesitan su propia invitación.",
+    "description": "Invita a personas al canal. Cada cuenta aparece una sola vez y acepta una invitación. Los dispositivos vinculados comparten la pertenencia y los roles.",
     "namePlaceholder": "Nombre del canal",
-    "invite": "Invitar contactos",
-    "noPeers": "Todavía no hay contactos para invitar.",
+    "invite": "Invitar personas",
+    "noPeers": "Los contactos aparecen aquí cuando su identidad de cuenta está disponible.",
     "failed": "No se pudo crear el canal: {{error}}. Inténtalo de nuevo."
   },
   "about": {

@@ -529,16 +529,16 @@ export const chat = {
     owner: string,
     expectedAccount: string,
     name: string,
-    memberIds: string[],
+    memberAccountIds: string[],
   ) =>
     invoke<string>("owner_create_channel", {
       owner,
       expectedAccount,
       name,
-      memberIds,
+      memberAccountIds,
     }),
-  createChannel: (name: string, memberIds: string[]) =>
-    invoke<string>("create_channel", { name, memberIds }),
+  createChannel: (name: string, memberAccountIds: string[]) =>
+    invoke<string>("create_channel", { name, memberAccountIds }),
   channelMembers: (channelId: string) =>
     invoke<ChannelMembersInfo>("channel_members", { channelId }),
   setChannelHistoryPolicy: (channelId: string, policy: ChannelHistoryPolicy) =>

@@ -31,7 +31,7 @@ interface ChannelActionContext {
   ): void;
   capture(): { current(): boolean };
   commands: {
-    createChannel(name: string, memberIds: string[]): Promise<string>;
+    createChannel(name: string, memberAccountIds: string[]): Promise<string>;
     channelMembers(id: string): Promise<ChannelMembersInfo>;
   };
   submitControl(
@@ -43,7 +43,7 @@ interface ChannelActionContext {
   reportError(message: string): void;
 }
 export interface ChannelActions {
-  createChannel(name: string, memberIds: string[]): Promise<boolean>;
+  createChannel(name: string, memberAccountIds: string[]): Promise<boolean>;
   addMember(memberId: string): Promise<GroupOperationOutcome>;
   removeMember(memberId: string): Promise<GroupOperationOutcome>;
   removeMemberAccount(accountId: string): Promise<GroupOperationOutcome>;
@@ -213,13 +213,13 @@ export function createChannelActions(
       : Promise.resolve(unavailable());
   }
   return {
-    async createChannel(name, memberIds) {
+    async createChannel(name, memberAccountIds) {
       const lease = capture();
       if (!lease.current()) return false;
       const request = read().activeRequest + 1;
       lease.set({ activeRequest: request });
       const current = () => lease.current() && read().activeRequest === request;
-      const id = await commands.createChannel(name, memberIds);
+      const id = await commands.createChannel(name, memberAccountIds);
       if (!current()) return false;
       await refreshRoster();
       if (!current()) return false;

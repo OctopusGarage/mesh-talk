@@ -781,8 +781,16 @@ release; those owners recheck current membership and disclosure policy.
 
 Group creation retains its existing public creation and invitation producer.
 Its owner-scoped desktop adapter checks the expected account and exact runtime
-session before resolving invitees and rechecks at the creation commit. It does
-not invent an existing group lifetime or operation reference before genesis.
+session before resolving invitees and rechecks at the creation commit. Both
+desktop creation adapters take account IDs, not device IDs. The existing
+`channels/account_invitation.rs` owner authenticates the selected account and
+compatible format over Noise, trying its known routes. Creation reuses that
+resolver and the existing account-authority grants, including one pending grant
+per invited account and an immediately accepted creator-account owner grant.
+The existing atomic new-channel event-store boundary publishes genesis, account
+authority and initial history policy together; interrupted creation cannot expose
+a device-only genesis while losing its account grants.
+It does not invent an existing group lifetime or operation reference before genesis.
 
 Typed desktop operation commands capture the exact local session owner and
 expected account. Durable submission and cancellation recheck that authority at

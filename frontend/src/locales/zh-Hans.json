@@ -946,10 +946,10 @@
   "createChannel": {
     "trigger": "新建频道",
     "title": "新建频道",
-    "description": "邀请设备加入频道。每台设备都需自行接受；同一账号的其他设备也要单独邀请。",
+    "description": "选择要邀请入群的人。每个账号只显示一次，只需接受一次邀请。关联设备共享群成员资格和角色。",
     "namePlaceholder": "频道名称",
-    "invite": "邀请对端",
-    "noPeers": "暂无可邀请的对端。",
+    "invite": "邀请成员",
+    "noPeers": "可确认账号身份的联系人会显示在这里。",
     "failed": "无法创建频道：{{error}}。请重试。"
   },
   "about": {

@@ -134,36 +134,17 @@ pub(in crate::node) fn expected_invitation(
     }))
 }
 impl Node {
-    pub(in crate::node) async fn prepare_invitation_assets(
+    /// One authenticated account-target resolver for creation and later invitations.
+    pub(in crate::node) async fn verified_account_invitation_target(
         &self,
-        group: ConversationId,
         target_account_id: &str,
-    ) -> Result<InvitationAssets, NodeError> {
-        let input = InvitationInput {
+    ) -> Result<Announce, NodeError> {
+        if !(InvitationInput {
             target_account_id: target_account_id.into(),
-        };
-        if !input.canonical() {
-            return Err(NodeError::InvalidInput("invalid target account".into()));
-        }
-        if let Some(grant) = self
-            .account_group_projection(group)
-            .authority
-            .grants()
-            .into_iter()
-            .find(|grant| grant.original.account_id().as_deref() == Some(target_account_id))
+        })
+        .canonical()
         {
-            let target = grant.original;
-            let history = self.prepare_invitation_history(
-                group,
-                &target.public(),
-                Vec::new(),
-                crate::channel::HistoryPolicy::Off,
-            )?;
-            return Ok(InvitationAssets {
-                target,
-                incarnation: grant.incarnation,
-                history,
-            });
+            return Err(NodeError::InvalidInput("invalid target account".into()));
         }
         let mut peers: Vec<_> = self
             .routing_peers()
@@ -195,11 +176,46 @@ impl Node {
                 break;
             }
         }
-        let target = verified.ok_or_else(|| {
+        verified.ok_or_else(|| {
             NodeError::Channel(
                 "the invited account must be reachable with a compatible client".into(),
             )
-        })?;
+        })
+    }
+    pub(in crate::node) async fn prepare_invitation_assets(
+        &self,
+        group: ConversationId,
+        target_account_id: &str,
+    ) -> Result<InvitationAssets, NodeError> {
+        let input = InvitationInput {
+            target_account_id: target_account_id.into(),
+        };
+        if !input.canonical() {
+            return Err(NodeError::InvalidInput("invalid target account".into()));
+        }
+        if let Some(grant) = self
+            .account_group_projection(group)
+            .authority
+            .grants()
+            .into_iter()
+            .find(|grant| grant.original.account_id().as_deref() == Some(target_account_id))
+        {
+            let target = grant.original;
+            let history = self.prepare_invitation_history(
+                group,
+                &target.public(),
+                Vec::new(),
+                crate::channel::HistoryPolicy::Off,
+            )?;
+            return Ok(InvitationAssets {
+                target,
+                incarnation: grant.incarnation,
+                history,
+            });
+        }
+        let target = self
+            .verified_account_invitation_target(target_account_id)
+            .await?;
         let _policy = self.privacy.gate.read().await;
         let policy = self.channel_history_policy(group);
         let selected = self.select_join_history(group, policy, super::super::node::now_millis());

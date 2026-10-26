@@ -680,6 +680,7 @@ mod tests {
                     crate::chat_commands::set_group_file_sharing_override,
                     crate::chat_commands::set_channel_history_policy,
                     crate::chat_commands::list_channels,
+                    crate::chat_commands::get_presence,
                     crate::chat_commands::channel_members,
                     crate::chat_commands::channel_custody_statuses,
                     crate::chat_commands::add_channel_member,
@@ -917,7 +918,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Search channel", "memberIds":[]}),
+                serde_json::json!({"name":"Search channel", "memberAccountIds":[]}),
             )
             .unwrap();
         fixture
@@ -1101,7 +1102,7 @@ mod tests {
             .account_id()
             .to_owned();
         let created = fixture.invoke("owner_create_channel", serde_json::json!({
-            "owner":"alice", "expectedAccount":account, "name":"Scoped creation", "memberIds":[],
+            "owner":"alice", "expectedAccount":account, "name":"Scoped creation", "memberAccountIds":[],
         })).expect("group creation must expose an explicit owner/account command");
         let id = created.as_str().unwrap();
         assert_eq!(id.len(), 64);
@@ -1122,7 +1123,7 @@ mod tests {
             ("alice", "00000000000000000000000000000000"),
         ] {
             let error = fixture.invoke("owner_create_channel", serde_json::json!({
-                "owner":owner, "expectedAccount":expected_account, "name":"Must not create", "memberIds":[],
+                "owner":owner, "expectedAccount":expected_account, "name":"Must not create", "memberAccountIds":[],
             })).unwrap_err();
             assert_eq!(error["kind"], "authorization");
         }
@@ -1227,7 +1228,7 @@ mod tests {
             match command {
                 "owner_create_channel" => {
                     body["name"] = serde_json::json!("Must not create");
-                    body["memberIds"] = serde_json::json!([]);
+                    body["memberAccountIds"] = serde_json::json!([]);
                 }
 
                 "owner_new_account_group_operation_id" => {}
@@ -1640,6 +1641,13 @@ mod tests {
         assert_eq!(members["owner"], legacy_owner.public().user_id());
         assert_eq!(members["members"].as_array().unwrap().len(), 2);
         assert_eq!(members["can_manage"], false);
+        let presence = fixture
+            .invoke("get_presence", serde_json::json!({}))
+            .unwrap();
+        let group_presence = &presence[hex::encode(id.as_bytes())];
+        assert_eq!(group_presence["member_count"], 1);
+        assert_eq!(group_presence["unbound_member_count"], 1);
+        assert_eq!(group_presence["online_count"], 1);
         for (command, extra) in [
             (
                 "set_channel_history_policy",
@@ -2476,7 +2484,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Caps", "memberIds":[]}),
+                serde_json::json!({"name":"Caps", "memberAccountIds":[]}),
             )
             .unwrap();
         for _ in 0..201 {
@@ -2529,7 +2537,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Bytes", "memberIds":[]}),
+                serde_json::json!({"name":"Bytes", "memberAccountIds":[]}),
             )
             .unwrap();
         let text = "byte cap token ".to_owned() + &"x".repeat(60_000);
@@ -2676,7 +2684,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Retry images","memberIds":[]}),
+                serde_json::json!({"name":"Retry images","memberAccountIds":[]}),
             )
             .unwrap();
         for protection in [serde_json::Value::Null, serde_json::json!("click")] {
@@ -2738,7 +2746,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Protected images","memberIds":[]}),
+                serde_json::json!({"name":"Protected images","memberAccountIds":[]}),
             )
             .unwrap();
         let path = fixture.root.path().join("protected.png");
@@ -2824,7 +2832,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Protected", "memberIds":[]}),
+                serde_json::json!({"name":"Protected", "memberAccountIds":[]}),
             )
             .unwrap();
         let id = fixture.invoke("owner_enqueue_channel_text", serde_json::json!({"owner":"alice","channelId":channel,"text":"channel protected secret","protection":"click"})).unwrap();
@@ -3205,7 +3213,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Acceptance", "memberIds":[]}),
+                serde_json::json!({"name":"Acceptance", "memberAccountIds":[]}),
             )
             .unwrap();
         let path = fixture.root.path().join("photo.png");
@@ -3532,7 +3540,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"History settings", "memberIds":[]}),
+                serde_json::json!({"name":"History settings", "memberAccountIds":[]}),
             )
             .unwrap();
         for policy in [
@@ -3602,7 +3610,7 @@ mod tests {
         let cases = [
             (
                 "owner_create_channel",
-                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "name":"Must not create", "memberIds":[]}),
+                serde_json::json!({"owner":"alice", "expectedAccount":expected_account, "name":"Must not create", "memberAccountIds":[]}),
             ),
             (
                 "owner_new_account_group_operation_id",
@@ -3635,7 +3643,7 @@ mod tests {
             ),
             (
                 "create_channel",
-                serde_json::json!({"name":"must not create", "memberIds":[]}),
+                serde_json::json!({"name":"must not create", "memberAccountIds":[]}),
             ),
             (
                 "rename_channel",

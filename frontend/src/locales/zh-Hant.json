@@ -946,10 +946,10 @@
   "createChannel": {
     "trigger": "新增頻道",
     "title": "新增頻道",
-    "description": "邀請裝置加入頻道。每台裝置都須自行接受；同一帳號的其他裝置也要另外邀請。",
+    "description": "選擇要邀請入群的人。每個帳號只顯示一次，只需接受一次邀請。關聯裝置共用群成員資格和角色。",
     "namePlaceholder": "頻道名稱",
-    "invite": "邀請對方",
-    "noPeers": "目前沒有可邀請的對方。",
+    "invite": "邀請成員",
+    "noPeers": "可確認帳號身分的聯絡人會顯示在這裡。",
     "failed": "無法建立頻道：{{error}}。請再試一次。"
   },
   "about": {

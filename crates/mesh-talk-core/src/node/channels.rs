@@ -739,11 +739,12 @@ impl Node {
         name: &str,
         members: Vec<PublicIdentity>,
     ) -> Result<ConversationId, NodeError> {
-        self.create_channel_with_consent(name, members, false, |commit| commit())
+        self.create_channel_with_consent(name, members, false, None, |commit| commit())
             .await
     }
 
-    /// Desktop-created groups require every invited device to accept explicitly.
+    /// Legacy device-only invitations for compatibility consumers. Desktop
+    /// creation uses `create_account_channel_invited_if` and account acceptance.
     pub async fn create_channel_invited(
         &self,
         name: &str,
@@ -759,7 +760,76 @@ impl Node {
         members: Vec<PublicIdentity>,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<ConversationId, NodeError> {
-        self.create_channel_with_consent(name, members, true, authorize)
+        self.create_channel_with_consent(name, members, true, None, authorize)
+            .await
+    }
+
+    /// Create an account-owned group using verified account invitations.
+    pub async fn create_account_channel_invited_if(
+        &self,
+        name: &str,
+        member_account_ids: Vec<String>,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<ConversationId, NodeError> {
+        use super::channel_account_authority::{AccountAuthorityControl, AccountGrant};
+        // Account IDs stay authoritative while the shared invitation owner selects routes.
+        // Authenticate bindings and format support before creating any group.
+        let member_account_ids: std::collections::BTreeSet<_> =
+            member_account_ids.into_iter().collect();
+        if member_account_ids.len() > 255 {
+            return Err(NodeError::Channel("too many invitation targets".into()));
+        }
+        let mut bindings = std::collections::BTreeMap::new();
+        for expected_account in member_account_ids {
+            if expected_account == self.account_id() {
+                continue;
+            }
+            let proof = self
+                .verified_account_invitation_target(&expected_account)
+                .await?;
+            let account = proof
+                .account_cert
+                .as_ref()
+                .expect("verified account certificate")
+                .account_ed25519_pub;
+            bindings.insert(account, proof);
+        }
+        let own = self.own_group_proof();
+        bindings.insert(self.account.public().ed25519_pub, own.clone());
+        let authority = AccountAuthorityControl {
+            version: 1,
+            previous: None,
+            issuer: own,
+            owner_account: self.account.public().ed25519_pub,
+            grants: bindings
+                .iter()
+                .map(|(account, proof)| {
+                    let mut incarnation = [0; 16];
+                    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut incarnation);
+                    AccountGrant {
+                        incarnation,
+                        pending: *account != self.account.public().ed25519_pub,
+                        original: proof.clone(),
+                        membership_event: EventId::new([0; 32]),
+                        acceptance_event: None,
+                    }
+                })
+                .collect(),
+            revoked: Vec::new(),
+            legacy_bindings: bindings.into_values().collect(),
+            account_signature: vec![0; 64],
+        };
+        if AccountAuthorityControl::decode(&authority.encode()).is_none() {
+            return Err(NodeError::Channel(
+                "account invitations exceed group format limits".into(),
+            ));
+        }
+        let members = authority
+            .legacy_bindings
+            .iter()
+            .map(|proof| proof.public())
+            .collect();
+        self.create_channel_with_consent(name, members, true, Some(authority), authorize)
             .await
     }
 
@@ -768,6 +838,7 @@ impl Node {
         name: &str,
         mut members: Vec<PublicIdentity>,
         invite: bool,
+        mut authority: Option<super::channel_account_authority::AccountAuthorityControl>,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<ConversationId, NodeError> {
         let mut distribution = None;
@@ -788,23 +859,64 @@ impl Node {
                 owner: owner.clone(),
             };
 
-            self.append_event(
-                channel,
-                EventKind::MembershipChange,
-                if invite {
-                    meta.encode_invitation()
-                } else {
-                    meta.encode()
-                },
-            )?;
-            if invite {
-                self.append_event(
+            let membership = if invite {
+                meta.encode_invitation()
+            } else {
+                meta.encode()
+            };
+            let history_policy = || {
+                super::join_history::encode_policy(
+                    crate::channel::HistoryPolicy::LastTenWithinThreeDays,
+                )
+            };
+            if let Some(control) = authority.as_mut() {
+                // A crash must not publish a device-only genesis without its
+                // account grants. Reuse the existing atomic new-channel store.
+                let mut delivery = self.delivery.lock().expect("delivery mutex");
+                self.recover_delivery(&mut delivery)
+                    .map_err(NodeError::Log)?;
+                let mut log = self.log.lock().expect("log mutex");
+                let wall = now_millis();
+                let root = crate::eventlog::Event::new(
+                    &self.identity,
                     channel,
+                    1,
+                    vec![],
+                    1,
+                    wall,
+                    EventKind::MembershipChange,
+                    membership,
+                );
+                for grant in &mut control.grants {
+                    grant.membership_event = root.id;
+                }
+                let account = crate::eventlog::Event::new(
+                    &self.identity,
+                    channel,
+                    2,
+                    vec![root.id],
+                    2,
+                    wall,
+                    EventKind::ChannelAccountAuthority,
+                    control.signed_encode(channel, &self.account),
+                );
+                let policy = crate::eventlog::Event::new(
+                    &self.identity,
+                    channel,
+                    3,
+                    vec![account.id],
+                    3,
+                    wall,
                     EventKind::ChannelHistoryPolicy,
-                    super::join_history::encode_policy(
-                        crate::channel::HistoryPolicy::LastTenWithinThreeDays,
-                    ),
-                )?;
+                    history_policy(),
+                );
+                log.append_channel_batch_atomic(&[root, account, policy])
+                    .map_err(NodeError::Log)?;
+            } else {
+                self.append_event(channel, EventKind::MembershipChange, membership)?;
+                if invite {
+                    self.append_event(channel, EventKind::ChannelHistoryPolicy, history_policy())?;
+                }
             }
             // Build our own channel state (sets our identity for the sender-key path).
             self.process_channel(channel);

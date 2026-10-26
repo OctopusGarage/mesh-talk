@@ -425,25 +425,15 @@ pub async fn create_channel(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
     name: String,
-    member_ids: Vec<String>,
+    member_account_ids: Vec<String>,
 ) -> Result<String, CommandError> {
     let admission = RuntimeAdmission::capture_current(&app, &state)?;
     admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
-                let (node, members) = admission.checked(runtime, || {
-                    let rt = runtime;
-                    let mut members = Vec::new();
-                    for uid in &member_ids {
-                        let p = rt.channel_invitee_public(uid).ok_or_else(|| {
-                            CommandError::Validation(format!("unknown or ineligible peer: {uid}"))
-                        })?;
-                        members.push(p);
-                    }
-                    Ok((rt.handle(), members))
-                })?;
+                let node = admission.checked(runtime, || Ok(runtime.handle()))?;
                 let id = node
-                    .create_channel_invited_if(&name, members, |commit| {
+                    .create_account_channel_invited_if(&name, member_account_ids, |commit| {
                         admission.authorize_accept(runtime, commit)
                     })
                     .await

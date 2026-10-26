@@ -9,6 +9,14 @@ Start a group conversation and review its members from the conversation header.
 3. Choose **Create** and inspect any error before trying again.
 4. Open the new channel from the sidebar to send messages.
 
+Each account appears once in the invitation picker, regardless of its number of
+devices. Your own linked devices are not separate people to invite. A new group
+assigns ownership to your account immediately. Invited accounts accept once;
+their certified linked devices inherit that membership and role through the
+existing authenticated group-state and key exchange. Both people need a reachable,
+updated client when creating an account invitation. If its account binding or
+format support cannot be verified, creation fails before a group is written.
+
 ## Review membership
 
 Open the channel's members control in the conversation header. Member profiles show known account and device identities. A known endpoint can belong to a relay; it is not proof of the person's physical location.
@@ -64,12 +72,12 @@ availability guarantee.
 The owner can open the channel's member controls and change **History for new members**.
 Other members can view this setting. Pending invitees and closed channels cannot change it.
 
-| Setting | Earlier text messages included |
-| --- | --- |
-| Off | None |
-| Last 10 messages | Up to 10 retained text messages |
-| Last 3 days | Text messages authored in the preceding 3 days, within transfer limits |
-| Last 10 messages within 3 days | Up to 10 text messages from the preceding 3 days |
+| Setting                        | Earlier text messages included                                         |
+| ------------------------------ | ---------------------------------------------------------------------- |
+| Off                            | None                                                                   |
+| Last 10 messages               | Up to 10 retained text messages                                        |
+| Last 3 days                    | Text messages authored in the preceding 3 days, within transfer limits |
+| Last 10 messages within 3 days | Up to 10 text messages from the preceding 3 days                       |
 
 New invitation-based groups default to **Last 10 messages within 3 days**. Existing
 channels without a signed policy remain **Off**. The policy and selection are frozen

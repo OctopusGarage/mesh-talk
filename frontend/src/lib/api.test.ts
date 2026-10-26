@@ -288,11 +288,11 @@ describe("chat command mapping", () => {
       replyTo: null,
     });
   });
-  it("create_channel maps memberIds", async () => {
+  it("create_channel maps memberAccountIds", async () => {
     await chat.createChannel("general", ["a", "b"]);
     expect(invoke).toHaveBeenCalledWith("create_channel", {
       name: "general",
-      memberIds: ["a", "b"],
+      memberAccountIds: ["a", "b"],
     });
   });
   it("react_channel maps channelId/target/emoji/remove", async () => {
@@ -731,7 +731,7 @@ it("binds group creation to the captured owner and account", async () => {
     owner: "owner",
     expectedAccount: "account",
     name: "Group",
-    memberIds: ["peer"],
+    memberAccountIds: ["peer"],
   });
 });
 

@@ -213,6 +213,149 @@ fn inbound_server(node: Arc<Node>, listener: TcpListener) -> tokio::task::JoinHa
     })
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_group_invites_one_account_and_starts_with_account_owner_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let invited_account = Account::generate();
+    let first = node(&dir.path().join("first"), &invited_account);
+    let second = node(&dir.path().join("second"), &invited_account);
+    let mut servers = Vec::new();
+    for (index, peer) in [&first, &second].into_iter().enumerate() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let privacy = dir.path().join(format!("privacy-{index}"));
+        std::fs::create_dir_all(&privacy).unwrap();
+        configure(peer, &privacy, address.port());
+        owner.roster.lock().unwrap().update(
+            &peer.signed_announce("same account", address.port()),
+            address.ip(),
+            &owner.user_id(),
+        );
+        servers.push(inbound_server(peer.clone(), listener));
+    }
+    let group = owner
+        .create_account_channel_invited_if(
+            "Account invitations",
+            vec![first.account_id(), second.account_id()],
+            |commit| commit(),
+        )
+        .await
+        .unwrap();
+    let projection = owner.account_group_projection(group);
+    assert!(
+        projection.authority.current_event().is_some(),
+        "new groups must not wait for legacy migration"
+    );
+    assert_eq!(
+        projection.invited.len(),
+        1,
+        "two devices are one invitation"
+    );
+    assert_eq!(
+        owner.account_group_access(group).unwrap().role,
+        AccountGroupRole::Owner
+    );
+    assert!(
+        projection
+            .authority
+            .account_grant(&invited_account.public().ed25519_pub)
+            .unwrap()
+            .pending
+    );
+    for server in servers {
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn new_account_group_rejects_unknown_binding_and_retired_admission_before_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = node(dir.path(), &Account::generate());
+    let unknown = Account::generate().account_id();
+    assert!(
+        owner
+            .create_account_channel_invited_if("unknown", vec![unknown], |commit| commit())
+            .await
+            .is_err()
+    );
+    assert!(
+        owner
+            .create_account_channel_invited_if("retired", vec![], |_| Err(
+                super::super::NodeError::Authorization("retired".into())
+            ))
+            .await
+            .is_err()
+    );
+    assert!(
+        owner.list_channels().is_empty(),
+        "failed creation cannot leave a partial group"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_account_group_rejects_a_route_whose_authenticated_account_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let peer = node(&dir.path().join("peer"), &Account::generate());
+    let advertised_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    owner.roster.lock().unwrap().update(
+        &Announce::new_with_account(
+            &peer.identity,
+            &advertised_account,
+            "same nickname",
+            address.port(),
+        ),
+        address.ip(),
+        &owner.user_id(),
+    );
+    let server = inbound_server(peer, listener);
+    assert!(
+        owner
+            .create_account_channel_invited_if(
+                "Must not invite a replacement account",
+                vec![advertised_account.account_id()],
+                |commit| commit(),
+            )
+            .await
+            .is_err()
+    );
+    assert!(owner.list_channels().is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn new_account_group_crash_before_publication_cannot_leave_device_only_genesis() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = node(dir.path(), &Account::generate());
+    owner
+        .log
+        .lock()
+        .unwrap()
+        .before_rewrite_rename(Box::new(|| {
+            panic!("injected process loss before atomic genesis publication");
+        }));
+    let result = tokio::spawn(async move {
+        owner
+            .create_account_channel_invited_if("Atomic account group", vec![], |commit| commit())
+            .await
+    })
+    .await;
+    assert!(
+        result.is_err_and(|error| error.is_panic()),
+        "creation must use the atomic genesis publication boundary"
+    );
+    let reopened =
+        crate::eventlog::persist::PersistentEventLog::open(&dir.path().join("events.log"), "pw")
+            .unwrap();
+    assert!(
+        reopened.conversations().is_empty(),
+        "a failed new group must not restart as a device-only group"
+    );
+}
+
 async fn owner_binding_relay_scenario(owner_online: bool, certificate_only: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();

@@ -1076,6 +1076,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_account_group_membership_and_ownership_inherit_over_certified_sibling_sync() {
+        use crate::node::AccountGroupRole;
+        let group = Group::new().await;
+        let owner = &group.nodes[0];
+        // The account resolver selects a stable available device, not the
+        // fixture's arbitrary array index. Accept on that real invitation route.
+        let (source, target) = if group.nodes[1].user_id() < group.nodes[2].user_id() {
+            (&group.nodes[1], &group.nodes[2])
+        } else {
+            (&group.nodes[2], &group.nodes[1])
+        };
+        let member_group = owner
+            .create_account_channel_invited_if(
+                "Account membership",
+                vec![source.account_id()],
+                |commit| commit(),
+            )
+            .await
+            .unwrap();
+        source.accept_channel_invite(member_group).await.unwrap();
+        let owned_group = source
+            .create_account_channel_invited_if(
+                "Account ownership",
+                vec![group.nodes[3].account_id()],
+                |commit| commit(),
+            )
+            .await
+            .unwrap();
+        // Only the accepted sibling is reachable; neither group owner approves
+        // another device. Discover and pull through the real certified protocol.
+        group.servers[0].abort();
+        for node in &group.nodes[1..] {
+            node.roster.lock().unwrap().forget(&owner.identity.public());
+        }
+        let mut target_work = ChannelAccountMaintenance::default();
+        let mut source_work = ChannelAccountMaintenance::default();
+        for _ in 0..16 {
+            target.maintain_account_channels(&mut target_work).await;
+            source.maintain_account_channels(&mut source_work).await;
+        }
+        assert_eq!(
+            target.account_group_access(member_group).unwrap().role,
+            AccountGroupRole::Member
+        );
+        assert_eq!(
+            target.account_group_access(owned_group).unwrap().role,
+            AccountGroupRole::Owner
+        );
+        assert!(target.channel_can_manage(owned_group));
+        assert_eq!(target.channel_member_account_sets(member_group).0.len(), 2);
+        assert!(
+            target
+                .account_group_projection(member_group)
+                .authority
+                .invitation_for_device(&target.identity.public(), &target.own_group_proof())
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn account_maintenance_inherits_and_exchanges_messages_with_owner_offline() {
         let group = Group::new().await;
         let owner = &group.nodes[0];

@@ -60,7 +60,10 @@
         "frontend/src/store/chat.ts",
         "frontend/src/store/chat.test.ts",
         "frontend/src/features/chat/MessageBubble.tsx",
-        "frontend/src/features/chat/MessageBubble.test.ts"
+        "frontend/src/features/chat/MessageBubble.test.ts",
+        "frontend/src/features/chat/CreateChannelDialog.tsx",
+        "frontend/src/features/chat/CreateChannelDialog.test.ts",
+        "frontend/e2e/create-channel-recovery.spec.ts"
       ],
       "frontend": [
         "src/features/chat/sidebar/conversationList.test.ts",
@@ -80,7 +83,8 @@
         "src/store/outgoingIntent/groupOperations.test.ts",
         "src/store/outgoingIntent.test.ts",
         "src/store/chat.test.ts",
-        "src/features/chat/MessageBubble.test.ts"
+        "src/features/chat/MessageBubble.test.ts",
+        "src/features/chat/CreateChannelDialog.test.ts"
       ],
       "capability": {
         "summary": "Render shared legacy group references distinctly from restored backups and transition to verified local state without duplicate rows.",
@@ -109,6 +113,10 @@
           {
             "name": "Channel message, File, reaction and recall requests reuse durable account operation IDs and pending tickets; committed effects alone refresh history and File settlement requires canonical metadata. File intake follows verified account participation rather than physical source availability. Cancellation retries retain the same operation ID through admission and refresh. Certified native account ownership governs sibling reaction toggles and chip actions, with the existing identifier fallback only when the ownership field is absent.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "New group selection lists each foreign account once, uses its canonical display identity, and excludes the creator account; desktop creation authenticates account grants before distribution.",
+            "reference": "docs/help/topics/channels.md#start-a-channel"
           }
         ]
       },

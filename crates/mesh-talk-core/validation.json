@@ -39,6 +39,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_group::",
+            "new_account_group_membership_and_ownership_inherit_over_certified_sibling_sync",
             "node::reaction_store::",
             "node::message_actions::",
             "node::account_documents::store::tests::",

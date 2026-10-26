@@ -142,7 +142,7 @@ pub async fn owner_create_channel(
     owner: String,
     expected_account: String,
     name: String,
-    member_ids: Vec<String>,
+    member_account_ids: Vec<String>,
     app: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
 ) -> Result<String, CommandError> {
@@ -150,24 +150,14 @@ pub async fn owner_create_channel(
     admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
-                let (handle, members) = admission.checked(runtime, || {
+                let handle = admission.checked(runtime, || {
                     if runtime.account_id() != expected_account {
                         return Err(CommandError::Authorization("account changed".into()));
                     }
-                    let members = member_ids
-                        .iter()
-                        .map(|id| {
-                            runtime.channel_invitee_public(id).ok_or_else(|| {
-                                CommandError::InvalidInput(format!(
-                                    "unknown or ineligible peer: {id}"
-                                ))
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok((runtime.handle(), members))
+                    Ok(runtime.handle())
                 })?;
                 let id = handle
-                    .create_channel_invited_if(&name, members, |commit| {
+                    .create_account_channel_invited_if(&name, member_account_ids, |commit| {
                         admission.authorize_accept(runtime, commit)
                     })
                     .await

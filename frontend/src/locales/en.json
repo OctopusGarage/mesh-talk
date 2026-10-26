@@ -946,10 +946,10 @@
   "createChannel": {
     "trigger": "New channel",
     "title": "New channel",
-    "description": "Invite devices to a channel. Each device must accept before joining; another device on the same account needs its own invitation.",
+    "description": "Invite people to a channel. Each account appears once and accepts one invitation. Linked devices share membership and roles.",
     "namePlaceholder": "Channel name",
-    "invite": "Invite peers",
-    "noPeers": "No peers to invite yet.",
+    "invite": "Invite people",
+    "noPeers": "Contacts appear here when their account identity is available.",
     "failed": "Couldn't create the channel: {{error}}. Try again."
   },
   "about": {
