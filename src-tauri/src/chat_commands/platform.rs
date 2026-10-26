@@ -568,7 +568,7 @@ mod screenshot_tests {
         let (_root, host, state, user) = capture_host();
         assert!(state.session().logout("capture-session").is_ok());
         assert!(matches!(
-            capture_screen(host.handle().clone(), true).await,
+            Box::pin(capture_screen(host.handle().clone(), true)).await,
             Err(CommandError::Authorization(_))
         ));
         state
@@ -576,7 +576,7 @@ mod screenshot_tests {
             .publish("replacement".into(), user, "pw".into());
         crate::app_lock::lock_app(host.state(), host.state()).unwrap();
         assert!(matches!(
-            capture_screen(host.handle().clone(), false).await,
+            Box::pin(capture_screen(host.handle().clone(), false)).await,
             Err(CommandError::Authorization(_))
         ));
     }
