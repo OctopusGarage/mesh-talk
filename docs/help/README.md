@@ -12,6 +12,7 @@ and the technical [documentation map](../README.md).
 
 | Your task                               | Guide                                                |
 | --------------------------------------- | ---------------------------------------------------- |
+| Understand capabilities and limitations | [About Mesh-Talk](topics/about-mesh-talk.md)         |
 | Get started                             | [Start using Mesh-Talk](topics/first-run.md)         |
 | Find another person                     | [Find people on your network](topics/find-people.md) |
 | Connect another site                    | [Connect across networks](topics/routed-networks.md) |
@@ -29,7 +30,7 @@ and the technical [documentation map](../README.md).
 | Search or retain local messages         | [History](topics/history.md)                         |
 | Keep a recoverable copy                 | [Backup and restore](topics/backup.md)               |
 | Change theme or wallpaper               | [Appearance](topics/appearance.md)                   |
-| Let a local agent send updates          | [Local agent access](topics/local-agent-access.md)          |
+| Let a local agent send updates          | [Local agent access](topics/local-agent-access.md)   |
 | Change language or startup behavior     | [General settings](topics/language.md)               |
 | Install a newer release                 | [Updates](topics/updates.md)                         |
 | Investigate connectivity                | [Diagnostics](topics/diagnostics.md)                 |

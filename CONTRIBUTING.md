@@ -1,11 +1,18 @@
 # Contributing
 
-Mesh-Talk is a serverless, end-to-end-encrypted LAN chat app: a Rust
-([Tauri](https://tauri.app/)) backend in `src-tauri/` and a React + Vite frontend in
-`frontend/`. A headless CLI (`mesh-talk-node`) drives the same core for testing without
-the GUI. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and
+Mesh-Talk is an end-to-end-encrypted desktop messenger for local and connected
+networks. Its UI-free Rust protocol core lives in `crates/mesh-talk-core/`, the
+[Tauri](https://tauri.app/) host in `src-tauri/`, and the React + Vite client in
+`frontend/`. Integrations and messaging MCP adapters have their own crates. The
+headless CLI (`mesh-talk-node`) uses the same core without the GUI. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and
 [documentation guidelines](docs/DOCUMENTATION_GUIDELINES.md) when changing
 user-facing copy or guides.
+
+Use the [change alignment checklist](docs/maintenance-checklist.md) to identify
+the help, site, AI exports, interfaces, release artifacts and other consumers
+affected by a change. Record applicable items, evidence and unresolved follow-ups
+in the PR rather than maintaining separate copies of product facts.
 
 ## Development setup
 
@@ -63,7 +70,7 @@ cargo run -p mesh-talk-core --bin mesh-talk-node -- \
 ## Coding style
 
 - **Rust**: `cargo fmt` (4-space indent, `snake_case` modules, `UpperCamelCase`
-  types) and `cargo clippy -- -D warnings`. Keep unit tests inline in a
+  types) and `cargo clippy --all-targets -- -D warnings`. Keep unit tests inline in a
   `#[cfg(test)] mod tests`.
 - **Frontend**: `npx prettier --write src/` in `frontend/`.
 - Match the surrounding code; see `specifications/development_conventions.md`.
