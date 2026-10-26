@@ -359,9 +359,18 @@ for (const theme of ["light", "dark"] as const) {
     ]) {
       await page.setViewportSize(viewport);
       await expect(sticker).toBeVisible();
-      const bounds = await sticker.boundingBox();
-      expect(bounds?.width).toBeLessThanOrEqual(128);
-      expect(bounds?.height).toBeLessThanOrEqual(128);
+      await expect
+        .poll(async () => {
+          const bounds = await sticker.boundingBox();
+          return (
+            bounds !== null &&
+            bounds.width > 0 &&
+            bounds.width <= 128 &&
+            bounds.height > 0 &&
+            bounds.height <= 128
+          );
+        })
+        .toBe(true);
       const screenshotName = `sticker-${theme}-${viewport.width}x${viewport.height}`;
       const path = testInfo.outputPath(`${screenshotName}.png`);
       await page.screenshot({ path });
