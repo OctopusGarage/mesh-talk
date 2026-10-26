@@ -82,6 +82,23 @@ function isTerminal(status: AccountGroupOperationStatus | undefined): boolean {
     ["committed", "rejected", "cancelled"].includes(status.phase.kind)
   );
 }
+
+/** Leave is one unresolved account action, even when its dialog is recreated. */
+export function unresolvedGroupLeave(
+  tickets: Iterable<GroupOperationTicket>,
+  accountId: string,
+  group: string,
+): GroupOperationTicket | undefined {
+  for (const ticket of tickets) {
+    if (
+      ticket.account_id === accountId &&
+      ticket.group === group &&
+      ticket.kind === "leave_account" &&
+      !isTerminal(ticket.status)
+    )
+      return ticket;
+  }
+}
 function outcome(status: AccountGroupOperationStatus): GroupOperationOutcome {
   const phase = status.phase.kind;
   return {
@@ -266,6 +283,16 @@ export function createGroupOperationCoordinator(
     ): Promise<GroupOperationOutcome> {
       const lease = context.capture();
       if (!lease?.current()) return { kind: "stale" };
+      const existingLeave = () =>
+        request.kind === "leave_account"
+          ? unresolvedGroupLeave(
+              context.tickets(),
+              lease.accountId,
+              request.group,
+            )
+          : undefined;
+      const existing = existingLeave();
+      if (existing) return currentOutcome(existing);
       let id: string;
       try {
         id = await context.commands.mint(lease.owner, lease.accountId);
@@ -275,6 +302,10 @@ export function createGroupOperationCoordinator(
           : { kind: "stale" };
       }
       if (!lease.current()) return { kind: "stale" };
+      // Another submission or recovered native observation can reserve the same
+      // logical Leave while minting yields. Keep its original durable identity.
+      const recovered = existingLeave();
+      if (recovered) return currentOutcome(recovered);
       const ticket: GroupOperationTicket = {
         id,
         account_id: lease.accountId,
@@ -427,7 +458,11 @@ export function createGroupOperationCoordinator(
                   lease.current() &&
                   ticketFor(lease, ticket.id)?.cancelRequested
                 )
-                  await requestCancellation(lease, ticket.id);
+                  // Bound this observer's wait, while requestCancellation retains
+                  // ownership until the original native mutation actually settles.
+                  await readWithDeadline(() =>
+                    requestCancellation(lease, ticket.id),
+                  );
               } catch {
                 failed = true;
                 if (lease.current()) context.report("observation_failed");

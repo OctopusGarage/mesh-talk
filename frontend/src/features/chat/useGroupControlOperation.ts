@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/store/auth";
 import { useChat } from "@/store/chat";
-import type { GroupOperationOutcome } from "@/store/accountGroupOperations";
+import {
+  unresolvedGroupLeave,
+  type GroupOperationOutcome,
+} from "@/store/accountGroupOperations";
 
 /** Dialog state only: the existing native-backed ticket owns durable operation state. */
 export function useGroupControlOperation(group: string | null) {
@@ -33,11 +36,22 @@ export function useGroupControlOperation(group: string | null) {
     };
   }, []);
   const current = local?.scope === scope ? local : null;
-  const id =
+  const localId =
     current?.outcome && "id" in current.outcome
       ? current.outcome.id
       : undefined;
-  const ticket = useChat((s) => (id ? s.groupOperations?.[id] : undefined));
+  const ticket = useChat((s) =>
+    localId
+      ? s.groupOperations?.[localId]
+      : owner && account && group
+        ? unresolvedGroupLeave(
+            Object.values(s.groupOperations ?? {}),
+            account,
+            group,
+          )
+        : undefined,
+  );
+  const id = localId ?? ticket?.id;
   const status =
     ticket && ticket.account_id === account && ticket.group === group
       ? ticket.status
@@ -56,7 +70,7 @@ export function useGroupControlOperation(group: string | null) {
           id,
           status,
         }
-      : current?.outcome;
+      : (current?.outcome ?? (id ? { kind: "unconfirmed", id } : undefined));
   const invoking = useRef<string | null>(null);
   const completion = useRef<{
     scope: string;

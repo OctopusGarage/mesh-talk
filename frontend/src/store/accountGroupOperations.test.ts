@@ -115,6 +115,50 @@ it("retains the same minted ID after uncertain IPC and resumes that intent", asy
   expect(invoke.mock.calls.map((args) => args[2])).toEqual([id, id]);
   expect(f.terminal).toHaveBeenCalledTimes(1);
 });
+it("rebinds an unresolved Leave without minting or submitting another operation", async () => {
+  const f = fixture();
+  const original: GroupOperationTicket = {
+    id,
+    account_id: account,
+    group,
+    kind: "leave_account",
+    stage: "observed",
+    observation: 1,
+    cancelRequested: true,
+    status: {
+      ...status({ kind: "cancellation_requested" }),
+      kind: "leave_account",
+    },
+  };
+  f.tickets.set(id, original);
+  const invoke = vi.fn();
+  const result = await f.coordinator.submit({
+    group,
+    kind: "leave_account",
+    invoke,
+  });
+  expect(result).toEqual({ kind: "pending", id, status: original.status });
+  expect(f.commands.mint).not.toHaveBeenCalled();
+  expect(invoke).not.toHaveBeenCalled();
+  expect(f.tickets.get(id)).toEqual(original);
+});
+it("retains the original unknown Leave ID when admission cannot be confirmed", async () => {
+  const f = fixture();
+  f.tickets.set(id, {
+    id,
+    account_id: account,
+    group,
+    kind: "leave_account",
+    stage: "unconfirmed",
+    observation: 0,
+  });
+  const invoke = vi.fn();
+  expect(
+    await f.coordinator.submit({ group, kind: "leave_account", invoke }),
+  ).toEqual({ kind: "unconfirmed", id });
+  expect(f.commands.mint).not.toHaveBeenCalled();
+  expect(invoke).not.toHaveBeenCalled();
+});
 it("rejects before mutation when local tracking capacity is exhausted", async () => {
   const f = fixture(0);
   const invoke = vi.fn(async () => status({ kind: "accepted" }));
@@ -144,6 +188,24 @@ it("clears only definite pre-admission errors", async () => {
     (await f.coordinator.submit({ group, kind: "rename", invoke })).kind,
   ).toBe("not_admitted");
   expect(f.tickets.size).toBe(0);
+});
+it("does not leave an unsupported legacy Leave permanently unconfirmed", async () => {
+  const f = fixture();
+  const error = {
+    kind: "invalid-input",
+    message:
+      "group account-membership format update required for this operation",
+  };
+  const invoke = vi.fn(async () => {
+    throw error;
+  });
+  expect(
+    await f.coordinator.submit({ group, kind: "leave_account", invoke }),
+  ).toEqual({ kind: "not_admitted", id, error });
+  expect(f.tickets.size).toBe(0);
+  await f.coordinator.refresh();
+  expect(f.commands.status).not.toHaveBeenCalled();
+  expect(f.commands.cancel).not.toHaveBeenCalled();
 });
 it("never applies a result for another account or group", async () => {
   const f = fixture();
@@ -273,6 +335,36 @@ it("serializes refresh within a session and releases it after the pending read s
   await pending;
   await f.coordinator.refresh();
   expect(f.commands.list).toHaveBeenCalledTimes(2);
+});
+it("keeps observing status after a cancellation RPC outlives the observation deadline", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  const cancellation = deferred<AccountGroupOperationStatus>();
+  try {
+    await f.coordinator.submit({
+      group,
+      kind: "rename",
+      invoke: async () => status({ kind: "accepted" }),
+    });
+    f.tickets.get(id)!.cancelRequested = true;
+    f.commands.cancel.mockReturnValueOnce(cancellation.promise);
+    const refreshing = f.coordinator.refresh();
+    await vi.advanceTimersByTimeAsync(10_000);
+    // A stalled cancellation must not own the shared observation lane forever.
+    f.commands.status.mockResolvedValueOnce(status({ kind: "committed" }));
+    await f.coordinator.refresh();
+    expect(f.commands.list).toHaveBeenCalledTimes(2);
+    expect(f.tickets.get(id)?.status?.phase.kind).toBe("committed");
+    expect(f.commands.cancel).toHaveBeenCalledTimes(1);
+    cancellation.resolve(status({ kind: "cancellation_requested" }));
+    await refreshing;
+    expect(f.tickets.get(id)?.status?.phase.kind).toBe("committed");
+    expect(f.terminal).toHaveBeenCalledTimes(1);
+  } finally {
+    cancellation.resolve(status({ kind: "cancellation_requested" }));
+    await Promise.resolve();
+    vi.useRealTimers();
+  }
 });
 it("does not let a retired observation lane release the replacement lane", async () => {
   const f = fixture();

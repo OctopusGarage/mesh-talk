@@ -1,6 +1,108 @@
 import { test, expect } from "./tauri-mock";
 import { BOB, CHANNEL, enterChat } from "./helpers/session";
 
+for (const result of ["pending", "not_admitted"] as const) {
+  test(`Leave ${result} survives navigation without duplicate or endless submission`, async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+    await page.getByTestId("members-trigger").click();
+    await page.getByRole("button", { name: "Transfer ownership bob" }).click();
+    await page
+      .getByRole("button", { name: "Transfer ownership", exact: true })
+      .click();
+    await page.evaluate(
+      ({ result }) => {
+        const host = window as unknown as {
+          __leaveCalls: number;
+          __TAURI_INTERNALS__: {
+            invoke: (
+              command: string,
+              args: Record<string, unknown>,
+            ) => Promise<unknown>;
+          };
+        };
+        const original = host.__TAURI_INTERNALS__.invoke;
+        let pending: Record<string, unknown> | undefined;
+        host.__leaveCalls = 0;
+        host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+          if (
+            command === "owner_submit_account_group_control" &&
+            (args.operation as { kind?: string }).kind === "leave_account"
+          ) {
+            host.__leaveCalls++;
+            if (result === "not_admitted")
+              throw {
+                kind: "invalid-input",
+                message:
+                  "group account-membership format update required for this operation",
+              };
+            pending = {
+              id: args.operationId,
+              account_id: args.expectedAccount,
+              group: args.channelId,
+              kind: "leave_account",
+              phase: { kind: "waiting_for_executor" },
+              executions: [],
+              committed_events: [],
+              primary_event: null,
+            };
+            return pending;
+          }
+          if (
+            pending &&
+            command === "owner_account_group_operation_status" &&
+            args.operationId === pending.id
+          )
+            return pending;
+          if (pending && command === "owner_list_account_group_operations")
+            return [pending];
+          return original(command, args);
+        };
+      },
+      { result },
+    );
+    const dialog = page.getByRole("dialog");
+    await dialog
+      .getByRole("button", { name: "Leave channel", exact: true })
+      .click();
+    const confirm = dialog.getByRole("button", {
+      name: "Leave channel",
+      exact: true,
+    });
+    await confirm.click();
+    if (result === "not_admitted") {
+      await expect(dialog.getByRole("alert")).toContainText(
+        "account-membership format update required",
+      );
+      await expect(confirm).toBeEnabled();
+      await expect(
+        page.getByText(
+          "The result is unconfirmed. Check this operation before retrying.",
+        ),
+      ).toHaveCount(0);
+    } else {
+      await expect(confirm).toBeDisabled();
+      await page.keyboard.press("Escape");
+      await page.getByTestId(`conversation-row-${BOB.account}`).click();
+      await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
+      await page.getByTestId("members-trigger").click();
+      await dialog
+        .getByRole("button", { name: "Leave channel", exact: true })
+        .click();
+      await expect(
+        dialog.getByRole("button", { name: "Leave channel", exact: true }),
+      ).toBeDisabled();
+    }
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { __leaveCalls: number }).__leaveCalls,
+      ),
+    ).toBe(1);
+  });
+}
+
 test.use({ viewport: { width: 1100, height: 800 } });
 
 test("linked devices render as one member and native owner-account authority applies on a sibling", async ({

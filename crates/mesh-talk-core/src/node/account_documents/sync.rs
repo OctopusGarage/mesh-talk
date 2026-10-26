@@ -2502,6 +2502,87 @@ mod group_control_tests {
                 },
             );
     }
+    #[tokio::test]
+    async fn authenticated_group_eof_backoff_keeps_pending_work_out_of_runnable_queue() {
+        use crate::node::account_sync::{mandatory_retry_deadline, take_ready_mandatory_peer};
+        use std::collections::VecDeque;
+        let mut fixture = UpgradeFixture::new().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut peer = fixture.peer.clone();
+        peer.addr = listener.local_addr().unwrap();
+        let key = install_operation_head(&fixture);
+        let meta = fixture.source.account_document_meta(&key).unwrap();
+        let source = fixture.source.clone();
+        let server = tokio::spawn(async move {
+            let (mut channel, _) = receive_document_request(&source, listener).await;
+            channel
+                .send(
+                    &AccountHistoryFrame::DocumentHeader {
+                        body: serde_json::to_vec(&meta).unwrap(),
+                    }
+                    .encode_version(AccountSyncVersion::V2)
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            // Drop after a real signed header, before its body and completion.
+        });
+        let mut cursor = DocumentSyncCursor::mandatory();
+        let error = fixture
+            .target
+            .pull_account_documents_page(&peer, &mut cursor)
+            .await
+            .unwrap_err();
+        assert!(transport_closed(&error));
+        server.await.unwrap();
+        let deadline = cursor
+            .retry_at
+            .expect("authenticated EOF has a short retry deadline");
+        assert!(cursor.pending && !cursor.up_to_date && cursor.error.is_none());
+        assert!(
+            !cursor.begin_refresh(),
+            "an incoming wake must retain the pending page"
+        );
+        let id = peer.public.user_id();
+        let mut queue = VecDeque::from([(id.clone(), peer.clone())]);
+        for _ in 0..32 {
+            assert!(
+                take_ready_mandatory_peer(
+                    &mut queue,
+                    |_| cursor.retry_at,
+                    deadline - Duration::from_nanos(1)
+                )
+                .is_none(),
+                "queued pending work must not create maintenance turns during its retry backoff"
+            );
+        }
+        queue.push_back(("ready peer".into(), peer.clone()));
+        assert_eq!(
+            take_ready_mandatory_peer(
+                &mut queue,
+                |key| (key == id).then_some(deadline),
+                deadline - Duration::from_nanos(1)
+            )
+            .unwrap()
+            .0,
+            "ready peer",
+            "a deferred peer cannot block healthy work"
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            mandatory_retry_deadline(&queue, |_| cursor.retry_at),
+            Some(deadline),
+            "the runner must wake at the short retry deadline rather than the periodic tick"
+        );
+        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        let (resumed, _) =
+            take_ready_mandatory_peer(&mut queue, |_| cursor.retry_at, deadline).unwrap();
+        assert_eq!(resumed, id);
+        assert!(mandatory_retry_deadline(&queue, |_| cursor.retry_at).is_none());
+        assert!(cursor.pending && !cursor.up_to_date);
+        fixture.servers.shutdown().await;
+    }
+
     async fn later_operation_probe_result_retires_a_concurrent_positive(close: bool) {
         let mut fixture = UpgradeFixture::new().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

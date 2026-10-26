@@ -346,7 +346,6 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (removing || transferring || leaving) return;
         setOpen(next);
         if (!next) {
           setProfileTarget(null);

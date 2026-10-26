@@ -109,6 +109,46 @@ fn a_certificate_for_an_owner_device_alone_cannot_claim_its_account_role() {
     );
 }
 
+#[test]
+fn legacy_account_leave_rejects_before_admission_instead_of_waiting_for_a_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let member = node(&dir.path().join("member"), &account);
+    let genesis = legacy_group(&owner, &member);
+    install(&member, &genesis);
+    let group = genesis.conversation_id;
+    let id = member
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    assert!(matches!(
+        member.submit_account_group_operation(
+            &account.account_id(), id, group, AccountGroupOperation::LeaveAccount,
+        ),
+        Err(crate::node::NodeError::InvalidInput(reason))
+            if reason.contains("account-membership format update required")
+    ));
+    assert!(
+        member
+            .account_group_operation_status(&account.account_id(), id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        member.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member
+    );
+    assert!(
+        !member
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .iter()
+            .any(|event| event.kind == EventKind::ChannelLeave)
+    );
+}
+
 #[tokio::test]
 async fn modern_owner_access_reuses_the_existing_account_authority() {
     let dir = tempfile::tempdir().unwrap();

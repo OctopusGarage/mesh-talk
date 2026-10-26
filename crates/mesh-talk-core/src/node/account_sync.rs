@@ -62,6 +62,26 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const ATTACHMENT_AVAILABILITY_TTL: Duration = Duration::from_secs(60);
 const MAX_UNAVAILABLE_ATTACHMENTS: usize = 256;
 
+/// Mandatory document admission respects its retained page retry deadline.
+/// Optional workers also own history/favorites and keep their independent scheduling.
+pub(in crate::node) fn take_ready_mandatory_peer(
+    queue: &mut std::collections::VecDeque<(String, PeerRecord)>,
+    retry_at: impl Fn(&str) -> Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<(String, PeerRecord)> {
+    let ready = queue
+        .iter()
+        .position(|(id, _)| retry_at(id).is_none_or(|at| at <= now))?;
+    queue.remove(ready)
+}
+
+pub(in crate::node) fn mandatory_retry_deadline(
+    queue: &std::collections::VecDeque<(String, PeerRecord)>,
+    retry_at: impl Fn(&str) -> Option<std::time::Instant>,
+) -> Option<std::time::Instant> {
+    queue.iter().filter_map(|(id, _)| retry_at(id)).min()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncPhase {
@@ -2115,7 +2135,17 @@ impl Node {
                 }
             }
             while mandatory_active.len() < MANDATORY_WORKERS {
-                let Some((id, peer)) = mandatory_queue.pop_front() else {
+                let Some((id, peer)) = take_ready_mandatory_peer(
+                    &mut mandatory_queue,
+                    |id| {
+                        mandatory_cursors.get(id).and_then(
+                            |state: &super::account_documents::sync::DocumentSyncCursor| {
+                                state.retry_at
+                            },
+                        )
+                    },
+                    std::time::Instant::now(),
+                ) else {
                     break;
                 };
                 if !mandatory_active.insert(id.clone()) {
@@ -2259,7 +2289,23 @@ impl Node {
             }
             let mut enqueue_all = false;
             let fanout_retry = fanout.next_retry();
+            // Deferred peers keep their cursor and queued refresh, but do not
+            // consume another worker/maintenance turn before the exact deadline.
+            let mandatory_retry = (mandatory_active.len() < MANDATORY_WORKERS)
+                .then(|| {
+                    mandatory_retry_deadline(&mandatory_queue, |id| {
+                        mandatory_cursors.get(id).and_then(|state| state.retry_at)
+                    })
+                })
+                .flatten();
             tokio::select! {
+                _ = async {
+                    if let Some(at) = mandatory_retry {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
                 _ = async {
                     if let Some(at) = fanout_retry {
                         tokio::time::sleep_until(at).await;

@@ -529,7 +529,9 @@ impl Node {
             if operation.self_control_input().is_some() {
                 sources.retain(|source| source.authority.authority.is_some());
                 if sources.is_empty() {
-                    return Err(NodeError::Channel(
+                    // Nothing has entered the journal. The host must report a
+                    // definite rejection, not keep observing an absent intent.
+                    return Err(NodeError::InvalidInput(
                         "group account-membership format update required for this operation".into(),
                     ));
                 }

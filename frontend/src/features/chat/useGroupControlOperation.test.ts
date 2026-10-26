@@ -138,3 +138,61 @@ it("renders before account initialization without a ticket or operation ID", asy
     if (h) await h.stop();
   }
 });
+
+it("rebinds an unresolved Leave after remount and preserves its cancellation request", async () => {
+  const status = {
+    id: "original-leave",
+    account_id: "account",
+    group: "group",
+    kind: "leave_account" as const,
+    phase: { kind: "cancellation_requested" as const },
+    executions: [],
+    primary_event: null,
+    committed_events: [],
+  };
+  state.groupOperations[status.id] = {
+    ...status,
+    stage: "observed",
+    observation: 1,
+    status,
+    cancelRequested: true,
+  };
+  const invoke = vi.fn();
+  let h: Awaited<ReturnType<typeof mount>> | undefined;
+  try {
+    h = await mount();
+    expect(h.get().id).toBe(status.id);
+    expect(h.get().busy).toBe(true);
+    expect(h.get().cancelRequested).toBe(true);
+    await h.stop();
+    h = await mount();
+    await act(async () => h!.get().run(invoke));
+    expect(h.get().id).toBe(status.id);
+    expect(h.get().outcome).toEqual({ kind: "pending", id: status.id, status });
+    expect(invoke).not.toHaveBeenCalled();
+  } finally {
+    state.groupOperations = {};
+    if (h) await h.stop();
+  }
+});
+
+it("rebinds an unknown Leave without treating it as cancelled or committed", async () => {
+  state.groupOperations.unknown = {
+    id: "unknown",
+    account_id: "account",
+    group: "group",
+    kind: "leave_account",
+    stage: "unconfirmed",
+    observation: 0,
+    cancelRequested: true,
+  };
+  const h = await mount();
+  try {
+    expect(h.get().outcome).toEqual({ kind: "unconfirmed", id: "unknown" });
+    expect(h.get().busy).toBe(true);
+    expect(h.get().cancelRequested).toBe(true);
+  } finally {
+    state.groupOperations = {};
+    await h.stop();
+  }
+});

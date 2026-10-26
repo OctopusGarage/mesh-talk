@@ -712,6 +712,20 @@ new controls; older envelopes receive an upgrade response before unknown kinds
 are transferred. Group counts and composite avatars use the same accepted
 account projection; pending invitations and duplicate devices do not add people.
 
+The desktop reuses one unresolved account Leave intent per group across dialog
+remounts and navigation. Reopening the member list must not mint a second Leave.
+A format rejection before journal admission is a definite input rejection, not
+an unconfirmed operation requiring endless status reads. Genuine IPC or journal
+uncertainty retains the original ID and does not imply cancellation or departure.
+Status observation has bounded waits even when a native cancellation remains
+outstanding; the original mutation still owns its result. Legacy physical-device
+departure is not a substitute for account departure: it cannot revoke sibling
+membership or let a new device sign an original member device's event.
+Mandatory document workers retain interrupted pages in the queue until their
+retry deadline. Other ready peers may proceed, and the exact queued deadline
+wakes the runner; a pending page must not create repeated maintenance turns
+before it is due. Optional history and favorites retain independent scheduling.
+
 Same-account group inventory is independent of that authority upgrade. Certified
 devices exchange bounded, versioned descriptive references through the existing
 private account-document session, including legacy groups currently held by only

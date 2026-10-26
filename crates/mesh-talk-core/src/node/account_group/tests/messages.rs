@@ -258,19 +258,91 @@ pub(super) fn panic_account_send_timeout(
     account: &Account,
     id: AccountGroupOperationId,
 ) -> ! {
+    // Inspect durable bytes before the input adapter's current-binding filters.
+    let raw_source = source
+        .account_group_operation_status(&account.account_id(), id)
+        .ok()
+        .flatten();
+    let group = raw_source.as_ref().map(|status| status.group).or_else(|| {
+        reference
+            .account_group_operation_status(&account.account_id(), id)
+            .ok()
+            .flatten()
+            .map(|status| status.group)
+    });
+    let durable = |node: &Node| {
+        let Some(group) = group else {
+            return "no_group".to_owned();
+        };
+        let key = crate::node::AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let meta = node.account_document_meta(&key).map(|meta| {
+            (
+                meta.revision,
+                hex::encode(meta.content_hash),
+                meta.content_len,
+                meta.writer_device == source.user_id(),
+            )
+        });
+        let document = node.account_document(&key);
+        let read_failed = document.is_err();
+        let frame = document.ok().flatten().and_then(|document| {
+            crate::node::account_group::operations::wire::OperationFrame::decode(
+                document.payload(),
+                &account.public().ed25519_pub,
+            )
+        });
+        let decoded = frame.is_some();
+        let binding = frame.as_ref().map(|frame| {
+            (
+                frame.group == group,
+                frame.proof.public() == source.identity.public(),
+                node.account_group_binding_current(&frame.proof),
+            )
+        });
+        let result = frame
+            .as_ref()
+            .and_then(|frame| {
+                frame
+                    .projection
+                    .results
+                    .iter()
+                    .find(|result| result.reference.id == id)
+            })
+            .map(|result| (&result.status.phase, result.status.primary_event.is_some()));
+        let request = frame.as_ref().is_some_and(|frame| {
+            frame
+                .projection
+                .requests
+                .iter()
+                .any(|request| request.reference.id == id)
+        });
+        format!(
+            "meta={meta:?} read_failed={read_failed} decoded={decoded} binding={binding:?} result={result:?} request={request} history={}",
+            node.device_sync_policy().history
+        )
+    };
+    let diagnostics = format!(
+        "source_raw=[{}] reference_raw=[{}] reference_sync={:?}",
+        durable(source),
+        durable(reference),
+        reference.device_sync_status()
+    );
     let Ok(Some(status)) = source.account_group_operation_status(&account.account_id(), id) else {
-        panic!("action timeout: selected source has not imported the request");
+        panic!("action timeout: selected source has not imported the request; {diagnostics}");
     };
     assert!(
         status.phase == AccountGroupOperationPhase::Committed,
-        "action timeout: selected source has not committed the effect"
+        "action timeout: selected source has not committed the effect; {diagnostics}"
     );
     let Some(event) = status.primary_event else {
-        panic!("action timeout: selected source has no original effect receipt");
+        panic!("action timeout: selected source has no original effect receipt; {diagnostics}");
     };
     assert!(
         external.log.lock().unwrap().get(&event).is_some(),
-        "action timeout: committed original effect has not reached the external member"
+        "action timeout: committed original effect has not reached the external member; {diagnostics}"
     );
     assert!(
         !reference
@@ -282,9 +354,11 @@ pub(super) fn panic_account_send_timeout(
                         && result.status.phase == AccountGroupOperationPhase::Committed
                 })
             }),
-        "action timeout: committed source frame awaits private-copy adoption"
+        "action timeout: committed source frame awaits private-copy adoption; {diagnostics}"
     );
-    panic!("action timeout: committed source frame has not reached the reference device")
+    panic!(
+        "action timeout: committed source frame has not reached the reference device; {diagnostics}"
+    )
 }
 
 async fn reference_member_send_fixture(fail_receive: bool) {

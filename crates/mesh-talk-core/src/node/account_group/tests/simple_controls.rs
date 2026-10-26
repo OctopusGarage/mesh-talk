@@ -299,6 +299,7 @@ async fn assert_reference_controls(modern: bool) {
         // running the real Noise server and account-operation owner directly.
         servers.push(inbound_server(target.clone(), listener));
         servers.push(tokio::spawn(target.clone().run_account_history_loop()));
+        servers.push(tokio::spawn(target.clone().run_account_wake_loop()));
     }
     for (left, right, address) in [
         (&owner, &reference, addresses[1]),
