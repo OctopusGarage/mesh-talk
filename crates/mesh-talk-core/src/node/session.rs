@@ -108,6 +108,34 @@ enum SyncWire {
     FpRequestV4(FpRequest),
     RequestV4(SyncRequest),
     FollowupV4(SyncFollowup),
+    /// Optional local-artwork reuse; old decoders close this disposable session.
+    StickerFileConsentRequest {
+        file: ConversationId,
+        manifest: EventId,
+        headers: Vec<crate::eventlog::Event>,
+    },
+    StickerFileConsentResponse {
+        file: ConversationId,
+        manifest: EventId,
+        control: Option<crate::eventlog::Event>,
+    },
+    StickerFileProofRequest {
+        file: ConversationId,
+        manifest: EventId,
+    },
+    StickerFileProofResponse {
+        file: ConversationId,
+        manifest: EventId,
+        headers: Option<Vec<crate::eventlog::Event>>,
+    },
+    /// Appended optional metadata exchange; MFM3 and history card bytes stay frozen.
+    FileMessageIdentitiesRequest {
+        requests: Vec<(ConversationId, EventId)>,
+        offers: Vec<crate::eventlog::Event>,
+    },
+    FileMessageIdentitiesResponse {
+        bundles: Vec<crate::eventlog::Event>,
+    },
 }
 
 fn supports_event_kind(kind: EventKind, v2: bool, v3: bool, v4: bool) -> bool {
@@ -138,6 +166,33 @@ pub(in crate::node) fn round_request_conversation(bytes: &[u8]) -> Option<Conver
 }
 
 #[cfg(test)]
+pub(super) fn sticker_test_frame(bytes: &[u8], file: ConversationId) -> (bool, usize) {
+    let (proof, events) = match decode(bytes) {
+        Ok(SyncWire::StickerFileConsentRequest { headers, .. }) => (true, headers),
+        Ok(SyncWire::StickerFileProofRequest { .. }) => (true, vec![]),
+        Ok(SyncWire::StickerFileProofResponse { headers, .. }) => {
+            (true, headers.unwrap_or_default())
+        }
+        Ok(SyncWire::Response(response)) => (false, response.events),
+        Ok(
+            SyncWire::Followup(frame)
+            | SyncWire::FollowupV2(frame)
+            | SyncWire::FollowupV3(frame)
+            | SyncWire::FollowupV4(frame),
+        ) => (false, frame.events),
+        _ => return (false, 0),
+    };
+    (
+        proof,
+        events
+            .iter()
+            .filter(|event| event.conversation_id == file)
+            .map(|event| event.ciphertext.len())
+            .sum(),
+    )
+}
+
+#[cfg(test)]
 pub(in crate::node) fn requests_response(bytes: &[u8]) -> bool {
     matches!(
         decode(bytes),
@@ -151,7 +206,10 @@ pub(in crate::node) fn requests_response(bytes: &[u8]) -> bool {
             | SyncWire::FpRequestV4(_)
             | SyncWire::DurableHaveRequest { .. }
             | SyncWire::FileConsentRequest { .. }
-            | SyncWire::SignedFileConsentRequest { .. })
+            | SyncWire::SignedFileConsentRequest { .. }
+            | SyncWire::StickerFileConsentRequest { .. }
+            | SyncWire::StickerFileProofRequest { .. }
+            | SyncWire::FileMessageIdentitiesRequest { .. })
     )
 }
 
@@ -305,6 +363,88 @@ where
             manifest: got_manifest,
             control,
         } if file == got_file && manifest == got_manifest => Ok(control),
+        _ => Err(SessionError::UnexpectedMessage),
+    }
+}
+
+/// Offer only signed metadata for local reconstruction before ordinary consent.
+pub(crate) async fn request_sticker_file_consent<IO>(
+    channel: &mut SecureChannel<IO>,
+    file: ConversationId,
+    manifest: EventId,
+    headers: Vec<crate::eventlog::Event>,
+) -> Result<Option<crate::eventlog::Event>, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    channel
+        .send(&encode(&SyncWire::StickerFileConsentRequest {
+            file,
+            manifest,
+            headers,
+        })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::StickerFileConsentResponse {
+            file: got_file,
+            manifest: got_manifest,
+            control,
+        } if file == got_file && manifest == got_manifest => Ok(control),
+        _ => Err(SessionError::UnexpectedMessage),
+    }
+}
+
+/// Ask an authorized source for metadata, never an image or a public hash lookup.
+pub(crate) async fn request_sticker_file_proof<IO>(
+    channel: &mut SecureChannel<IO>,
+    file: ConversationId,
+    manifest: EventId,
+) -> Result<Option<Vec<crate::eventlog::Event>>, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    channel
+        .send(&encode(&SyncWire::StickerFileProofRequest {
+            file,
+            manifest,
+        })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::StickerFileProofResponse {
+            file: got_file,
+            manifest: got_manifest,
+            headers,
+        } if file == got_file && manifest == got_manifest => Ok(headers),
+        _ => Err(SessionError::UnexpectedMessage),
+    }
+}
+
+pub(in crate::node) const MAX_FILE_IDENTITIES: usize = 8;
+
+/// Optional exact-ID metadata, separately negotiated from attachment bytes/history.
+pub(crate) async fn request_file_message_identities<IO>(
+    channel: &mut SecureChannel<IO>,
+    requests: Vec<(ConversationId, EventId)>,
+    offers: Vec<crate::eventlog::Event>,
+) -> Result<Vec<crate::eventlog::Event>, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    if requests.len() > MAX_FILE_IDENTITIES || offers.len() > MAX_FILE_IDENTITIES {
+        return Err(SessionError::UnexpectedMessage);
+    }
+    channel
+        .send(&encode(&SyncWire::FileMessageIdentitiesRequest {
+            requests,
+            offers,
+        })?)
+        .await?;
+    match decode(&channel.recv().await?)? {
+        SyncWire::FileMessageIdentitiesResponse { bundles }
+            if bundles.len() <= MAX_FILE_IDENTITIES =>
+        {
+            Ok(bundles)
+        }
         _ => Err(SessionError::UnexpectedMessage),
     }
 }
@@ -748,6 +888,73 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     match decode(bytes)? {
+        SyncWire::FileMessageIdentitiesRequest { requests, offers } => {
+            if requests.len() > MAX_FILE_IDENTITIES || offers.len() > MAX_FILE_IDENTITIES {
+                return Err(SessionError::UnexpectedMessage);
+            }
+            let conversation = requests
+                .first()
+                .map(|(file, _)| *file)
+                .or_else(|| offers.first().map(|event| event.conversation_id))
+                .unwrap_or(ConversationId::new([0; 32]));
+            let bundles = {
+                let mut store = store.lock().expect("store mutex not poisoned");
+                for bundle in offers {
+                    store.accept_file_message_identity(bundle);
+                }
+                let mut seen = std::collections::HashSet::new();
+                requests
+                    .into_iter()
+                    .filter_map(|(file, manifest)| store.file_message_identity(&file, &manifest))
+                    .filter(|bundle| seen.insert(bundle.id))
+                    .collect()
+            };
+            channel
+                .send(&encode(&SyncWire::FileMessageIdentitiesResponse {
+                    bundles,
+                })?)
+                .await?;
+            Ok(Served::Handled(conversation))
+        }
+        SyncWire::StickerFileProofRequest { file, manifest } => {
+            let headers = store
+                .lock()
+                .expect("store mutex not poisoned")
+                .sticker_file_proof(&file, &manifest);
+            channel
+                .send(&encode(&SyncWire::StickerFileProofResponse {
+                    file,
+                    manifest,
+                    headers,
+                })?)
+                .await?;
+            Ok(Served::Handled(file))
+        }
+        SyncWire::StickerFileConsentRequest {
+            file,
+            manifest,
+            headers,
+        } => {
+            let control = if headers.len() <= 64
+                && headers.iter().all(|event| {
+                    event.ciphertext.is_empty() && event.parents.len() <= 1 && event.sig.len() == 64
+                }) {
+                store
+                    .lock()
+                    .expect("store mutex not poisoned")
+                    .sticker_file_consent(&file, &manifest, headers)
+            } else {
+                None
+            };
+            channel
+                .send(&encode(&SyncWire::StickerFileConsentResponse {
+                    file,
+                    manifest,
+                    control,
+                })?)
+                .await?;
+            Ok(Served::Handled(file))
+        }
         SyncWire::SignedFileConsentRequest { file, manifest } => {
             let control = store
                 .lock()
@@ -901,7 +1108,10 @@ where
         | SyncWire::UpgradeRequired { .. } => Err(SessionError::UnexpectedMessage),
         SyncWire::DurableHaveResponse { .. }
         | SyncWire::FileConsentResponse { .. }
-        | SyncWire::SignedFileConsentResponse { .. } => Err(SessionError::UnexpectedMessage),
+        | SyncWire::SignedFileConsentResponse { .. }
+        | SyncWire::StickerFileConsentResponse { .. }
+        | SyncWire::StickerFileProofResponse { .. }
+        | SyncWire::FileMessageIdentitiesResponse { .. } => Err(SessionError::UnexpectedMessage),
     }
 }
 
@@ -2384,5 +2594,93 @@ mod tests {
             NUM_EVENTS,
             "requester pulled all events despite a >1-frame have id-set",
         );
+    }
+
+    #[tokio::test]
+    async fn optional_file_message_identity_exchange_keeps_metadata_out_of_history() {
+        struct Identities {
+            log: EventLog,
+            bundle: Event,
+            manifest: EventId,
+            imported: Vec<Event>,
+        }
+        impl SyncStore for Identities {
+            fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+                self.log.event_ids(conversation)
+            }
+            fn events_excluding(
+                &self,
+                conversation: &ConversationId,
+                have: &std::collections::HashSet<EventId>,
+            ) -> Vec<Event> {
+                self.log.events_excluding(conversation, have)
+            }
+            fn ingest(
+                &mut self,
+                event: Event,
+            ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
+                self.log.append(event)
+            }
+            fn file_message_identity(
+                &self,
+                file: &ConversationId,
+                manifest: &EventId,
+            ) -> Option<Event> {
+                (*file == conv() && *manifest == self.manifest).then(|| self.bundle.clone())
+            }
+            fn accept_file_message_identity(&mut self, bundle: Event) -> bool {
+                self.imported.push(bundle);
+                true
+            }
+        }
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let manifest = EventId::new([97; 32]);
+        let bundle = Event::new(
+            &bob,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"identity".to_vec(),
+        );
+        let offered = Event::new(
+            &alice,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"offered identity".to_vec(),
+        );
+        let offered_id = offered.id;
+        let expected_bundle = bundle.clone();
+        let (a, b) = tokio::io::duplex(65536);
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+            let store = Mutex::new(Identities {
+                log: EventLog::default(),
+                bundle,
+                manifest,
+                imported: vec![],
+            });
+            serve_one(&mut channel, &store).await.unwrap();
+            let store = store.lock().unwrap();
+            assert_eq!(store.imported[0].id, offered_id);
+            assert!(store.log.event_ids(&conv()).is_empty());
+        });
+        let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+        let bundles = request_file_message_identities(
+            &mut channel,
+            vec![(conv(), manifest), (conv(), EventId::new([98; 32]))],
+            vec![offered],
+        )
+        .await
+        .unwrap();
+        assert_eq!(bundles, vec![expected_bundle]);
+        server.await.unwrap();
     }
 }

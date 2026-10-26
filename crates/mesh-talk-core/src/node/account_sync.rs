@@ -689,11 +689,14 @@ impl Node {
                 "file proof conflicts with signed event".into(),
             ));
         }
-        let suppressed = self
-            .account_suppression
-            .lock()
-            .expect("account suppression mutex not poisoned")
-            .contains(host, event_id);
+        let logical = self.file_message_row_logical_id(&row);
+        let suppressed = {
+            let suppression = self
+                .account_suppression
+                .lock()
+                .expect("account suppression mutex not poisoned");
+            suppression.contains(host, event_id) || suppression.contains(host, logical)
+        };
         let erased = {
             let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
             delivery.file_erased(host, event_id) || delivery.manifest_event_erased(event_id)
@@ -1390,6 +1393,159 @@ impl Node {
         Ok(())
     }
 
+    pub(in crate::node) async fn serve_account_file_message_identities(
+        &self,
+        channel: &mut SecureChannel<TcpStream>,
+        account_id: &str,
+        requests: Vec<([u8; 32], [u8; 32])>,
+    ) -> bool {
+        use crate::eventlog::sync::SyncStore;
+        let (revision, bundles) = {
+            let _operation = self.privacy.gate.read().await;
+            if account_id != self.account_id()
+                || requests.len() > super::session::MAX_FILE_IDENTITIES
+                || !channel.io_admitted()
+                || !self.certified_sibling(channel.peer_identity())
+                || !self.account_allowed(channel.peer_identity(), channel.peer_announcement())
+            {
+                return false;
+            }
+            let (policy, revision) = self.device_sync_policy_snapshot();
+            let bundles = if policy.history || policy.attachments {
+                let store = self.serve_sync_store(channel.peer_identity());
+                let mut seen = HashSet::new();
+                requests
+                    .into_iter()
+                    .filter_map(|(file, manifest)| {
+                        store
+                            .lock()
+                            .expect("sync store lock")
+                            .file_message_identity(
+                                &ConversationId::new(file),
+                                &EventId::new(manifest),
+                            )
+                    })
+                    .filter(|bundle| seen.insert(bundle.id))
+                    .collect()
+            } else {
+                vec![]
+            };
+            (revision, bundles)
+        };
+        self.send_account_frame(
+            channel,
+            AccountSyncVersion::V2,
+            revision,
+            &AccountHistoryFrame::FileMessageIdentitiesResponse { bundles },
+        )
+        .await
+        .is_ok()
+    }
+
+    async fn pull_account_file_message_identities(
+        self: &Arc<Self>,
+        peer: &PeerRecord,
+        requests: &[(ConversationId, EventId)],
+        revision: u64,
+    ) {
+        if !self.file_identity_capability_due(peer.addr, &peer.public) {
+            return;
+        }
+        let mut requests: Vec<_> = requests
+            .iter()
+            .copied()
+            .filter(|(_, manifest)| {
+                let host = self
+                    .received_files
+                    .lock()
+                    .expect("received files lock")
+                    .entry(*manifest)
+                    .map(|row| row.conversation);
+                host.is_some_and(|host| {
+                    host != account_conversation_id(&self.account_id(), &self.account_id())
+                        && self
+                            .channels
+                            .lock()
+                            .expect("channels lock")
+                            .state(&host)
+                            .is_none()
+                        && !self.has_file_message_identity(host, *manifest)
+                })
+            })
+            .collect();
+        requests.extend(self.pending_file_message_identities(&peer.public));
+        requests.sort_unstable_by_key(|(file, manifest)| (*file.as_bytes(), *manifest.as_bytes()));
+        requests.dedup();
+        if !requests.is_empty() {
+            let offset = self.file_message_identity_cursor.fetch_add(
+                super::session::MAX_FILE_IDENTITIES,
+                std::sync::atomic::Ordering::Relaxed,
+            ) % requests.len();
+            requests.rotate_left(offset);
+            requests.truncate(super::session::MAX_FILE_IDENTITIES);
+        }
+        for batch in requests.chunks(super::session::MAX_FILE_IDENTITIES) {
+            let policy = self.device_sync_policy_snapshot();
+            if policy.1 != revision
+                || (!policy.0.history && !policy.0.attachments)
+                || !self.certified_sibling(&peer.public)
+            {
+                return;
+            }
+            let opening = self
+                .begin_account_exchange(
+                    peer,
+                    AccountSyncVersion::V2,
+                    AccountHistoryFrame::FileMessageIdentitiesRequest {
+                        account_id: self.account_id(),
+                        requests: batch
+                            .iter()
+                            .map(|(file, manifest)| (*file.as_bytes(), *manifest.as_bytes()))
+                            .collect(),
+                    },
+                )
+                .await;
+            let mut channel = match opening {
+                Ok(channel) => channel,
+                Err(_) => {
+                    self.sessions.note_file_identity_unsupported(
+                        self.file_identity_endpoint_key(peer.addr, &peer.public),
+                    );
+                    return;
+                }
+            };
+            let key = match channel.tcp_peer_addr() {
+                Ok(address) => self.peer_endpoint_key(address, &peer.public),
+                Err(_) => return,
+            };
+            let response = tokio::time::timeout(READ_TIMEOUT, channel.recv()).await;
+            let bundles = match response {
+                Ok(Ok(bytes)) => match AccountHistoryFrame::decode_versioned(&bytes) {
+                    Some((
+                        AccountSyncVersion::V2,
+                        AccountHistoryFrame::FileMessageIdentitiesResponse { bundles },
+                    )) => bundles,
+                    _ => {
+                        self.sessions.note_file_identity_unsupported(key);
+                        return;
+                    }
+                },
+                _ => {
+                    self.sessions.note_file_identity_unsupported(key);
+                    return;
+                }
+            };
+            if self
+                .accept_file_message_identity_response(&peer.public, batch, bundles, Some(revision))
+                .is_err()
+            {
+                return;
+            }
+            self.sessions.note_file_identity_supported(&key);
+            channel.recycle(self);
+        }
+    }
+
     async fn pull_account_history_page(
         self: &Arc<Self>,
         peer: &PeerRecord,
@@ -1564,6 +1720,23 @@ impl Node {
                         }
                         let next = complete.next_cursor;
                         let digest = complete.digest;
+                        let identities: Vec<_> = complete
+                            .records
+                            .iter()
+                            .filter_map(|record| {
+                                let HistoryRecord::FileCard(record) = record else {
+                                    return None;
+                                };
+                                let payload: FileCardPayload = bincode::DefaultOptions::new()
+                                    .with_fixint_encoding()
+                                    .with_limit(MAX_RECORD as u64)
+                                    .reject_trailing_bytes()
+                                    .deserialize(&record.payload)
+                                    .ok()?;
+                                let manifest = super::files::validated_manifest(&payload.manifest)?;
+                                Some((manifest.file_conv(), EventId::new(record.event_id)))
+                            })
+                            .collect();
                         self.account_blocking(move |node| {
                             // Recheck after waiting for the blocking pool.
                             if node.device_sync_policy_snapshot().1 != revision {
@@ -1579,6 +1752,8 @@ impl Node {
                         })
                         .await?;
                         channel.recycle(self);
+                        self.pull_account_file_message_identities(peer, &identities, revision)
+                            .await;
                         return Ok((next, digest));
                     }
                 }

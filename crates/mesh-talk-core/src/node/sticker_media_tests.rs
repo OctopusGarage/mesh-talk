@@ -575,3 +575,354 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
     serving.abort();
     let _ = serving.await;
 }
+
+#[tokio::test]
+async fn installed_sticker_headers_complete_exact_offer_without_image_transfer() {
+    use crate::discovery::Announce;
+    use crate::eventlog::sync::SyncStore;
+    use tokio::net::TcpListener;
+    for chunk_count in [1, 3] {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob = DeviceIdentity::generate();
+        let ba = Account::generate();
+        let target = ba.account_id();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 4000);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bp =
+            Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+        let (a, _, _) = super::test_support::node_with_files(ad.path(), alice, aa, &bp);
+        let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, ba, &ap);
+        let (path, mut bytes) = sticker(ad.path(), 0);
+        if chunk_count > 1 {
+            // Valid PNG trailing bytes exercise original-author parent chains.
+            bytes.resize(crate::file::CHUNK_SIZE * (chunk_count - 1) + 1, 0);
+            std::fs::write(&path, &bytes).unwrap();
+        }
+        let mut replaced = bytes.clone();
+        replaced.push(19);
+        b.register_sticker_source(path.file_name().unwrap().to_str().unwrap(), &replaced)
+            .unwrap();
+        let (id, file) = a
+            .enqueue_file_to_account(&target, &path, FileKind::Media)
+            .await
+            .unwrap();
+        let serving = tokio::spawn(b.clone().run_accept_loop(listener));
+        a.flush_delivery(id).await;
+        let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let destination = card.destinations.first().unwrap();
+        let manifest = destination.binding.event_id;
+        let proofs = a.sticker_chunk_proof(file).unwrap();
+        assert_eq!(proofs.len(), chunk_count);
+        assert!(proofs.iter().all(|event| event.ciphertext.is_empty()));
+        assert!(b.read_media(file).is_none());
+        let unrelated = DeviceIdentity::generate().public();
+        assert!(
+            b.sync_store(&unrelated)
+                .lock()
+                .unwrap()
+                .sticker_file_consent(&file, &manifest, proofs.clone())
+                .is_none()
+        );
+        assert!(
+            b.sync_store(&ap.public())
+                .lock()
+                .unwrap()
+                .sticker_file_consent(
+                    &file,
+                    &crate::eventlog::EventId::new([237; 32]),
+                    proofs.clone()
+                )
+                .is_none()
+        );
+        let control = b
+            .sync_store(&ap.public())
+            .lock()
+            .unwrap()
+            .sticker_file_consent(&file, &manifest, proofs.clone())
+            .unwrap();
+        assert!(
+            super::file_consent::Decision::open(&control)
+                .unwrap()
+                .completion
+                .is_none()
+        );
+        assert!(b.read_media(file).is_none());
+        b.register_sticker_source(path.file_name().unwrap().to_str().unwrap(), &bytes)
+            .unwrap();
+        let mut tampered = proofs.clone();
+        tampered.last_mut().unwrap().sig[0] ^= 1;
+        let control = b
+            .sync_store(&ap.public())
+            .lock()
+            .unwrap()
+            .sticker_file_consent(&file, &manifest, tampered)
+            .unwrap();
+        assert!(
+            super::file_consent::Decision::open(&control)
+                .unwrap()
+                .completion
+                .is_none()
+        );
+        assert!(b.read_media(file).is_none());
+        assert!(b.log.lock().unwrap().events(&file).is_empty());
+        let control = b
+            .sync_store(&ap.public())
+            .lock()
+            .unwrap()
+            .sticker_file_consent(&file, &manifest, proofs)
+            .unwrap();
+        assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
+        a.accept_file_consent_event(&control, &bp.public()).unwrap();
+        assert!(a.recipient_completed_file(&card, destination));
+        assert!(b.log.lock().unwrap().events(&file).is_empty());
+        serving.abort();
+        let _ = serving.await;
+    }
+}
+
+#[tokio::test]
+async fn installed_sticker_wire_reuse_and_legacy_mismatch_fallback() {
+    use crate::discovery::Announce;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+    // Matching installed bytes skip all ciphertext. Replaced artwork and older
+    // endpoints retain the ordinary transfer path.
+    for (matching, legacy) in [(true, false), (false, false), (true, true)] {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob = DeviceIdentity::generate();
+        let ba = Account::generate();
+        let target = ba.account_id();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 4000);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bp =
+            Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+        let (a, _, _) = super::test_support::node_with_files(ad.path(), alice, aa, &bp);
+        let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, ba, &ap);
+        let (path, bytes) = sticker(ad.path(), 0);
+        let mut installed = bytes.clone();
+        if !matching {
+            installed.push(23);
+        }
+        b.register_sticker_source(path.file_name().unwrap().to_str().unwrap(), &installed)
+            .unwrap();
+        let (first, file) = a
+            .enqueue_file_to_account(&target, &path, FileKind::Media)
+            .await
+            .unwrap();
+        let payload_bytes = Arc::new(AtomicUsize::new(0));
+        let proofs_seen = Arc::new(AtomicUsize::new(0));
+        let serving = sticker_wire_server(
+            b.clone(),
+            listener,
+            file,
+            legacy,
+            payload_bytes.clone(),
+            proofs_seen.clone(),
+        );
+        a.flush_delivery(first).await;
+        // A closed optional-protocol socket must release its directional permit
+        // before legacy fallback can acquire the sole remaining outbound slot.
+        let reserved = if legacy {
+            (0..super::session_pool::MAX_DIRECTION_CONNECTIONS - 1)
+                .map(|_| {
+                    a.sessions
+                        .try_outbound()
+                        .expect("reserve other outbound slots")
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            a.flush_file_delivery(first).await;
+        })
+        .await
+        .unwrap();
+        drop(reserved);
+        assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
+        assert!(proofs_seen.load(Ordering::Relaxed) > 0);
+        if matching && !legacy {
+            assert_eq!(
+                payload_bytes.load(Ordering::Relaxed),
+                0,
+                "matching artwork sends no image ciphertext"
+            );
+            let card = a.delivery.lock().unwrap().file_card(first).unwrap().clone();
+            assert!(a.recipient_completed_file(&card, &card.destinations[0]));
+            let (second, reused) = a
+                .enqueue_file_to_account(&target, &path, FileKind::Media)
+                .await
+                .unwrap();
+            assert_ne!(first, second);
+            assert_eq!(file, reused);
+            a.flush_delivery(second).await;
+            a.flush_file_delivery(second).await;
+            let cards = b.delivery.lock().unwrap().cards_for_file(file);
+            assert_eq!(cards.len(), 2);
+            assert!(
+                cards
+                    .iter()
+                    .all(|card| b.delivery.lock().unwrap().file_completed(card.id))
+            );
+            assert_eq!(payload_bytes.load(Ordering::Relaxed), 0);
+        } else {
+            assert!(payload_bytes.load(Ordering::Relaxed) >= bytes.len());
+        }
+        serving.abort();
+        let _ = serving.await;
+    }
+}
+
+fn sticker_wire_server(
+    server_node: Arc<Node>,
+    listener: tokio::net::TcpListener,
+    file: crate::eventlog::ConversationId,
+    legacy: bool,
+    payload_counter: Arc<std::sync::atomic::AtomicUsize>,
+    proof_counter: Arc<std::sync::atomic::AtomicUsize>,
+) -> tokio::task::JoinHandle<()> {
+    use std::sync::atomic::Ordering;
+    tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let node = server_node.clone();
+            let payload_counter = payload_counter.clone();
+            let proof_counter = proof_counter.clone();
+            connections.spawn(async move {
+                let Ok(mut channel) = node.privacy_accept(stream).await else {
+                    return;
+                };
+                let store = node.serve_sync_store(channel.peer_identity());
+                while let Ok(frame) = channel.recv().await {
+                    let (proof, payload) = super::session::sticker_test_frame(&frame, file);
+                    payload_counter.fetch_add(payload, Ordering::Relaxed);
+                    // A recovery file-round request asks the source for image bytes.
+                    // Count it as traffic as well, so zero excludes both directions.
+                    if super::session::round_request_conversation(&frame) == Some(file) {
+                        payload_counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if proof {
+                        proof_counter.fetch_add(1, Ordering::Relaxed);
+                        if legacy {
+                            return;
+                        }
+                    }
+                    match super::session::serve_wire_bytes(&mut channel, &store, &frame).await {
+                        Ok(super::session::Served::Handled(conversation)) => {
+                            node.emit_new_messages(conversation);
+                            node.process_file_events(conversation);
+                        }
+                        _ => return,
+                    }
+                }
+            });
+        }
+    })
+}
+
+#[tokio::test]
+async fn installed_sticker_receiver_recovery_requests_only_authorized_headers() {
+    use crate::discovery::Announce;
+    use crate::eventlog::sync::SyncStore;
+    use futures_util::FutureExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+    for (matching, legacy) in [(true, false), (false, false), (true, true)] {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob = DeviceIdentity::generate();
+        let ba = Account::generate();
+        let target = ba.account_id();
+        let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
+        let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+        let (a, _, _) = super::test_support::node_with_files(ad.path(), alice, aa, &bp);
+        let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, ba, &ap);
+        let (path, bytes) = sticker(ad.path(), 0);
+        let mut installed = bytes.clone();
+        if !matching {
+            installed.push(23);
+        }
+        let (id, file) = a
+            .enqueue_file_to_account(&target, &path, FileKind::Media)
+            .await
+            .unwrap();
+        let payloads = Arc::new(AtomicUsize::new(0));
+        let proofs = Arc::new(AtomicUsize::new(0));
+        let sender = sticker_wire_server(
+            a.clone(),
+            al,
+            file,
+            legacy,
+            payloads.clone(),
+            proofs.clone(),
+        );
+        let receiver = tokio::spawn(b.clone().run_accept_loop(bl));
+        a.flush_delivery(id).await;
+        assert!(b.read_media(file).is_none());
+        // Registration may follow manifest delivery during startup.
+        let _ = b.file_pull_notify.notified().now_or_never();
+        b.register_sticker_source(path.file_name().unwrap().to_str().unwrap(), &installed)
+            .unwrap();
+        assert!(b.file_pull_notify.notified().now_or_never().is_some());
+        let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
+        let manifest = card.destinations[0].binding.event_id;
+        assert!(
+            a.serve_sync_store(&DeviceIdentity::generate().public())
+                .lock()
+                .unwrap()
+                .sticker_file_proof(&file, &manifest)
+                .is_none()
+        );
+        assert!(
+            a.serve_sync_store(&bp.public())
+                .lock()
+                .unwrap()
+                .sticker_file_proof(&file, &crate::eventlog::EventId::new([226; 32]))
+                .is_none()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), b.pull_pending_files())
+            .await
+            .unwrap();
+        assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
+        if matching && !legacy {
+            assert!(proofs.load(Ordering::Relaxed) > 0);
+            assert_eq!(payloads.load(Ordering::Relaxed), 0);
+            assert!(
+                a.serve_sync_store(&bp.public())
+                    .lock()
+                    .unwrap()
+                    .sticker_file_proof(&file, &manifest)
+                    .unwrap()
+                    .iter()
+                    .all(|event| event.ciphertext.is_empty())
+            );
+        } else {
+            assert!(
+                payloads.load(Ordering::Relaxed) > 0,
+                "fallback requests ordinary file bytes"
+            );
+        }
+        // Recovery publishes the same exact signed completion consumed by senders.
+        let control = b
+            .direct_file_consent_control(&ap.public(), file, manifest)
+            .unwrap()
+            .unwrap();
+        a.accept_file_consent_event(&control, &bp.public()).unwrap();
+        assert!(a.recipient_completed_file(&card, &card.destinations[0]));
+        sender.abort();
+        receiver.abort();
+        let _ = sender.await;
+        let _ = receiver.await;
+    }
+}

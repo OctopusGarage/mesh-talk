@@ -70,11 +70,22 @@ pub(super) enum AccountSessionRequest {
         account_id: String,
         file_conv: [u8; 32],
     },
+    FileMessageIdentities {
+        account_id: String,
+        requests: Vec<([u8; 32], [u8; 32])>,
+    },
 }
 
 impl AccountSessionRequest {
     pub(super) fn from_frame(frame: &AccountHistoryFrame) -> Option<Self> {
         match frame {
+            AccountHistoryFrame::FileMessageIdentitiesRequest {
+                account_id,
+                requests,
+            } => Some(Self::FileMessageIdentities {
+                account_id: account_id.clone(),
+                requests: requests.clone(),
+            }),
             AccountHistoryFrame::AttachmentRequestChecked {
                 account_id,
                 file_conv,
@@ -122,6 +133,13 @@ impl AccountSessionRequest {
 
     pub(super) fn into_frame(self) -> AccountHistoryFrame {
         match self {
+            Self::FileMessageIdentities {
+                account_id,
+                requests,
+            } => AccountHistoryFrame::FileMessageIdentitiesRequest {
+                account_id,
+                requests,
+            },
             Self::AttachmentChecked {
                 account_id,
                 file_conv,
@@ -288,6 +306,14 @@ pub(super) enum AccountHistoryFrame {
         file_conv: [u8; 32],
         source_disabled: bool,
     },
+    /// Optional metadata uses the existing exclusive sibling session owner.
+    FileMessageIdentitiesRequest {
+        account_id: String,
+        requests: Vec<([u8; 32], [u8; 32])>,
+    },
+    FileMessageIdentitiesResponse {
+        bundles: Vec<crate::eventlog::Event>,
+    },
 }
 
 impl AccountHistoryFrame {
@@ -329,7 +355,9 @@ impl AccountHistoryFrame {
 
     fn valid_for(&self, codec: AccountSyncVersion) -> bool {
         match self {
-            Self::AttachmentRequestChecked { .. }
+            Self::FileMessageIdentitiesRequest { .. }
+            | Self::FileMessageIdentitiesResponse { .. }
+            | Self::AttachmentRequestChecked { .. }
             | Self::AttachmentUnavailable { .. }
             | Self::DocumentsRequest { .. }
             | Self::DocumentHeader { .. }
@@ -366,6 +394,16 @@ impl AccountHistoryFrame {
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         }
         match self {
+            Self::FileMessageIdentitiesRequest {
+                account_id: id,
+                requests,
+            } => account_id(id) && requests.len() <= super::session::MAX_FILE_IDENTITIES,
+            Self::FileMessageIdentitiesResponse { bundles } => {
+                bundles.len() <= super::session::MAX_FILE_IDENTITIES
+                    && bundles
+                        .iter()
+                        .all(|bundle| bundle.ciphertext.len() <= 16 * 1024)
+            }
             Self::AttachmentRequestChecked { account_id: id, .. } => account_id(id),
             Self::AttachmentUnavailable { .. } => true,
             Self::DocumentsRequest { body } => {
@@ -474,6 +512,30 @@ impl AccountHistoryFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logical_file_identity_extension_preserves_existing_account_tags() {
+        let request = AccountHistoryFrame::FileMessageIdentitiesRequest {
+            account_id: "a".repeat(32),
+            requests: vec![([1; 32], [2; 32])],
+        };
+        let response = AccountHistoryFrame::FileMessageIdentitiesResponse { bundles: vec![] };
+        for (tag, frame) in [(27u32, request.clone()), (28u32, response)] {
+            let bytes = frame.encode_version(AccountSyncVersion::V2).unwrap();
+            assert_eq!(&bytes[6..10], &tag.to_le_bytes());
+            assert_eq!(
+                AccountHistoryFrame::decode_versioned(&bytes),
+                Some((AccountSyncVersion::V2, frame.clone()))
+            );
+            assert!(frame.encode_version(AccountSyncVersion::V1).is_none());
+        }
+        let nested = AccountSessionRequest::from_frame(&request).unwrap();
+        assert_eq!(
+            &bincode::serialize(&nested).unwrap()[..4],
+            &5u32.to_le_bytes()
+        );
+        assert_eq!(nested.into_frame(), request);
+    }
 
     #[test]
     fn checked_attachment_extension_appends_tags_and_cannot_encode_legacy_terminals() {

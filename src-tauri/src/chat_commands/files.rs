@@ -10,6 +10,34 @@ fn file_kind(media: bool) -> mesh_talk_core::file::FileKind {
     }
 }
 
+/// Session-local installed artwork can satisfy an independently authenticated sticker offer.
+#[tauri::command]
+pub async fn register_sticker_source(
+    app: tauri::State<'_, AppState>,
+    state: tauri::State<'_, NodeState>,
+    owner: String,
+    account: String,
+    name: String,
+    bytes: Vec<u8>,
+) -> Result<(), CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &state, &owner)?;
+    if bytes.len() > mesh_talk_core::file::sticker::MAX_STICKER_BYTES {
+        return Err(CommandError::Validation("sticker source too large".into()));
+    }
+    admission
+        .blocking(move |runtime, _| {
+            let node = runtime.handle();
+            if node.account_id() != account {
+                return Err(CommandError::Authorization(
+                    "runtime account mismatch".into(),
+                ));
+            }
+            node.register_sticker_source(&name, &bytes)
+                .map_err(CommandError::from)
+        })
+        .await
+}
+
 #[derive(serde::Serialize)]
 pub struct FileStatus {
     file_conv: String,
@@ -631,6 +659,138 @@ mod tests {
             "{error}"
         );
         assert!(!root.path().join("downloads").exists());
+    }
+
+    fn sticker_app() -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+        let root = tempfile::tempdir().unwrap();
+        let app = AppState::new(crate::services::auth_service::AuthService::new(
+            std::sync::Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+            )),
+        ));
+        app.session().publish(
+            "session".into(),
+            crate::services::user::User {
+                user_id: "alice".into(),
+                account_login_name: None,
+                name: "alice".into(),
+                display_name: "Alice".into(),
+                address: "local".into(),
+                created_at: 0,
+                last_seen: 0,
+                is_online: true,
+            },
+            "pw".into(),
+        );
+        let app = tauri::test::mock_builder()
+            .manage(app)
+            .manage(NodeState::empty())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        (root, app)
+    }
+
+    #[tokio::test]
+    async fn registered_sticker_source_rejects_wrong_owner_before_waiting_for_runtime() {
+        let (_root, app) = sticker_app();
+        let state = app.state::<NodeState>();
+        let _held = state.0.write().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            register_sticker_source(
+                app.state(),
+                app.state(),
+                "bob".into(),
+                "account".into(),
+                "sticker.png".into(),
+                vec![],
+            ),
+        )
+        .await
+        .expect("wrong owner must not wait for runtime");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("session owner mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_sticker_source_requires_current_crypto_account_and_valid_image() {
+        let (root, app) = sticker_app();
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            "alice",
+            "Alice",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let account = runtime.handle().account_id();
+        *app.state::<NodeState>().0.write().await = Some(runtime);
+        let wrong_account = register_sticker_source(
+            app.state(),
+            app.state(),
+            "alice".into(),
+            "another-account".into(),
+            "sticker.png".into(),
+            vec![],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            wrong_account
+                .to_string()
+                .contains("runtime account mismatch"),
+            "{wrong_account}"
+        );
+        let name = "mt-sticker-v1-cGFjazpleGFtcGxlOndhdmUK8J-Riw.png";
+        let bytes = hex::decode("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63f8cfc0f01f00050001ff89993d1d0000000049454e44ae426082").unwrap();
+        let valid = register_sticker_source(
+            app.state(),
+            app.state(),
+            "alice".into(),
+            account.clone(),
+            name.into(),
+            bytes,
+        )
+        .await;
+        let invalid = register_sticker_source(
+            app.state(),
+            app.state(),
+            "alice".into(),
+            account.clone(),
+            name.into(),
+            b"not an image".to_vec(),
+        )
+        .await;
+        let oversized = register_sticker_source(
+            app.state(),
+            app.state(),
+            "alice".into(),
+            account,
+            name.into(),
+            vec![0; mesh_talk_core::file::sticker::MAX_STICKER_BYTES + 1],
+        )
+        .await;
+        app.state::<NodeState>()
+            .0
+            .write()
+            .await
+            .take()
+            .unwrap()
+            .stop()
+            .await;
+        valid.unwrap();
+        assert!(invalid.is_err());
+        assert!(oversized.is_err());
     }
 
     #[test]

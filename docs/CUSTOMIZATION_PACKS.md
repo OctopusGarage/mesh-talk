@@ -110,6 +110,22 @@ change retained new-message artwork. Legacy ID-only messages keep their existing
 installed-pack lookup and fallback behavior; their original images cannot be
 reconstructed reliably from an ID alone.
 
+For direct messaging, matching installed artwork can supply the image locally.
+The desktop registers validated installed snapshots with the current account's
+node; the optional in-memory cache is bounded to 128 images and 32 MiB and is
+rebuilt for each runtime. A pack ID or sticker ID alone never establishes a match:
+the incoming authenticated manifest must match the exact checksum and byte size.
+
+Compatible direct peers exchange only the original signed chunk headers when
+local artwork matches. The recipient reconstructs deterministic encrypted chunks
+from its local bytes, verifies every original event ID and signature, then uses
+the ordinary authorized admission, durable media persistence and exact receipt
+path. The headers contain no image payload. Both sender delivery and receiver
+recovery can negotiate this optimization. Missing, changed, evicted or invalid
+artwork and older peers fall back to ordinary media transfer. Relay-only delivery
+and channel media continue using their existing transfer paths. Removing an
+installed pack cannot change an image already retained in message history.
+
 The deployed MFM3 media envelope remains unchanged. Its filename carries a
 versioned presentation marker:
 `mt-sticker-v1-<base64url-no-padding(UTF-8(id + newline + fallback))>.<extension>`.
@@ -135,6 +151,22 @@ missing, erased or incompatible sources stage a fresh transfer. File keys are
 never reused across recipient conversations, groups or retention scopes. Normal
 event reconciliation transfers only missing ciphertext chunks. This is scoped
 reuse, not global hash-based discovery or convergent encryption.
+
+A file or sticker sent to several devices is one
+[logical file message](../CONTEXT.md#conversations-and-history). The sender's
+signed identity binding associates its exact destination manifests with that
+message; account history, recall and local deletion resolve the binding while
+consent and completion keep their device-specific event IDs. Equal artwork,
+transfer IDs or timestamps never establish message equivalence. Two intentional
+sends therefore remain two messages even when they reuse one transfer.
+
+The binding is supplemental signed metadata carried over authenticated direct
+sessions, private sibling reconciliation and encrypted post-office controls.
+Existing MFM3 media and account-history card encodings remain unchanged; older
+peers ignore the optional metadata and retain ordinary file delivery. Retained
+source cards can supply bindings for earlier sends when the original signing
+device is still available. Bindings are persisted in the account's encrypted
+storage and included in recovery snapshots using existing signed-event records.
 
 Every repeated message still needs completion for its exact manifest event.
 After ciphertext reclamation, a cached sticker may complete a new compatible

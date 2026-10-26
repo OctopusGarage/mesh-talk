@@ -363,7 +363,9 @@
         "scripts/diagnostics/native-ipc-boundary.test.mjs",
         "scripts/evals/png-evidence.mjs",
         "scripts/diagnostics/png-evidence.test.mjs",
-        "scripts/diagnostics/test-fixtures/png.mjs"
+        "scripts/diagnostics/test-fixtures/png.mjs",
+        "scripts/diagnostics/native-sticker-acceptance.mjs",
+        "scripts/diagnostics/native-sticker-acceptance.test.mjs"
       ],
       "node": [
         "scripts/diagnostics/hidden-contacts-report.test.mjs",
@@ -371,10 +373,12 @@
         "scripts/diagnostics/native-core-scenarios.test.mjs",
         "scripts/diagnostics/native-ipc-boundary.test.mjs",
         "scripts/diagnostics/native-build.test.mjs",
-        "scripts/diagnostics/png-evidence.test.mjs"
+        "scripts/diagnostics/png-evidence.test.mjs",
+        "scripts/diagnostics/native-sticker-acceptance.test.mjs"
       ],
       "escalation": [
-        "Native harness and evidence-validation changes require fresh real desktop acceptance on the affected platforms with clean source and verified build provenance; diagnostic unit checks cannot certify native behavior."
+        "Native harness and evidence-validation changes require fresh real desktop acceptance on the affected platforms with clean source and verified build provenance; diagnostic unit checks cannot certify native behavior.",
+        "Installed sticker candidate acceptance uses node scripts/diagnostics/native-sticker-acceptance.mjs after a clean source-pinned native-build.mjs build. It uses two isolated native profiles and production ZIP import/source registration, checks independent missing/installed/replaced transfers plus repeated-send identity and retained bytes, and does not certify native older-peer or linked-device alias behavior."
       ]
     }
   ]

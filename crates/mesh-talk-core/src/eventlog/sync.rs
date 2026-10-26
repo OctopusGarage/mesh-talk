@@ -164,6 +164,30 @@ pub trait SyncStore {
     fn signed_file_consent(&self, _file: &ConversationId, _manifest: &EventId) -> Option<Event> {
         None
     }
+    /// Optional signed logical attachment identity; never part of public history.
+    fn file_message_identity(&self, _file: &ConversationId, _manifest: &EventId) -> Option<Event> {
+        None
+    }
+    fn accept_file_message_identity(&mut self, _bundle: Event) -> bool {
+        false
+    }
+    /// Optional exact sticker reconstruction from ciphertext-free signed headers.
+    fn sticker_file_consent(
+        &mut self,
+        _file: &ConversationId,
+        _manifest: &EventId,
+        _headers: Vec<Event>,
+    ) -> Option<Event> {
+        None
+    }
+    /// Optional metadata-only recovery for an already authorized exact file offer.
+    fn sticker_file_proof(
+        &self,
+        _file: &ConversationId,
+        _manifest: &EventId,
+    ) -> Option<Vec<Event>> {
+        None
+    }
     /// Optional custody qualification. Memory/legacy stores cannot promise
     /// durability; durable hosts synchronize and check current visibility.
     fn durable_have(&self, _conversation: &ConversationId, _id: &EventId) -> bool {

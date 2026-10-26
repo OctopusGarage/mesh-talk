@@ -48,7 +48,18 @@
         "frontend/src/store/conversationModel.ts",
         "frontend/src/store/outgoingIntent.ts",
         "frontend/e2e/stickers.spec.ts",
-        "frontend/e2e/tauri-mock.ts"
+        "frontend/e2e/tauri-mock.ts",
+        "frontend/src/lib/installedStickerSources.ts",
+        "frontend/src/lib/installedStickerSources.test.ts",
+        "frontend/src/lib/linkedCustomizationPacks.ts",
+        "frontend/src/lib/linkedCustomizationPacks.test.ts",
+        "frontend/src/store/reception.ts",
+        "frontend/src/store/reception.test.ts",
+        "frontend/src/lib/unreadStorage.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/conversationHistory.test.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/lib/types.ts"
       ],
       "frontend": [
         "src/lib/stickerMedia.test.ts",
@@ -58,18 +69,27 @@
         "src/features/chat/mediaFile.test.ts",
         "src/lib/stickerPacks.test.ts",
         "src/store/chat.test.ts",
-        "src/store/outgoingIntent.test.ts"
+        "src/store/outgoingIntent.test.ts",
+        "src/lib/installedStickerSources.test.ts",
+        "src/lib/linkedCustomizationPacks.test.ts",
+        "src/store/reception.test.ts",
+        "src/store/conversationHistory.test.ts",
+        "src/lib/unreadStorage.test.ts"
       ],
       "capability": {
         "summary": "Send selected sticker artwork as bounded ordinary media while preserving legacy sticker identities and account-owned file retry.",
         "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
         "invariants": [
           {
-            "name": "A canonical bounded media filename carries source identity and fallback; the image manifest remains byte identity. Incoming artwork never installs or resolves a pack.",
+            "name": "A canonical bounded filename carries presentation identity; the authenticated manifest binds image bytes. Installed exact-byte snapshots are registered only with the current owner/account runtime and never install incoming packs.",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           },
           {
             "name": "Selected artwork is snapshotted before asynchronous staging; stale account work cannot dispatch, retained file intents retry the same bytes, and retention removes visible blob URLs.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Authenticated file-message aliases coalesce late live/history copies into one unread identity, preserve any actual read, survive bounded persistence and never merge independent sends by content.",
             "reference": "docs/module-boundaries.md"
           }
         ]

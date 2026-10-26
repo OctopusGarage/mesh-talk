@@ -79,6 +79,11 @@ Fresh signed announcements supply current TCP endpoints. Changed local interface
 cancel stale delivery control batches and mailbox pulls; changed endpoints for an
 active recipient or eligible relay cancel the old control batch before retrying
 its immutable queue. Unrelated peers and refresh timestamps do not cause resets.
+When a supplied endpoint is already a known route, the last authenticated working
+endpoint keeps priority. A fresh one-off endpoint still gets the first attempt;
+a newer signed listening port supersedes a cached port on that same IP. Alternate
+routes retain their bounded race and shared socket budget.
+
 Transport errors retire failed pooled sessions. The 15-second complete-exchange
 budget remains available on stable high-latency routes. The two-second observation period and per-exchange
 timeouts are scheduling bounds, not an end-to-end delivery SLA. Recovery still
@@ -140,6 +145,16 @@ inventory discovery and bidirectional encrypted DM/group/file exchange. This
 scenario does not establish WebRTC media, every operating system, or internet
 NAT/relay behavior. Record exact source and observations in the PR or CI artifacts;
 do not retain another dated implementation report in the documentation tree.
+
+For a VM behind NAT, check both discovery and the advertised TCP listener.
+A signed announcement can arrive through the host's address while the guest's
+TCP port remains unreachable from another machine. A loopback-only host forward
+does not establish LAN reachability. From the guest, use **Connection →
+Troubleshoot → Connect without Wi-Fi → Connect by address** with the other
+machine's reachable IP. The normal signed response and pinned Noise handshake
+then establish a direct candidate. Receiving an offer, showing Online and having
+complete file bytes are separate observations; a stalled sticker and delayed
+text can share the same unreachable route or exhausted socket budget.
 
 ## Opt-in post-office bridge
 

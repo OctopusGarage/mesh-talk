@@ -1,6 +1,8 @@
 import type { ArrivalKind, ReceptionMetadata } from "@/lib/types";
 
 export interface ReceptionEntry {
+  /** Core-authenticated recipient event identities for this logical file message. */
+  messageAliases?: string[];
   /** Content-free evidence that this external message mentioned the local user. */
   mentioned?: boolean;
   seen: boolean;
@@ -28,6 +30,39 @@ export interface ReceptionState {
 export const LEDGER_CONVERSATIONS = 64;
 export const LEDGER_IDENTITIES = 1024;
 export const LEDGER_TOTAL = 8192;
+export const LEDGER_ALIAS_BYTES = 128_000;
+const MESSAGE_ALIAS_LIMIT = 64;
+
+export function validMessageAliases(
+  value: unknown,
+  canonical?: string,
+): string[] {
+  return Array.isArray(value)
+    ? [
+        ...new Set(
+          value.filter(
+            (id): id is string =>
+              typeof id === "string" &&
+              id !== canonical &&
+              validAccountSeenIdentity(id),
+          ),
+        ),
+      ].slice(0, MESSAGE_ALIAS_LIMIT)
+    : [];
+}
+
+/** Resolve only explicit identities inside this account/conversation's bounded ledger. */
+function receptionIdentity(
+  entries: Record<string, ReceptionEntry>,
+  id: string,
+): string {
+  if (Object.prototype.hasOwnProperty.call(entries, id)) return id;
+  return (
+    Object.keys(entries).find((canonical) =>
+      entries[canonical].messageAliases?.includes(id),
+    ) ?? id
+  );
+}
 
 /** Exact identities, scoped to account by persistence. No author-time read watermark. */
 export function boundLedger(ledger: ReceptionLedger): ReceptionLedger {
@@ -54,12 +89,24 @@ export function boundLedger(ledger: ReceptionLedger): ReceptionLedger {
     conversations.map(([key]) => [key, {}]),
   );
   let retained = 0;
+  let aliasBytes = 0;
   const counts: Record<string, number> = {};
   for (const { key, id, entry } of candidates) {
     if (retained >= LEDGER_TOTAL) break;
     if ((counts[key] ?? 0) >= LEDGER_IDENTITIES) continue;
+    const aliases = validMessageAliases(entry.messageAliases, id).filter(
+      (alias) => {
+        const bytes = JSON.stringify(alias).length + 1;
+        if (aliasBytes + bytes > LEDGER_ALIAS_BYTES) return false;
+        aliasBytes += bytes;
+        return true;
+      },
+    );
+    const { messageAliases: _aliases, ...metadata } = entry;
     Object.defineProperty(result[key], id, {
-      value: entry,
+      value: aliases.length
+        ? { ...metadata, messageAliases: aliases }
+        : metadata,
       enumerable: true,
       configurable: true,
       writable: true,
@@ -149,7 +196,19 @@ export function mergeReception(
                       seen: old.seen || incoming.seen,
                       late: old.late || incoming.late,
                       mentioned: old.mentioned || incoming.mentioned,
-                      receivedAt: old.receivedAt ?? incoming.receivedAt,
+                      messageAliases: validMessageAliases(
+                        [
+                          ...(old.messageAliases ?? []),
+                          ...(incoming.messageAliases ?? []),
+                        ],
+                        id,
+                      ),
+                      receivedAt:
+                        old.receivedAt === undefined
+                          ? incoming.receivedAt
+                          : incoming.receivedAt === undefined
+                            ? old.receivedAt
+                            : Math.min(old.receivedAt, incoming.receivedAt),
                       arrivalKind: old.arrivalKind ?? incoming.arrivalKind,
                     }
                   : (old ?? incoming),
@@ -175,7 +234,7 @@ export function mergeReception(
       ),
     ]),
   );
-  const merged = emptyReception(
+  let merged = emptyReception(
     ledger,
     overflow,
     persisted.accountSeen || pending.accountSeen
@@ -197,6 +256,21 @@ export function mergeReception(
         )
       : undefined,
   );
+  // Disk may already know a binding while startup callbacks still carry an alias.
+  for (const [key, entries] of Object.entries(merged.ledger)) {
+    merged = reconcileHistory(
+      merged,
+      key,
+      Object.entries(entries)
+        .filter(([, entry]) => entry.messageAliases?.length)
+        .map(([id, entry]) => ({
+          id,
+          fromMe: false,
+          fileMessageAliases: entry.messageAliases,
+        })),
+      false,
+    );
+  }
   const unread = Object.fromEntries(
     [
       ...new Set([
@@ -248,8 +322,9 @@ export function receiveIdentity(
       },
     };
   }
-  const id = event.event_id;
-  if (!id || id.length > 200) return state;
+  const eventId = event.event_id;
+  if (!eventId || eventId.length > 200) return state;
+  const id = receptionIdentity(state.ledger[key] ?? {}, eventId);
   const old = Object.prototype.hasOwnProperty.call(state.ledger[key] ?? {}, id)
     ? state.ledger[key][id]
     : undefined;
@@ -338,7 +413,8 @@ export function viewIdentities(
   ids: string[],
 ): ReceptionState {
   const entries = { ...(state.ledger[key] ?? {}) };
-  for (const id of ids)
+  for (const requested of ids) {
+    const id = receptionIdentity(entries, requested);
     if (id && id.length <= 200)
       Object.defineProperty(entries, id, {
         value: {
@@ -351,6 +427,7 @@ export function viewIdentities(
         configurable: true,
         writable: true,
       });
+  }
   return {
     ...emptyReception(
       { ...state.ledger, [key]: entries },
@@ -363,33 +440,49 @@ export function viewIdentities(
 export function reconcileHistory(
   state: ReceptionState,
   key: string,
-  rows: { id: string | null; fromMe: boolean; mentioned?: boolean }[],
+  rows: {
+    id: string | null;
+    fromMe: boolean;
+    mentioned?: boolean;
+    fileMessageAliases?: string[];
+  }[],
   discover: boolean,
 ): ReceptionState {
   const entries = { ...(state.ledger[key] ?? {}) };
   for (const row of rows) {
     if (!row.id || row.id.length > 200) continue;
-    if (Object.prototype.hasOwnProperty.call(entries, row.id)) {
-      // The resolved history owner can classify an own send that arrived before
-      // device/account identity was available to the live callback.
-      const old = entries[row.id];
-      if (row.fromMe || row.mentioned)
-        entries[row.id] = {
-          ...old,
-          seen: old.seen || row.fromMe,
-          mentioned: !row.fromMe && (old.mentioned || row.mentioned),
-        };
-      continue;
+    const aliases = validMessageAliases(row.fileMessageAliases, row.id);
+    const ids = new Set([row.id, ...aliases]);
+    // Preserve previously learned aliases when history pages expose a subset.
+    for (const id of ids) {
+      if (Object.prototype.hasOwnProperty.call(entries, id))
+        for (const alias of entries[id].messageAliases ?? []) ids.add(alias);
     }
+    const related = [...ids].flatMap((id) =>
+      Object.prototype.hasOwnProperty.call(entries, id) ? [entries[id]] : [],
+    );
+    const received = related.flatMap((entry) =>
+      entry.receivedAt === undefined ? [] : [entry.receivedAt],
+    );
+    const receivedAt = received.length ? Math.min(...received) : undefined;
+    const oldest = related.find((entry) => entry.receivedAt === receivedAt);
+    const knownRead =
+      related.some((entry) => entry.seen) ||
+      [...ids].some((id) => state.accountSeen?.[key]?.includes(id));
+    const retainedAliases = validMessageAliases([...ids], row.id);
+    for (const id of ids) if (id !== row.id) delete entries[id];
     Object.defineProperty(entries, row.id, {
       value: {
-        ...(row.mentioned && !row.fromMe ? { mentioned: true } : {}),
-        seen:
-          row.fromMe ||
-          !discover ||
-          state.accountSeen?.[key]?.includes(row.id) === true,
-        late: true,
-        arrivalKind: "history_sync",
+        ...(retainedAliases.length ? { messageAliases: retainedAliases } : {}),
+        ...(!row.fromMe &&
+        (row.mentioned || related.some((entry) => entry.mentioned))
+          ? { mentioned: true }
+          : {}),
+        seen: row.fromMe || knownRead || (!related.length && !discover),
+        late: related.length ? related.some((entry) => entry.late) : true,
+        ...(receivedAt === undefined ? {} : { receivedAt }),
+        arrivalKind:
+          oldest?.arrivalKind ?? related[0]?.arrivalKind ?? "history_sync",
       },
       enumerable: true,
       configurable: true,

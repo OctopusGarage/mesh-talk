@@ -50,6 +50,7 @@ export interface HistoryFileInfo {
 }
 
 export interface HistoryItem {
+  file_message_aliases?: string[];
   protection?: MessageProtection | null;
   expires_at_ms?: number | null;
   id: string | null; // null when there is no stable event id yet

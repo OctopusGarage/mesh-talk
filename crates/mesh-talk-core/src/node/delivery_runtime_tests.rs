@@ -3041,6 +3041,10 @@ fn legacy_file_erasure_capacity_refusal_preserves_durable_row_and_key() {
         b.delete_account_message(&ap.account_id().unwrap(), id)
             .is_err()
     );
+    assert!(
+        !b.account_suppression.lock().unwrap().contains(host, id),
+        "a refused erase must not commit a visibility tombstone"
+    );
     assert_eq!(b.account_history(&ap.account_id().unwrap(), 10)[0].id, id);
     assert!(
         b.files
