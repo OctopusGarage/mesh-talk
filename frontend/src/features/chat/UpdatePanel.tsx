@@ -30,6 +30,7 @@ export function UpdatePanel() {
     canceling,
     check,
     startDownload,
+    install,
     cancel,
     setError,
   } = useUpdates();
@@ -52,7 +53,23 @@ export function UpdatePanel() {
     }
   };
 
-  const busy = phase === "checking" || phase === "downloading";
+  const installing = phase === "installing" || phase === "restarting";
+  const busy = phase === "checking" || phase === "downloading" || installing;
+  const preparing = progress?.phase === "preparing";
+  const progressLabel = t(
+    preparing
+      ? "about.updates.preparing"
+      : progress?.phase === "fallback"
+        ? "about.updates.fallback"
+        : "about.updates.downloading",
+  );
+  const percent =
+    !preparing && progress?.total
+      ? Math.min(
+          100,
+          Math.max(0, Math.floor((progress.downloaded / progress.total) * 100)),
+        )
+      : null;
   const installKey = release?.package_name?.includes("_macos_")
     ? "mac"
     : release?.package_name?.includes("_windows_")
@@ -65,13 +82,8 @@ export function UpdatePanel() {
       aria-label={t("about.updates.title")}
       data-testid="update-panel"
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="text-sm font-semibold">{t("about.updates.title")}</h3>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            {t("about.updates.manual")}
-          </p>
-        </div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold">{t("about.updates.title")}</h3>
         <Button
           size="sm"
           variant="outline"
@@ -80,7 +92,10 @@ export function UpdatePanel() {
           data-testid="check-for-updates"
         >
           {phase === "checking" ? (
-            <LoaderCircle className="h-4 w-4 animate-spin" />
+            <LoaderCircle
+              className="h-4 w-4 animate-spin motion-reduce:animate-none"
+              aria-hidden="true"
+            />
           ) : (
             <RefreshCw className="h-4 w-4" />
           )}
@@ -90,6 +105,11 @@ export function UpdatePanel() {
         </Button>
       </div>
 
+      {!release && (
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          {t("about.updates.manual")}
+        </p>
+      )}
       <div className="mt-3 space-y-2">
         <div className="flex flex-wrap items-center gap-2">
           <label htmlFor="update-channel" className="text-xs font-medium">
@@ -108,33 +128,24 @@ export function UpdatePanel() {
             <option value="stable">{t("about.updates.stable")}</option>
             <option value="nightly">{t("about.updates.nightly")}</option>
           </select>
+          {currentVersion && (
+            <p className="ml-auto min-w-0 break-words text-xs text-muted-foreground">
+              {t("about.updates.installed", { version: currentVersion })}
+            </p>
+          )}
         </div>
         <p
           id="update-channel-help"
-          className="text-xs leading-relaxed text-muted-foreground"
+          className={
+            release && channel === "stable"
+              ? "sr-only"
+              : "text-xs leading-relaxed text-muted-foreground"
+          }
         >
           {channel === "nightly"
             ? t("about.updates.nightlyWarning")
             : t("about.updates.stableHelp")}
         </p>
-        {currentVersion && (
-          <p className="break-words text-xs text-muted-foreground">
-            {t("about.updates.installed", { version: currentVersion })}
-          </p>
-        )}
-        <Button
-          size="sm"
-          variant="link"
-          className="h-auto px-0 text-xs"
-          onClick={() =>
-            void openRelease(
-              "https://github.com/OctopusGarage/mesh-talk/releases/latest",
-            )
-          }
-        >
-          {t("about.updates.stableDownload")}
-          <ExternalLink className="h-3.5 w-3.5" />
-        </Button>
       </div>
 
       {release && (
@@ -161,8 +172,14 @@ export function UpdatePanel() {
               )}
               {release.package_name ? (
                 <>
-                  <p className="break-all text-xs text-muted-foreground">
-                    {release.package_name}
+                  <p className="break-words text-xs leading-relaxed text-muted-foreground">
+                    {release.automatic_install
+                      ? t(
+                          installKey === "windows"
+                            ? "about.updates.automaticWindowsHelp"
+                            : "about.updates.automaticHelp",
+                        )
+                      : release.package_name}
                     {release.package_size
                       ? ` · ${readableSize(release.package_size)}`
                       : ""}
@@ -170,20 +187,24 @@ export function UpdatePanel() {
                   {phase === "downloading" && progress && (
                     <div role="status" aria-live="polite">
                       <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-                        <span>{t("about.updates.downloading")}</span>
+                        <span>{progressLabel}</span>
                         <span>
-                          {progress.total
-                            ? Math.floor(
-                                (progress.downloaded / progress.total) * 100,
-                              )
-                            : 0}
-                          %
+                          {percent !== null
+                            ? `${percent}%`
+                            : preparing
+                              ? ""
+                              : readableSize(progress.downloaded)}
                         </span>
                       </div>
                       <progress
                         className="h-2 w-full accent-primary"
+                        aria-label={progressLabel}
                         max={progress.total || 1}
-                        value={progress.downloaded}
+                        value={
+                          !preparing && progress.total
+                            ? Math.min(progress.downloaded, progress.total)
+                            : undefined
+                        }
                       />
                       <Button
                         size="sm"
@@ -196,32 +217,70 @@ export function UpdatePanel() {
                       </Button>
                     </div>
                   )}
-                  {download ? (
+                  {installing ? (
+                    <p
+                      className="flex items-center gap-2 text-sm"
+                      role="status"
+                      aria-live="polite"
+                      data-testid="update-install-status"
+                    >
+                      <LoaderCircle
+                        className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none"
+                        aria-hidden="true"
+                      />
+                      {t(
+                        phase === "restarting"
+                          ? "about.updates.restarting"
+                          : "about.updates.installing",
+                      )}
+                    </p>
+                  ) : download ? (
                     <div className="space-y-3" data-testid="update-downloaded">
                       <p className="flex items-center gap-2 text-sm font-medium">
                         <CheckCircle2 className="h-4 w-4 text-emerald-600" />
                         {t("about.updates.verified")}
                       </p>
                       <p className="text-xs leading-relaxed text-muted-foreground">
-                        {t(`about.updates.install.${installKey}`)}
+                        {download.installable
+                          ? t("about.updates.readyToRestart")
+                          : t(`about.updates.install.${installKey}`)}
                       </p>
-                      <Button size="sm" onClick={() => void reveal()}>
-                        {t("about.updates.showDownload")}
+                      <Button
+                        size="sm"
+                        onClick={() =>
+                          void (download.installable ? install() : reveal())
+                        }
+                      >
+                        {t(
+                          download.installable
+                            ? "about.updates.restartToUpdate"
+                            : "about.updates.showDownload",
+                        )}
                       </Button>
                     </div>
-                  ) : (
+                  ) : phase !== "downloading" ? (
                     <Button
                       size="sm"
                       onClick={() => void startDownload()}
                       disabled={busy}
                       data-testid="download-update"
                     >
-                      {phase === "downloading" ? (
-                        <LoaderCircle className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <ArrowDownToLine className="h-4 w-4" />
+                      <ArrowDownToLine className="h-4 w-4" aria-hidden="true" />
+                      {t(
+                        release.automatic_install
+                          ? "about.updates.updateAndRestart"
+                          : "about.updates.download",
                       )}
-                      {t("about.updates.download")}
+                    </Button>
+                  ) : null}
+                  {release.automatic_install && !installing && (
+                    <Button
+                      size="sm"
+                      variant="link"
+                      className="ml-3 h-auto px-0 text-xs"
+                      onClick={() => void openRelease()}
+                    >
+                      {t("about.updates.downloadManually")}
                     </Button>
                   )}
                 </>
@@ -230,15 +289,17 @@ export function UpdatePanel() {
                   {t("about.updates.noPackage")}
                 </p>
               )}
-              <Button
-                size="sm"
-                variant="link"
-                className="ml-2 h-auto px-0"
-                onClick={() => void openRelease()}
-              >
-                {t("about.updates.releaseNotes")}
-                <ExternalLink className="h-3.5 w-3.5" />
-              </Button>
+              {!release.automatic_install && (
+                <Button
+                  size="sm"
+                  variant="link"
+                  className="ml-2 h-auto px-0"
+                  onClick={() => void openRelease()}
+                >
+                  {t("about.updates.releaseNotes")}
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </Button>
+              )}
             </>
           )}
         </div>
@@ -252,6 +313,21 @@ export function UpdatePanel() {
           {t("about.updates.failed", { error })}
         </p>
       )}
+      <div className="mt-3">
+        <Button
+          size="sm"
+          variant="link"
+          className="h-auto px-0 text-xs"
+          onClick={() =>
+            void openRelease(
+              "https://github.com/OctopusGarage/mesh-talk/releases/latest",
+            )
+          }
+        >
+          {t("about.updates.stableDownload")}
+          <ExternalLink className="h-3.5 w-3.5" />
+        </Button>
+      </div>
     </section>
   );
 }

@@ -44,6 +44,45 @@ beforeEach(() => {
   });
 });
 
+it.each(["owner_account_history", "account_reactions"])(
+  "releases the history spinner when %s stalls and retries without restarting",
+  async (stalledCommand) => {
+    vi.useFakeTimers();
+    const pending: (() => void)[] = [];
+    try {
+      const store = session();
+      store.setState({ active: conversation, cacheOrder: [key] });
+      invoke.mockImplementation((command: string) =>
+        command === stalledCommand
+          ? new Promise((resolve) => pending.push(() => resolve([])))
+          : Promise.resolve([]),
+      );
+      const loading = reloadConversation(store.setState, store.getState);
+      expect(store.getState().loading).toBe(true);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(store.getState().loading).toBe(false);
+      expect(store.getState().historyError).toBe(key);
+      expect(await loading).toBe(false);
+
+      invoke.mockImplementation((command: string) =>
+        Promise.resolve(
+          command === "owner_account_history" ? [row("fresh")] : [],
+        ),
+      );
+      expect(await reloadConversation(store.setState, store.getState)).toBe(
+        true,
+      );
+      pending.forEach((finish) => finish());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.getState().messages[key]?.[0]?.id).toBe("fresh");
+      expect(store.getState().historyError).toBeNull();
+    } finally {
+      pending.forEach((finish) => finish());
+      vi.useRealTimers();
+    }
+  },
+);
+
 it("establishes expanded coverage without unread archive, then discovers changed snapshots", async () => {
   const store = session();
   store.setState({ active: conversation, cacheOrder: [key] });
@@ -290,3 +329,154 @@ it("commits recovered history with historical arrival metadata while preserving 
     stop();
   }
 });
+
+it("refreshes exact context independently without replacing recent history or unread coverage", async () => {
+  const store = session();
+  store.setState({
+    active: conversation,
+    cacheOrder: [key],
+    activeRequest: 1,
+    searchTarget: {
+      key,
+      request: 1,
+      reference: { kind: "account", target: "friend", message_id: "archive" },
+      context: [],
+    },
+  });
+  invoke.mockImplementation((command: string) =>
+    Promise.resolve(
+      command === "owner_search_context"
+        ? {
+            status: "found",
+            reference: {
+              kind: "account",
+              target: "friend",
+              message_id: "archive",
+            },
+            messages: [row("archive")],
+          }
+        : command === "owner_account_history"
+          ? [row("recent")]
+          : [],
+    ),
+  );
+  await reloadConversation(store.setState, store.getState);
+  expect(store.getState().messages[key].map((m) => m.id)).toEqual(["recent"]);
+  const target = store.getState().searchTarget;
+  expect(
+    target && "reference" in target && target.context.map((m) => m.id),
+  ).toEqual(["archive"]);
+  expect(store.getState().ledger[key]).not.toHaveProperty("archive");
+});
+
+it("releases a stalled exact context read without losing recent history or accepting late context", async () => {
+  vi.useFakeTimers();
+  let finish: ((value: unknown) => void) | undefined;
+  try {
+    const store = session();
+    const reference = {
+      kind: "account" as const,
+      target: "friend",
+      message_id: "archive",
+    };
+    store.setState({
+      active: conversation,
+      cacheOrder: [key],
+      searchTarget: { key, request: 1, reference, context: [] },
+    });
+    invoke.mockImplementation((command: string) =>
+      command === "owner_search_context"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : Promise.resolve(
+            command === "owner_account_history" ? [row("recent")] : [],
+          ),
+    );
+    const loading = reloadConversation(store.setState, store.getState);
+    await vi.advanceTimersByTimeAsync(10_001);
+    await loading;
+    expect(store.getState().loading).toBe(false);
+    expect(store.getState().messages[key].map((message) => message.id)).toEqual(
+      ["recent"],
+    );
+    finish?.({ status: "found", reference, messages: [row("archive")] });
+    await vi.advanceTimersByTimeAsync(0);
+    const target = store.getState().searchTarget;
+    expect(target && "reference" in target && target.context).toEqual([]);
+  } finally {
+    finish?.({ status: "unavailable" });
+    vi.useRealTimers();
+  }
+});
+
+it("drops context with an identical ID from a different namespace", async () => {
+  const store = session();
+  store.setState({
+    active: conversation,
+    cacheOrder: [key],
+    searchTarget: {
+      key,
+      request: 1,
+      reference: { kind: "account", target: "friend", message_id: "same-id" },
+      context: [],
+    },
+  });
+  invoke.mockImplementation((command: string) =>
+    Promise.resolve(
+      command === "owner_search_context"
+        ? {
+            status: "found",
+            reference: {
+              kind: "legacy-device",
+              target: "friend",
+              message_id: "same-id",
+            },
+            messages: [row("same-id")],
+          }
+        : [],
+    ),
+  );
+  await reloadConversation(store.setState, store.getState);
+  const target = store.getState().searchTarget;
+  expect(target && "reference" in target && target.context).toEqual([]);
+});
+
+it.each(["Alice", ""])(
+  "classifies channel history mentions with display name %j while preserving unread identities",
+  async (displayName) => {
+    useAuth.setState({
+      user: { id: "host", username: "alice", display_name: displayName },
+    });
+    const store = session();
+    const channel: Conversation = { kind: "channel", id: "team", name: "Team" };
+    const channelKey = "channel:team";
+    store.setState({
+      active: channel,
+      cacheOrder: [channelKey],
+      ledger: { [channelKey]: { mention: { seen: false, late: true } } },
+      unreadIds: { [channelKey]: ["mention"] },
+      unread: { [channelKey]: 1 },
+    });
+    invoke.mockImplementation((command: string) =>
+      Promise.resolve(
+        command === "channel_history"
+          ? [
+              { ...row("mention"), text: "@Alice please check" },
+              { ...row("own"), text: "@Alice", from_me: true },
+              { ...row("other"), text: "@Bob" },
+              { ...row("archive"), text: "@Alice archived" },
+            ]
+          : [],
+      ),
+    );
+    expect(await reloadConversation(store.setState, store.getState)).toBe(true);
+    expect(store.getState().ledger[channelKey].mention).toMatchObject({
+      mentioned: true,
+      seen: false,
+    });
+    expect(store.getState().ledger[channelKey].own.mentioned).not.toBe(true);
+    expect(store.getState().ledger[channelKey].other.mentioned).not.toBe(true);
+    expect(store.getState().ledger[channelKey].archive.seen).toBe(true);
+  },
+);

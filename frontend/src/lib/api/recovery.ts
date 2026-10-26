@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { invokeSensitive } from "./sensitiveInvoke";
 
 export interface BackupPreview {
   account_id: string;
@@ -8,12 +9,23 @@ export interface BackupPreview {
   file_cards: number;
   media_files: number;
   missing_media: number;
+  favorites: number;
+  favorite_files: number;
+  missing_favorite_files: number;
 }
 
 export interface BackupCreated {
   recovery_key: string;
   preview: BackupPreview;
   archive_bytes: number;
+}
+
+export type BackupDestination = "local" | "drive";
+
+export interface BackupSetup {
+  recovery_key: string;
+  confirmed: boolean;
+  destination: BackupDestination;
 }
 
 export interface BackupStatus {
@@ -30,9 +42,17 @@ export interface RestoreComplete {
 
 export const recovery = {
   prepareKey: () => invoke<string>("prepare_backup_key"),
+  setup: () => invoke<BackupSetup>("backup_setup"),
+  confirmKey: (recoveryKey: string) =>
+    invoke<void>("confirm_backup_key", { recoveryKey }),
+  setDestination: (destination: BackupDestination) =>
+    invoke<void>("set_backup_destination", { destination }),
   status: () => invoke<BackupStatus | null>("backup_status"),
-  create: (destination: string, recoveryKey: string) =>
-    invoke<BackupCreated>("create_backup", { destination, recoveryKey }),
+  create: (destination: string, recoveryKey?: string) =>
+    invokeSensitive<BackupCreated>("create_backup", {
+      destination,
+      recoveryKey,
+    }),
   inspect: (path: string, recoveryKey: string) =>
     invoke<BackupPreview>("inspect_backup", { path, recoveryKey }),
   restore: (

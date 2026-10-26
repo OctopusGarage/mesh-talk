@@ -202,7 +202,16 @@ test("stranded prompt dismiss target meets interaction invariants", async ({
   await expectVisibleFocus(page, page.getByTestId("stranded-dismiss"));
 });
 
-for (const language of ["en", "es", "ja", "zh-Hans", "zh-Hant", "yue"]) {
+for (const language of [
+  "en",
+  "es",
+  "ja",
+  "zh-Hans",
+  "zh-Hant",
+  "yue",
+  "pt-BR",
+  "ko",
+]) {
   test(`sidebar actions fit in ${language}`, async ({ page }) => {
     await page.addInitScript(
       (nextLanguage) => localStorage.setItem("mesh-talk-lang", nextLanguage),

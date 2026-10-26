@@ -1,0 +1,9 @@
+/* Isolate answer margins while measuring the native disclosure. */
+.faq-motion-content {
+  display: flow-root;
+}
+
+.faq-list details[data-faq-animating] {
+  box-sizing: border-box;
+  overflow: hidden;
+}

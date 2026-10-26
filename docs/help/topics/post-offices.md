@@ -12,6 +12,25 @@ A peer-operated post office can temporarily hold encrypted events while a recipi
 
 The preferred choice is saved intent, not proof the relay is currently connected or handling a message. Disabling the master switch retains dependent saved choices; the app shows why they are inactive.
 
+## Choose whether to share your registration office
+
+**Share my originating post office**, under **Connection & delivery**, is off by
+default. Enable it only if you want people discovering this device to see the
+name and identity of its registration office, including through forwarding
+offices. This choice belongs to the person sharing the information; viewing
+someone's profile cannot enable it for them.
+
+Office names may reveal a network or site. Participating post offices can read
+this optional metadata through the existing encrypted connections. Turning the
+setting off stops new sharing; already forwarded information expires within
+its original 15-second lease. It cannot erase information someone already read.
+Ordinary discovery and messaging continue. This control does not hide connection
+IP addresses or the office introducing a participant directly to you.
+
+A member profile separates **Registration office** from **Discovery source**.
+No shared registration information can mean sharing is off, evidence has expired
+or a node does not support it. Neither field establishes physical location.
+
 ## Understand the limits
 
 Post offices are operated by peers, not a vendor account service. They hold encrypted events subject to capacity and a maximum age of 30 days. Delivery depends on eligible relays and surviving routes; it is not guaranteed permanent storage.

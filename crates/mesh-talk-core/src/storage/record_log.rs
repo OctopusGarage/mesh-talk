@@ -26,7 +26,7 @@ use crate::storage::encryption::{
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
@@ -138,15 +138,14 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
             .map_err(|_| LogError::CorruptFile("missing salt".into()))?;
         let key = EncryptionKey::from_password(password, &salt)?;
 
-        let mut rest = Vec::new();
-        file.read_to_end(&mut rest)?;
-        let (records, valid) = Self::parse_records(&rest, &key)?;
-        if valid != rest.len() {
+        let body_len = file.metadata()?.len() - (6 + SALT_SIZE) as u64;
+        let (records, valid) = Self::parse_records(&mut BufReader::new(&mut file), body_len, &key)?;
+        if valid != body_len {
             #[cfg(windows)]
             let repair_file = &repair;
             #[cfg(not(windows))]
             let repair_file = &file;
-            repair_file.set_len((6 + SALT_SIZE + valid) as u64)?;
+            repair_file.set_len((6 + SALT_SIZE) as u64 + valid)?;
             repair_file.sync_all()?;
         }
         Ok((
@@ -174,34 +173,38 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
 
     /// Parse the record region. A torn trailing record (crash mid-write) is
     /// dropped; a record that fails to decrypt (tampering) is an error.
-    fn parse_records(mut data: &[u8], key: &EncryptionKey) -> Result<(Vec<R>, usize), LogError> {
+    fn parse_records(
+        reader: &mut impl Read,
+        body_len: u64,
+        key: &EncryptionKey,
+    ) -> Result<(Vec<R>, u64), LogError> {
         let mut records = Vec::new();
         let mut valid = 0;
-        loop {
-            if data.len() < 4 {
-                break; // clean end, or a torn length prefix
+        // Reuse one ciphertext buffer; replay never retains a second whole-file copy.
+        let mut record = Vec::new();
+        while body_len - valid >= 4 {
+            let mut prefix = [0; 4];
+            reader.read_exact(&mut prefix)?;
+            let len = u32::from_be_bytes(prefix) as usize;
+            // The prefix is unauthenticated. Check the actual remaining file extent
+            // before reserving memory, preserving the existing torn-tail rule.
+            if len as u64 > body_len - valid - 4 {
+                break;
             }
-            let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-            data = &data[4..];
-            if data.len() < len {
-                break; // torn trailing record — drop it
-            }
-            let record = &data[..len];
-            data = &data[len..];
-
-            if record.len() < NONCE_SIZE {
+            if len < NONCE_SIZE {
                 return Err(LogError::CorruptFile("record shorter than nonce".into()));
             }
+            record.resize(len, 0);
+            reader.read_exact(&mut record)?;
             let nonce: [u8; NONCE_SIZE] = record[..NONCE_SIZE]
                 .try_into()
                 .expect("nonce length checked");
-            let ciphertext = &record[NONCE_SIZE..];
-            let plaintext = decrypt_data(ciphertext, &nonce, key)
+            let plaintext = decrypt_data(&record[NONCE_SIZE..], &nonce, key)
                 .map_err(|_| LogError::CorruptFile("record failed to decrypt".into()))?;
             let value: R = bincode::deserialize(&plaintext)
                 .map_err(|e| LogError::CorruptFile(format!("record decode: {e}")))?;
             records.push(value);
-            valid += 4 + len;
+            valid += 4 + len as u64;
         }
         Ok((records, valid))
     }
@@ -454,6 +457,41 @@ mod tests {
             n,
             data: data.to_vec(),
         }
+    }
+
+    #[test]
+    fn replay_reads_one_frame_at_a_time_and_checks_length_before_allocation() {
+        struct FrameReader {
+            data: std::io::Cursor<Vec<u8>>,
+            largest_read: usize,
+        }
+        impl Read for FrameReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.largest_read = self.largest_read.max(buf.len());
+                self.data.read(buf)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (log, _) =
+            EncryptedRecordLog::<Rec>::open(&dir.path().join("stream.log"), "pw", TEST_MAGIC)
+                .unwrap();
+        let frame = log.encode_record(&rec(1, b"streamed")).unwrap();
+        let frame_len = frame.len();
+        let mut bytes = frame.repeat(128);
+        // A corrupt length must be treated as a torn tail before allocating it.
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+        bytes.extend_from_slice(b"short tail");
+        let body_len = bytes.len() as u64;
+        let mut reader = FrameReader {
+            data: std::io::Cursor::new(bytes),
+            largest_read: 0,
+        };
+        let (records, valid) =
+            EncryptedRecordLog::<Rec>::parse_records(&mut reader, body_len, &log.key).unwrap();
+        assert_eq!(records, vec![rec(1, b"streamed"); 128]);
+        assert_eq!(valid, (128 * frame_len) as u64);
+        assert!(reader.largest_read <= frame_len);
+        assert_eq!(reader.data.position(), valid + 4);
     }
 
     #[test]
@@ -751,7 +789,7 @@ mod tests {
     #[test]
     fn round_trips_a_record_larger_than_a_single_buffer() {
         // A record whose ciphertext is far bigger than typical must frame, persist,
-        // and reload intact (the u32 length prefix and read_to_end path handle it).
+        // and reload intact (the u32 length prefix and streaming replay handle it).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.log");
         let big = rec(1, &vec![0xA5u8; 512 * 1024]);

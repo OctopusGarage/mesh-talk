@@ -13,17 +13,21 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { auth, chat } from "@/lib/api";
+import { auth, chat, diag } from "@/lib/api";
+import { accountDocuments } from "@/lib/api/accountDocuments";
 import type {
+  AccountLoginSyncStatus,
   DeviceSyncPolicy,
   DeviceSyncStatus,
   SyncCategory,
 } from "@/lib/api/chat";
-import { errorMessage } from "@/lib/error";
+import { errorKind, errorMessage, isVerificationCanceled } from "@/lib/error";
 import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import { shortId } from "@/lib/format";
 import { isContactPeer } from "@/lib/contactVisibility";
 import { publishAppearanceBeforeLink } from "@/lib/linkedAppearance";
+import { publishContactsBeforeLink } from "@/lib/linkedContacts";
+import { publishDraftsBeforeLink, useDrafts } from "@/store/drafts";
 import { useCopyFeedback } from "./useCopyFeedback";
 import { useSerialPoll } from "./useSerialPoll";
 import { useChat } from "@/store/chat";
@@ -37,13 +41,54 @@ const SYNC_OPTIONS = [
   { category: "contacts", label: "contactsSync" },
 ] as const satisfies readonly { category: SyncCategory; label: string }[];
 
+function combinedSyncPhase(
+  device: DeviceSyncStatus,
+): DeviceSyncStatus["phase"] {
+  if (device.phase !== "up_to_date" && device.phase !== "waiting_for_files")
+    return device.phase;
+  if (device.document_requires_upgrade) return "error";
+  if (device.document_phase === "disabled") return "disabled";
+  if (device.document_error || device.document_phase === "error")
+    return "error";
+  return device.document_phase && device.document_phase !== "up_to_date"
+    ? device.document_phase
+    : device.phase;
+}
+
+function linkFailureKey(error: unknown) {
+  switch (errorKind(error)) {
+    case "link-no-direct-route":
+      return "linkDevice.noDirectRoute";
+    case "link-connection":
+    case "relay-unreachable":
+      return "linkDevice.connectionFailed";
+    case "link-timeout":
+      return "linkDevice.responseTimedOut";
+    case "link-rejected":
+      return "linkDevice.requestClosed";
+    case "link-upgrade-required":
+      return "linkDevice.credentialsUpgrade";
+    case "link-protocol":
+      return "linkDevice.invalidResponse";
+    case "invalid-input":
+      return "linkDevice.invalidCode";
+    case "peer-unknown":
+      return "linkDevice.deviceUnavailable";
+    default:
+      return "linkDevice.couldNotLink";
+  }
+}
+
 export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
   const owner = useAuth((state) => state.user?.id);
   const generation = useAuth((state) => state.generation);
+  const runtime = useChat(
+    (state) => `${state.myAccountId}:${state.runEpoch}:${state.identityEpoch}`,
+  );
   if (!owner) return null;
   return (
     <OwnedLinkDeviceDialog
-      key={`${owner}:${generation}`}
+      key={`${owner}:${generation}:${runtime}`}
       owner={owner}
       menuItem={menuItem}
     />
@@ -67,6 +112,7 @@ function OwnedLinkDeviceDialog({
   useEffect(() => {
     translate.current = t;
   }, [t]);
+  const user = useAuth((state) => state.user);
   const myAccountId = useChat((s) => s.myAccountId);
   const peers = useChat((s) => s.peers);
   const setError = useChat((s) => s.setError);
@@ -75,20 +121,49 @@ function OwnedLinkDeviceDialog({
   const [code, setCode] = useState<string | null>(null);
   const [joinPeer, setJoinPeer] = useState("");
   const [joinCode, setJoinCode] = useState("");
+  const [accountChangeConfirmed, setAccountChangeConfirmed] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [msgIsError, setMsgIsError] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [linkError, setLinkError] = useState<unknown>(null);
+  const linkFeedback = useRef<HTMLDivElement>(null);
+  const [refreshStatus, setRefreshStatus] = useState<
+    "idle" | "loading" | "done"
+  >("idle");
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const contactPeers = peers.filter(isContactPeer);
+  const pairingPeers = contactPeers.filter(
+    (peer) => peer.directly_reachable !== false,
+  );
+  const hasUnavailablePeers = pairingPeers.length < contactPeers.length;
+  const selectedPeer = pairingPeers.find((peer) => peer.user_id === joinPeer);
+  const targetLabel = selectedPeer
+    ? `${selectedPeer.name || t("common.unnamed")} (${shortId(selectedPeer.user_id)})`
+    : "";
+  useEffect(() => {
+    setAccountChangeConfirmed(false);
+  }, [open, joinPeer, selectedPeer?.user_id, selectedPeer?.account_id]);
   const [creatingCode, setCreatingCode] = useState(false);
   const creatingCodeRef = useRef(false);
   const openRef = useRef(false);
   const dialogSession = useRef(0);
   const stopRef = useRef<Promise<void> | null>(null);
   const { status: copyStatus, copy, reset: resetCopy } = useCopyFeedback();
+  const [syncAll, setSyncAll] = useState(true);
   const [syncPolicy, setSyncPolicy] = useState<DeviceSyncPolicy | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<DeviceSyncStatus[]>([]);
   const [syncStatusError, setSyncStatusError] = useState<string | null>(null);
+  const [loginStatus, setLoginStatus] = useState<AccountLoginSyncStatus | null>(
+    null,
+  );
+  const [loginStatusFailed, setLoginStatusFailed] = useState(false);
+
+  useEffect(() => {
+    if (linkError !== null)
+      linkFeedback.current?.scrollIntoView?.({ block: "nearest" });
+  }, [linkError]);
 
   useEffect(() => {
     if (!open) return;
@@ -126,8 +201,28 @@ function OwnedLinkDeviceDialog({
     (error) => setSyncStatusError(errorMessage(error)),
   );
 
+  useSerialPoll(
+    open,
+    5_000,
+    () => chat.getAccountLoginSyncStatus(owner),
+    (status) => {
+      if (!ownsSession() || !status || status.account_id !== myAccountId) {
+        setLoginStatus(null);
+        setLoginStatusFailed(true);
+        return;
+      }
+      setLoginStatus(status);
+      setLoginStatusFailed(false);
+    },
+    () => {
+      setLoginStatus(null);
+      setLoginStatusFailed(true);
+    },
+  );
+
   const setSyncCategory = async (category: SyncCategory, enabled: boolean) => {
     if (!syncPolicy || syncBusy) return;
+    setSyncAll(false);
     const session = dialogSession.current;
     setSyncBusy(true);
     setSyncError(null);
@@ -161,6 +256,11 @@ function OwnedLinkDeviceDialog({
     if (v !== openRef.current) dialogSession.current++;
     openRef.current = v;
     setOpen(v);
+    if (v) {
+      setSyncAll(true);
+      setLoginStatus(null);
+      setLoginStatusFailed(false);
+    }
     if (!v) {
       if (code) void stopLinking();
       setCode(null);
@@ -168,6 +268,9 @@ function OwnedLinkDeviceDialog({
       setMsgIsError(false);
       resetCopy();
       setJoinCode("");
+      setLinkError(null);
+      setRefreshError(null);
+      setRefreshStatus("idle");
     }
   };
 
@@ -182,37 +285,95 @@ function OwnedLinkDeviceDialog({
   const showCode = async () => {
     if (creatingCodeRef.current) return;
     const session = dialogSession.current;
+    const sourceAccount = myAccountId;
+    const ownsSourceAccount = () =>
+      ownsSession() && useChat.getState().myAccountId === sourceAccount;
     creatingCodeRef.current = true;
     setCreatingCode(true);
     setMsg(null);
     setMsgIsError(false);
+    let started = false;
+    let displayed = false;
     try {
       if (stopRef.current) await stopRef.current;
       if (
-        !ownsSession() ||
+        !ownsSourceAccount() ||
         !openRef.current ||
         session !== dialogSession.current
       )
         return;
-      await publishAppearanceBeforeLink(owner).catch((error) => {
-        console.warn("Could not prepare linked appearance", error);
-      });
+      // Native authentication precedes sync expansion. Keep the code concealed
+      // until all source snapshots are ready, and revoke it if preparation fails.
+      const nextCode = await chat.startLinking(syncAll);
+      started = true;
       if (
-        !ownsSession() ||
+        !ownsSourceAccount() ||
         !openRef.current ||
         session !== dialogSession.current
       )
         return;
-      const nextCode = await chat.startLinking();
-      if (ownsSession() && openRef.current && session === dialogSession.current)
+      setCode(null);
+      if (syncAll)
+        setSyncPolicy(
+          Object.fromEntries(
+            SYNC_OPTIONS.map(({ category }) => [category, true]),
+          ) as DeviceSyncPolicy,
+        );
+      if (syncAll || syncPolicy?.appearance)
+        await publishAppearanceBeforeLink(owner);
+      if (
+        !ownsSourceAccount() ||
+        !openRef.current ||
+        session !== dialogSession.current
+      )
+        return;
+      if (syncAll || syncPolicy?.contacts)
+        await publishContactsBeforeLink(owner);
+      if (
+        !ownsSourceAccount() ||
+        !openRef.current ||
+        session !== dialogSession.current
+      )
+        return;
+      if (syncAll || syncPolicy?.history) {
+        if (!sourceAccount) throw new Error(t("linkDevice.couldNotLink"));
+        await accountDocuments.publishLegacyControls(owner, sourceAccount);
+        if (
+          !ownsSourceAccount() ||
+          !openRef.current ||
+          session !== dialogSession.current
+        )
+          return;
+        const report = await publishDraftsBeforeLink(owner);
+        if (
+          !ownsSourceAccount() ||
+          !openRef.current ||
+          session !== dialogSession.current
+        )
+          return;
+        if (report.unmapped)
+          setMsg(t("linkDevice.draftsUnmapped", { count: report.unmapped }));
+      }
+      if (
+        ownsSourceAccount() &&
+        openRef.current &&
+        session === dialogSession.current
+      ) {
         setCode(nextCode);
-      else if (ownsSession()) await stopLinking();
+        displayed = true;
+      }
     } catch (e) {
-      if (openRef.current && session === dialogSession.current) {
+      if (
+        !isVerificationCanceled(e) &&
+        ownsSourceAccount() &&
+        openRef.current &&
+        session === dialogSession.current
+      ) {
         setMsgIsError(true);
         setMsg(errorMessage(e));
       }
     } finally {
+      if (started && !displayed && ownsSourceAccount()) await stopLinking();
       creatingCodeRef.current = false;
       setCreatingCode(false);
     }
@@ -224,13 +385,34 @@ function OwnedLinkDeviceDialog({
   };
 
   const doLink = async () => {
-    if (!joinPeer || !joinCode.trim()) return;
+    const pairingCode = joinCode.replace(/\s+/g, "");
+    if (!selectedPeer || !pairingCode || !accountChangeConfirmed || busy)
+      return;
     const session = dialogSession.current;
     setBusy(true);
     setMsg(null);
     setMsgIsError(false);
+    setLinkError(null);
     try {
-      await chat.linkDevice(joinPeer, joinCode.trim());
+      const current = () =>
+        ownsSession() && openRef.current && session === dialogSession.current;
+      await useDrafts.getState().flush();
+      if (!current()) return;
+      if (useDrafts.getState().error) throw new Error(t("drafts.saveFailed"));
+      const peer = useChat
+        .getState()
+        .peers.find((candidate) => candidate.user_id === selectedPeer.user_id);
+      if (
+        !peer ||
+        !isContactPeer(peer) ||
+        peer.directly_reachable === false ||
+        peer.account_id !== selectedPeer.account_id
+      )
+        throw {
+          kind: "peer-unknown",
+          message: "Selected device changed during account setup",
+        };
+      await chat.linkDevice(joinPeer, pairingCode, syncAll);
       if (!ownsSession()) return;
       await auth.adoptLinkedAccount();
       if (openRef.current && session === dialogSession.current) {
@@ -238,12 +420,36 @@ function OwnedLinkDeviceDialog({
         setJoinCode("");
       }
     } catch (e) {
-      if (openRef.current && session === dialogSession.current) {
-        setMsgIsError(true);
-        setMsg(t("linkDevice.linkFailed", { error: errorMessage(e) }));
+      if (
+        !isVerificationCanceled(e) &&
+        openRef.current &&
+        session === dialogSession.current
+      ) {
+        setLinkError(() => e ?? new Error(errorMessage(e)));
       }
     } finally {
       setBusy(false);
+    }
+  };
+
+  const refreshDevices = async () => {
+    if (refreshStatus === "loading" || busy) return;
+    const session = dialogSession.current;
+    setRefreshStatus("loading");
+    setRefreshError(null);
+    try {
+      await diag.rescan();
+      if (ownsSession() && openRef.current && session === dialogSession.current)
+        setRefreshStatus("done");
+    } catch (error) {
+      if (
+        ownsSession() &&
+        openRef.current &&
+        session === dialogSession.current
+      ) {
+        setRefreshStatus("idle");
+        setRefreshError(errorMessage(error));
+      }
     }
   };
 
@@ -291,11 +497,49 @@ function OwnedLinkDeviceDialog({
           </DialogDescription>
         </DialogHeader>
 
+        <label
+          className="flex items-start gap-3 text-sm leading-relaxed"
+          htmlFor="link-sync-all"
+        >
+          <input
+            id="link-sync-all"
+            type="checkbox"
+            checked={syncAll}
+            disabled={busy || creatingCode || syncBusy}
+            onChange={(event) => setSyncAll(event.target.checked)}
+            className="mt-1 h-4 w-4 shrink-0 accent-signal"
+          />
+          <span>
+            <span className="block font-medium">{t("linkDevice.syncAll")}</span>
+            <span className="text-xs text-muted-foreground">
+              {t("linkDevice.syncAllHint")}
+            </span>
+          </span>
+        </label>
+
         {/* Show this device's pairing code on the OTHER device. */}
         <section className="space-y-3 rounded-lg border p-4">
           <p className="font-display text-sm font-semibold tracking-tight">
             {t("linkDevice.addDevice")}
           </p>
+          <p className="text-sm leading-relaxed">
+            {t("linkDevice.keepAccountHint")}
+          </p>
+          {user?.username && (
+            <div
+              data-testid="link-source-identity"
+              className="space-y-1 break-words text-sm leading-relaxed [overflow-wrap:anywhere]"
+            >
+              <p>{t("linkDevice.sourceLoginName", { login: user.username })}</p>
+              {user.display_name?.trim() && (
+                <p>
+                  {t("linkDevice.sourceNickname", {
+                    nickname: user.display_name,
+                  })}
+                </p>
+              )}
+            </div>
+          )}
           {!code ? (
             <>
               <p className="text-xs leading-relaxed text-muted-foreground">
@@ -377,48 +621,255 @@ function OwnedLinkDeviceDialog({
           <p className="font-display text-sm font-semibold tracking-tight">
             {t("linkDevice.haveCode")}
           </p>
-          <label
-            htmlFor="link-device-peer"
-            className="block text-xs font-medium text-muted-foreground"
-          >
-            {t("linkDevice.device")}
-          </label>
+          <p className="text-sm leading-relaxed">
+            {t("linkDevice.adoptAccountHint")}
+          </p>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("linkDevice.directConnectionHint")}
+          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <label
+              htmlFor="link-device-peer"
+              className="block text-xs font-medium text-muted-foreground"
+            >
+              {t("linkDevice.device")}
+            </label>
+            <Button
+              variant="ghost"
+              size="sm"
+              data-testid="link-refresh-devices"
+              disabled={busy || refreshStatus === "loading"}
+              onClick={() => void refreshDevices()}
+            >
+              {t(
+                refreshStatus === "loading"
+                  ? "linkDevice.refreshing"
+                  : "linkDevice.refreshDevices",
+              )}
+            </Button>
+          </div>
           <select
             id="link-device-peer"
-            value={joinPeer}
-            onChange={(e) => setJoinPeer(e.target.value)}
+            value={selectedPeer?.user_id ?? ""}
+            disabled={busy}
+            aria-describedby="link-device-route-hint"
+            onChange={(e) => {
+              setJoinPeer(e.target.value);
+              setLinkError(null);
+            }}
             className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background [@media(hover:none)]:min-h-11"
           >
             <option value="">{t("linkDevice.pickDevice")}</option>
-            {peers.filter(isContactPeer).map((p) => (
+            {pairingPeers.map((p) => (
               <option key={p.user_id} value={p.user_id}>
                 {p.name || t("common.unnamed")} ({shortId(p.user_id)})
               </option>
             ))}
           </select>
+          <p
+            id="link-device-route-hint"
+            className="text-xs leading-relaxed text-muted-foreground"
+          >
+            {t(
+              !selectedPeer && hasUnavailablePeers
+                ? "linkDevice.relayOnlyHint"
+                : "linkDevice.deviceHint",
+            )}
+          </p>
+          {refreshStatus === "done" && (
+            <p role="status" className="text-xs text-muted-foreground">
+              {t("linkDevice.refreshStarted")}
+            </p>
+          )}
+          {refreshError && (
+            <p role="alert" className="break-words text-xs text-destructive">
+              {t("linkDevice.refreshFailed", { error: refreshError })}
+            </p>
+          )}
+          {selectedPeer && (
+            <div
+              data-testid="link-account-change"
+              className="space-y-1 break-words rounded-md bg-muted/50 p-3 text-sm leading-relaxed"
+            >
+              <p className="font-medium">
+                {t("linkDevice.accountChange", { device: targetLabel })}
+              </p>
+              <p>
+                {t("linkDevice.accountChangeIds", {
+                  current: myAccountId ? shortId(myAccountId, 12) : "—",
+                  target: shortId(
+                    selectedPeer.account_id || selectedPeer.user_id,
+                    12,
+                  ),
+                })}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {t("linkDevice.localProfileHint")}
+              </p>
+            </div>
+          )}
           <label
             htmlFor="link-device-code"
             className="block text-xs font-medium text-muted-foreground"
           >
             {t("linkDevice.pairingCode")}
           </label>
-          <div className="flex gap-2">
+          <div className="space-y-3">
             <Input
               id="link-device-code"
               autoFocus
               placeholder={t("linkDevice.pairingCode")}
               value={joinCode}
-              onChange={(e) => setJoinCode(e.target.value)}
-              className="font-mono tracking-widest"
+              disabled={busy}
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              aria-describedby={
+                linkError !== null
+                  ? "link-device-feedback"
+                  : "link-device-code-hint"
+              }
+              onChange={(e) => {
+                setJoinCode(e.target.value);
+                setLinkError(null);
+              }}
+              className="min-w-0 font-mono tracking-widest"
             />
+            {selectedPeer && (
+              <label
+                className="flex items-start gap-2 text-sm leading-relaxed"
+                htmlFor="link-account-consent"
+              >
+                <input
+                  id="link-account-consent"
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 shrink-0 accent-signal"
+                  checked={accountChangeConfirmed}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setAccountChangeConfirmed(event.target.checked)
+                  }
+                />
+                <span className="min-w-0 [overflow-wrap:anywhere]">
+                  {t("linkDevice.confirmAccountChange", {
+                    device: targetLabel,
+                  })}
+                </span>
+              </label>
+            )}
             <Button
-              disabled={!joinPeer || !joinCode.trim() || busy}
+              data-testid="link-adopt-account"
+              disabled={
+                !selectedPeer ||
+                !joinCode.trim() ||
+                !accountChangeConfirmed ||
+                busy
+              }
               onClick={doLink}
+              aria-busy={busy}
+              className="h-auto min-h-10 w-full whitespace-normal py-2"
             >
-              {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-              {t("common.link")}
+              {busy && (
+                <Loader2
+                  aria-hidden="true"
+                  className="h-4 w-4 animate-spin motion-reduce:animate-none"
+                />
+              )}
+              <span
+                aria-live="polite"
+                className="min-w-0 [overflow-wrap:anywhere]"
+              >
+                {t(busy ? "linkDevice.connecting" : "linkDevice.adoptAccount", {
+                  device: targetLabel || t("linkDevice.selectedDevice"),
+                })}
+              </span>
             </Button>
           </div>
+          <p
+            id="link-device-code-hint"
+            className="text-xs leading-relaxed text-muted-foreground"
+          >
+            {t("linkDevice.codeHint")}
+          </p>
+          {linkError !== null && (
+            <div
+              ref={linkFeedback}
+              id="link-device-feedback"
+              role="alert"
+              className="space-y-2 break-words text-sm"
+            >
+              <p className="font-medium text-destructive">
+                {t(linkFailureKey(linkError))}
+              </p>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t("linkDevice.retryHint")}
+              </p>
+              <details className="text-xs text-muted-foreground">
+                <summary className="cursor-pointer py-1">
+                  {t("linkDevice.technicalDetails")}
+                </summary>
+                <p className="mt-1 whitespace-pre-wrap break-words">
+                  {errorMessage(linkError)}
+                </p>
+              </details>
+            </div>
+          )}
+          <details className="text-xs text-muted-foreground">
+            <summary className="cursor-pointer py-1">
+              {t("linkDevice.connectionTips")}
+            </summary>
+            <ul className="mt-2 list-disc space-y-1 pl-4 leading-relaxed">
+              <li>{t("linkDevice.networkTip")}</li>
+              <li>{t("linkDevice.awakeTip")}</li>
+              <li>{t("linkDevice.firewallTip")}</li>
+            </ul>
+          </details>
+        </section>
+
+        <section
+          className="space-y-2 rounded-lg border p-4"
+          data-testid="account-login-sync-status"
+          aria-live="polite"
+        >
+          <p className="font-display text-sm font-semibold tracking-tight">
+            {t("linkDevice.loginSyncTitle")}
+          </p>
+          <p className="text-sm leading-relaxed">
+            {t(
+              loginStatusFailed
+                ? "linkDevice.loginSyncUnavailable"
+                : !loginStatus
+                  ? "linkDevice.loginSyncChecking"
+                  : loginStatus.available_revision === null
+                    ? "linkDevice.loginSyncWaiting"
+                    : loginStatus.applied_revision ===
+                        loginStatus.available_revision
+                      ? "linkDevice.loginSyncApplied"
+                      : "linkDevice.loginSyncApplying",
+            )}
+          </p>
+          {loginStatus?.devices.map((device) => (
+            <p
+              key={device.device_id}
+              className="text-xs leading-relaxed text-muted-foreground"
+            >
+              <span className="font-mono">{shortId(device.device_id, 8)}</span>
+              {" · "}
+              {t(
+                device.phase === "unsupported"
+                  ? "linkDevice.credentialsUpgrade"
+                  : device.phase === "permission_denied"
+                    ? "linkDevice.loginSyncAccessDenied"
+                    : device.phase === "retry_scheduled"
+                      ? "linkDevice.loginSyncRetry"
+                      : device.phase === "up_to_date"
+                        ? "linkDevice.loginSyncReceived"
+                        : device.phase === "synchronizing"
+                          ? "linkDevice.loginSyncReceiving"
+                          : "linkDevice.loginSyncWaiting",
+              )}
+            </p>
+          ))}
         </section>
 
         <section className="space-y-3 rounded-lg border p-4">
@@ -440,7 +891,7 @@ function OwnedLinkDeviceDialog({
               </div>
               <Switch
                 checked={syncPolicy?.[category] ?? false}
-                disabled={!syncPolicy || syncBusy}
+                disabled={!syncPolicy || syncBusy || busy || creatingCode}
                 aria-label={t(`linkDevice.${label}`)}
                 onCheckedChange={(enabled) =>
                   void setSyncCategory(category, enabled)
@@ -463,7 +914,20 @@ function OwnedLinkDeviceDialog({
                   <span className="font-mono">
                     {shortId(device.device_id, 8)}
                   </span>{" "}
-                  <span>{t(`linkDevice.syncPhase.${device.phase}`)}</span>
+                  <span>
+                    {t(`linkDevice.syncPhase.${combinedSyncPhase(device)}`)}
+                  </span>
+                  {combinedSyncPhase(device) === "waiting_for_files" && (
+                    <p>{t("linkDevice.waitingForFilesHint")}</p>
+                  )}
+                  {device.document_requires_upgrade ? (
+                    <p role="alert">{t("linkDevice.documentsUpgrade")}</p>
+                  ) : device.document_phase === "disabled" ? (
+                    <p>{t("linkDevice.documentsDisabled")}</p>
+                  ) : device.document_error ||
+                    device.document_phase === "error" ? (
+                    <p role="alert">{t("linkDevice.documentsError")}</p>
+                  ) : null}
                   {device.legacy_file_metadata && (
                     <p>{t("linkDevice.legacyFileMetadata")}</p>
                   )}

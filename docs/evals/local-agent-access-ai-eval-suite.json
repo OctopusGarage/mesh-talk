@@ -1,0 +1,133 @@
+{
+  "name": "mesh-talk-local-agent-access-eval",
+  "version": 1,
+  "evaluator_prompt": "docs/evals/prompts/agent-contract-evaluator.md",
+  "cases": [
+    {
+      "id": "MT-LOCAL-AGENT-001",
+      "name": "Short bootstrap discovers complete usage without secret-bearing prompts",
+      "subject_file": "src-tauri/src/integrations/instructions.rs",
+      "context_files": [
+        "crates/mesh-talk-integrations/src/http.rs",
+        "docs/bot-integrations.md",
+        "crates/mesh-talk-integrations/src/model.rs",
+        "crates/mesh-talk-integrations/src/service.rs",
+        "src-tauri/src/integrations.rs",
+        "crates/mesh-talk-core/src/node/outgoing_message.rs",
+        "crates/mesh-talk-core/src/node/delivery_store.rs",
+        "crates/mesh-talk-core/src/storage/record_log.rs"
+      ],
+      "min_score": 0.9,
+      "scenario": "An agent receives only the copied bootstrap and a user task. Evaluate whether it can discover real HTTP usage while prompts and public help remain free of credential values and private conversation data.",
+      "rubric": [
+        "The reusable bootstrap contains the complete numeric-loopback help URL and availability conditions, with no private config path, token or duplicate API manual.",
+        "Unauthenticated GET /v1/help supplies actual request schemas, routes, examples, auth steps and private credential-file location without exposing the token, principal, granted destinations or history.",
+        "The generated catalog describes the same fixed operations that are actually dispatched and distinguishes accepted work, retry duplication and recipient delivery."
+      ]
+    },
+    {
+      "id": "MT-LOCAL-AGENT-002",
+      "name": "HTTP auth and local resource boundaries",
+      "subject_file": "crates/mesh-talk-integrations/src/http.rs",
+      "context_files": [
+        "crates/mesh-talk-integrations/src/service.rs",
+        "crates/mesh-talk-integrations/src/model.rs",
+        "crates/mesh-talk-integrations/src/policy.rs",
+        "src-tauri/src/integrations.rs",
+        "src-tauri/src/runtime_admission.rs",
+        "src-tauri/src/chat_commands/state.rs",
+        "src-tauri/src/desktop_session.rs",
+        "crates/mesh-talk-core/src/node/outgoing_message.rs",
+        "crates/mesh-talk-core/src/node/runtime.rs",
+        "crates/mesh-talk-core/src/node/participant_runtime.rs",
+        "crates/mesh-talk-core/src/node/dm.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
+      ],
+      "min_score": 0.9,
+      "scenario": "An untrusted browser or local client probes the new HTTP listener with missing credentials, bad Host, Origin, excessive bodies and slow partial headers. Review the actual adapter and supplied authority owners.",
+      "rubric": [
+        "Only numeric loopback is bound, exact Host is validated, browser Origin and fetch metadata are rejected, and operations require existing scoped bearer authority.",
+        "The HTTP catalog is fixed and cannot dispatch administration or arbitrary integration RPC methods.",
+        "Input size, concurrent connections and handler requests, header/body deadlines and shutdown drain are bounded; listener cancellation owns and ends child producers.",
+        "Secret values never appear in public discovery or structured errors, and no new sending or cryptography implementation bypasses the existing service."
+      ]
+    },
+    {
+      "id": "MT-LOCAL-AGENT-003",
+      "name": "Desktop scope, idempotency and retirement",
+      "subject_file": "src-tauri/src/integrations/local_access.rs",
+      "context_files": [
+        "src-tauri/src/integrations.rs",
+        "src-tauri/src/runtime_admission.rs",
+        "crates/mesh-talk-integrations/src/service.rs",
+        "crates/mesh-talk-integrations/src/policy.rs",
+        "docs/bot-integrations.md",
+        "crates/mesh-talk-core/src/node/outgoing_message.rs",
+        "crates/mesh-talk-core/src/node/delivery_store.rs",
+        "src-tauri/src/chat_commands/state.rs",
+        "src-tauri/src/desktop_session.rs",
+        "crates/mesh-talk-core/src/node/runtime.rs",
+        "crates/mesh-talk-integrations/src/http.rs",
+        "crates/mesh-talk-integrations/src/host.rs",
+        "crates/mesh-talk-integrations/src/model.rs",
+        "crates/mesh-talk-integrations/src/private_files.rs",
+        "crates/mesh-talk-core/src/storage/record_log.rs",
+        "crates/mesh-talk-core/src/node/participant_runtime.rs",
+        "crates/mesh-talk-core/src/node/dm.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-integrations/src/ipc.rs",
+        "src-tauri/src/app_lock.rs"
+      ],
+      "min_score": 0.9,
+      "scenario": "A signed-in user enables local access for one existing group, retries one send, changes scope, locks, disables and restarts the app. Distinguish actual source guarantees from missing native evidence.",
+      "rubric": [
+        "Managed access defaults off, requires a nonempty explicit set of at most 16 available destinations, and authority belongs to the current desktop account/session.",
+        "The desktop reuses one service/grant writer and existing durable idempotency; repeating a send key does not create a second message.",
+        "Disabling or retiring closes admission at the send commit boundary and retires adapters and credentials; old managed tokens cannot authorize a later service.",
+        "Runtime tasks retain the service while needed and control handles do not create a permanent ownership cycle; scope and instruction-update failures are reflected in actual readiness."
+      ]
+    },
+    {
+      "id": "MT-LOCAL-AGENT-004",
+      "name": "Repeated instruction installation preserves user files",
+      "subject_file": "src-tauri/src/integrations/instructions.rs",
+      "context_files": [
+        "src-tauri/src/integrations/local_access.rs"
+      ],
+      "min_score": 0.9,
+      "scenario": "Enable, disable and reenable access around unrelated user AGENTS.md content, malformed markers, symlinks and concurrent edits.",
+      "rubric": [
+        "The user-level instruction path follows CODEX_HOME or the documented fallback; the exact copyable bootstrap is reused for file installation.",
+        "Repeated normal toggles upsert a single marked section and disable removes only the owned bytes, preserving unrelated content.",
+        "Malformed/duplicate markers, oversized inputs, symlink/reparse paths and detected concurrent edits fail without guessed destructive changes.",
+        "Writes are atomic and preserve supported permissions, and never-enabled startup does not modify user instructions."
+      ]
+    },
+    {
+      "id": "MT-LOCAL-AGENT-005",
+      "name": "Settings disclosure and recovery remain usable",
+      "subject_file": "frontend/src/features/chat/settings/LocalAgentSettings.tsx",
+      "context_files": [
+        "frontend/src/features/chat/settings/LocalAgentSettings.test.ts",
+        "frontend/e2e/local-agent-access.spec.ts",
+        "frontend/src/lib/api/localAgentAccess.ts",
+        "src-tauri/src/integrations/local_access.rs",
+        "frontend/src/features/chat/settings/useSettingsController.ts",
+        "src-tauri/src/integrations/instructions.rs",
+        "frontend/src/features/chat/settingsDialogSession.ts",
+        "frontend/src/features/chat/settingSaveQueue.ts",
+        "frontend/src/lib/contactVisibility.ts",
+        "frontend/src/store/contactPolicy.ts"
+      ],
+      "min_score": 0.9,
+      "scenario": "A user selects a conversation, enables access, expands and copies the prompt, then encounters a failed save or changes accounts while loading.",
+      "rubric": [
+        "No selected destination prevents enable; maximum scope and actual running/error readiness are represented rather than assuming a saved switch proves a running service.",
+        "Disclosure is expandable and copy uses exactly the backend bootstrap without token or a second API manual.",
+        "Mutations coordinate through the existing settings queue, failed updates refresh canonical state, and stale account/load responses cannot overwrite the new view.",
+        "Executable browser evidence covers toggle, selection, copy and constrained viewport behavior, while mocked IPC is not claimed as native platform evidence.",
+        "New account scope choices reuse the current owner's loaded contact presentation policy, while channels remain available and previously granted hidden scopes remain explicitly revocable without silent authorization changes."
+      ]
+    }
+  ]
+}

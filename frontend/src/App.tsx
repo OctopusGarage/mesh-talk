@@ -2,9 +2,16 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Loader2, LockKeyhole } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LoginScreen } from "@/features/auth/LoginScreen";
+import { SensitiveVerificationDialog } from "@/features/auth/SensitiveVerificationDialog";
 import { WindowControls } from "@/components/WindowControls";
 import { isMacOverlay } from "@/lib/platform";
 import { useAuth } from "@/store/auth";
+import { useChat } from "@/store/chat";
+import { usePacks, installedTheme } from "@/store/packs";
+import { useTheme, selectedPackWallpaper, ALL_THEMES } from "@/lib/theme";
+import { prepareInitialPresentation } from "@/lib/initialPresentation";
+import { initialPresentationReady } from "@/lib/api/window";
+import { startLinkedAppearance } from "@/lib/linkedAppearance";
 import { useAvatars } from "@/store/avatars";
 import { useAppLock } from "@/store/appLock";
 import { useSettings } from "@/store/settings";
@@ -32,6 +39,116 @@ export default function App() {
   const autoLockSeconds = useSettings((s) => s.privacy.auto_lock_seconds);
   const lockWhenHidden = useSettings((s) => s.privacy.lock_when_hidden);
   const callPhase = useCalls((s) => s.phase);
+  const generation = useAuth((s) => s.generation);
+  const startChat = useChat((s) => s.start);
+  const accountId = useChat((s) => s.myAccountId);
+  const unreadOwner = useChat((s) => s.unreadOwner);
+  const runtimeRun = useChat((s) => s.runEpoch);
+  const runtimeIdentity = useChat((s) => s.identityEpoch);
+  const packScope = usePacks((s) => s.scope);
+  const packsLoaded = usePacks((s) => s.loaded);
+  const preparedThemeId = usePacks((s) => s.preparedThemeId);
+  const packs = usePacks((s) => s.packs);
+  const theme = useTheme((s) => s.theme);
+  const wallpaperEnabled = useTheme((s) => s.wallpaperEnabled);
+  const wallpaperSelections = useTheme((s) => s.packWallpaperIds);
+  const presentationAcknowledged = useRef(false);
+  const selectedThemePrepared =
+    packsLoaded || preparedThemeId === theme || ALL_THEMES.includes(theme);
+  const appearanceReady = Boolean(
+    owner &&
+    !locked &&
+    unreadOwner === owner &&
+    accountId &&
+    packScope?.owner === owner &&
+    packScope.account === accountId &&
+    packScope.session === `${generation}:${runtimeRun}`,
+  );
+
+  useEffect(() => {
+    if (presentationAcknowledged.current || booting || loggingOut) return;
+    if (user && !locked && (!appearanceReady || !selectedThemePrepared)) return;
+    let active = true;
+    const current = () => {
+      const authState = useAuth.getState();
+      return (
+        active &&
+        !presentationAcknowledged.current &&
+        authState.user?.id === user?.id &&
+        authState.generation === generation &&
+        useAppLock.getState().locked === locked &&
+        (!user ||
+          locked ||
+          (usePacks.getState().scope === packScope &&
+            (usePacks.getState().loaded ||
+              usePacks.getState().preparedThemeId === theme ||
+              ALL_THEMES.includes(theme)) &&
+            usePacks.getState().packs === packs &&
+            useChat.getState().runEpoch === runtimeRun &&
+            useChat.getState().identityEpoch === runtimeIdentity &&
+            useChat.getState().myAccountId === accountId &&
+            useChat.getState().unreadOwner === owner &&
+            useTheme.getState().theme === theme &&
+            useTheme.getState().wallpaperEnabled === wallpaperEnabled &&
+            useTheme.getState().packWallpaperIds === wallpaperSelections))
+      );
+    };
+    const pack =
+      user && !locked && wallpaperEnabled ? installedTheme(theme) : undefined;
+    const wallpaper = pack
+      ? (selectedPackWallpaper(pack, wallpaperSelections)?.url ??
+        pack.wallpaper ??
+        null)
+      : null;
+    void prepareInitialPresentation(wallpaper, current, {
+      acknowledge: async () => {
+        presentationAcknowledged.current = true;
+        await initialPresentationReady();
+      },
+    }).catch(() => {
+      /* Native fallback also covers a missing browser bridge or failed image. */
+    });
+    return () => {
+      active = false;
+    };
+  }, [
+    user,
+    generation,
+    locked,
+    booting,
+    loggingOut,
+    appearanceReady,
+    selectedThemePrepared,
+    packScope,
+    packs,
+    theme,
+    wallpaperEnabled,
+    wallpaperSelections,
+    runtimeRun,
+    runtimeIdentity,
+    accountId,
+    owner,
+  ]);
+
+  // The authenticated lifetime starts before the lazy chat view downloads.
+  // Keep identity verification and private appearance with that lifetime so
+  // the startup canvas can use the same account-scoped assets as the chat.
+  useEffect(() => {
+    if (owner && !locked) return startChat();
+  }, [owner, generation, locked, startChat]);
+
+  useEffect(() => {
+    if (owner && !locked && accountId && unreadOwner === owner)
+      return startLinkedAppearance(owner);
+  }, [
+    owner,
+    generation,
+    locked,
+    unreadOwner,
+    accountId,
+    runtimeRun,
+    runtimeIdentity,
+  ]);
 
   // On app start, attempt a "stay signed in" resume from the OS keychain BEFORE deciding
   // whether to show the login screen. While it's in flight we show a brief unlocking
@@ -174,21 +291,35 @@ export default function App() {
       )}
       {/* Custom min/max/close for the frameless window (Windows/Linux); null on macOS/web. */}
       <WindowControls />
-      {user && locked ? (
-        <LockScreen />
-      ) : user ? (
-        <Suspense
-          fallback={<Unlocking label={t("redesign.loadingContacts")} />}
-        >
-          <ChatApp />
-        </Suspense>
-      ) : loggingOut ? (
-        <Unlocking label={t("common.loading")} />
-      ) : booting ? (
-        <Unlocking label={t("login.resuming")} />
-      ) : (
-        <LoginScreen />
+      {owner && !locked && (
+        <SensitiveVerificationDialog
+          key={`${owner}:${generation}`}
+          owner={owner}
+          generation={generation}
+        />
       )}
+      <div
+        className="contents"
+        data-appearance-ready={appearanceReady ? "" : undefined}
+      >
+        {user && locked ? (
+          <LockScreen />
+        ) : user ? (
+          <Suspense
+            fallback={
+              <Unlocking appearance label={t("redesign.loadingContacts")} />
+            }
+          >
+            <ChatApp />
+          </Suspense>
+        ) : loggingOut ? (
+          <Unlocking label={t("common.loading")} />
+        ) : booting ? (
+          <Unlocking label={t("login.resuming")} />
+        ) : (
+          <LoginScreen />
+        )}
+      </div>
     </>
   );
 }
@@ -284,9 +415,18 @@ function LockScreen() {
 }
 
 /** A minimal centered splash shown while the auto-login attempt resolves. */
-function Unlocking({ label }: { label: string }) {
+function Unlocking({
+  label,
+  appearance = false,
+}: {
+  label: string;
+  appearance?: boolean;
+}) {
   return (
-    <div className="flex h-full items-center justify-center bg-background">
+    <div
+      data-appearance-canvas={appearance ? "" : undefined}
+      className="flex h-full items-center justify-center bg-background"
+    >
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" />
         {label}

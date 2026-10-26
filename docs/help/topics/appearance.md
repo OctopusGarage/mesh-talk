@@ -8,7 +8,7 @@ Personalize the interface while keeping conversation content readable.
 2. Choose from the installed theme library and available wallpaper options.
 3. Turn wallpaper visibility off if you prefer a quieter conversation surface.
 
-The More menu also has a light/dark mode shortcut. Available themes and bundled assets can differ between the default and lite editions and your installed customization packs.
+The More menu also has a light/dark mode shortcut. Additional themes and artwork come from your installed customization packs.
 
 ## Across devices
 

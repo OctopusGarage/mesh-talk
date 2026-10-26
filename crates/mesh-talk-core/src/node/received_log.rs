@@ -42,6 +42,21 @@ pub struct ReceivedLog {
     fail_once_after: Option<usize>,
 }
 
+#[cfg(test)]
+thread_local! { static HISTORY_CLONE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(super) fn record_history_clone(bytes: usize) {
+    HISTORY_CLONE_BYTES.with(|count| count.set(count.get() + bytes));
+}
+#[cfg(test)]
+pub(super) fn reset_history_clone_bytes() {
+    HISTORY_CLONE_BYTES.with(|count| count.set(0));
+}
+#[cfg(test)]
+pub(super) fn history_clone_bytes() -> usize {
+    HISTORY_CLONE_BYTES.with(std::cell::Cell::get)
+}
+
 impl ReceivedLog {
     /// File cards can have a device-conversation row and an account-conversation
     /// row for the same signed manifest. Message logs keep event IDs unique.
@@ -252,6 +267,8 @@ impl ReceivedLog {
             .get(conversation)
             .cloned()
             .unwrap_or_default();
+        #[cfg(test)]
+        record_history_clone(v.iter().map(|entry| entry.plaintext.len()).sum());
         v.sort_by_key(|e| e.wall_clock);
         v
     }

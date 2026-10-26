@@ -41,22 +41,24 @@ the read-only [documentation MCP](../tools/help/README.md).
 | [`docs/backup-recovery.md`](backup-recovery.md)                           | Manual encrypted backup, offline restore, recovery key handling, and coverage limits.                                                                       |
 | [`docs/channel-release-rehearsal.md`](channel-release-rehearsal.md)       | Repeatable channel replica scale, old-binary compatibility, and physical LAN release checks.                                                                |
 | [`docs/updates.md`](updates.md)                                           | Stable/Nightly selection, verified downloads, native installation, canonical product-version ownership, reviewed release/next-target automation, and publication recovery. |
+| [`docs/favorites.md`](favorites.md)                                       | Independent saved message collections, grouped capture, searchable personal notes, retention and linked-device permissions.                                  |
 | [`docs/settings.md`](settings.md)                                         | Seven category pages, automatic saving, permission dependencies, local retention confirmation and settings ownership.                                       |
-| [`docs/privacy-controls.md`](privacy-controls.md)                         | Privacy presets, app lock, invisible mode, hidden contacts, and limits.                                                                                     |
+| [`docs/privacy-controls.md`](privacy-controls.md)                         | Privacy presets, app lock, protected messages, invisible mode, hidden contacts, and limits.                                                                 |
 | [`specifications/TODO.md`](../specifications/TODO.md)                     | Current capability index, deliberate design boundaries and separately unverified acceptance cases.                                                          |
 
 The [group reception guide](group-conversation-reception.md) owns ordering, unread
 tracking, catch-up notifications and local recovery observations. For embedding
 the UI-free protocol core, see the [core crate guide](../crates/mesh-talk-core/README.md).
 
-[Peer trust cards](peer-trust.md) explains signed public profiles, creation claims,
-independent witness receipts and private relationship evidence.
+[Profiles and contact verification](peer-trust.md) explains automatic profile
+signatures, immutable account creation metadata and private relationship evidence.
 
 ## Bots and local agents
 
 [Bot integrations](bot-integrations.md) explains the dedicated headless bot host,
-opt-in desktop delegation, scoped CLI credentials and local MCP tools. Text/reply
-sending is implemented; interactive subscriptions and HTTP ingress are later stages.
+the desktop local-agent switch and self-describing loopback HTTP API, scoped CLI
+credentials and local MCP tools. Text/reply sending is implemented; interactive
+subscriptions and incoming HTTP webhooks are later stages.
 
 ## Contributor workflow and design
 

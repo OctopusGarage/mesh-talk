@@ -56,3 +56,26 @@ it("keeps legacy downloads Stable and delegates cancellation to the native downl
   await updates.cancel();
   expect(mocks.invoke).toHaveBeenLastCalledWith("cancel_update_download");
 });
+
+it("prepares only the selected build and installs host-owned bytes without accepting paths", async () => {
+  await updates.prepare("0.4.4-nightly.42.1", vi.fn(), "nightly");
+  expect(mocks.invoke).toHaveBeenLastCalledWith(
+    "prepare_update",
+    expect.objectContaining({
+      version: "0.4.4-nightly.42.1",
+      updateChannel: "nightly",
+      onProgress: expect.any(Object),
+    }),
+  );
+  const progress = vi.fn();
+  await updates.install("0.4.4-nightly.42.1", progress, "nightly");
+  expect(mocks.invoke).toHaveBeenLastCalledWith("install_update", {
+    version: "0.4.4-nightly.42.1",
+    updateChannel: "nightly",
+    onProgress: expect.any(Object),
+  });
+  mocks.invoke.mock.calls[
+    mocks.invoke.mock.calls.length - 1
+  ][1].onProgress.onmessage("restarting");
+  expect(progress).toHaveBeenCalledWith("restarting");
+});

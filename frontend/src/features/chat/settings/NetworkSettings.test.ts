@@ -42,6 +42,7 @@ beforeEach(() => {
     settings: {
       physical_lan_only: false,
       bridge_discovery_enabled: true,
+      origin_sharing_enabled: false,
       post_office_enabled: true,
       post_office_send_enabled: true,
       post_office_receive_enabled: true,
@@ -136,4 +137,47 @@ it("shows relay availability without requiring federation configuration", async 
   expect(
     host.querySelector('[data-testid="post-office-status"]')?.textContent,
   ).toBe("settings.postOfficeStatusDisabled");
+});
+
+it("keeps origin sharing off until the owner explicitly enables it", async () => {
+  await render();
+  const sharing = host.querySelector<HTMLButtonElement>(
+    "#setting-origin-sharing",
+  );
+  expect(sharing).not.toBeNull();
+  expect(sharing!.getAttribute("aria-checked")).toBe("false");
+  await act(async () => sharing!.click());
+  expect(mocks.update).toHaveBeenCalledExactlyOnceWith(
+    { origin_sharing_enabled: true },
+    "connection",
+  );
+  expect(sharing!.getAttribute("aria-checked")).toBe("false");
+});
+
+it("prevents enabling origin sharing without directory discovery", async () => {
+  controller.settings!.bridge_discovery_enabled = false;
+  await render();
+  const sharing = host.querySelector<HTMLButtonElement>(
+    "#setting-origin-sharing",
+  );
+  expect(sharing).not.toBeNull();
+  expect(sharing!.disabled).toBe(true);
+});
+
+it("allows withdrawing origin sharing when discovery dependencies are off", async () => {
+  controller.settings!.bridge_discovery_enabled = false;
+  controller.settings!.post_office_enabled = false;
+  controller.settings!.physical_lan_only = true;
+  controller.settings!.origin_sharing_enabled = true;
+  await render();
+  const sharing = host.querySelector<HTMLButtonElement>(
+    "#setting-origin-sharing",
+  );
+  expect(sharing).not.toBeNull();
+  expect(sharing!.disabled).toBe(false);
+  await act(async () => sharing!.click());
+  expect(mocks.update).toHaveBeenCalledExactlyOnceWith(
+    { origin_sharing_enabled: false },
+    "connection",
+  );
 });

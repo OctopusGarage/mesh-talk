@@ -8,7 +8,31 @@ Device privacy, invisible mode and hidden contacts solve different problems.
 2. Select a device privacy preset, read its effects and choose **Apply preset**.
 3. Review idle locking, locking when hidden, sensitive-copy confirmation and clipboard clearing.
 
+The page also shows saved-login preferences and actual local-agent status, with
+a link to manage its selected conversations. A preset selection takes effect
+only after **Apply preset** succeeds. Weakening protections requires
+[identity verification](../../privacy-controls.md#verify-sensitive-operations).
+
 Use **More → Lock now** to hide chat content while background delivery continues. Unlock with the account password or supported configured device authentication.
+
+## Send a message with concealed content
+
+1. Write a text message or text reply, or prepare an image.
+2. Open the protection control beside the composer and choose **Click to view**
+   or **Verify to view**.
+3. Send the text, or select, paste, drop or capture an image. The composer returns
+   to **Normal** after acceptance.
+
+The message stays visible as a placeholder. Choose its view button to reveal it
+for 30 seconds, or **Hide** to conceal it sooner. Verify to view uses the existing
+app-lock authentication: system authentication on macOS, and the Mesh-Talk login
+password on other platforms. Each new reveal requires verification again.
+
+Leaving the conversation or app also conceals the body. Notifications, reply
+quotes and search do not expose it. Protected images have no ordinary thumbnail
+or save action. Videos, generic files, folders and stickers do not support this
+mode. All viewing devices need an updated app. This is repeatable temporary
+viewing; it does not delete the message or prevent screenshots.
 
 ## Control network visibility
 

@@ -57,32 +57,6 @@ function nextClientId(): string {
   return `c${clientIdCounter}`;
 }
 
-function sendFileFor(
-  c: Conversation,
-  path: string,
-  media: boolean,
-  progressKey: string,
-  expiresAtMs?: number | null,
-) {
-  return c.kind === "account"
-    ? chat.sendFileToAccount(c.id, path, media)
-    : chat.sendFileChannel(c.id, path, media, progressKey, expiresAtMs);
-}
-function sendStickerFor(
-  c: Conversation,
-  stickerId: string,
-  fallback: string,
-  expiresAtMs?: number | null,
-) {
-  return chat.sendSticker(
-    c.id,
-    stickerId,
-    fallback,
-    c.kind === "channel",
-    expiresAtMs,
-  );
-}
-
 type StatusRefreshRun = {
   current(): boolean;
   dirty: Map<string, Conversation>;
@@ -126,21 +100,33 @@ export async function refreshDeliveryStatuses(
             .map((m) => m.id!),
         ),
       ];
-      const replicas = new Map<string, number>();
+      const requestedIds = new Set(ids);
+      const replicas = new Map<
+        string,
+        { members: number; postOffices: number }
+      >();
       for (let i = 0; i < ids.length; i += 256) {
         const rows = await readWithDeadline(() =>
           chat.channelCustodyStatuses(c.id, ids.slice(i, i + 256)),
         );
         if (!lease.current()) return;
-        for (const row of rows) replicas.set(row.id, row.replicas);
+        for (const row of rows)
+          replicas.set(row.id, {
+            members: row.replicas,
+            postOffices: row.post_offices ?? 0,
+          });
       }
       set((s) => ({
         messages: s.messages[key]
           ? {
               ...s.messages,
               [key]: s.messages[key].map((m) =>
-                m.id && replicas.has(m.id)
-                  ? { ...m, replicas: replicas.get(m.id) }
+                m.fromMe && !m.file && m.id && requestedIds.has(m.id)
+                  ? {
+                      ...m,
+                      replicas: replicas.get(m.id)?.members,
+                      postOfficeCopies: replicas.get(m.id)?.postOffices,
+                    }
                   : m,
               ),
             }
@@ -171,7 +157,14 @@ export async function refreshDeliveryStatuses(
             .filter((i) => convKey(i.conversation) === key)
             .map((i) => i.message),
         ]
-          .filter((m) => m.fromMe && m.id && m.delivery !== "delivered")
+          .filter(
+            (m) =>
+              m.fromMe &&
+              m.id &&
+              (m.delivery !== "delivered" ||
+                (m.file &&
+                  !useTransfers.getState().transfers[m.id]?.delivered)),
+          )
           .map((m) => m.id!),
       ),
     ];
@@ -210,6 +203,9 @@ export async function refreshDeliveryStatuses(
             kind: fact.kind,
             ageMs: fact.age_ms,
             sampledAt,
+            ...((fact.reason === "post_office_disabled" ||
+              fact.reason === "no_known_route" ||
+              fact.reason === "attempt_timed_out") && { reason: fact.reason }),
           });
         }
         if (fileIds.has(row.id)) {
@@ -286,7 +282,11 @@ export function beginSendIntent(
   get: Get,
   c: Conversation,
   payload: SendPayload,
-  options: { waitForHydration?: boolean } = {},
+  options: {
+    waitForHydration?: boolean;
+    onAccepted?: () => void;
+    retainFailure?: boolean;
+  } = {},
 ): Promise<boolean> | null {
   if (Object.keys(get().intents).length >= SEND_INTENT_CAP) {
     get().setError(
@@ -302,11 +302,14 @@ export function beginSendIntent(
     who: get().myId,
     text:
       payload.kind === "text"
-        ? payload.text
+        ? payload.protection
+          ? ""
+          : payload.text
         : payload.kind === "sticker"
           ? payload.fallback
           : "",
     replyTo: payload.kind === "text" ? payload.replyTo : null,
+    protection: payload.kind !== "sticker" ? payload.protection : null,
     wallClock: Date.now(),
     expiresAtMs: payload.expiresAtMs,
     pending: true,
@@ -315,15 +318,23 @@ export function beginSendIntent(
     file:
       payload.kind === "file"
         ? {
-            name: payload.path.split(/[\\\\/]/).pop() || "File",
-            size: 0,
-            mime: "",
+            name:
+              payload.stickerMedia?.name ||
+              payload.path.split(/[\\\\/]/).pop() ||
+              "File",
+            size: payload.stickerMedia?.size ?? 0,
+            mime: payload.stickerMedia?.mime ?? "",
             fileConv: "",
             media: payload.media,
           }
         : null,
   };
-  const intent = { conversation: { ...c }, payload, message };
+  const intent = {
+    conversation: { ...c },
+    payload,
+    message,
+    onAccepted: options.onAccepted,
+  };
   const key = convKey(c);
   set((s) => ({
     intents: { ...s.intents, [clientId]: intent },
@@ -336,7 +347,10 @@ export async function dispatchIntent(
   set: Set,
   get: Get,
   intent: SendIntent,
-  { waitForHydration = true }: { waitForHydration?: boolean } = {},
+  {
+    waitForHydration = true,
+    retainFailure = true,
+  }: { waitForHydration?: boolean; retainFailure?: boolean } = {},
 ): Promise<boolean> {
   const lease = captureChatOwner(get);
   const guarded: Set = (partial) => {
@@ -369,6 +383,7 @@ export async function dispatchIntent(
             payload.text,
             payload.replyTo,
             payload.expiresAtMs,
+            payload.protection,
           ),
           pending: false,
         };
@@ -392,6 +407,7 @@ export async function dispatchIntent(
           payload.media,
           clientId,
           payload.expiresAtMs,
+          payload.protection,
         );
         accepted = {
           ...message,
@@ -406,34 +422,58 @@ export async function dispatchIntent(
       update(accepted);
       if (!hadIntent) return true;
     } else {
+      const owner = lease.owner!;
       if (payload.kind === "text")
-        await chat.sendChannelMessage(
-          c.id,
-          payload.text,
-          payload.replyTo,
-          payload.expiresAtMs,
-        );
+        accepted = {
+          ...message,
+          id: await chat.enqueueChannelText(
+            owner,
+            c.id,
+            payload.text,
+            payload.replyTo,
+            payload.expiresAtMs,
+            payload.protection,
+          ),
+          pending: false,
+        };
       else if (payload.kind === "sticker")
-        await sendStickerFor(
-          c,
-          payload.stickerId,
-          payload.fallback,
-          payload.expiresAtMs,
-        );
-      else
-        await sendFileFor(
-          c,
+        accepted = {
+          ...message,
+          id: await chat.enqueueChannelSticker(
+            owner,
+            c.id,
+            payload.stickerId,
+            payload.fallback,
+            payload.expiresAtMs,
+          ),
+          pending: false,
+        };
+      else {
+        const result = await chat.enqueueChannelFile(
+          owner,
+          c.id,
           payload.path,
           payload.media,
           clientId,
           payload.expiresAtMs,
+          payload.protection,
         );
+        accepted = {
+          ...message,
+          id: result.id,
+          pending: false,
+          file: { ...message.file!, fileConv: result.fileConv },
+        };
+      }
       admitted = true;
       if (!lease.current()) return false;
-      update(null); // Legacy void never claims acceptance/receipt for a placeholder.
+      const hadIntent = !!get().intents[clientId];
+      update(accepted);
+      if (!hadIntent) return true;
     }
     if (!lease.current()) return false;
     if (accepted?.id) {
+      intent.onAccepted?.();
       // The durable ID settles admission. Optional UI hydration must not hold the draft.
       const hydration =
         get().active && convKey(get().active!) === key
@@ -453,6 +493,11 @@ export async function dispatchIntent(
     // Durable acceptance survives hydration failure, even if history already removed the intent.
     if (admitted) return true;
     if (payload.kind === "file") useTransfers.getState().clear(clientId);
+    // A durable protected-text composer retains its rejected draft and sole retry ownership.
+    if (!retainFailure) {
+      update(null);
+      return false;
+    }
     update({
       ...message,
       pending: false,

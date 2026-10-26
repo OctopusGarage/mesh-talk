@@ -58,7 +58,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev xvfb dbus-x11 xdotool fonts-noto-cjk fonts-noto-color-emoji
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev xvfb openbox dbus-x11 xdotool fonts-noto-cjk fonts-noto-color-emoji
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
@@ -71,7 +71,14 @@ jobs:
         env:
           NATIVE_CONTACT_OUTPUT: ${{ runner.temp }}/hidden-contacts-native
           EVAL_SOURCE_SHA: ${{ github.sha }}
-        run: xvfb-run -a dbus-run-session -- node scripts/diagnostics/hidden-contacts.mjs
+        run: |
+          # Native focus and screenshot assertions require a real window manager.
+          # shellcheck disable=SC2016
+          xvfb-run -a -s '-screen 0 1600x1200x24' dbus-run-session -- bash -e -c '
+            mkdir -p "$NATIVE_CONTACT_OUTPUT"
+            openbox > "$NATIVE_CONTACT_OUTPUT/openbox.log" 2>&1 &
+            node scripts/diagnostics/hidden-contacts.mjs
+          '
       - name: Run native evaluation (Windows and macOS desktop)
         if: runner.os != 'Linux'
         env:

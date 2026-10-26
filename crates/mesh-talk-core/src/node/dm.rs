@@ -12,10 +12,18 @@ impl Node {
         &self,
         target_account_id: &str,
     ) -> Vec<PeerRecord> {
+        self.select_account_fanout_targets(target_account_id, self.routing_peers())
+    }
+
+    fn select_account_fanout_targets(
+        &self,
+        target_account_id: &str,
+        peers: Vec<PeerRecord>,
+    ) -> Vec<PeerRecord> {
         let my_account = self.account_id();
         let me = self.user_id();
         let mut seen = std::collections::HashSet::new();
-        self.routing_peers()
+        peers
             .into_iter()
             .filter(|p| {
                 (p.account_id.as_deref() == Some(target_account_id)
@@ -120,6 +128,28 @@ impl Node {
         .await
     }
 
+    pub async fn enqueue_protected_to_account_expiring_if(
+        &self,
+        target: &str,
+        text: &[u8],
+        reply_to: Option<EventId>,
+        expires_at_ms: Option<u64>,
+        protection: super::MessageProtection,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        self.enqueue_account_inner(
+            target,
+            crate::expiry::wrap(
+                &MessageBody::protected(text.to_vec(), reply_to, protection).encode(),
+                expires_at_ms,
+            ),
+            None,
+            authorize,
+        )
+        .await
+    }
+
     pub async fn enqueue_sticker_to_account(
         &self,
         target: &str,
@@ -199,13 +229,6 @@ impl Node {
     ) -> Result<EventId, NodeError> {
         authorize(&mut || Ok(()))?;
         let self_target = target == self.account_id();
-        if self_target {
-            // Own-device sends skip contact grants, which normally persist the
-            // certified binding. Discovery can arrive before the next host query.
-            self.cached_peer_snapshot_async()
-                .await
-                .map_err(|error| NodeError::Log(crate::eventlog::LogError::Io(error)))?;
-        }
         let dests = self.account_fanout_targets(target);
         if !self_target
             && !dests
@@ -240,8 +263,62 @@ impl Node {
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
         request: Option<super::delivery_store::RequestRecord>,
     ) -> Result<EventId, NodeError> {
+        authorize(&mut || {
+            let mut store = self.delivery.lock().expect("delivery lock not poisoned");
+            self.recover_delivery(&mut store).map_err(NodeError::Log)
+        })?;
+        let mut inputs = Some((dests, target, plaintext, logical, request));
+        let mut accepted = None;
+        authorize(&mut || {
+            let (dests, target, plaintext, logical, request) = inputs
+                .take()
+                .ok_or_else(|| NodeError::Authorization("accept is single-use".into()))?;
+            accepted =
+                Some(self.enqueue_encoded_authorized(dests, target, plaintext, logical, request)?);
+            Ok(())
+        })?;
+        accepted.ok_or_else(|| {
+            NodeError::Authorization("authorization did not execute acceptance".into())
+        })
+    }
+
+    // Host authority precedes the delivery journal across preparation and WAL.
+    fn enqueue_encoded_authorized(
+        &self,
+        dests: Vec<PeerRecord>,
+        target: Option<String>,
+        plaintext: Vec<u8>,
+        logical: Option<EventId>,
+        request: Option<super::delivery_store::RequestRecord>,
+    ) -> Result<EventId, NodeError> {
+        let dests = if let Some(target_account) = target.as_deref() {
+            // Account fanout needs durable bindings for own siblings as well as
+            // the external recipient. Select from this exact persisted snapshot
+            // inside final host authorization, after the awaited privacy grant.
+            let mut peers = self
+                .cached_peer_snapshot()
+                .map_err(|error| NodeError::Log(crate::eventlog::LogError::Io(error)))?;
+            let mut seen: std::collections::HashSet<_> =
+                peers.iter().map(|peer| peer.public.user_id()).collect();
+            peers.extend(
+                self.cached_routing_peers()
+                    .into_iter()
+                    .filter(|peer| seen.insert(peer.public.user_id())),
+            );
+            let dests = self.select_account_fanout_targets(target_account, peers);
+            if target_account != self.account_id()
+                && !dests
+                    .iter()
+                    .any(|peer| peer.account_id.as_deref() == Some(target_account))
+            {
+                return Err(NodeError::UnknownPeer(target_account.to_owned()));
+            }
+            dests
+        } else {
+            dests
+        };
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
-        authorize(&mut || self.recover_delivery(&mut store).map_err(NodeError::Log))?;
+        self.recover_delivery(&mut store).map_err(NodeError::Log)?;
         store
             .check_capacity(dests.len(), plaintext.len() as u64)
             .map_err(NodeError::Log)?;
@@ -252,9 +329,14 @@ impl Node {
                     .historical_author(&peer.public.ed25519_pub)
                     .filter(|p| p.public() == peer.public)
                     .and_then(|p| p.account_id());
-                (peer, proof_account)
+                if target.is_some() && proof_account != peer.account_id {
+                    return Err(NodeError::Authorization(
+                        "account fanout binding changed before acceptance".into(),
+                    ));
+                }
+                Ok((peer, proof_account))
             })
-            .collect();
+            .collect::<Result<_, NodeError>>()?;
         let ratchet = self.dm_ratchet.lock().expect("ratchet lock not poisoned");
         let log = self.log.lock().expect("log lock not poisoned");
         let own = self.identity.public();
@@ -344,7 +426,7 @@ impl Node {
             transaction
         };
         // WAL acceptance cannot turn into a failed send inviting duplicates.
-        if !self.accept_outgoing_transaction(&mut store, transaction, authorize)? {
+        if !self.commit_outgoing_transaction(&mut store, transaction)? {
             log::warn!("accepted delivery awaits local recovery");
         }
         self.account_sync_notify.notify_one();

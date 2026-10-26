@@ -108,6 +108,10 @@ test("city avatar thumbnails load after scrolling the gallery", async ({
   await page.getByRole("button", { name: "Change group photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   const gallery = page.getByTestId("avatar-gallery");
+  // Cold Windows module transforms need the startup budget before image checks.
+  await expect(gallery).toBeVisible({
+    timeout: process.platform === "win32" ? 90_000 : 15_000,
+  });
   await expect(gallery.locator("img")).toHaveCount(36);
 
   await gallery.evaluate((element) => {
@@ -192,18 +196,9 @@ test("portable registration sign in and sign out", async ({ page }) => {
   await page.getByTestId("login-username").fill("tester");
   await page.getByTestId("login-password").fill("password123");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("login-tab-signin")).toHaveAttribute(
-    "data-state",
-    "active",
-  );
-  await expect(
-    page.getByText("Account created — you can sign in now.", { exact: true }),
-  ).toBeVisible();
-  await expect(page.getByTestId("login-password")).toHaveValue("");
-  await expect(page.getByTestId("chat-shell")).toHaveCount(0);
-  await page.getByTestId("login-password").fill("password123");
-  await page.getByTestId("login-submit").click();
+  await expect(page.getByTestId("login-form")).toBeHidden();
   await waitForChatShell(page);
+  await expect(page.getByTestId("account-protection")).toBeVisible();
   await expect(page.getByTestId("sidebar-own-name")).toHaveText("tester");
   await page.getByTestId("sidebar-overflow").click();
   await page.getByTestId("sidebar-sign-out").click();

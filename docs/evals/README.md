@@ -94,6 +94,27 @@ agent-workflow suite; model judgments do not replace unit or loopback evidence.
 AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/person-presence-ai-eval-suite.json --report target/ai-eval/person-presence-report.json
 ```
 
+## Protected messages
+
+The [protected messages suite](protected-messages-ai-eval-suite.json) reviews text
+and image framing/default redaction, exact retained image reads and export guards,
+app-lock authentication and session/runtime authority, the 30-second reveal and
+Blob URL lifecycle, and captured send policies across image batches and retry.
+Separate frontend and native admission cases keep each model input bounded while
+retaining the production owners that establish its guarantees.
+A separate Favorites case reviews atomic capture refusal, selection redaction,
+retained file access and sibling synchronization without changing ordinary
+Favorites' independent lifetime or wire layout.
+Its scope is accidental-disclosure control in supported clients, as defined by
+the [privacy guide](../privacy-controls.md#protected-messages), rather than
+resistance to a modified recipient or secure browser-memory erasure. Supplied
+contexts include delegated production owners; source judgments supplement unit,
+real-process and browser evidence and cannot certify native OS authentication.
+
+```bash
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/protected-messages-ai-eval-suite.json --report target/ai-eval/protected-messages-report.json
+```
+
 ## Evaluation workflow and limits
 
 `make eval-smoke` checks deterministic repository contracts and required scenario
@@ -147,3 +168,59 @@ applicability
 with the model provider described above. Model review complements executable
 regressions and hosted checks; it cannot certify timing improvements or replace
 required platform/native evidence.
+
+## Desktop local agent access
+
+The [local agent access suite](local-agent-access-ai-eval-suite.json) evaluates
+short-prompt discovery, public-help privacy, HTTP admission and resource limits,
+scoped sends and retirement, instruction-file ownership, and settings recovery.
+Model source review complements real loopback and browser assertions; it does not
+prove native webview behavior or recipient delivery.
+
+```bash
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/local-agent-access-ai-eval-suite.json --report target/ai-eval/local-agent-access-report.json
+```
+
+The normal Rust suite runs `deterministic_provider_exercises_help_retry_and_disabled_service`
+through a Node.js HTTP fixture and the same provider process/evidence harness used
+by the model test. It discovers operations and credentials through help, verifies
+actual accepted history and retry identity, and requires connection refusal after
+disable. This proves the executable scenario and harness; it is not a model-backed
+result. Node.js is required for this desktop test, as in the full repository gates.
+Deterministic evidence uses `target/ai-eval/local-agent-deterministic/` so it cannot
+overwrite real-model evidence.
+
+The opt-in desktop behavioral test starts an isolated temporary account and the
+real local HTTP service, supplies only the rendered bootstrap plus a user task
+to a configured model, and verifies the actual core history after an idempotent
+retry, an unavailable destination, and a disabled-service attempt:
+
+```bash
+AI_EVAL_COMMAND='<absolute-path non-interactive model command>' cargo test -p mesh-talk --lib real_model_uses_only_help_to_send_retry_and_observe_disabled_access -- --ignored --nocapture
+```
+
+The command reads its prompt from stdin and must return only the requested JSON
+object. It runs from an isolated temporary directory, so use absolute executable
+or script paths. The fixture provides `MESH_AGENT_EVAL_SECRET` to the provider
+wrapper solely for transcript-leak detection; remove it before launching the
+model process and never include it in a prompt. Final output is checked for
+credential disclosure, evidence is sanitized under `target/ai-eval/local-agent-live/`,
+and test identities never use the real desktop profile or user instruction file.
+A passing send proves durable local acceptance and retry behavior; this fixture
+does not prove delivery to a second device or native settings interaction.
+
+## Desktop updater acceptance
+
+The [desktop updater suite](desktop-updates-ai-eval-suite.json) reviews version-bound
+signatures, device/channel authority, cancellation, private staging, restart preparation
+and the Windows installer handoff. Its contexts include the Windows launch-failure
+regression: the SDK calls its pre-exit hook before ShellExecute can fail, so the
+application must not retire native resources at that point.
+
+```bash
+AI_EVAL_COMMAND='<non-interactive model command>' node scripts/ai-eval.mjs --suite docs/evals/desktop-updates-ai-eval-suite.json --report target/ai-eval/desktop-updates-report.json
+```
+
+The score is a source review. Real signed application replacement, authorization
+cancellation, relaunch, persistent data/session restoration and verified hosted
+publication remain separate acceptance requirements in [the update guide](../updates.md).

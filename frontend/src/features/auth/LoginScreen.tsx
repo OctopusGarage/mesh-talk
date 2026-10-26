@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { BookOpen, Loader2, ShieldCheck } from "lucide-react";
+import { BookOpen, Eye, EyeOff, Loader2, ShieldCheck } from "lucide-react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
@@ -14,6 +14,7 @@ import { errorMessage } from "@/lib/error";
 import { isMacOverlay, needsCustomWindowControls } from "@/lib/platform";
 import { useAuth } from "@/store/auth";
 import { RestoreBackup } from "./RestoreBackup";
+import { DeviceEnrollmentDialog } from "./DeviceEnrollmentDialog";
 import { HelpDialog } from "@/features/help/HelpDialog";
 
 /**
@@ -28,6 +29,7 @@ export function LoginScreen() {
   const [tab, setTab] = useState<"signin" | "register">("signin");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   useEffect(() => {
@@ -92,11 +94,12 @@ export function LoginScreen() {
     if (tab === "signin") {
       await login(username.trim(), password);
     } else {
-      const okReg = await register(username.trim(), password);
-      if (okReg) {
-        setNotice(t("login.accountCreated"));
+      await register(username.trim(), password);
+      // Creation and entry are distinct outcomes: never register twice after a
+      // successful creation whose sign-in failed. Keep the user's input for retry.
+      if (useAuth.getState().createdUsername === username.trim()) {
+        setNotice(t("login.createdEntryFailed"));
         setTab("signin");
-        setPassword("");
       }
     }
   };
@@ -104,6 +107,8 @@ export function LoginScreen() {
   const onTab = (v: string) => {
     setTab(v as "signin" | "register");
     clearError();
+    setPassword("");
+    setShowPassword(false);
     setNotice(null);
   };
 
@@ -159,6 +164,14 @@ export function LoginScreen() {
               {t("redesign.returning")}
             </p>
           )}
+          {isMacOverlay() && (
+            <p
+              className="mt-3 max-w-xs text-xs leading-5 text-foreground/80"
+              data-testid="mac-auth-guidance"
+            >
+              {t("login.macAuthGuidance")}
+            </p>
+          )}
         </motion.div>
 
         <motion.div
@@ -170,10 +183,18 @@ export function LoginScreen() {
         >
           <Tabs value={tab} onValueChange={onTab}>
             <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="signin" data-testid="login-tab-signin">
+              <TabsTrigger
+                value="signin"
+                disabled={loading}
+                data-testid="login-tab-signin"
+              >
                 {t("login.signIn")}
               </TabsTrigger>
-              <TabsTrigger value="register" data-testid="login-tab-register">
+              <TabsTrigger
+                value="register"
+                disabled={loading}
+                data-testid="login-tab-register"
+              >
                 {t("redesign.createIdentity")}
               </TabsTrigger>
             </TabsList>
@@ -193,50 +214,87 @@ export function LoginScreen() {
                     autoFocus
                     autoComplete="username"
                     value={username}
+                    disabled={loading}
                     onChange={(e) => setUsername(e.target.value)}
-                    placeholder={t("login.usernamePlaceholder")}
+                    className="placeholder:italic"
+                    placeholder={t(
+                      tab === "register"
+                        ? "login.newUsernamePlaceholder"
+                        : "login.usernamePlaceholder",
+                    )}
                   />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="password">{t("login.password")}</Label>
-                  <Input
-                    id="password"
-                    data-testid="login-password"
-                    type="password"
-                    autoComplete={
-                      tab === "signin" ? "current-password" : "new-password"
-                    }
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder={
+                  <div className="relative">
+                    <Input
+                      id="password"
+                      data-testid="login-password"
+                      type={showPassword ? "text" : "password"}
+                      className="pr-12 text-foreground placeholder:italic"
+                      aria-describedby="password-guidance"
+                      disabled={loading}
+                      autoComplete={
+                        tab === "signin" ? "current-password" : "new-password"
+                      }
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder={t(
+                        tab === "register"
+                          ? "login.newPasswordPlaceholder"
+                          : "login.passwordPlaceholder",
+                      )}
+                    />
+                    <button
+                      type="button"
+                      aria-label={t(
+                        showPassword
+                          ? "login.hidePassword"
+                          : "login.showPassword",
+                      )}
+                      aria-pressed={showPassword}
+                      onClick={() => setShowPassword((value) => !value)}
+                      className="absolute inset-y-0 right-0 flex w-11 items-center justify-center rounded-r-md text-foreground/80 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      {showPassword ? (
+                        <EyeOff className="h-4 w-4" aria-hidden="true" />
+                      ) : (
+                        <Eye className="h-4 w-4" aria-hidden="true" />
+                      )}
+                    </button>
+                  </div>
+                  <p
+                    id="password-guidance"
+                    className="text-xs leading-5 text-foreground/80"
+                  >
+                    {t(
                       tab === "register"
-                        ? t("login.passwordHint")
-                        : t("login.passwordPlaceholder")
-                    }
-                  />
+                        ? "login.passwordGuidance"
+                        : "login.signInGuidance",
+                    )}
+                  </p>
                 </div>
 
-                {tab === "signin" && (
-                  <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+                <div className="space-y-1.5 rounded-md bg-muted/50 p-3">
+                  <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-foreground">
                     <input
                       type="checkbox"
                       data-testid="login-stay-signed-in"
                       checked={stay}
                       onChange={(e) => void onStay(e.target.checked)}
-                      disabled={!stayLoaded || staySaving}
+                      disabled={!stayLoaded || staySaving || loading}
                       className="h-4 w-4 rounded border-input accent-signal"
                     />
                     {t("login.staySignedIn")}
                   </label>
-                )}
-                {isMacOverlay() && (
-                  <p
-                    className="text-xs leading-5 text-muted-foreground"
-                    data-testid="mac-auth-guidance"
-                  >
-                    {t("login.macAuthGuidance")}
+                  <p className="pl-6 text-xs leading-5 text-foreground/80">
+                    {t(
+                      isMacOverlay()
+                        ? "login.stayMacDescription"
+                        : "login.stayDescription",
+                    )}
                   </p>
-                )}
+                </div>
 
                 {stayError && (
                   <div
@@ -282,7 +340,13 @@ export function LoginScreen() {
                   data-testid="login-submit"
                   className="w-full"
                   disabled={
-                    loading || staySaving || !username.trim() || !password
+                    loading ||
+                    !stayLoaded ||
+                    !!stayError ||
+                    staySaving ||
+                    !username.trim() ||
+                    !password ||
+                    (tab === "register" && password.trim().length < 8)
                   }
                 >
                   {loading && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -294,12 +358,16 @@ export function LoginScreen() {
                       )
                     : tab === "signin"
                       ? t("login.signIn")
-                      : t("redesign.createIdentity")}
+                      : t("login.createAndEnter")}
                 </Button>
               </form>
             </TabsContent>
           </Tabs>
         </motion.div>
+
+        <div className="mt-3">
+          <DeviceEnrollmentDialog />
+        </div>
 
         <div className="mt-3">
           <RestoreBackup

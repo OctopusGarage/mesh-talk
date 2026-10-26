@@ -175,6 +175,25 @@ test("Rust inventory compiles only selected packages and rejects zero/ignored-on
   );
 });
 
+test("selected Rust execution uses Cargo so repository environment limits apply", async () => {
+  const calls = [];
+  await executePlan(plan, {
+    log: () => {},
+    run: async (program, args) => {
+      calls.push([program, args]);
+      if (args.includes("--no-run")) return { code: 0, output: artifact };
+      if (args.includes("--list")) return {
+        code: 0,
+        output: args.includes("--ignored") ? "" : "profile::actual: test\n",
+      };
+      assert.equal(program, "cargo");
+      assert.deepEqual(args, ["test", "--locked", "-p", "core", "--lib", "--", "profile::"]);
+      return { code: 0, output: "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n" };
+    },
+  });
+  assert.equal(calls.length, 4);
+});
+
 test("failed compilation never authorizes test execution", async () => {
   await assert.rejects(
     prepareRust(plan.rust, {
@@ -311,6 +330,24 @@ test("every selected frontend file must execute an assertion; missing and skippe
   assert.throws(
     () => validateFrontendReport({}, ["src/a.test.ts"], "/repo/frontend"),
     /report/i,
+  );
+});
+
+test("failed frontend assertions remain visible after temporary report cleanup", async () => {
+  await assert.rejects(
+    executePlan({ rust: [], blockers: [], node: [], frontend: ["src/a.test.ts"] }, {
+      log: () => {},
+      run: async (_program, args) => {
+        writeFileSync(args[args.indexOf("--outputFile") + 1], JSON.stringify({
+          testResults: [{
+            name: "src/a.test.ts",
+            assertionResults: [{ status: "failed", fullName: "keeps account metadata", failureMessages: ["actual failing assertion"] }],
+          }],
+        }));
+        return { code: 1, output: "JSON report written" };
+      },
+    }),
+    /keeps account metadata[\s\S]*actual failing assertion/,
   );
 });
 

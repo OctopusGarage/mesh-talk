@@ -9,6 +9,8 @@ mod account;
 mod channels;
 mod diagnostics;
 mod files;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod linux_screenshot;
 mod messaging;
 mod models;
 mod platform;
@@ -29,11 +31,11 @@ pub use messaging::*;
 pub use models::*;
 pub use platform::*;
 pub use presence::*;
-pub use state::NodeState;
 pub(crate) use state::RuntimeAuthority;
+pub use state::{NodeState, StartupIdentity};
 pub use sync::*;
 
-fn parse_channel_id(hex_id: &str) -> Result<ConversationId, CommandError> {
+pub(crate) fn parse_channel_id(hex_id: &str) -> Result<ConversationId, CommandError> {
     let bytes =
         hex::decode(hex_id).map_err(|_| CommandError::Validation("invalid channel id".into()))?;
     let arr: [u8; 32] = bytes

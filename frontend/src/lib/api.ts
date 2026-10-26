@@ -8,9 +8,12 @@ export { diag, presence, obs, updates } from "./api/diagnostics";
 export { contactPolicy, favorites, avatars } from "./api/contacts";
 import { useAuth } from "@/store/auth";
 import { createSettingsApi } from "./api/settings";
+import { currentRuntimeAccountId } from "@/store/ownership";
 
 // App composition: low-level IPC modules do not read Zustand state.
 export const settings = createSettingsApi(
   () => useAuth.getState().user?.id ?? null,
+  currentRuntimeAccountId,
+  () => useAuth.getState().generation,
 );
 export { recovery } from "./api/recovery";

@@ -1,6 +1,6 @@
-# Change your name and avatar
+# Change your profile
 
-Open your profile from the sidebar to change your display name or picture.
+Open your profile from the sidebar to change your display name, picture or About text.
 
 ## Open your profile
 
@@ -26,13 +26,20 @@ Open a member's profile to inspect the original name separately from your remark
 along with the account and device details. A remark changes your local label; it
 does not replace the other person's identity information.
 
-## Share a signed profile
+## Edit About and share your account
 
-Use the trust card in your profile to publish a signed name, short bio and optional
-self-declared creation date. Copy or download its signed JSON to share it. The
-account QR identifies your account; it does not prove your real-world identity.
-Imported introductions and creation witness receipts show who signed each claim.
-See [peer trust cards](../../peer-trust.md) for the evidence limits.
+Edit **About** in your profile and select **Save**. It appears in the direct
+conversation header and in your contact profile. Your name, picture and About
+synchronize automatically; no separate publication or signed file is required.
+About supports up to 2,048 UTF-8 bytes; non-Latin characters can use several bytes.
+
+The account creation date is read-only and recorded automatically when the account
+is created. Older accounts without a recorded date show **Unknown**. Restoring a
+backup or linking a device does not replace the original date.
+
+Expand **Account ID and QR code** to copy or share your account ID. The QR code
+identifies the account; it does not prove your real-world identity. See
+[profiles and verification](../../peer-trust.md) for evidence limits.
 
 ## Further reference
 

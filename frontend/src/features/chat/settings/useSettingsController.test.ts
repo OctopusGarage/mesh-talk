@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   setAutostart: vi.fn(),
   setPrivacy: vi.fn(),
   setCallsEnabled: vi.fn(),
+  setNotificationsEnabled: vi.fn(),
   setRingtone: vi.fn(),
   auth: { user: { id: "alice" } as { id: string } | null, generation: 0 },
 }));
@@ -46,6 +47,7 @@ const initial: AppSettings = {
   post_office_receive_enabled: true,
   physical_lan_only: false,
   bridge_discovery_enabled: false,
+  origin_sharing_enabled: false,
   bridge_hub_id: "",
   ringtone: "classic",
   privacy_level: "balanced",
@@ -98,6 +100,7 @@ it("keeps acknowledged settings until the write and canonical readback finish", 
   expect(controller.savedCategory).toBeNull();
   const canonical: AppSettings = {
     ...initial,
+    notifications: false,
     privacy_level: "strict",
     notification_preview: false,
     auto_lock_seconds: 60,
@@ -113,6 +116,7 @@ it("keeps acknowledged settings until the write and canonical readback finish", 
     await saving;
   });
   expect(controller.settings).toEqual(canonical);
+  expect(mocks.setNotificationsEnabled).toHaveBeenLastCalledWith(false);
   expect(controller.savedCategory).toBe("privacy");
   expect(controller.saving).toBe(false);
   expect(mocks.setPrivacy).toHaveBeenCalledWith({
@@ -125,6 +129,24 @@ it("keeps acknowledged settings until the write and canonical readback finish", 
   });
   expect(mocks.setCallsEnabled).toHaveBeenCalledWith(true);
   expect(mocks.setRingtone).toHaveBeenCalledWith("digital");
+});
+
+it("keeps acknowledged privacy unchanged when identity verification is canceled", async () => {
+  await render();
+  mocks.update.mockRejectedValueOnce({
+    kind: "authentication-canceled",
+    message: "Verification canceled",
+  });
+  await act(async () => {
+    expect(await controller.update({ stay_signed_in: true }, "privacy")).toBe(
+      false,
+    );
+  });
+  expect(controller.settings).toEqual(initial);
+  expect(controller.errors.privacy).toBeUndefined();
+  expect(controller.savedCategory).toBeNull();
+  expect(controller.saving).toBe(false);
+  expect(mocks.get).toHaveBeenCalledTimes(1);
 });
 it("marks settings unknown after successful write with failed readback and supports refresh", async () => {
   await render();
@@ -158,6 +180,38 @@ it("keeps acknowledged settings after rejected write", async () => {
     detail: "write unavailable",
   });
   expect(mocks.get).toHaveBeenCalledTimes(1);
+});
+it("does not acknowledge origin sharing when the owner save fails", async () => {
+  await render();
+  mocks.update.mockRejectedValueOnce(
+    new Error("origin preference was not saved"),
+  );
+  await act(async () => {
+    expect(
+      await controller.update({ origin_sharing_enabled: true }, "connection"),
+    ).toBe(false);
+  });
+  expect(controller.settings?.origin_sharing_enabled).toBe(false);
+  expect(controller.errors.connection?.kind).toBe("save");
+});
+
+it("does not apply a prior owner's enabled origin-sharing readback", async () => {
+  await render();
+  const readback = deferred<AppSettings>();
+  mocks.get.mockReturnValueOnce(readback.promise);
+  let saving!: Promise<boolean>;
+  await act(async () => {
+    saving = controller.update({ origin_sharing_enabled: true }, "connection");
+  });
+  mocks.auth = { user: { id: "bob" }, generation: 1 };
+  await render();
+  await act(async () => {
+    readback.resolve({ ...initial, origin_sharing_enabled: true });
+    await saving;
+  });
+  expect(controller.owner).toBe("bob");
+  expect(controller.settings?.origin_sharing_enabled).toBe(false);
+  expect(controller.savedCategory).toBeNull();
 });
 it("does not publish a late settings read after closing", async () => {
   const pending = deferred<AppSettings>();

@@ -2,7 +2,7 @@
 // name, the inline-render size gate, a file glyph, and the lazy decrypted-bytes blob-URL
 // hook. Kept out of MediaPreview.tsx so that file can export only its component (the
 // react-refresh rule flags mixing component + non-component exports in one module).
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   FileArchive,
   FileAudio,
@@ -14,7 +14,12 @@ import {
 } from "lucide-react";
 import { chat } from "@/lib/api";
 import { isDirectoryAttachment } from "@/lib/directoryAttachment";
-import { isImage, isVideo, mediaMimeFromName } from "@/lib/mediaTypes";
+import {
+  IMAGE_INLINE_CAP,
+  isImage,
+  isVideo,
+  mediaMimeFromName,
+} from "@/lib/mediaTypes";
 import { useAuth } from "@/store/auth";
 import { useChat, captureChatOwnership } from "@/store/chat";
 
@@ -40,7 +45,7 @@ export function blobMime(
 // Only fetch the whole file into memory for inline rendering when it's small enough.
 // `read_file` decrypts and returns the entire file (bounded only by the 4 GiB hard cap),
 // so we gate on the manifest-reported size before pulling bytes through IPC.
-const IMAGE_INLINE_CAP = 16 * 1024 * 1024; // 16 MB
+
 const VIDEO_INLINE_CAP = 50 * 1024 * 1024; // 50 MB
 
 /** Whether an image/video of `size` bytes is small enough to fetch + render inline. */
@@ -207,7 +212,13 @@ export function useFileObjectUrl(
   fileConv: string,
   enabled: boolean,
   mime?: string,
+  options?: { onReadError?: (error: unknown) => void; retryKey?: number },
 ): string | null {
+  const onReadError = useRef(options?.onReadError);
+  useEffect(() => {
+    onReadError.current = options?.onReadError;
+  }, [options?.onReadError]);
+  const retryKey = options?.retryKey;
   const owner = useAuth((s) => s.user?.id);
   const generation = useAuth((s) => s.generation);
   const run = useChat((s) => s.runEpoch);
@@ -220,6 +231,7 @@ export function useFileObjectUrl(
     identityEpoch,
     fileConv,
     mime,
+    retryKey,
   ]);
   const [result, setResult] = useState<{
     key: string;
@@ -251,8 +263,9 @@ export function useFileObjectUrl(
           new Blob([bytes], mime ? { type: mime } : {}),
         );
         setResult({ key, url: objectUrl, ownership });
-      } catch {
+      } catch (error) {
         if (!current()) return;
+        onReadError.current?.(error);
         const delay = Math.min(200 * 2 ** failures, 2000);
         failures = Math.min(failures + 1, 4);
         timer = setTimeout(() => {

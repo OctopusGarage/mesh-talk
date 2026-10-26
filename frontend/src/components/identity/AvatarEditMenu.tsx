@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Camera, ImagePlus, LayoutGrid, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -6,6 +6,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { captureRuntimeOwner } from "@/store/ownership";
 import { pickImageFile } from "@/lib/avatarImage";
 import { useAvatar, useAvatars } from "@/store/avatars";
 import { cn } from "@/lib/utils";
@@ -42,17 +43,84 @@ export function AvatarEditMenu({
   const [open, setOpen] = useState(false);
   const [cropFile, setCropFile] = useState<File | null>(null);
   const [gallery, setGallery] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
+  const [failedChoice, setFailedChoice] = useState<{
+    dataUrl: string | null;
+  } | null>(null);
+  const attempt = useRef(0);
+  const viewLifetime = useRef({ active: true });
+  const currentId = useRef(id);
+  currentId.current = id;
+  useEffect(() => {
+    const lifetime = { active: true };
+    viewLifetime.current = lifetime;
+    setSaveFailed(false);
+    setFailedChoice(null);
+    setCropFile(null);
+    setGallery(false);
+    setOpen(false);
+    return () => {
+      lifetime.active = false;
+    };
+  }, [id]);
   const hasPhoto = useAvatar(id) !== undefined;
   const setAvatar = useAvatars((s) => s.setAvatar);
 
-  const choose = async () => {
+  const save = async (dataUrl: string | null) => {
+    const request = ++attempt.current;
+    const lifetime = viewLifetime.current;
+    const lease = captureRuntimeOwner();
+    const target = id;
+    setSaveFailed(false);
+    setFailedChoice(null);
     setOpen(false);
-    const file = await pickImageFile();
-    if (file) setCropFile(file);
+    try {
+      await setAvatar(target, dataUrl);
+    } catch {
+      if (
+        request !== attempt.current ||
+        !lifetime.active ||
+        !lease.current() ||
+        currentId.current !== target
+      )
+        return;
+      setFailedChoice({ dataUrl });
+      setSaveFailed(true);
+      setOpen(true);
+    }
+  };
+  const choose = async () => {
+    const request = ++attempt.current;
+    const lifetime = viewLifetime.current;
+    const lease = captureRuntimeOwner();
+    const target = id;
+    setSaveFailed(false);
+    setFailedChoice(null);
+    setOpen(false);
+    try {
+      const file = await pickImageFile();
+      if (
+        request === attempt.current &&
+        lifetime.active &&
+        lease.current() &&
+        currentId.current === target &&
+        file
+      )
+        setCropFile(file);
+    } catch {
+      if (
+        request === attempt.current &&
+        lifetime.active &&
+        lease.current() &&
+        currentId.current === target
+      ) {
+        setSaveFailed(true);
+        setOpen(true);
+      }
+    }
   };
   const remove = () => {
-    setOpen(false);
-    void setAvatar(id, null);
+    void save(null);
   };
 
   return (
@@ -90,6 +158,9 @@ export function AvatarEditMenu({
             <button
               type="button"
               onClick={() => {
+                attempt.current++;
+                setSaveFailed(false);
+                setFailedChoice(null);
                 setOpen(false);
                 setGallery(true);
               }}
@@ -109,13 +180,29 @@ export function AvatarEditMenu({
               {t("avatar.remove")}
             </button>
           )}
+          {saveFailed && (
+            <div className="border-t border-border px-2.5 py-2">
+              <p role="alert" className="text-xs text-destructive">
+                {t("avatar.saveFailed")}
+              </p>
+              {failedChoice && (
+                <button
+                  type="button"
+                  className="mt-2 text-xs font-medium underline"
+                  onClick={() => void save(failedChoice.dataUrl)}
+                >
+                  {t("privacy.retry")}
+                </button>
+              )}
+            </div>
+          )}
         </PopoverContent>
       </Popover>
       <AvatarCropDialog
         file={cropFile}
         onConfirm={(dataUrl) => {
           setCropFile(null);
-          void setAvatar(id, dataUrl);
+          void save(dataUrl);
         }}
         onCancel={() => setCropFile(null)}
       />
@@ -126,7 +213,7 @@ export function AvatarEditMenu({
             open={gallery}
             onPick={(dataUrl) => {
               setGallery(false);
-              void setAvatar(id, dataUrl);
+              void save(dataUrl);
             }}
             onClose={() => setGallery(false)}
           />

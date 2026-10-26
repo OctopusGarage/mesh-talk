@@ -1,42 +1,13 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath, URL } from "node:url";
-import { readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { loadHelp } from "../tools/help/load.mjs";
 
 // https://vitejs.dev/config/
-export default defineConfig(({ command, mode }) => {
-  const lite = mode === "lite" || process.env.MESH_TALK_VARIANT === "lite";
-  const market = new URL("../site/market/", import.meta.url);
-  const catalog = JSON.parse(
-    readFileSync(new URL("catalog.json", market), "utf8"),
-  ) as {
-    id: string;
-    version: string;
-    kind: "avatar" | "theme" | "sticker";
-    sha256: string;
-  }[];
-  const lock = JSON.parse(
-    readFileSync(new URL("bundled-packs.lock.json", import.meta.url), "utf8"),
-  ) as { id: string; version: string; sha256: string }[];
-  const bundled = lite
-    ? []
-    : lock.map((pin) => {
-        const entry = catalog.find(({ id }) => id === pin.id);
-        if (
-          !entry ||
-          entry.version !== pin.version ||
-          entry.sha256 !== pin.sha256
-        )
-          throw new Error(`Bundled pack lock mismatch: ${pin.id}`);
-        return entry;
-      });
+export default defineConfig(() => {
   return {
     define: {
-      "import.meta.env.VITE_BUNDLED_PACK_IDS": JSON.stringify(
-        bundled.map(({ id }) => id).join(","),
-      ),
+      "import.meta.env.VITE_BUNDLED_PACK_IDS": JSON.stringify(""),
     },
     publicDir: false,
     plugins: [
@@ -47,38 +18,6 @@ export default defineConfig(({ command, mode }) => {
           await loadHelp({
             root: fileURLToPath(new URL("../", import.meta.url)),
           });
-        },
-      },
-      {
-        name: "mesh-talk-bundled-packs",
-        configureServer(server) {
-          server.middlewares.use((request, response, next) => {
-            const name = request.url?.split("?", 1)[0];
-            const entry = bundled.find(
-              ({ id }) => name === `/builtin-packs/${id}.zip`,
-            );
-            if (!entry) return next();
-            response.setHeader("Content-Type", "application/zip");
-            response.end(
-              readFileSync(new URL(`packs/${entry.id}.zip`, market)),
-            );
-          });
-        },
-        buildStart() {
-          if (command !== "build") return;
-          for (const entry of bundled) {
-            const source = readFileSync(
-              new URL(`packs/${entry.id}.zip`, market),
-            );
-            const hash = createHash("sha256").update(source).digest("hex");
-            if (hash !== entry.sha256)
-              throw new Error(`Bundled pack checksum mismatch: ${entry.id}`);
-            this.emitFile({
-              type: "asset",
-              fileName: `builtin-packs/${entry.id}.zip`,
-              source,
-            });
-          }
         },
       },
     ],
@@ -96,6 +35,11 @@ export default defineConfig(({ command, mode }) => {
         output: {
           codeSplitting: {
             groups: [
+              {
+                // Keep the growing offline language catalog separate from UI code.
+                name: "locales",
+                test: /[\\/]src[\\/]locales[\\/]/,
+              },
               {
                 name: "react-vendor",
                 // Keep React, its renderer and scheduler together so the shared

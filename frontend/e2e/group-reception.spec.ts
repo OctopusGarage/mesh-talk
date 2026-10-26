@@ -8,12 +8,10 @@ const BOB = "device_bob_2222";
 
 async function enterGroup(page: Page, count = 120) {
   await page.goto("/?data=group-reception-window");
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill("tester");
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await waitForChatShell(page);
   // Persist initial history before opening it: no notification/read shortcut.
   await page.evaluate(

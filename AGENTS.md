@@ -131,12 +131,15 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
   frontend private metadata is versionless and Tauri inherits Cargo. Never broadly replace
   matching dependency, fixture, history, wire or schema versions. Keep source builds `BASE-dev`,
   Nightlies `BASE-nightly.RUN.ATTEMPT`, official tagged builds `BASE`, and standard SemVer ordering.
-- Release proposals and next-development-target changes use reviewed PRs. Stable publication
+- Version/changelog preparation and next-development-target changes use reviewed PRs. Ordinary main
+  pushes must not create automatic release proposals or commit-derived product notes. Stable publication
   remains explicit through the existing verified tagged-release workflow; no direct main push,
   public empty release, mutable published tag or gate bypass. Nightly publication requires trusted
   `main` and a target above the latest Stable. Future changes must extend the existing version
   owner, its tests, standards/CI enforcement and capability contracts together; the owning guide
-  documents permissions, bot-PR checks, dispatch and recovery requirements. The fixed release-history
+  documents permissions, bot-PR checks, dispatch and recovery requirements. Manual Stable draft
+  preparation uses the reviewed exact-version CHANGELOG section and requires exact-source checks
+  before creating its immutable tag/draft. The fixed release-history
   migration floor is historical provenance; never advance it during ordinary version bumps.
 
 - Conventional commits (`feat:`, `fix:`, `refactor:`); scopes like `feat(node):` align with

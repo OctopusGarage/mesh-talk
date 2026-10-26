@@ -174,7 +174,7 @@ test("mapped source owners with no executable tests cannot produce a successful 
   assert.match(plan.blockers.join(" "), /no executable tests/i);
 });
 
-test("repository grant policy expands through service, IPC, client, host and desktop/MCP consumers", async () => {
+test("repository grant policy expands through service, HTTP, IPC and desktop/UI/MCP consumers", async () => {
   const registered = await loadContracts(fileURLToPath(new URL("../../", import.meta.url)));
   const plan = buildAffectedPlan(
     ["crates/mesh-talk-integrations/src/policy.rs"],
@@ -184,14 +184,18 @@ test("repository grant policy expands through service, IPC, client, host and des
     plan.owners.map((owner) => owner.id),
     [
       "desktop-integrations",
+      "frontend-local-agent-access",
       "integration-client",
       "integration-host",
+      "integration-http",
       "integration-ipc",
       "integration-policy",
       "integration-service",
       "mcp-adapter",
     ],
   );
+  assert.ok(plan.frontend.includes("src/features/chat/settings/LocalAgentSettings.test.ts"));
+  assert.ok(plan.rust.some((entry) => entry.package === "mesh-talk-integrations" && entry.filters.includes("http::tests::")));
 });
 
 test("misspelled contract fields cannot silently drop downstream checks", () => {
@@ -227,16 +231,26 @@ test("shared Cargo configuration selects every workspace crate via owning contra
   assert(!profile.owners.some(owner => owner.id === "core-node"), "established focused ownership must not widen through the catch-all Node prefix");
   assert.deepEqual(profile.rust.find(item => item.package === "mesh-talk-core").filters, [
     "node::account_profile::tests::",
+    "node::account_profile_data::tests::",
+    "node::account_profile_io::tests::",
+    "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback",
+    "node::node::tests::account_profile_exhausted_avatar_revision_rejects_before_either_store_mutates",
+    "node::node::tests::account_profile_linked_device_pair_preserves_metadata_and_requires_card_parent",
+    "node::node::tests::account_profile_projection_retry_and_restart_preserve_avatar_and_identity_lifetime",
+    "node::node::tests::account_profile_propagates_signed_claims_over_loopback",
+    "node::node::tests::account_profile_reconciles_newer_sibling_legacy_avatar",
+    "node::node::tests::account_profile_terminal_legacy_avatar_reconciles_on_restart",
     "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
     "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
-    "node::node::tests::trust_card_exhausted_avatar_revision_rejects_before_either_store_mutates",
-    "node::node::tests::trust_card_linked_device_pair_preserves_metadata_and_requires_card_parent",
-    "node::node::tests::trust_card_projection_retry_and_restart_preserve_avatar_and_identity_lifetime",
-    "node::node::tests::trust_card_propagates_signed_claims_over_loopback",
-    "node::node::tests::trust_card_reconciles_newer_sibling_legacy_avatar",
-    "node::node::tests::trust_card_terminal_legacy_avatar_reconciles_on_restart",
+    "node::node::tests::signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp",
+    "node::node::tests::signed_avatar_retries_after_relay_publication_is_reenabled",
+    "node::opaque_relay::",
     "node::profile::tests::",
     "node::profile_store::tests::",
+    "node::runtime::tests::account_nickname_preserves_bio_and_wins_over_host_name_on_restart",
+    "node::runtime::tests::contact_nickname_survives_a_stale_signed_card_name_and_restart",
+    "node::runtime::tests::offline_account_names_survive_roster_expiry_and_restart_without_presence",
+    "node::runtime::tests::profile_republish_targets_fires_on_first_sight_and_on_reconnect",
     "node::trust_card::tests::",
   ]);
   const consentFixture = buildAffectedPlan(["crates/mesh-talk-core/src/node/file_consent_tests.rs"], {contracts:registered});
@@ -304,6 +318,14 @@ test("acceptance harness changes select their focused integrity checks without c
     assert.deepEqual(plan.blockers, [], file);
     assert.ok(plan[kind].includes(selected), `${file} must select ${selected}`);
   }
+  const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
+  for (const name of new Set(requiredBrowserPaths("core").map(path => path[0]))) {
+    const file = `frontend/e2e/${name}`;
+    const plan = buildAffectedPlan([file], { contracts: registered });
+    assert.deepEqual(plan.blockers, [], file);
+    assert.ok(plan.node.includes("scripts/diagnostics/browser-eval-report.test.mjs"), `${file} must select portable inventory parity`);
+  }
+  assert.ok(buildAffectedPlan(["frontend/playwright.portable.config.ts"], { contracts: registered }).node.includes("scripts/diagnostics/browser-eval-report.test.mjs"));
   for (const file of ["frontend/e2e/future.spec.ts", "scripts/diagnostics/future-native.mjs", "docs/evals/future-suite.json"]) {
     assert.match(buildAffectedPlan([file], { contracts: registered }).blockers.join(" "), /unmapped/i, file);
   }

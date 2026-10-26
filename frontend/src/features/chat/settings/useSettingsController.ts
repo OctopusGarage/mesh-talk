@@ -7,7 +7,7 @@ import {
 } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { settings as settingsApi } from "@/lib/api";
-import { errorMessage } from "@/lib/error";
+import { errorMessage, isVerificationCanceled } from "@/lib/error";
 import { privacyFromSettings } from "@/lib/privacySettings";
 import { asRingtoneId } from "@/lib/ringtones";
 import type { AppSettings } from "@/lib/types";
@@ -58,12 +58,14 @@ export function useSettingsController(open: boolean) {
       post_office_receive_enabled: settings.post_office_receive_enabled ?? true,
       physical_lan_only: settings.physical_lan_only ?? false,
       bridge_discovery_enabled: settings.bridge_discovery_enabled ?? false,
+      origin_sharing_enabled: settings.origin_sharing_enabled ?? false,
       bridge_hub_id: settings.bridge_hub_id ?? "",
     };
     setValues(next);
     const store = useSettings.getState();
     store.setPrivacy(privacyFromSettings(next));
     store.setCallsEnabled(next.calls_enabled);
+    store.setNotificationsEnabled(next.notifications);
     store.setRingtone(asRingtoneId(next.ringtone));
   }, []);
 
@@ -125,6 +127,7 @@ export function useSettingsController(open: boolean) {
         setSavedCategory(category);
       },
       (error) => {
+        if (isVerificationCanceled(error)) return;
         const failed: SettingError = {
           kind:
             error instanceof SavedRefreshError
@@ -210,6 +213,7 @@ export function useSettingsController(open: boolean) {
     update,
     setAutostartEnabled,
     chooseDownloadDir,
+    runSettingAction: save,
   };
 }
 

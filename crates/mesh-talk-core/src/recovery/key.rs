@@ -1,4 +1,4 @@
-//! Per-export recovery key. Never persist or log this value.
+//! Recovery archive key. Hosts may retain it in protected local storage; never log it.
 
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroize;
