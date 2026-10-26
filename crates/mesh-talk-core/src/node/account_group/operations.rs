@@ -26,6 +26,49 @@ use crate::{
 pub(in crate::node) use wire::valid_payload;
 use wire::{LookupProjection, OperationProjection, RequestProjection, ResultProjection};
 
+#[cfg(test)]
+type LookupAdmissionHook = Box<dyn FnOnce(&Node) + Send>;
+#[cfg(test)]
+static LOOKUP_ADMISSION_HOOKS: std::sync::Mutex<
+    Vec<(AccountGroupOperationId, LookupAdmissionHook)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(in crate::node) fn before_lookup_commit_for_test(
+    id: AccountGroupOperationId,
+    hook: impl FnOnce(&Node) + Send + 'static,
+) {
+    LOOKUP_ADMISSION_HOOKS
+        .lock()
+        .unwrap()
+        .push((id, Box::new(hook)));
+}
+
+#[cfg(test)]
+pub(in crate::node) fn finish_imported_result_for_test(
+    node: &Node,
+    result: ResultProjection,
+) -> Result<(), NodeError> {
+    node.group_operations
+        .lock()
+        .unwrap()
+        .adopt(journal::Entry {
+            reference: result.reference,
+            body: None,
+            status: result.status,
+            file_copy: result
+                .file_descriptor
+                .map(|descriptor| journal::GroupFileCopy {
+                    descriptor,
+                    complete: false,
+                }),
+            source: false,
+            cancel: false,
+            sequence: 0,
+        })
+        .map_err(NodeError::Log)
+}
+
 /// A caller-generated logical operation ID, distinct from every public event ID.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct AccountGroupOperationId([u8; 32]);
@@ -489,21 +532,59 @@ impl Node {
                 primary_event: None,
             };
             if !id.matches_origin(&self.identity.public()) {
-                if !self.preflight_group_operation_lookup(LookupProjection {
+                let lookup_fits = self.preflight_group_operation_lookup(LookupProjection {
                     id,
                     group,
                     kind: operation.kind(),
                     digest,
                     cancel: false,
                     nonce: self.operation_query_nonce(id),
-                }) {
+                });
+                #[cfg(test)]
+                {
+                    let hook = {
+                        let mut hooks = LOOKUP_ADMISSION_HOOKS.lock().unwrap();
+                        hooks
+                            .iter()
+                            .position(|(operation, _)| *operation == id)
+                            .map(|index| hooks.remove(index).1)
+                    };
+                    if let Some(hook) = hook {
+                        hook(self);
+                    }
+                }
+                let mut journal = self
+                    .group_operations
+                    .lock()
+                    .expect("group operation journal mutex");
+                // Result import finishes outside the delivery gate. It may have
+                // adopted the original request since the first journal read;
+                // resolve that identity atomically instead of replacing it.
+                let existing = journal
+                    .entries
+                    .get(&id)
+                    .map(|entry| (entry.reference.group, entry.reference.digest, &entry.status))
+                    .or_else(|| {
+                        journal
+                            .lookups
+                            .get(&id)
+                            .map(|lookup| (lookup.group, lookup.digest, &lookup.status))
+                    });
+                if let Some((old_group, old_digest, status)) = existing {
+                    if old_group != group || old_digest != digest {
+                        return Err(NodeError::InvalidInput(
+                            "operation ID belongs to another request".into(),
+                        ));
+                    }
+                    result = Some(status.clone());
+                    return Ok(());
+                }
+                if !lookup_fits {
                     return Err(NodeError::InvalidInput(
                         "account group operation transport capacity exhausted".into(),
                     ));
                 }
-                self.group_operations
-                    .lock()
-                    .expect("group operation journal mutex")
+                journal
                     .put_lookup(journal::Lookup {
                         id,
                         group,

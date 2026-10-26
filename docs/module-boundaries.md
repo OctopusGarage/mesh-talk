@@ -808,6 +808,10 @@ the core admission callback; lifecycle reads retain the matching runtime guard.
 The guarded ID factory binds an opaque ID to the full origin device and a random
 nonce without accepting work. Deduplication still belongs to the account and ID;
 a sibling resolves the original reference before resuming a foreign-origin ID.
+Submission rechecks the existing entry under the final journal write lock after
+transport preflight: an authenticated result may arrive during preflight. A
+matching retry returns that retained status; a mismatched group or digest still
+rejects the ID, and lookup admission never replaces an adopted result.
 Logical operation IDs remain separate from committed public event IDs. Bounded
 list and status projections contain lifecycle metadata only. The frontend IPC
 adapter preserves pending outcomes for the existing action and outgoing-intent

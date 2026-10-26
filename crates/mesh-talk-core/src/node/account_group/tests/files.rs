@@ -553,6 +553,16 @@ async fn reference_file_and_fresh_sibling_retry_save_the_original_bytes_without_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn matching_file_retry_preserves_a_result_adopted_during_lookup_admission() {
+    file_result_roundtrip(4).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn conflicting_file_retry_cannot_replace_a_result_adopted_during_lookup_admission() {
+    file_result_roundtrip(5).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn foreign_signed_file_prefix_prepares_cache_without_holding_delivery() {
     file_result_roundtrip(1).await;
 }
@@ -891,10 +901,43 @@ async fn file_result_roundtrip(mode: u8) {
         ),
         "the actual authenticated capability exchange must precede result work"
     );
-    let fresh_clone = fresh.clone();
-    tasks.spawn(async move { Box::pin(fresh_clone.run_accept_loop(listener)).await });
+    let mut fresh_listener = Some(listener);
+    if mode < 4 {
+        let fresh_clone = fresh.clone();
+        let listener = fresh_listener.take().unwrap();
+        tasks.spawn(async move { Box::pin(fresh_clone.run_accept_loop(listener)).await });
+    }
     let fresh_raw = fresh_path.join("explicit.bin");
-    std::fs::write(&fresh_raw, &bytes).unwrap();
+    let mut retry_bytes = bytes.clone();
+    if mode == 5 {
+        retry_bytes[0] ^= 1;
+    }
+    std::fs::write(&fresh_raw, &retry_bytes).unwrap();
+    if mode >= 4 {
+        let result = source
+            .operation_projection(group)
+            .results
+            .into_iter()
+            .find(|result| result.reference.id == id)
+            .expect("source committed result");
+        let proof = source.own_group_proof();
+        // The importer releases delivery after card materialization, before its
+        // final journal adoption. Stop at precisely that production boundary.
+        fresh
+            .import_explicit_account_group_file_card(
+                &result.reference,
+                result.message_event.as_ref().unwrap(),
+                result.file_descriptor.as_ref().unwrap(),
+                &proof,
+            )
+            .unwrap();
+        let observed = prepare_observed.clone();
+        super::super::operations::before_lookup_commit_for_test(id, move |node| {
+            super::super::operations::finish_imported_result_for_test(node, result)
+                .expect("authenticated original result must adopt in the retry gap");
+            observed.store(4, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
     let retry = fresh
         .submit_account_group_file_if(
             &account.account_id(),
@@ -907,8 +950,36 @@ async fn file_result_roundtrip(mode: u8) {
             |_| {},
             |commit| commit(),
         )
-        .await
-        .expect("a foreign-origin matching retry must resolve the original reference");
+        .await;
+    if mode >= 4 {
+        assert_eq!(
+            prepare_observed.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "the original result must arrive after the initial retry lookup"
+        );
+    }
+    if mode == 5 {
+        assert!(
+            matches!(retry, Err(crate::node::NodeError::InvalidInput(_))),
+            "a concurrent original result must still reject different retry content"
+        );
+        let retained = fresh
+            .account_group_operation_status(&account.account_id(), id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.phase, AccountGroupOperationPhase::Committed);
+        assert_eq!(retained.primary_event, Some(event_id));
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        return;
+    }
+    let retry = retry.expect("a foreign-origin matching retry must resolve the original reference");
+    if mode >= 4 {
+        assert_eq!(retry.phase, AccountGroupOperationPhase::Committed);
+        let fresh_clone = fresh.clone();
+        let listener = fresh_listener.take().unwrap();
+        tasks.spawn(async move { Box::pin(fresh_clone.run_accept_loop(listener)).await });
+    }
     assert!(retry.primary_event.is_none() || retry.primary_event == Some(event_id));
     if mode == 2 {
         tokio::time::timeout(Duration::from_secs(8), async {
