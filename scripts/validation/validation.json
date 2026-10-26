@@ -291,12 +291,14 @@
       "id": "public-help",
       "paths": [
         "tools/help/",
-        "docs/help/"
+        "docs/help/",
+        ".github/workflows/pages.yml"
       ],
       "node": [
         "tools/help/corpus.test.mjs",
         "tools/help/help.test.mjs",
-        "tools/help/server.test.mjs"
+        "tools/help/server.test.mjs",
+        "tools/help/discovery.test.mjs"
       ],
       "escalation": [
         "Public help content is bundled into the frontend and published independently; review the public help build/publication and settings-navigation consumers."

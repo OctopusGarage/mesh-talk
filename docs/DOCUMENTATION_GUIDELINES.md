@@ -67,6 +67,12 @@ reachability requirements. Link to [the glossary](../CONTEXT.md),
 
 ## Public documentation styling
 
+The [public discovery contract](help-system.md#public-discovery-and-factual-accuracy)
+owns canonical URLs, Markdown exports, sitemaps, application metadata and product
+fact consistency. Generate these with `node tools/help/build-site.mjs --out <dir>`;
+do not maintain separate AI-only instructions or infer Stable availability from
+the documentation source version.
+
 The [shared public theme](../site/theme.css) owns the landing page and generated
 help reader's colors, self-hosted Space Grotesk headings, system body font, focus
 states and reduced-motion behavior. The [reader stylesheet](../tools/help/style.css)

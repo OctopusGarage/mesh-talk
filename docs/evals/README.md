@@ -4,6 +4,12 @@ This directory contains maintained evaluation inputs, not generated reports or
 historical implementation reviews. Keep output under ignored `target/ai-eval/`
 or `tmp/`; put current guidance in its owning document.
 
+The [public discovery review prompt](prompts/public-discovery-review.md) defines
+live GEO discovery, branded-search and direct-retrieval checks. It records actual
+citations and claim accuracy separately; source-review model scores do not prove
+search placement. Follow the [publication contract](../help-system.md#public-discovery-and-factual-accuracy)
+for authoritative content ownership and generated exports.
+
 These are stable, repeatable cases for both the deterministic AI regression smoke gate and
 the real model-backed AI eval. The canonical executable suite is
 `docs/evals/ai-eval-suite.json`.
