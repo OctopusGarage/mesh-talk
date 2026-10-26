@@ -16,11 +16,18 @@ and protocol behavior. User topics summarize those contracts and link to them.
 | `tools/help/search.mjs`       | Deterministic title, alias, summary and full-text search, reused by all three readers.                    |
 | `tools/help/render.mjs`       | Restricted, escaped Markdown rendering for desktop and online readers.                                    |
 | `tools/help/build.mjs`        | Static HTML, Markdown, JSON and discovery exports.                                                        |
+| `tools/help/build-site.mjs`   | Complete public site build, project-level discovery exports and landing application metadata.             |
+| `tools/help/discovery.mjs`    | Shared publication URL validation, documentation scope, aggregate Markdown and sitemap construction.       |
 | `tools/help/server.mjs`       | Read-only stdio MCP adapter over the public manual.                                                       |
 
 The browser and app need no additional Markdown or search dependency. Only the MCP
 adapter needs its separately pinned SDK dependencies. No protocol-core changes,
 local HTTP listener, vector database or vendor-operated help service are required.
+
+When behavior or publication changes, review the help, public-site and AI-export
+items in the [maintenance checklist](maintenance-checklist.md). Keep semantic
+ownership with feature guides and regenerate derived representations through the
+owners above; the inventory records which consumers to check, not another manual.
 
 ## Desktop behavior
 

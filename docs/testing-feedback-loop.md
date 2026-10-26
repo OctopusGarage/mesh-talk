@@ -77,6 +77,9 @@ For every new requirement, the implementation owner follows this sequence:
    observable acceptance criteria, including applicable failure, permission,
    persistence and lifetime behavior. Clarify the rule in its owning guide when
    its meaning changes; preserve the canonical glossary.
+   Select applicable [maintenance inventory](maintenance-checklist.md) items for
+   documentation, generated exports, external publications and other consumers;
+   record evidence, justified exclusions and owned follow-ups in the PR.
 2. Preview `make verify-plan` against the actual diff. Review consumers and
    browser/native escalation, including runtime relationships that imports cannot
    reveal. Extend the owning implementation before creating another rule owner.

@@ -20,6 +20,12 @@ The site and README may summarize a capability, but link to its owning guide
 for setup, flags, support matrices, and changing limits. Do not copy a CLI option
 table, release procedure, or full feature inventory into either overview.
 
+The [change alignment checklist](maintenance-checklist.md) owns the cross-surface
+maintenance inventory: select applicable items when behavior changes, identify
+generated and externally published consumers, and record evidence or follow-ups
+in the PR. This guide owns writing and audience rules; the checklist links to
+existing owners rather than duplicating their product contracts.
+
 ## Shared domain language
 
 [CONTEXT.md](../CONTEXT.md) owns domain definitions; [DDD conventions](domain-design.md)
