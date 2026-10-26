@@ -428,7 +428,30 @@
     "textValue": "Texto da anotação",
     "undo": "Desfazer anotação",
     "cancel": "Cancelar",
-    "send": "Enviar captura de tela"
+    "send": "Enviar captura de tela",
+    "shortcuts": {
+      "recording": "Pressione um atalho…",
+      "recordingHint": "Pressione um modificador e uma letra, número ou tecla de função. Esc cancela.",
+      "bindingHint": "Clique para alterar. Salvo apenas neste dispositivo.",
+      "unassigned": "Não atribuído",
+      "clear": "Limpar atalho",
+      "clearAction": "Limpar atalho de {{action}}",
+      "invalid": "Use um modificador com uma letra, número ou F1–F12.",
+      "reserved": "Este atalho é reservado para edição ou ações do sistema. Escolha outro.",
+      "duplicate": "Escolha um atalho diferente para cada ação de captura.",
+      "empty": "Atribua pelo menos um atalho antes de ativar o uso global.",
+      "globalTitle": "Usar atalhos de captura globais",
+      "globalDescription": "Permite usar estes atalhos em outros aplicativos. O Mesh-Talk deve estar aberto e desbloqueado.",
+      "checking": "Verificando atalhos globais…",
+      "globalActive": "Atalhos globais ativos",
+      "globalInactive": "Atalhos globais indisponíveis; os do aplicativo continuam funcionando",
+      "appOnly": "Os atalhos funcionam dentro do Mesh-Talk",
+      "restore": "Restaurar padrões",
+      "registrationFailed": "Não foi possível registrar os atalhos globais. Altere a combinação ou libere-a no outro aplicativo e tente novamente.",
+      "scopeApp": "No aplicativo",
+      "scopeGlobal": "Global",
+      "chooseConversation": "Escolha uma conversa antes de fazer uma captura."
+    }
   },
   "settings": {
     "originSharing": "Compartilhar meu posto de correio de origem",

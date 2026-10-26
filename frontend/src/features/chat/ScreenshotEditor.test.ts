@@ -108,6 +108,40 @@ async function select() {
   await pointer("pointermove", 120, 110);
   await pointer("pointerup", 120, 110);
 }
+
+it("shows actual editor shortcuts and switches tools without stealing text input", async () => {
+  await select();
+  const rect = container.querySelector<HTMLButtonElement>(
+    '[title="Rectangle · R"]',
+  );
+  expect(rect?.getAttribute("aria-keyshortcuts")).toBe("R");
+  await act(async () =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { code: "KeyR", key: "r", bubbles: true }),
+    ),
+  );
+  expect(rect?.getAttribute("aria-pressed")).toBe("true");
+  await act(async () =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { code: "KeyT", key: "t", bubbles: true }),
+    ),
+  );
+  const input = container.querySelector("input[type=text]")!;
+  await act(async () =>
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { code: "KeyR", key: "r", bubbles: true }),
+    ),
+  );
+  expect(
+    container.querySelector('[title="Text · T"]')?.getAttribute("aria-pressed"),
+  ).toBe("true");
+  expect(container.querySelector('[title="Cancel · Esc"]')).not.toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="screenshot-send"]')
+      ?.getAttribute("aria-keyshortcuts"),
+  ).toBe("Enter");
+});
 async function key(value: string) {
   await act(async () =>
     window.dispatchEvent(

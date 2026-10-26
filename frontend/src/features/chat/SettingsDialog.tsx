@@ -99,6 +99,13 @@ export function SettingsDialog({
         </DialogTrigger>
       )}
       <DialogContent
+        onEscapeKeyDown={(event) => {
+          if (
+            event.target instanceof Element &&
+            event.target.closest("[data-shortcut-recording]")
+          )
+            event.preventDefault();
+        }}
         onCloseAutoFocus={onCloseAutoFocus}
         className="grid h-[min(44rem,calc(100vh-2rem))] supports-[height:100dvh]:h-[min(44rem,calc(100dvh-2rem))] max-w-[min(56rem,calc(100vw-2rem))] grid-rows-[auto_minmax(0,1fr)_auto] gap-4 overflow-hidden"
         data-testid="settings-dialog"

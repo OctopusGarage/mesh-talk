@@ -7,6 +7,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { isLinuxDesktop } from "@/lib/platform";
+import { editorToolForKey } from "@/lib/screenshotShortcuts";
 import { expandCaptureWindow } from "./screenshot/captureWindow";
 import { ScreenshotToolbar } from "./screenshot/ScreenshotToolbar";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -385,7 +386,7 @@ export function ScreenshotEditor({
 
   useEffect(() => {
     const keyboard = (event: KeyboardEvent) => {
-      if (event.isComposing) return;
+      if (event.isComposing || event.repeat) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -400,6 +401,18 @@ export function ScreenshotEditor({
         !!event.target.closest(
           "button, input, textarea, select, a, [role=button], [contenteditable=true]",
         );
+      const shortcutTool = editorToolForKey(event);
+      if (
+        shortcutTool &&
+        !input &&
+        !busy.current &&
+        (region || shortcutTool === "select")
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        setTool(shortcutTool);
+        return;
+      }
       if (event.key === "Enter" && !interactive) {
         event.preventDefault();
         event.stopPropagation();
@@ -408,6 +421,8 @@ export function ScreenshotEditor({
       if (
         (event.metaKey || event.ctrlKey) &&
         event.key.toLowerCase() === "z" &&
+        !event.shiftKey &&
+        !event.altKey &&
         !input &&
         !busy.current
       ) {
@@ -441,7 +456,7 @@ export function ScreenshotEditor({
     };
     window.addEventListener("keydown", keyboard, true);
     return () => window.removeEventListener("keydown", keyboard, true);
-  }, [confirm, onCancel]);
+  }, [confirm, onCancel, region]);
 
   const visibleRegion = region && {
     left: layout.canvasX + region.x * layout.scaleX,

@@ -445,6 +445,11 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   Confirmed screenshots join the composer's pending files; only the normal Send
   action hands them to delivery. `screenshot/` owns image-coordinate geometry,
   annotation painting, floating controls and temporary fullscreen restoration.
+  Its shortcut router shares that intake path for local and opt-in global
+  activation. `src-tauri/src/screenshot_shortcuts.rs` owns OS registration and
+  native session/lock authority; the settings controller owns acknowledged local
+  bindings. Registration tokens prevent retired renderer cleanup from releasing
+  newer keys. See [screenshot shortcuts](settings.md#screenshot-shortcuts).
 - `DiagnosticsDialog.tsx` delegates observations and native actions to
   `diagnostics/useDiagnosticsController.ts`. Each opening owns independent
   refresh generations, serial peer polling, bounded activity history and

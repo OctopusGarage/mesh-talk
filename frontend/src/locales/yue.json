@@ -428,7 +428,30 @@
     "textValue": "標註文字",
     "undo": "復原標註",
     "cancel": "取消",
-    "send": "傳送截圖"
+    "send": "傳送截圖",
+    "shortcuts": {
+      "recording": "請按快捷鍵…",
+      "recordingHint": "請按修飾鍵加字母、數字或功能鍵；Esc 取消。",
+      "bindingHint": "撳一下修改，只儲存喺呢部裝置。",
+      "unassigned": "未設定",
+      "clear": "清除快捷鍵",
+      "clearAction": "清除「{{action}}」嘅快捷鍵",
+      "invalid": "請用修飾鍵加字母、數字或 F1–F12。",
+      "reserved": "呢個快捷鍵用於編輯或系統操作，請揀另一個組合。",
+      "duplicate": "兩種截圖方式請設定唔同嘅快捷鍵。",
+      "empty": "請先設定至少一個快捷鍵，再開啟全域觸發。",
+      "globalTitle": "容許全域截圖快捷鍵",
+      "globalDescription": "用緊其他應用程式都可以觸發。Mesh-Talk 要保持執行同已解鎖。",
+      "checking": "檢查緊全域快捷鍵…",
+      "globalActive": "全域快捷鍵已生效",
+      "globalInactive": "全域快捷鍵用唔到，應用程式內快捷鍵仍然可用",
+      "appOnly": "快捷鍵只喺 Mesh-Talk 入面生效",
+      "restore": "恢復預設",
+      "registrationFailed": "註冊唔到全域快捷鍵。請改按鍵，或者解除其他應用程式佔用之後重試。",
+      "scopeApp": "應用程式內",
+      "scopeGlobal": "全域",
+      "chooseConversation": "請先揀聊天，再用截圖。"
+    }
   },
   "settings": {
     "originSharing": "分享我嘅來源郵局",

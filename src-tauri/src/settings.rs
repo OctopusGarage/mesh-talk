@@ -8,6 +8,7 @@
 mod shared;
 
 use crate::config_store;
+use crate::screenshot_shortcuts::ScreenshotShortcuts;
 use crate::{commands::CommandError, runtime_admission::RuntimeAdmission};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -98,6 +99,9 @@ pub struct AppSettings {
     pub confirm_sensitive_copy: bool,
     #[serde(default)]
     pub clipboard_clear_seconds: u32,
+    /// Capture bindings remain local to this account on this device.
+    #[serde(default)]
+    pub screenshot_shortcuts: ScreenshotShortcuts,
 }
 
 /// The default ringtone id (the classic phone ring).
@@ -134,6 +138,7 @@ impl Default for AppSettings {
             lock_when_hidden: false,
             confirm_sensitive_copy: false,
             clipboard_clear_seconds: 0,
+            screenshot_shortcuts: ScreenshotShortcuts::default(),
         }
     }
 }
@@ -189,6 +194,7 @@ struct AccountSettings {
     lock_when_hidden: bool,
     confirm_sensitive_copy: bool,
     clipboard_clear_seconds: u32,
+    screenshot_shortcuts: ScreenshotShortcuts,
 }
 
 impl Default for AccountSettings {
@@ -218,6 +224,7 @@ impl From<&AppSettings> for AccountSettings {
             lock_when_hidden: value.lock_when_hidden,
             confirm_sensitive_copy: value.confirm_sensitive_copy,
             clipboard_clear_seconds: value.clipboard_clear_seconds,
+            screenshot_shortcuts: value.screenshot_shortcuts.clone(),
         }
     }
 }
@@ -246,6 +253,7 @@ impl AccountSettings {
             lock_when_hidden: self.lock_when_hidden,
             confirm_sensitive_copy: self.confirm_sensitive_copy,
             clipboard_clear_seconds: self.clipboard_clear_seconds,
+            screenshot_shortcuts: self.screenshot_shortcuts.clone(),
         }
     }
 }
@@ -843,6 +851,7 @@ fn require_settings_account(
 }
 
 fn normalize_settings(mut settings: AppSettings) -> Result<AppSettings, CommandError> {
+    settings.screenshot_shortcuts.validate()?;
     let level = settings.privacy_level;
     settings = settings.with_privacy_level(level);
     let hub = settings.bridge_hub_id.trim();
@@ -898,9 +907,35 @@ pub async fn set_app_settings(
     }
     match owner.as_deref() {
         Some(owner) => {
-            admission
-                .as_ref()
-                .unwrap()
+            use tauri::Manager;
+            let shortcuts = app.try_state::<crate::screenshot_shortcuts::ScreenshotShortcutState>();
+            // OS accelerator APIs dispatch synchronously to the main thread. Never call
+            // them while holding native session or installed-runtime guards.
+            let _shortcut_operation = match shortcuts.as_ref() {
+                Some(shortcuts) => Some(shortcuts.operation.lock().await),
+                None => None,
+            };
+            let admission = admission.as_ref().unwrap();
+            let previous_shortcuts = admission
+                .with_runtime(|runtime| {
+                    require_settings_account(runtime, expected_account.as_deref())?;
+                    state
+                        .get_for_owner(owner)
+                        .map(|settings| settings.screenshot_shortcuts)
+                })
+                .await?;
+            let next = match patch.as_ref() {
+                Some(patch) => shared::patch(&state.get_for_owner(owner)?, patch)?,
+                None => settings.clone(),
+            };
+            let next_shortcuts = normalize_settings(next)?.screenshot_shortcuts;
+            let shortcut_changed = previous_shortcuts != next_shortcuts;
+            if shortcut_changed && let Some(shortcuts) = shortcuts.as_ref() {
+                shortcuts
+                    .apply(&app, admission.lease(), &next_shortcuts)
+                    .await?;
+            }
+            let saved = admission
                 .with_runtime(|runtime| {
                     require_settings_account(runtime, expected_account.as_deref())?;
                     let previous = state.get_for_owner(owner)?;
@@ -931,7 +966,19 @@ pub async fn set_app_settings(
                     }
                     Ok(())
                 })
-                .await?
+                .await;
+            if saved.is_err()
+                && shortcut_changed
+                && let Some(shortcuts) = shortcuts.as_ref()
+                && let Err(error) = shortcuts
+                    .apply(&app, admission.lease(), &previous_shortcuts)
+                    .await
+            {
+                log::error!(
+                    "Could not restore screenshot shortcuts after failed settings save: {error}"
+                );
+            }
+            saved?;
         }
         None => {
             if app_state.session().capture().is_ok() {
@@ -970,6 +1017,45 @@ pub async fn set_app_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_shortcuts_persist_per_device_without_portable_export() {
+        let initial = AppSettings::default();
+        let mut changed = initial.clone();
+        changed.screenshot_shortcuts.global = true;
+        changed.screenshot_shortcuts.capture = Some("Alt+Shift+KeyS".into());
+        assert!(shared::changed(&initial, &changed).is_empty());
+        assert!(!shared::values(&changed).contains_key("settings.screenshot_shortcuts"));
+        let account: AccountSettings =
+            serde_json::from_str(&serde_json::to_string(&AccountSettings::from(&changed)).unwrap())
+                .unwrap();
+        assert_eq!(
+            account
+                .with_global(&GlobalSettings::default())
+                .screenshot_shortcuts,
+            changed.screenshot_shortcuts
+        );
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.json");
+        let second = root.path().join("second.json");
+        config_store::write_account(&first, &account).unwrap();
+        let state = SettingsState::default();
+        state.activate_at("first", &first);
+        assert_eq!(
+            state.get().screenshot_shortcuts,
+            changed.screenshot_shortcuts
+        );
+        state.activate_at("second", &second);
+        assert_eq!(
+            state.get().screenshot_shortcuts,
+            initial.screenshot_shortcuts
+        );
+        state.activate_at("first", &first);
+        assert_eq!(
+            state.get().screenshot_shortcuts,
+            changed.screenshot_shortcuts
+        );
+    }
 
     #[tokio::test]
     async fn startup_reads_local_settings_before_the_cryptographic_runtime_is_ready() {

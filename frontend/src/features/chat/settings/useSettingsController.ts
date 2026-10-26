@@ -15,6 +15,8 @@ import { useAuth } from "@/store/auth";
 import { useSettings } from "@/store/settings";
 import { createSettingsDialogSession } from "../settingsDialogSession";
 import type { SettingsCategory } from "./model";
+import { DEFAULT_SCREENSHOT_SHORTCUTS } from "@/lib/screenshotShortcuts";
+import { captureOwner } from "@/store/ownership";
 
 interface SettingError {
   kind: "load" | "save" | "refresh";
@@ -63,6 +65,9 @@ export function useSettingsController(open: boolean) {
     };
     setValues(next);
     const store = useSettings.getState();
+    store.setScreenshotShortcuts(
+      next.screenshot_shortcuts ?? { ...DEFAULT_SCREENSHOT_SHORTCUTS },
+    );
     store.setPrivacy(privacyFromSettings(next));
     store.setCallsEnabled(next.calls_enabled);
     store.setNotificationsEnabled(next.notifications);
@@ -148,11 +153,36 @@ export function useSettingsController(open: boolean) {
     return accepted;
   };
 
-  const update = (patch: Partial<AppSettings>, category: SettingsCategory) =>
-    save(
+  const update = (patch: Partial<AppSettings>, category: SettingsCategory) => {
+    const lease = captureOwner();
+    return save(
       category,
       async () => {
-        await settingsApi.update(patch);
+        try {
+          await settingsApi.update(patch);
+        } catch (error) {
+          const store = useSettings.getState();
+          // The OS may also reject rollback. Re-observe its effective registration
+          // without publishing the rejected candidate as the saved preference.
+          if (
+            patch.screenshot_shortcuts &&
+            lease.current() &&
+            store.owner === lease.owner
+          )
+            void store.syncScreenshotShortcuts();
+          throw error;
+        }
+        // A successful host write already replaced the OS bindings. Publish that exact
+        // acknowledged patch even if the unrelated full-document readback later fails.
+        const store = useSettings.getState();
+        if (
+          patch.screenshot_shortcuts &&
+          lease.current() &&
+          store.owner === lease.owner
+        ) {
+          store.setScreenshotShortcuts(patch.screenshot_shortcuts);
+          void store.syncScreenshotShortcuts();
+        }
         // Presets are normalized by the backend; never duplicate that policy in each page.
         try {
           return await settingsApi.get();
@@ -162,6 +192,7 @@ export function useSettingsController(open: boolean) {
       },
       install,
     );
+  };
 
   const setAutostartEnabled = (on: boolean) => {
     if (!autostart.loaded) return Promise.resolve(false);

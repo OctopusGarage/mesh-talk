@@ -12,13 +12,18 @@ const mocks = vi.hoisted(() => ({
   setCallsEnabled: vi.fn(),
   setNotificationsEnabled: vi.fn(),
   setRingtone: vi.fn(),
+  setScreenshotShortcuts: vi.fn(),
+  syncScreenshotShortcuts: vi.fn(),
+  owner: "alice",
   auth: { user: { id: "alice" } as { id: string } | null, generation: 0 },
 }));
 vi.mock("@/lib/api", () => ({ settings: mocks }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@/store/auth", () => ({
-  useAuth: (select: (state: typeof mocks.auth) => unknown) =>
-    select(mocks.auth),
+  useAuth: Object.assign(
+    (select: (state: typeof mocks.auth) => unknown) => select(mocks.auth),
+    { getState: () => mocks.auth },
+  ),
 }));
 vi.mock("@/store/settings", () => ({ useSettings: { getState: () => mocks } }));
 import {
@@ -75,6 +80,30 @@ beforeEach(() => {
   mocks.update.mockResolvedValue(undefined);
   mocks.setAutostart.mockResolvedValue(undefined);
   root = createRoot(document.createElement("div"));
+});
+
+it("publishes acknowledged shortcut bindings even if canonical settings readback fails", async () => {
+  await render();
+  const shortcuts = { capture: "Alt+KeyB", capture_hidden: null, global: true };
+  mocks.get.mockRejectedValueOnce(new Error("readback unavailable"));
+  await act(async () => {
+    await controller.update({ screenshot_shortcuts: shortcuts }, "general");
+  });
+  expect(mocks.setScreenshotShortcuts).toHaveBeenCalledWith(shortcuts);
+  expect(mocks.syncScreenshotShortcuts).toHaveBeenCalled();
+  expect(controller.loadError?.kind).toBe("refresh");
+});
+
+it("reconciles effective registration after a rejected shortcut replacement without publishing it", async () => {
+  await render();
+  const shortcuts = { capture: "Alt+KeyB", capture_hidden: null, global: true };
+  mocks.update.mockRejectedValueOnce(new Error("shortcut occupied"));
+  await act(async () => {
+    await controller.update({ screenshot_shortcuts: shortcuts }, "general");
+  });
+  expect(mocks.setScreenshotShortcuts).not.toHaveBeenCalledWith(shortcuts);
+  expect(mocks.syncScreenshotShortcuts).toHaveBeenCalledOnce();
+  expect(controller.errors.general?.kind).toBe("save");
 });
 afterEach(async () => {
   await act(async () => root.unmount());

@@ -181,7 +181,12 @@ pub fn set_call_active(
 pub fn allowed_while_locked(command: &str) -> bool {
     matches!(
         command,
-        "lock_status" | "unlock_app" | "logout" | "delete_temp_file" | "initial_presentation_ready"
+        "lock_status"
+            | "unlock_app"
+            | "logout"
+            | "delete_temp_file"
+            | "initial_presentation_ready"
+            | "suspend_screenshot_shortcuts"
     )
 }
 
