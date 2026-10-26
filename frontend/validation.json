@@ -2,6 +2,64 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-screenshot-shortcuts",
+      "paths": [
+        "frontend/src/lib/screenshotShortcuts.ts",
+        "frontend/src/lib/screenshotShortcuts.test.ts",
+        "frontend/src/lib/api/screenshotShortcuts.ts",
+        "frontend/src/features/chat/screenshot/shortcutRouter.ts",
+        "frontend/src/features/chat/screenshot/shortcutRouter.test.ts",
+        "frontend/src/features/chat/screenshot/useScreenshotShortcuts.ts",
+        "frontend/src/features/chat/screenshot/useScreenshotShortcuts.test.ts",
+        "frontend/src/features/chat/settings/ScreenshotShortcutSettings.tsx",
+        "frontend/src/features/chat/settings/ScreenshotShortcutSettings.test.ts",
+        "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/features/chat/settings/useSettingsController.ts",
+        "frontend/src/features/chat/settings/useSettingsController.test.ts",
+        "frontend/src/store/settings.ts",
+        "frontend/src/store/settings.test.ts",
+        "frontend/src/features/chat/SettingsDialog.tsx",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ScreenshotEditor.tsx",
+        "frontend/src/features/chat/screenshot/ScreenshotToolbar.tsx",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/e2e/screenshot-shortcuts.spec.ts",
+        "frontend/e2e/ui-audit-composer.spec.ts",
+        "frontend/e2e/ui-audit-composer.spec.ts-snapshots/composer-screenshot-dark-760x620.png",
+        "frontend/e2e/tauri-mock.ts",
+        "docs/settings.md",
+        "docs/help/topics/screenshots.md"
+      ],
+      "frontend": [
+        "src/lib/screenshotShortcuts.test.ts",
+        "src/store/settings.test.ts",
+        "src/features/chat/screenshot/shortcutRouter.test.ts",
+        "src/features/chat/screenshot/useScreenshotShortcuts.test.ts",
+        "src/features/chat/settings/ScreenshotShortcutSettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts",
+        "src/features/chat/ScreenshotEditor.test.ts",
+        "src/features/chat/ComposerScreenshot.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts"
+      ],
+      "capability": {
+        "summary": "Customize device-local screenshot bindings with default application scope, opt-in native global activation and truthful floating-control hints.",
+        "guide": "docs/settings.md#screenshot-shortcuts",
+        "invariants": [
+          {
+            "name": "Native registration is transactional and scoped to the unlocked session; retired cleanup cannot release a newer registration.",
+            "reference": "docs/settings.md#screenshot-shortcuts"
+          },
+          {
+            "name": "Local and global input share conversation-owned capture; editor and modal input never accidentally launch or send a screenshot.",
+            "reference": "docs/help/topics/screenshots.md#keyboard-shortcuts"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/screenshot-shortcuts.spec.ts and relevant screenshot browser scenarios; verify actual OS key delivery, occupied shortcuts, tray/background wakeup, lock/logout and window restoration in packaged apps. Linux global activation requires native X11. Browser events do not certify native behavior."
+      ]
+    },
+    {
       "id": "frontend-group-file-network-cost",
       "paths": [
         "frontend/src/features/chat/MembersDialog.tsx",

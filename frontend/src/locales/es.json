@@ -439,7 +439,30 @@
     "textValue": "Texto de anotación",
     "undo": "Deshacer anotación",
     "cancel": "Cancelar",
-    "send": "Enviar captura"
+    "send": "Enviar captura",
+    "shortcuts": {
+      "recording": "Pulsa un atajo…",
+      "recordingHint": "Pulsa un modificador y una letra, número o tecla de función. Esc cancela.",
+      "bindingHint": "Haz clic para cambiar. Solo se guarda en este dispositivo.",
+      "unassigned": "Sin asignar",
+      "clear": "Borrar atajo",
+      "clearAction": "Borrar atajo para {{action}}",
+      "invalid": "Usa un modificador con una letra, número o F1–F12.",
+      "reserved": "Este atajo está reservado para edición o acciones del sistema. Elige otro.",
+      "duplicate": "Elige un atajo distinto para cada acción de captura.",
+      "empty": "Asigna al menos un atajo antes de activar el uso global.",
+      "globalTitle": "Usar atajos de captura globales",
+      "globalDescription": "Permite usar estos atajos desde otras aplicaciones. Mesh-Talk debe estar abierto y desbloqueado.",
+      "checking": "Comprobando atajos globales…",
+      "globalActive": "Atajos globales activos",
+      "globalInactive": "Atajos globales no disponibles; los de la aplicación siguen funcionando",
+      "appOnly": "Los atajos funcionan dentro de Mesh-Talk",
+      "restore": "Restaurar valores",
+      "registrationFailed": "No se pudieron registrar los atajos globales. Cambia la combinación o libérala en la otra aplicación y reintenta.",
+      "scopeApp": "En la aplicación",
+      "scopeGlobal": "Global",
+      "chooseConversation": "Elige una conversación antes de tomar una captura."
+    }
   },
   "settings": {
     "originSharing": "Compartir mi oficina postal de origen",

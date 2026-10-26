@@ -248,6 +248,8 @@ export type PresenceMap = Record<string, PresenceInfo>;
 // --- Background-presence settings (src-tauri/src/settings.rs) ---
 
 export interface AppSettings {
+  /** Account-owned device preferences; never synchronized to linked devices. */
+  screenshot_shortcuts?: import("./screenshotShortcuts").ScreenshotShortcuts;
   /** Closing the window hides it to the tray instead of quitting. */
   minimize_to_tray: boolean;
   /** Native notification on incoming messages when the window isn't focused. */

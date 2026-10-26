@@ -257,6 +257,9 @@ pub async fn capture_screen(
     app: tauri::AppHandle,
     hide_window: bool,
 ) -> Result<Vec<u8>, CommandError> {
+    let authority = crate::screenshot_shortcuts::CaptureAuthority::capture(
+        &app.state::<crate::state::AppState>(),
+    )?;
     let window = app.get_webview_window("main").map(|w| w.as_ref().window());
 
     // Resolve once before hiding. Never switch backends after a portal denial or cancel.
@@ -273,14 +276,20 @@ pub async fn capture_screen(
         .ok_or_else(|| CommandError::Internal("screenshot display unavailable".into()))?;
 
     if hide_window {
-        if let Some(w) = &window {
-            let _ = crate::window_visibility::hide(w);
-        }
+        let capture_window = window.clone();
+        authority
+            .on_main_thread(&app, move || {
+                if let Some(w) = &capture_window {
+                    let _ = crate::window_visibility::hide(w);
+                }
+            })
+            .await?;
         // Give the compositor a moment to actually remove the window from the screen before
         // we capture, otherwise it can still be in the shot.
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     }
 
+    authority.ensure_current()?;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let captured = capture_png(monitor).await;
     #[cfg(target_os = "linux")]
@@ -295,10 +304,18 @@ pub async fn capture_screen(
         }
     });
 
-    if hide_window && let Some(w) = &window {
-        let _ = crate::window_visibility::show(w);
-        let _ = w.set_focus();
+    if hide_window {
+        authority
+            .on_main_thread(&app, move || {
+                if let Some(w) = &window {
+                    let _ = w.unminimize();
+                    let _ = crate::window_visibility::show(w);
+                    let _ = w.set_focus();
+                }
+            })
+            .await?;
     }
+    authority.ensure_current()?;
 
     result
 }
