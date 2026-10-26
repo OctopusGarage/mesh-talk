@@ -950,6 +950,84 @@ async fn a_newer_source_member_observation_wins_before_its_public_transfer_arriv
 }
 
 #[tokio::test]
+async fn pending_operation_status_only_wakes_sync_when_its_retry_nonce_advances() {
+    use futures_util::FutureExt;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    let genesis = legacy_group(&owner, &external);
+    install(&owner, &genesis);
+    let id = owner
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    let admitted = owner
+        .submit_account_group_operation(
+            &account.account_id(),
+            id,
+            genesis.conversation_id,
+            AccountGroupOperation::Rename {
+                name: "pending status polling".into(),
+            },
+        )
+        .unwrap();
+    assert!(admitted.committed_events.is_empty());
+    assert!(
+        owner
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_some(),
+        "fresh admission must wake the operation owner"
+    );
+    owner
+        .account_group_operation_status(&account.account_id(), id)
+        .unwrap();
+    assert!(
+        owner
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_some(),
+        "the first status read advances the retry query and wakes synchronization"
+    );
+    let nonce = owner.operation_query_nonce(id);
+    for _ in 0..32 {
+        owner
+            .account_group_operation_status(&account.account_id(), id)
+            .unwrap();
+        assert_eq!(owner.operation_query_nonce(id), nonce);
+        assert!(
+            owner
+                .account_sync_notify
+                .notified()
+                .now_or_never()
+                .is_none(),
+            "unchanged status query must not repeatedly schedule all-peer reconciliation"
+        );
+    }
+    owner
+        .operation_queries
+        .lock()
+        .unwrap()
+        .get_mut(&id)
+        .unwrap()
+        .1 = std::time::Instant::now() - std::time::Duration::from_secs(2);
+    owner
+        .account_group_operation_status(&account.account_id(), id)
+        .unwrap();
+    assert_ne!(owner.operation_query_nonce(id), nonce);
+    assert!(
+        owner
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_some(),
+        "an elapsed retry interval must still wake synchronization"
+    );
+}
+
+#[tokio::test]
 async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();

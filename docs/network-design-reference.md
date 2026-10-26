@@ -725,6 +725,10 @@ Mandatory document workers retain interrupted pages in the queue until their
 retry deadline. Other ready peers may proceed, and the exact queued deadline
 wakes the runner; a pending page must not create repeated maintenance turns
 before it is due. Optional history and favorites retain independent scheduling.
+Reading a pending operation's unchanged status retains its retry nonce and does
+not wake all-peer reconciliation. Only advancing the existing one-second query
+retry gate emits that wake; admission and cancellation keep their own immediate
+notifications. UI polling must not become an unbounded synchronization producer.
 
 Same-account group inventory is independent of that authority upgrade. Certified
 devices exchange bounded, versioned descriptive references through the existing

@@ -666,12 +666,17 @@ impl Node {
                 0,
                 std::time::Instant::now() - std::time::Duration::from_secs(2),
             ));
-            if query.1.elapsed() >= std::time::Duration::from_secs(1) {
+            let advanced = query.1.elapsed() >= std::time::Duration::from_secs(1);
+            if advanced {
                 query.0 = query.0.wrapping_add(1);
                 query.1 = std::time::Instant::now();
             }
             drop(queries);
-            self.account_sync_notify.notify_one();
+            // Polling the same pending query cannot create fresh reconciliation
+            // work; only an advanced retry nonce needs another sync turn.
+            if advanced {
+                self.account_sync_notify.notify_one();
+            }
         }
         Ok(status)
     }
