@@ -149,6 +149,7 @@ export function loadReceptionLedger(
         if (typeof e.seen !== "boolean" || typeof e.late !== "boolean")
           continue;
         valid[id] = {
+          ...(e.mentioned === true ? { mentioned: true } : {}),
           seen: e.seen,
           late: e.late,
           ...(Number.isFinite(e.receivedAt)

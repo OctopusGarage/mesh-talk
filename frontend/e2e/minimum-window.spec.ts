@@ -14,6 +14,8 @@ test("first run keeps the form reachable at the minimum window size", async ({
 }) => {
   await page.goto("/");
   await expect(page.getByTestId("login-form")).toBeVisible();
+  const tabs = await page.getByTestId("login-tab-signin").boundingBox();
+  expect(tabs?.y).toBeGreaterThanOrEqual(32);
   await expectElementsWithin(page, '[data-testid="login-submit"]', "body");
   await page.getByTestId("login-tab-register").click();
   await expectElementsWithin(page, '[data-testid="login-submit"]', "body");

@@ -11,12 +11,10 @@ test.use({ viewport: { width: 1280, height: 800 } });
 
 test("channel members shows self with name + online", async ({ page }) => {
   await page.goto("/");
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill("tester");
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await waitForChatShell(page);
   await page.getByTestId(`conversation-row-${CHANNEL}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();

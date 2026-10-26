@@ -109,3 +109,25 @@ it("forwards scoped state invalidations and releases the listener", async () => 
   stop();
   await vi.waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
 });
+
+it("forwards account profile projections and releases their listener", async () => {
+  let forward!: (event: { payload: unknown }) => void;
+  const unlisten = vi.fn();
+  listen.mockImplementation((name, callback) => {
+    expect(name).toBe("account-profile-changed");
+    forward = callback;
+    return Promise.resolve(unlisten);
+  });
+  const onAccountProfile = vi.fn();
+  const stop = subscribeNodeEvents({ onAccountProfile });
+  const user = {
+    id: "host",
+    username: "local-login",
+    display_name: "Shared account",
+  };
+  const payload = { user, account_id: "account", device_id: "device" };
+  forward({ payload });
+  expect(onAccountProfile).toHaveBeenCalledWith(payload);
+  stop();
+  await vi.waitFor(() => expect(unlisten).toHaveBeenCalledOnce());
+});

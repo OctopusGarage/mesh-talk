@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
+import { rm } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { delimiter, resolve as resolvePath } from "node:path";
 
 const repo = "owner/mesh-talk";
@@ -123,7 +126,12 @@ test("rejects malformed paginated responses", async () => {
   }
 });
 
-test("CLI appends only a numeric run output and hides API failure details", () => {
+// A copied executable may remain briefly locked after its process exits on Windows.
+function removeCliFixture(path) {
+  return rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+test("CLI appends only a numeric run output and hides API failure details", async () => {
   mkdirSync("tmp", { recursive: true });
   const directory = mkdtempSync(resolvePath("tmp/release-reuse-"));
   try {
@@ -162,6 +170,44 @@ console.log(JSON.stringify(result));
       return true;
     });
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    await removeCliFixture(directory);
+  }
+});
+
+
+test("fixture cleanup fails for a held Windows image and succeeds after release", {
+  skip: process.platform !== "win32",
+  timeout: 30_000,
+}, async () => {
+  mkdirSync("tmp", { recursive: true });
+  const directory = mkdtempSync(resolvePath("tmp/release-reuse-lock-"));
+  const executable = `${directory}/locked-node.exe`;
+  let child;
+  let exited;
+  try {
+    copyFileSync(process.execPath, executable);
+    child = spawn(executable, ["-e", `
+process.stdin.resume();
+process.stdin.once("end", () => process.exit(0));
+process.stdout.write("ready");
+`], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NODE_OPTIONS: "" } });
+    exited = once(child, "exit");
+    await Promise.race([
+      once(child.stdout, "data"),
+      exited.then(() => { throw new Error("Executable fixture exited before locking its image"); }),
+    ]);
+    // A persistent lock must still fail; cleanup cannot silently abandon the fixture.
+    await assert.rejects(removeCliFixture(executable), (error) => ["EBUSY", "EPERM"].includes(error.code));
+    const removal = removeCliFixture(directory).then(() => null, (error) => error);
+    await delay(50);
+    assert.ok(existsSync(executable));
+    child.stdin.end();
+    assert.equal(await removal, null);
+    assert.equal(existsSync(directory), false);
+    assert.equal((await exited)[0], 0);
+  } finally {
+    child?.kill();
+    await exited?.catch(() => {});
+    await removeCliFixture(directory);
   }
 });

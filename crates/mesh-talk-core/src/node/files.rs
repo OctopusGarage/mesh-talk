@@ -22,7 +22,10 @@ pub(in crate::node) fn same_file_transfer(
         manifest.mime.clear();
         manifest
     }
-    match (left, right) {
+    if left.protection() != right.protection() {
+        return false;
+    }
+    match (left.unprotected(), right.unprotected()) {
         (AnyManifest::V1(left), AnyManifest::V1(right)) => v1(left.clone()) == v1(right.clone()),
         (AnyManifest::V2(left), AnyManifest::V2(right)) => v2(left.clone()) == v2(right.clone()),
         (AnyManifest::V3(left), AnyManifest::V3(right)) => {
@@ -75,7 +78,9 @@ pub(in crate::node) fn validated_manifest(bytes: &[u8]) -> Option<AnyManifest> {
         .with_fixint_encoding()
         .with_limit(crate::transport::MAX_PLAINTEXT as u64)
         .reject_trailing_bytes();
-    let manifest = if let Some(body) = bytes.strip_prefix(b"MFM4") {
+    let manifest = if bytes.starts_with(b"MFP") {
+        crate::file::decode_manifest(bytes)?
+    } else if let Some(body) = bytes.strip_prefix(b"MFM4") {
         AnyManifest::V4(decode.deserialize::<FileManifestV4>(body).ok()?)
     } else if let Some(body) = bytes.strip_prefix(b"MFM3") {
         AnyManifest::V3(decode.deserialize::<FileManifestV3>(body).ok()?)
@@ -88,10 +93,26 @@ pub(in crate::node) fn validated_manifest(bytes: &[u8]) -> Option<AnyManifest> {
                 .ok()?,
         )
     };
+    if manifest.protection().is_some()
+        && !crate::node::media_store::automatic_inline_image(&manifest)
+    {
+        return None;
+    }
     if manifest.size() > MAX_FILE_SIZE || manifest.chunk_count() == 0 {
         return None;
     }
-    match &manifest {
+    if crate::file::sticker::is_sticker_name(manifest.name())
+        && (manifest.protection().is_some()
+            || !crate::file::sticker::valid_manifest(
+                manifest.name(),
+                manifest.mime(),
+                manifest.size(),
+                manifest.kind() == Some(FileKind::Media),
+            ))
+    {
+        return None;
+    }
+    match manifest.unprotected() {
         AnyManifest::V1(m) if m.chunk_count != chunk_count_for(m.size) => return None,
         AnyManifest::V2(m) | AnyManifest::V3(FileManifestV3 { v2: m, .. })
             if m.chunk_size == 0
@@ -589,6 +610,50 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
         expires_at_ms: Option<u64>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        self.enqueue_file_to_account_progress_expiring_if_inner(
+            target_account_id,
+            path,
+            kind,
+            on_progress,
+            expires_at_ms,
+            None,
+            authorize,
+        )
+        .await
+    }
+
+    pub async fn enqueue_protected_file_to_account_progress_expiring_if(
+        self: &Arc<Self>,
+        target_account_id: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+        protection: MessageProtection,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
+        self.enqueue_file_to_account_progress_expiring_if_inner(
+            target_account_id,
+            path,
+            kind,
+            on_progress,
+            expires_at_ms,
+            Some(protection),
+            authorize,
+        )
+        .await
+    }
+
+    async fn enqueue_file_to_account_progress_expiring_if_inner(
+        self: &Arc<Self>,
+        target_account_id: &str,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+        protection: Option<MessageProtection>,
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(crate::eventlog::EventId, ConversationId), NodeError> {
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
@@ -612,17 +677,37 @@ impl Node {
                 .await?;
         }
 
-        let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
+        if protection.is_some() {
+            validate_protected_image_path(path, kind)?;
+        }
         let account_conv = super::conversation::account_conversation_id(
             &self.account.account_id(),
             target_account_id,
         );
-        let id = self.accept_staged_manifest_if(
+        let (mut manifest, file_conv) = self
+            .stage_file_for_host_blocking(
+                path,
+                kind,
+                on_progress,
+                account_conv,
+                Some(target_account_id.to_owned()),
+                expires_at_ms,
+            )
+            .await?;
+        if protection.is_some() {
+            self.validate_staged_protected_image(&manifest)?;
+            manifest.v2.name = format!(
+                "protected-image.{}",
+                path.extension().and_then(|s| s.to_str()).unwrap_or("img")
+            );
+        }
+        let id = self.accept_staged_manifest_with_protection_if(
             &dests,
             account_conv,
             Some(target_account_id.to_owned()),
             &manifest,
             expires_at_ms,
+            protection,
             &mut authorize,
         )?;
         Ok((id, file_conv))
@@ -650,6 +735,58 @@ impl Node {
         expires_at_ms: Option<u64>,
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<crate::eventlog::EventId, NodeError> {
+        self.accept_staged_manifest_with_protection_if(
+            peers,
+            host,
+            target_account,
+            manifest,
+            expires_at_ms,
+            None,
+            authorize,
+        )
+    }
+
+    fn accept_staged_manifest_with_protection_if(
+        &self,
+        peers: &[crate::discovery::PeerRecord],
+        host: ConversationId,
+        target_account: Option<String>,
+        manifest: &FileManifestV3,
+        expires_at_ms: Option<u64>,
+        protection: Option<MessageProtection>,
+        authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<crate::eventlog::EventId, NodeError> {
+        super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        let mut target_account = Some(target_account);
+        let mut accepted = None;
+        authorize(&mut || {
+            let target = target_account
+                .take()
+                .ok_or_else(|| NodeError::Authorization("accept is single-use".into()))?;
+            accepted = Some(self.accept_staged_manifest_authorized(
+                peers,
+                host,
+                target,
+                manifest,
+                expires_at_ms,
+                protection,
+            )?);
+            Ok(())
+        })?;
+        accepted.ok_or_else(|| {
+            NodeError::Authorization("authorization did not execute acceptance".into())
+        })
+    }
+
+    fn accept_staged_manifest_authorized(
+        &self,
+        peers: &[crate::discovery::PeerRecord],
+        host: ConversationId,
+        target_account: Option<String>,
+        manifest: &FileManifestV3,
+        expires_at_ms: Option<u64>,
+        protection: Option<MessageProtection>,
+    ) -> Result<crate::eventlog::EventId, NodeError> {
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
         use super::delivery_store::{DeliveryDestination, OutgoingDelivery};
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
@@ -657,7 +794,10 @@ impl Node {
         let own = self.identity.public();
         let author = Author::from_ed25519(own.ed25519_pub);
         let clock = super::node::now_millis();
-        let plaintext = crate::expiry::wrap(&outgoing_manifest_bytes(manifest), expires_at_ms);
+        let plaintext = crate::expiry::wrap(
+            &protected_manifest_bytes(manifest, protection),
+            expires_at_ms,
+        );
         let mut destinations = Vec::with_capacity(peers.len());
         {
             let log = self.log.lock().expect("log lock not poisoned");
@@ -734,13 +874,13 @@ impl Node {
             )
         }
         .map_err(NodeError::Log)?;
-        if self.accept_outgoing_transaction(&mut store, transaction, authorize)? {
+        if self.commit_outgoing_transaction(&mut store, transaction)? {
             let mut book = self.files.lock().expect("files lock not poisoned");
             book.mark_emitted(id);
             book.record_event(
                 id,
                 Author::from_ed25519(self.identity.public().ed25519_pub),
-                outgoing_manifest(manifest),
+                protected_manifest(manifest, protection),
             );
         }
         self.account_sync_notify.notify_one();
@@ -837,9 +977,76 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress) + Send + 'static,
         expires_at_ms: Option<u64>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<ConversationId, NodeError> {
+        let (_, file) = self
+            .enqueue_file_channel_progress_expiring_if(
+                channel,
+                path,
+                kind,
+                on_progress,
+                expires_at_ms,
+                authorize,
+            )
+            .await?;
+        self.flush_channel_file(channel, file).await;
+        Ok(file)
+    }
+
+    pub async fn enqueue_file_channel_progress_expiring_if(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<(EventId, ConversationId), NodeError> {
+        self.enqueue_file_channel_progress_expiring_if_inner(
+            channel,
+            path,
+            kind,
+            on_progress,
+            expires_at_ms,
+            None,
+            authorize,
+        )
+        .await
+    }
+
+    pub async fn enqueue_protected_file_channel_progress_expiring_if(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+        protection: MessageProtection,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<(EventId, ConversationId), NodeError> {
+        self.enqueue_file_channel_progress_expiring_if_inner(
+            channel,
+            path,
+            kind,
+            on_progress,
+            expires_at_ms,
+            Some(protection),
+            authorize,
+        )
+        .await
+    }
+
+    async fn enqueue_file_channel_progress_expiring_if_inner(
+        self: &Arc<Self>,
+        channel: ConversationId,
+        path: &Path,
+        kind: FileKind,
+        on_progress: impl FnMut(FileProgress) + Send + 'static,
+        expires_at_ms: Option<u64>,
+        protection: Option<MessageProtection>,
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
-    ) -> Result<ConversationId, NodeError> {
+    ) -> Result<(EventId, ConversationId), NodeError> {
         authorize(&mut || Ok(()))?;
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
         {
@@ -847,46 +1054,55 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !state.is_member(&self.user_id()) || state.pending_invite() {
+            if !self.channel_identity_is_current(state) {
                 return Err(NodeError::Channel("not an accepted channel member".into()));
             }
         }
-        let (manifest, file_conv) = self.stage_file_blocking(path, kind, on_progress).await?;
+        if protection.is_some() {
+            validate_protected_image_path(path, kind)?;
+        }
+        let (mut manifest, file_conv) = self
+            .stage_file_for_host_blocking(path, kind, on_progress, channel, None, expires_at_ms)
+            .await?;
+        if protection.is_some() {
+            self.validate_staged_protected_image(&manifest)?;
+            manifest.v2.name = format!(
+                "protected-image.{}",
+                path.extension().and_then(|s| s.to_str()).unwrap_or("img")
+            );
+        }
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
+        let id = self.enqueue_channel_payload_if(
+            channel,
+            crate::expiry::wrap(
+                &protected_manifest_bytes(&manifest, protection),
+                expires_at_ms,
+            ),
+            EventKind::FileManifest,
+            None,
+            &mut authorize,
+        )?;
+        Ok((id, file_conv))
+    }
+
+    /// Fan out an already accepted channel offer and its automatically permitted bytes.
+    pub async fn flush_channel_file(&self, channel: ConversationId, file: ConversationId) {
         let members = self
             .channels
             .lock()
             .expect("channels lock")
             .state(&channel)
-            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?
-            .members()
-            .to_vec();
-        let id = self.enqueue_channel_payload_if(
-            channel,
-            crate::expiry::wrap(&outgoing_manifest_bytes(&manifest), expires_at_ms),
-            EventKind::FileManifest,
-            None,
-            &mut authorize,
-        )?;
-        let seq = self
-            .log
+            .map(|state| state.recipient_members());
+        let automatic_inline = self
+            .files
             .lock()
-            .expect("log lock")
-            .get(&id)
-            .ok_or_else(|| NodeError::File("accepted manifest awaits recovery".into()))?
-            .seq;
-        authorize(&mut || {
-            self.record_sent_manifest(channel, channel, seq, &manifest, expires_at_ms)
-        })?;
-        // A file/folder manifest is an offer. Members pull its chunks only after
-        // their own receive policy permits it; pushing the chunk conversation here
-        // would transmit the bytes before they could approve. Inline media keeps
-        // the existing automatic transfer behavior.
-        self.distribute_channel(channel, &members).await;
-        if crate::node::media_store::automatic_inline_image(&outgoing_manifest(&manifest)) {
-            self.distribute_channel(file_conv, &members).await;
+            .expect("files lock")
+            .manifest(&file)
+            .is_some_and(crate::node::media_store::automatic_inline_image);
+        if let Some(members) = members {
+            self.distribute_channel_file(channel, file, &members, automatic_inline)
+                .await;
         }
-        Ok(file_conv)
     }
 
     /// Off-reactor wrapper around [`Node::stage_file`]: staging is a synchronous burst of
@@ -915,6 +1131,52 @@ impl Node {
         .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
     }
 
+    async fn stage_file_for_host_blocking(
+        self: &Arc<Self>,
+        path: &Path,
+        kind: FileKind,
+        mut on_progress: impl FnMut(FileProgress) + Send + 'static,
+        host: ConversationId,
+        account: Option<String>,
+        deadline: Option<u64>,
+    ) -> Result<(FileManifestV3, ConversationId), NodeError> {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !crate::file::sticker::is_sticker_name(name) {
+            return self.stage_file_blocking(path, kind, on_progress).await;
+        }
+        let permit = self
+            .runtime_work
+            .admit()
+            .ok_or_else(|| NodeError::File("participant runtime is stopping".into()))?;
+        let node = Arc::clone(self);
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let bytes = super::sticker_media::snapshot(&path, kind)?
+                .ok_or_else(|| NodeError::InvalidInput("invalid sticker name".into()))?;
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if let Some(manifest) =
+                node.reusable_sticker(host, account.as_deref(), name, &bytes, deadline)
+            {
+                on_progress(FileProgress {
+                    done: manifest.v2.chunk_count,
+                    total: manifest.v2.chunk_count,
+                });
+                let file = manifest.v2.file_conv;
+                return Ok((manifest, file));
+            }
+            node.stage_sticker_snapshot(name, &bytes, on_progress)
+        })
+        .await
+        .map_err(|error| NodeError::File(format!("stage join error: {error}")))?
+    }
+
     /// Stream `path` from disk, sealing each `CHUNK_SIZE` piece (deterministic-nonce v2
     /// AEAD) into a fresh per-file conversation as one chunk event, hashing each chunk
     /// (and the whole file) as we go. Never holds more than one chunk in memory.
@@ -925,6 +1187,13 @@ impl Node {
         kind: FileKind,
         on_progress: impl FnMut(FileProgress),
     ) -> Result<(FileManifestV3, ConversationId), NodeError> {
+        if let Some(bytes) = super::sticker_media::snapshot(path, kind)? {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            return self.stage_sticker_snapshot(name, &bytes, on_progress);
+        }
         if path.is_dir() {
             let archive = crate::file::directory::pack(path)?;
             let name = crate::file::directory::archive_name(path)?;
@@ -938,7 +1207,7 @@ impl Node {
         self.stage_regular_file(path, kind, on_progress, None)
     }
 
-    fn stage_regular_file(
+    pub(super) fn stage_regular_file(
         &self,
         path: &Path,
         kind: FileKind,
@@ -1043,63 +1312,41 @@ impl Node {
         Ok((manifest, file_conv))
     }
 
-    /// Record a manifest we just SENT into the durable file stores so the file shows as an
-    /// outgoing message in OUR history (and is previewable/saveable), persisting across
-    /// restart. Records into `received_files` keyed by `record_conv` (the UI's host
-    /// conversation: the DM/channel conv, or the ACCOUNT conv for an account send) with
-    /// `from = our own user-id` (so `conversation_files` derives `from_me`), and into the
-    /// FileBook so `read_file`/`save_file` resolve the manifest (our own chunks are in the
-    /// file_conv log). The manifest event's id + wall-clock are read from `event_conv` by
-    /// `seq` (the value `append_event` returned) — for a DM/channel send `event_conv ==
-    /// record_conv`; for an account send the event lives in a per-device DM conv while we
-    /// file it under the account conv. Idempotent: the `received_files`/FileBook dedup on
-    /// the event id, so the account path's repeated calls (one per device, same manifest)
-    /// record it once.
-    pub(in crate::node) fn record_sent_manifest(
-        &self,
-        record_conv: ConversationId,
-        event_conv: ConversationId,
-        seq: u64,
-        manifest: &FileManifestV3,
-        expires_at_ms: Option<u64>,
-    ) -> Result<(), NodeError> {
-        let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-        // Resolve the just-appended manifest event's content-addressed id + wall-clock.
-        let appended = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&event_conv)
-                .into_iter()
-                .find(|e| {
-                    e.kind == EventKind::FileManifest && e.author == self_author && e.seq == seq
-                })
-                .map(|e| (e.id, e.wall_clock))
-        };
-        let Some((event_id, wall_clock)) = appended else {
-            return Err(NodeError::File("sent manifest event unavailable".into()));
-        };
-        self.remember_sent_manifest_scope(manifest.v2.file_conv, event_conv, self_author, event_id)
-            .map_err(NodeError::Log)?;
-        let plaintext = crate::expiry::wrap(&outgoing_manifest_bytes(manifest), expires_at_ms);
-        self.received_files
+    fn validate_staged_protected_image(&self, manifest: &FileManifestV3) -> Result<(), NodeError> {
+        let manifest = outgoing_manifest(manifest);
+        if !super::media_store::automatic_inline_image(&manifest) {
+            return Err(NodeError::InvalidInput(
+                "protected media must be a supported raster image within 16 MiB".into(),
+            ));
+        }
+        let chunks = self.collect_chunks(manifest.file_conv());
+        let first = chunks
+            .first()
+            .ok_or_else(|| NodeError::File("staged image unavailable".into()))?;
+        let bytes = open_chunk_for(&manifest, 0, first)
+            .map_err(|_| NodeError::File("staged image unavailable".into()))?;
+        if !super::media_store::raster_signature_matches(manifest.mime(), &bytes) {
+            return Err(NodeError::InvalidInput(
+                "protected image signature differs from media type".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn file_is_protected(&self, file: ConversationId) -> bool {
+        self.files
             .lock()
-            .expect("received_files mutex not poisoned")
-            .record(
-                record_conv,
-                self.identity.public().user_id(),
-                wall_clock,
-                &plaintext,
-                event_id,
-            )
-            .map_err(NodeError::Log)?;
-        let mut files = self.files.lock().expect("files mutex not poisoned");
-        files.mark_emitted(event_id);
-        files.record_event(
-            event_id,
-            Author::from_ed25519(self.identity.public().ed25519_pub),
-            outgoing_manifest(manifest),
-        );
-        drop(files);
-        self.note_account_local_change();
+            .expect("files lock")
+            .manifest(&file)
+            .is_some_and(|m| m.protection().is_some())
+    }
+
+    fn reject_protected_file(&self, file: ConversationId) -> Result<(), NodeError> {
+        if self.file_is_protected(file) {
+            return Err(NodeError::Authorization(
+                "protected image requires an exact authorized reveal".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1108,7 +1355,26 @@ impl Node {
     /// not yet received-complete). This is the DURABLE display path — distinct from
     /// [`Node::read_file`], which reassembles the transient chunks (gone after prune).
     pub fn read_media(&self, file_conv: ConversationId) -> Option<Vec<u8>> {
-        self.media.read(file_conv)
+        // Cleanup retires manifest metadata before removing the encrypted blob.
+        // Missing policy metadata must never turn a protected image into ordinary media.
+        let manifest = self
+            .files
+            .lock()
+            .expect("files lock")
+            .manifest(&file_conv)?
+            .clone();
+        if manifest.protection().is_some() || self.expired_received_file(file_conv) {
+            return None;
+        }
+        let bytes = self.media.read(file_conv)?;
+        if crate::file::sticker::is_sticker_name(manifest.name()) {
+            if bytes.len() as u64 != manifest.size() || file_checksum(&bytes) != manifest.checksum()
+            {
+                return None;
+            }
+            super::sticker_media::validate(manifest.name(), manifest.mime(), &bytes).ok()?;
+        }
+        Some(bytes)
     }
 
     /// Whether durable media bytes for `file_conv` exist (drives the UI's store-vs-chunk
@@ -1146,11 +1412,14 @@ impl Node {
             return false; // attachment — never written to the media store
         }
         if self.media.contains(file_conv) && self.has_verified_file_completion(file_conv) {
-            return false; // already durable
+            self.complete_sticker_aliases(file_conv);
+            if !self.pending_sticker_aliases(file_conv) {
+                return false; // every retained offer is already complete
+            }
         }
         let candidates = self.completion_candidates(file_conv);
         // Need all chunks present; `read_file` enforces completeness + verifies integrity.
-        match self.read_file(file_conv) {
+        match self.read_file_internal(file_conv) {
             Ok(bytes) => {
                 if self.media.store_bytes(file_conv, &name, &bytes).is_ok() {
                     // The durable media copy now exists, so the transient chunks are
@@ -1200,6 +1469,9 @@ impl Node {
     /// This bounded metadata/path check does not read content: save verifies the
     /// complete managed copy's size and checksum on the blocking export path.
     pub fn file_ready_to_save(&self, file_conv: ConversationId) -> bool {
+        if self.file_is_protected(file_conv) {
+            return false;
+        }
         self.file_progress(file_conv).is_some_and(|progress| {
             if progress.done == progress.total {
                 return true;
@@ -1222,6 +1494,14 @@ impl Node {
     /// chunks have synced, or verification fails. For large files prefer
     /// [`Node::save_file`], which streams to disk.
     pub fn read_file(&self, file_conv: ConversationId) -> Result<Vec<u8>, NodeError> {
+        self.reject_protected_file(file_conv)?;
+        self.read_file_internal(file_conv)
+    }
+
+    pub(in crate::node) fn read_file_internal(
+        &self,
+        file_conv: ConversationId,
+    ) -> Result<Vec<u8>, NodeError> {
         if self.expired_received_file(file_conv) {
             return Err(NodeError::File("file expired".into()));
         }
@@ -1240,10 +1520,13 @@ impl Node {
                 manifest.chunk_count()
             )));
         }
-        match &manifest {
+        match manifest.unprotected() {
             AnyManifest::V1(m) => reassemble_and_verify(m, &chunks)
                 .map_err(|e| NodeError::File(format!("reassemble: {e}"))),
-            AnyManifest::V2(_) | AnyManifest::V3(_) | AnyManifest::V4(_) => {
+            AnyManifest::V2(_)
+            | AnyManifest::V3(_)
+            | AnyManifest::V4(_)
+            | AnyManifest::Protected { .. } => {
                 let mut out = Vec::new();
                 for (i, ct) in chunks.iter().enumerate() {
                     let plain = open_chunk_for(&manifest, i as u32, ct)
@@ -1259,6 +1542,7 @@ impl Node {
                 if file_checksum(&out) != manifest.checksum() {
                     return Err(NodeError::File("checksum mismatch".into()));
                 }
+                super::sticker_media::validate(manifest.name(), manifest.mime(), &out)?;
                 Ok(out)
             }
         }
@@ -1278,6 +1562,7 @@ impl Node {
         file_conv: ConversationId,
         dir: &Path,
     ) -> Result<std::path::PathBuf, NodeError> {
+        self.reject_protected_file(file_conv)?;
         if self.expired_received_file(file_conv) {
             return Err(NodeError::File("file expired".into()));
         }
@@ -1315,6 +1600,7 @@ impl Node {
         dest: &Path,
         on_progress: impl FnMut(FileProgress),
     ) -> Result<(), NodeError> {
+        self.reject_protected_file(file_conv)?;
         if self.expired_received_file(file_conv) {
             return Err(NodeError::File("file expired".into()));
         }
@@ -1639,3 +1925,66 @@ mod part_guard_tests {
 #[cfg(test)]
 #[path = "personal_files_tests.rs"]
 mod personal_files_tests;
+
+fn validate_protected_image_path(path: &Path, kind: FileKind) -> Result<(), NodeError> {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(crate::file::sticker::is_sticker_name)
+    {
+        return Err(NodeError::InvalidInput(
+            "protected stickers are unsupported".into(),
+        ));
+    }
+    let mime = mime_from_name(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(""),
+    );
+    if kind != FileKind::Media
+        || path.is_dir()
+        || !mime.starts_with("image/")
+        || std::fs::metadata(path).map_or(true, |m| m.len() > 16 * 1024 * 1024)
+    {
+        return Err(NodeError::InvalidInput(
+            "protected media must be an image".into(),
+        ));
+    }
+    let mut prefix = [0u8; 32];
+    let mut input = std::fs::File::open(path)
+        .map_err(|_| NodeError::InvalidInput("protected image is unavailable".into()))?;
+    let n = input
+        .read(&mut prefix)
+        .map_err(|_| NodeError::InvalidInput("protected image is unavailable".into()))?;
+    if !super::media_store::raster_signature_matches(&mime, &prefix[..n]) {
+        return Err(NodeError::InvalidInput(
+            "protected media must be a supported raster image".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn protected_manifest_bytes(
+    manifest: &FileManifestV3,
+    protection: Option<MessageProtection>,
+) -> Vec<u8> {
+    let bytes = outgoing_manifest_bytes(manifest);
+    match protection {
+        Some(mode) => crate::file::manifest::protect_image_manifest(bytes, mode),
+        None => bytes,
+    }
+}
+
+fn protected_manifest(
+    manifest: &FileManifestV3,
+    protection: Option<MessageProtection>,
+) -> AnyManifest {
+    let inner = outgoing_manifest(manifest);
+    match protection {
+        Some(protection) => AnyManifest::Protected {
+            protection,
+            inner: Box::new(inner),
+        },
+        None => inner,
+    }
+}

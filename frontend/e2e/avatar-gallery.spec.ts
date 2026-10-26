@@ -6,12 +6,10 @@ test.use({ viewport: { width: 1100, height: 800 } });
 
 async function login(page: import("@playwright/test").Page) {
   await page.goto("/");
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill("tester");
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await waitForChatShell(page);
   await waitForPackBootstrap(page);
 }
@@ -31,6 +29,7 @@ test("personal avatar gallery offers the player pack", async ({ page }) => {
 test("personal avatar gallery offers all Cat Acrylic portraits", async ({
   page,
 }) => {
+  await seedMarketPacks(page, ["cat-acrylic-avatars"]);
   await login(page);
   await page.getByTestId("open-profile").click();
   await page.getByRole("button", { name: "Change your photo" }).click();
@@ -42,7 +41,9 @@ test("personal avatar gallery offers all Cat Acrylic portraits", async ({
   await expect(gallery).toBeHidden();
 });
 
-test("bundled avatar tabs retain their translated names", async ({ page }) => {
+test("installed avatar tabs retain their translated names", async ({
+  page,
+}) => {
   await page.addInitScript(() => localStorage.setItem("mesh-talk-lang", "ja"));
   await seedMarketPacks(page, ["players"]);
   await login(page);

@@ -31,6 +31,9 @@ tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-opener = "2"
+# Version-bound signatures and native bundle replacement without paid OS certificates.
+# Native NSIS/AppImage payloads need no ZIP extraction; macOS tar support is unconditional.
+tauri-plugin-updater = { version = "=2.14.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
 # Shared (versions from the workspace)
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -38,11 +41,16 @@ log = { workspace = true }
 tracing = { workspace = true }
 rand = "0.10" # session-token generation; already in the tree via tauri-plugin-notification
 hex = { workspace = true }
+base64 = { workspace = true }
 lazy_static = { workspace = true }
 serde_json = "1" # persist app settings as JSON in the app config dir
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "system-proxy", "query", "form"] }
 semver = "1"
 sha2 = { workspace = true }
+minisign-verify = "0.3" # release helper uses the SDK-compatible signed-version trust root
+fs4 = { version = "1.1", default-features = false } # quota-aware private staging budget
+zstd = { version = "0.14.3", default-features = false }
+zeroize = { workspace = true }
 tempfile = { workspace = true } # atomic replacement of per-account contact policy
 # "Stay signed in": store the login password in the OS keychain (macOS Keychain,
 # Windows Credential Manager, Linux Secret Service) — never on plaintext disk.
@@ -58,7 +66,8 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSString", "NSBundle"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationSettings"] }
 objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "LAContext", "block2"] }
 # Read and migrate credentials saved by the earlier Touch ID-only release.
 security-framework = { version = "3.6", features = ["OSX_10_15"] }
@@ -70,12 +79,16 @@ core-foundation = "0.10"
 raw-window-handle = "0.6"
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screenshot"] }
 url = "2.5"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["UI_Notifications", "Networking_Connectivity"] }
 xcap = "0.9.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
+rcgen = "0.14"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tauri-plugin-wdio-webdriver = "=1.5.0"
 tauri = { version = "2.12.3", features = ["test"] }
 serde_json = "1"
@@ -100,3 +113,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "mesh-talk"
 path = "src/main.rs"
+
+[[example]]
+name = "delta-artifact"
+test = true

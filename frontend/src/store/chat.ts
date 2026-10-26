@@ -1,3 +1,8 @@
+import { usePacks } from "./packs";
+import { stickerById } from "@/lib/stickerPacks";
+import { snapshotSticker } from "@/lib/stickerMedia";
+import { mentionsName } from "@/lib/mentions";
+import { useAuth } from "./auth";
 import { createRosterRefresh } from "./rosterRefresh";
 import {
   notifySyncInvalidation,
@@ -26,6 +31,7 @@ import {
 } from "@/lib/unreadStorage";
 import {
   emptyReception,
+  applyAccountSeen,
   mergeReception,
   receiveIdentity,
   viewIdentities,
@@ -95,6 +101,7 @@ export type {
 const INCOMING_FILES_CAP = 300;
 
 export interface IncomingFile {
+  protection?: import("@/lib/types").MessageProtection | null;
   expiresAtMs?: number | null;
   fromName: string;
   name: string;
@@ -117,9 +124,76 @@ export function displayName(
   return favorites[id]?.custom_alias || announced;
 }
 
-/** Number of boot poll attempts (≈30s at BOOT_POLL_MS). */
-const BOOT_POLL_TRIES = 60;
+/** Total boot window, including time spent waiting for native reads. */
+const BOOT_TIMEOUT_MS = 30_000;
 const BOOT_POLL_MS = 500;
+const BOOT_RECOVERY_INTERVAL_MS = 10_000;
+
+/** Both startup and full runtime identities bind persisted reception exactly once. */
+function applyVerifiedIdentity(
+  set: Set,
+  identity: {
+    owner: string;
+    account_id: string;
+    device_id: string;
+    history_revision?: number;
+  },
+  ready: boolean,
+) {
+  const owner = identity.owner;
+  const acct = identity.account_id;
+  const persistedUnread = loadUnread(owner, acct);
+  const persistedPendingUnread = loadPendingUnread(owner, acct);
+  const persistedReception = emptyReception(
+    loadReceptionLedger(owner, acct),
+    loadUnreadOverflow(owner, acct),
+  );
+  set((state) => {
+    const sameScope = state.unreadOwner === owner && state.myAccountId === acct;
+    const invalidateScope = state.unreadOwner !== "" && !sameScope;
+    const replacedScope =
+      invalidateScope ||
+      (state.myAccountId !== "" && state.myAccountId !== acct);
+    const reception = sameScope
+      ? state
+      : mergeReception(
+          { ...persistedReception, unread: persistedUnread },
+          replacedScope ? { ...emptyReception(), unread: {} } : state,
+        );
+    const unread = reception.unread;
+    const pendingUnknownUnread = sameScope
+      ? state.pendingUnknownUnread
+      : { ...persistedPendingUnread };
+    if (!sameScope && !replacedScope)
+      for (const [sender, count] of Object.entries(state.pendingUnknownUnread))
+        pendingUnknownUnread[sender] = Math.min(
+          1_000_000,
+          (pendingUnknownUnread[sender] ?? 0) + count,
+        );
+    return {
+      ...(invalidateScope ? invalidateConversationIdentity(state) : {}),
+      ...(!sameScope
+        ? {
+            ...reception,
+            accountSeen: reception.accountSeen,
+            historyBaselines: Object.keys(persistedReception.ledger),
+            historyFullBaselines: loadFullHistoryBaselines(owner, acct),
+          }
+        : {}),
+      identityEpoch: invalidateScope
+        ? state.identityEpoch + 1
+        : state.identityEpoch,
+      historyRevision: identity.history_revision ?? null,
+      myId: identity.device_id,
+      myAccountId: acct,
+      unread,
+      pendingUnknownUnread,
+      unreadOwner: owner,
+      ready,
+      bootFailed: false,
+    };
+  });
+}
 
 /**
  * Poll my_id/account_id until the node finishes opening (post-login KDF unlock takes a
@@ -131,75 +205,118 @@ async function pollUntilReady(
   set: Set,
   get: Get,
   isCancelled: () => boolean,
+  singleAttempt = false,
 ): Promise<boolean> {
-  for (let i = 0; i < BOOT_POLL_TRIES && !isCancelled(); i++) {
+  const deadline = performance.now() + BOOT_TIMEOUT_MS;
+  while (performance.now() < deadline && !isCancelled()) {
+    const owner = captureOwner().owner;
+    if (!owner) return false;
+    const identityEpoch = get().identityEpoch;
+    const superseded = () =>
+      isCancelled() || get().identityEpoch !== identityEpoch;
+    let observedStartup:
+      Awaited<ReturnType<typeof chat.ownerStartupIdentity>> | undefined;
     try {
-      const owner = captureOwner().owner;
-      if (!owner) return false;
-      const identity = await readWithDeadline(() => chat.ownerIdentity(owner));
-      if (isCancelled()) return false;
+      const identity = await readWithDeadline(
+        () => chat.ownerIdentity(owner),
+        Math.min(10_000, deadline - performance.now()),
+      );
+      if (superseded() || performance.now() >= deadline) return false;
       if (identity.owner !== owner)
         throw new Error("Node identity is not ready for this owner");
+      // Remember the native ticket even when the node was already ready at the
+      // first poll, so a later transient outage cannot look like a new startup.
+      const startup = await readWithDeadline(
+        () => chat.ownerStartupIdentity(owner),
+        Math.max(1, Math.min(2_000, deadline - performance.now())),
+      ).catch(() => undefined);
+      if (superseded() || performance.now() >= deadline) return false;
+      if (startup === null && get().startupId !== null) {
+        observedStartup = null;
+        throw new Error("Runtime startup retired during identity observation");
+      }
+      if (startup?.owner === owner && startup.startup_id) {
+        if (
+          startup.phase !== "ready" ||
+          startup.account_id !== identity.account_id ||
+          startup.device_id !== identity.device_id
+        ) {
+          observedStartup = startup;
+          throw new Error(
+            "Runtime startup changed during identity observation",
+          );
+        }
+        set({ startupId: startup.startup_id });
+      }
+      if (identity.display_name && useAuth.getState().user?.id === owner)
+        useAuth.setState((state) => ({
+          user: state.user
+            ? { ...state.user, display_name: identity.display_name! }
+            : null,
+        }));
+      applyVerifiedIdentity(set, identity, true);
       const acct = identity.account_id;
-      const persistedUnread = loadUnread(owner, acct);
-      const persistedPendingUnread = loadPendingUnread(owner, acct);
-      const persistedReception = emptyReception(
-        loadReceptionLedger(owner, acct),
-        loadUnreadOverflow(owner, acct),
-      );
-      set((state) => {
-        const sameScope =
-          state.unreadOwner === owner && state.myAccountId === acct;
-        const invalidateScope = state.unreadOwner !== "" && !sameScope;
-        const replacedScope =
-          invalidateScope ||
-          (state.myAccountId !== "" && state.myAccountId !== acct);
-        const reception = sameScope
-          ? state
-          : mergeReception(
-              { ...persistedReception, unread: persistedUnread },
-              replacedScope ? { ...emptyReception(), unread: {} } : state,
-            );
-        const unread = reception.unread;
-        const pendingUnknownUnread = sameScope
-          ? state.pendingUnknownUnread
-          : { ...persistedPendingUnread };
-        if (!sameScope && !replacedScope)
-          for (const [sender, count] of Object.entries(
-            state.pendingUnknownUnread,
-          ))
-            pendingUnknownUnread[sender] = Math.min(
-              1_000_000,
-              (pendingUnknownUnread[sender] ?? 0) + count,
-            );
-        return {
-          ...(invalidateScope ? invalidateConversationIdentity(state) : {}),
-          ...(!sameScope
-            ? {
-                ...reception,
-                historyBaselines: Object.keys(persistedReception.ledger),
-                historyFullBaselines: loadFullHistoryBaselines(owner, acct),
-              }
-            : {}),
-          identityEpoch: invalidateScope
-            ? state.identityEpoch + 1
-            : state.identityEpoch,
-          historyRevision: identity.history_revision ?? null,
-          myId: identity.device_id,
-          myAccountId: acct,
-          unread,
-          pendingUnknownUnread,
-          unreadOwner: owner,
-          ready: true,
-        };
-      });
       setPushStateSupport(identity.supports_push_state ? owner : null);
       syncChatAvatarIdentity(acct, () => !isCancelled());
       await get().refreshRoster();
       return true;
     } catch {
-      if (isCancelled()) return false;
-      await new Promise((r) => setTimeout(r, BOOT_POLL_MS));
+      if (superseded()) return false;
+      try {
+        const startup =
+          observedStartup !== undefined
+            ? observedStartup
+            : await readWithDeadline(
+                () => chat.ownerStartupIdentity(owner),
+                Math.max(1, Math.min(2_000, deadline - performance.now())),
+              );
+        if (superseded() || performance.now() >= deadline) return false;
+        if (startup === null && get().startupId !== null) {
+          resetChatFileAvailability();
+          set((state) => ({
+            ...invalidateConversationIdentity(state),
+            identityEpoch: state.identityEpoch + 1,
+            myId: "",
+            myAccountId: "",
+            startupId: null,
+          }));
+        }
+        if (startup?.owner === owner && startup.startup_id) {
+          const hasIdentity =
+            (startup.phase === "identity" || startup.phase === "ready") &&
+            Boolean(startup.account_id && startup.device_id);
+          const changed = get().startupId !== startup.startup_id;
+          if ((changed || !hasIdentity) && get().myAccountId) {
+            resetChatFileAvailability();
+            set((state) => ({
+              ...invalidateConversationIdentity(state),
+              identityEpoch: state.identityEpoch + 1,
+              myId: "",
+              myAccountId: "",
+            }));
+          }
+          set({ startupId: startup.startup_id });
+          if (hasIdentity)
+            applyVerifiedIdentity(
+              set,
+              {
+                owner,
+                device_id: startup.device_id!,
+                account_id: startup.account_id!,
+              },
+              false,
+            );
+        }
+      } catch {
+        // Older native hosts and transient observation failures retain the
+        // existing full-runtime retry path; they never grant startup identity.
+      }
+      if (isCancelled() || singleAttempt) return false;
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return false;
+      await new Promise((r) =>
+        setTimeout(r, Math.min(BOOT_POLL_MS, remaining)),
+      );
     }
   }
   return false;
@@ -225,6 +342,8 @@ export interface ChatState
   extends ConversationHistoryState, OutgoingIntentContext, ChannelActions {
   bootBusy: boolean;
   bootRequest: number;
+  /** Native startup ticket; distinct from the frontend run and account identity. */
+  startupId: string | null;
   rosterRequest: number;
   favoritesRequest: number;
   ready: boolean;
@@ -246,11 +365,11 @@ export interface ChatState
   // on the Rust side; mirrored here so the sidebar can sort/rename without a roundtrip.
   favorites: Record<string, FavoriteInfo>;
   error: string | null; // transient action error (file/reaction send), surfaced to the user
-  bootFailed: boolean; // the node never came up within the boot window
+  bootFailed: boolean; // identity did not resolve within the latest boot window
 
   resetForLock: () => void;
   start: () => () => void;
-  retryBoot: () => void;
+  retryBoot: (background?: boolean) => void;
   loadFavorites: () => Promise<void>;
   togglePinned: (id: string, pinned: boolean) => Promise<void>;
   setChannelHidden: (id: string, hidden: boolean) => Promise<void>;
@@ -262,6 +381,12 @@ export interface ChatState
   deleteContact: (account: string) => Promise<boolean>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
   markActiveRead: () => void;
+  applyAccountReadReceipts: (
+    owner: string,
+    accountId: string,
+    key: string,
+    ids: string[],
+  ) => void;
   markLegacyActiveRead: () => void;
   markMessagesViewed: (key: string, ids: string[]) => void;
   revealUnread: (key: string, id: string) => Promise<boolean>;
@@ -270,11 +395,13 @@ export interface ChatState
     text: string,
     replyTo: string | null,
     expiresAtMs?: number | null,
+    protection?: import("@/lib/types").MessageProtection | null,
   ) => Promise<boolean>;
   admitText: (
     text: string,
     replyTo: string | null,
     expiresAtMs?: number | null,
+    protection?: import("@/lib/types").MessageProtection | null,
   ) => boolean;
   retry: (clientId: string) => Promise<void>;
   sendFile: (
@@ -282,6 +409,12 @@ export interface ChatState
     media: boolean,
     expiresAtMs?: number | null,
   ) => Promise<void>;
+  admitImage: (
+    path: string,
+    protection: import("@/lib/types").MessageProtection,
+    expiresAtMs?: number | null,
+    onAccepted?: () => void,
+  ) => Promise<"refused" | "failed" | "accepted">;
   saveFile: (fileConv: string, dest: string) => Promise<void>;
   toggleReaction: (target: string, emoji: string) => Promise<void>;
   /** Delete one message from this device only (local). */
@@ -300,6 +433,7 @@ export interface ChatState
 
 function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
   return {
+    accountSeen: undefined,
     ...emptyConversationHistory(),
     historyRevision: state.historyRevision,
     activeRequest: state.activeRequest,
@@ -317,11 +451,13 @@ function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
 /** One empty session snapshot for initial state, login, and app lock. */
 function emptySessionData() {
   return {
+    accountSeen: undefined,
     ...emptyConversationHistory(),
     expiryNow: Date.now(),
     identityEpoch: 0,
     bootBusy: false,
     bootRequest: 0,
+    startupId: null,
     statusBusy: false,
     rosterRequest: 0,
     favoritesRequest: 0,
@@ -401,6 +537,12 @@ async function refreshRosterSnapshot(
       get().retryBoot();
       return;
     }
+    if (identity.display_name && useAuth.getState().user?.id === lease.owner)
+      useAuth.setState((state) => ({
+        user: state.user
+          ? { ...state.user, display_name: identity.display_name! }
+          : null,
+      }));
     const [peers, accounts] = await Promise.all([
       readWithDeadline(() => chat.listPeers()),
       readWithDeadline(() => chat.listAccounts()),
@@ -439,9 +581,16 @@ async function refreshRosterSnapshot(
         rawSet,
         get,
         [
-          ...accounts.map((account): Conversation => ({
+          // Saved Messages belongs to the runtime even when the contact
+          // directory has no row for our own account.
+          ...Array.from(
+            new Set([
+              ...accounts.map((account) => account.account_id),
+              identity.account_id,
+            ]),
+          ).map((accountId): Conversation => ({
             kind: "account",
-            id: account.account_id,
+            id: accountId,
             name: "",
           })),
           ...channels.map((channel): Conversation => ({
@@ -589,14 +738,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
   // Re-attempt the node-id poll after a boot failure (events + roster interval from the
   // original start() are still live, so we only need to re-resolve my_id/account_id).
-  retryBoot: () => {
-    const lease = captureChat(get);
+  retryBoot: (background = false) => {
+    const lease = captureChat(get, false);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
     if (get().bootBusy) return;
     const request = get().bootRequest + 1;
     set({
-      bootFailed: false,
+      bootFailed: background && get().bootFailed,
       ready: false,
       bootBusy: true,
       bootRequest: request,
@@ -607,7 +756,10 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         set,
         get,
         () => !lease.current() || get().bootRequest !== request,
+        background,
       );
+      if (ok && lease.current() && get().bootRequest === request)
+        void get().loadFavorites();
       if (get().bootRequest === request)
         set({ bootBusy: false, bootFailed: !ok });
     })();
@@ -715,8 +867,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     };
     let nextRosterFallback = 0;
     let nextStatusFallback = 0;
+    let nextBootRecovery = 0;
+    let bootFailureObserved = false;
     const roster = setInterval(() => {
       if (lease.current() && get().ready) {
+        bootFailureObserved = false;
         const now = performance.now();
         if (!supportsPushState(lease.owner) || now >= nextRosterFallback) {
           nextRosterFallback = now + 30000;
@@ -726,8 +881,20 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           nextStatusFallback = now + 30000;
           void get().refreshStatuses();
         }
-      } else if (lease.current() && !get().bootBusy && !get().bootFailed)
-        get().retryBoot();
+      } else if (lease.current() && !get().bootBusy) {
+        const failed = get().bootFailed;
+        const now = performance.now();
+        if (failed && !bootFailureObserved) {
+          bootFailureObserved = true;
+          nextBootRecovery = now + BOOT_RECOVERY_INTERVAL_MS;
+        }
+        if (!failed || now >= nextBootRecovery) {
+          nextBootRecovery = now + BOOT_RECOVERY_INTERVAL_MS;
+          // A failed boot remains visible while one bounded background read checks
+          // for recovery. Never let a transient identity timeout become terminal.
+          get().retryBoot(failed);
+        }
+      }
     }, 2000);
 
     const unlisten = subscribeNodeEvents({
@@ -786,6 +953,21 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       },
       onFileProgress: (e) => {
         if (lease.current()) applyChatFileProgress(e);
+      },
+      onAccountProfile: (event) => {
+        const state = get();
+        if (
+          lease.current() &&
+          useAuth.getState().user?.id === event.user.id &&
+          state.myAccountId === event.account_id &&
+          state.myId === event.device_id
+        )
+          useAuth.setState({
+            user: event.user,
+            ...(event.saved_session != null
+              ? { savedSession: event.saved_session }
+              : {}),
+          });
       },
       onProfile: (e) => {
         if (lease.current()) applyChatProfile(e);
@@ -864,6 +1046,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     await get().reload();
     if (!lease.current() || get().activeRequest !== request) return;
     if (
+      (!target || !("reference" in target)) &&
       !get().loading &&
       get().historyError !== convKey(c) &&
       isConversationVisible()
@@ -906,6 +1089,17 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       (state.unreadIds[key]?.length ?? 0) + (state.overflowUnread[key] ?? 0);
     if (state.unread[key] !== tracked)
       rawSet({ unread: { ...state.unread, [key]: tracked } });
+  },
+
+  applyAccountReadReceipts: (owner, accountId, key, ids) => {
+    const state = get();
+    if (
+      !state.ready ||
+      state.unreadOwner !== owner ||
+      state.myAccountId !== accountId
+    )
+      return;
+    rawSet(receptionPatch(state, applyAccountSeen(state, key, ids)));
   },
 
   markActiveRead: () => {
@@ -965,7 +1159,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
   // The composer needs an immediate admission answer so it never clears a draft that
   // could not enter the local optimistic queue. Delivery still settles asynchronously.
-  admitText: (text, replyTo, expiresAtMs) => {
+  admitText: (text, replyTo, expiresAtMs, protection) => {
     const lease = captureChat(get);
     if (!lease.current()) return false;
     const c = get().active;
@@ -979,6 +1173,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         text,
         replyTo,
         expiresAtMs,
+        protection,
       },
     );
     if (!dispatch) return false;
@@ -987,7 +1182,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
   },
 
   // Account composers retain the draft until the core has durably accepted it.
-  admitTextAndWait: async (text, replyTo, expiresAtMs) => {
+  admitTextAndWait: async (text, replyTo, expiresAtMs, protection) => {
     const lease = captureChat(get);
     if (!lease.current()) return false;
     const c = get().active;
@@ -1002,8 +1197,9 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           text,
           replyTo,
           expiresAtMs,
+          protection,
         },
-        { waitForHydration: false },
+        { waitForHydration: false, retainFailure: !protection },
       ) ?? false
     );
   },
@@ -1045,6 +1241,21 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     await dispatchIntent(set, get, { ...intent, message: pending });
   },
 
+  admitImage: async (path, protection, expiresAtMs, onAccepted) => {
+    const lease = captureChat(get);
+    const c = get().active;
+    if (!lease.current() || !get().ready || !c) return "refused";
+    const admission = beginSendIntent(
+      guardedSet(rawSet, lease.current),
+      get,
+      c,
+      { kind: "file", path, media: true, expiresAtMs, protection },
+      { waitForHydration: false, onAccepted },
+    );
+    if (!admission) return "refused";
+    // Local transfer gives the bubble sole retry ownership, including native failure.
+    return (await admission) ? "accepted" : "failed";
+  },
   sendFile: async (path, media, expiresAtMs) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
@@ -1136,6 +1347,46 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!lease.current()) return;
     const c = get().active;
     if (!get().ready || !c) return;
+    const installed = stickerById(stickerId, usePacks.getState().packs);
+    if (installed) {
+      let stagedPath: string | undefined;
+      let transferred = false;
+      try {
+        const snapshot = snapshotSticker(installed, fallback);
+        stagedPath = await chat.writeTempFile(
+          Array.from(snapshot.bytes),
+          snapshot.ext,
+          snapshot.name,
+        );
+        if (
+          !lease.current() ||
+          !get().active ||
+          convKey(get().active!) !== convKey(c)
+        )
+          return;
+        const sending = beginSendIntent(set, get, c, {
+          kind: "file",
+          path: stagedPath,
+          media: true,
+          expiresAtMs,
+          stickerMedia: {
+            name: snapshot.name,
+            size: snapshot.bytes.length,
+            mime: snapshot.mime,
+          },
+        });
+        if (!sending) return;
+        // The ordinary file intent owns this immutable path through retry.
+        transferred = true;
+        await sending;
+      } catch (error) {
+        set({ error: `Couldn't send sticker: ${errorMessage(error)}` });
+      } finally {
+        if (stagedPath && !transferred)
+          await chat.deleteTempFile(stagedPath).catch(() => {});
+      }
+      return;
+    }
     await sendIntent(set, get, c, {
       kind: "sticker",
       stickerId,
@@ -1216,6 +1467,7 @@ function captureChat(get: Get, identitySensitive = true) {
 registerRuntimeSnapshot(() => ({
   runEpoch: useChat.getState().runEpoch,
   identityEpoch: useChat.getState().identityEpoch,
+  accountId: useChat.getState().myAccountId,
 }));
 
 export function captureChatOwnership() {
@@ -1328,7 +1580,18 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
     set((state) =>
       receptionPatch(
         state,
-        receiveIdentity(state, key, { ...e, own_device: own }),
+        receiveIdentity(
+          state,
+          key,
+          { ...e, own_device: own },
+          !e.protection &&
+            mentionsName(
+              e.text,
+              useAuth.getState().user?.display_name ||
+                useAuth.getState().user?.username ||
+                "",
+            ),
+        ),
       ),
     );
   } else if (!e.own_device) bump(set, key, isActive && isConversationVisible());
@@ -1379,6 +1642,7 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
           mime: e.mime,
           fileConv: e.file_conv,
           media: e.media,
+          protection: e.protection,
         },
         ...state.incomingFiles,
       ].slice(0, INCOMING_FILES_CAP),

@@ -22,13 +22,6 @@ async function register(page: Page, user = "tester", path = "/") {
   await page.getByTestId("login-submit").click();
 }
 
-async function signIn(page: Page, user = "tester") {
-  await page.getByTestId("login-tab-signin").click();
-  await page.getByTestId("login-username").fill(user);
-  await page.getByTestId("login-password").fill("password123");
-  await page.getByTestId("login-submit").click();
-}
-
 /** Open Bob's DM and wait for its (seeded) history to render. */
 async function openBobDm(page: Page) {
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
@@ -39,11 +32,12 @@ async function openBobDm(page: Page) {
 }
 
 test.describe("Mesh-Talk UI flow", () => {
-  test("register → sign in → chat shell renders", async ({ page }) => {
+  test("creating an account enters the chat shell directly", async ({
+    page,
+  }) => {
     await register(page);
-    // Registration succeeds and flips back to sign-in with a notice.
-    await expect(page.getByText("Account created")).toBeVisible();
-    await signIn(page);
+    await expect(page.getByTestId("account-protection")).toBeVisible();
+    await expect(page.getByTestId("login-form")).toBeHidden();
 
     await waitForChatShell(page);
     // Identity is present (the glyph + own name), and no blank/black screen regression.
@@ -363,7 +357,9 @@ test.describe("Mesh-Talk UI flow", () => {
 
   test("screenshot button opens a two-option menu and captures", async ({
     page,
+    context,
   }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await enterChat(page);
     await openBobDm(page);
     // The screenshot button lives in the composer toolbar.
@@ -434,7 +430,11 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(page.getByTestId("composer-screenshot")).toBeDisabled();
   });
 
-  test("screenshot stays staged when sending fails", async ({ page }) => {
+  test("screenshot stays staged when sending fails", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await enterChat(page, "tester", "/?data=screenshot-write-fails");
     await openBobDm(page);
     await revealComposerTools(page);
@@ -561,6 +561,74 @@ test.describe("Mesh-Talk UI flow", () => {
     );
   });
 
+  test("search opens the selected identical message in bounded older context", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await page.evaluate(() => {
+      const inject = (
+        window as unknown as {
+          __mockInject: (
+            conv: string,
+            text: string,
+            who: string,
+            metadata?: { id?: string; wall_clock?: number },
+          ) => void;
+        }
+      ).__mockInject;
+      for (const id of ["exact-one", "exact-two"])
+        inject("acc:acc_bob_bbbb2222", "identical search phrase", "bob", {
+          id,
+          wall_clock: 1_700_000_000_000,
+        });
+      for (let i = 0; i < 240; i++)
+        inject("acc:acc_bob_bbbb2222", `recent filler ${i}`, "bob");
+    });
+    await page.getByTestId("sidebar-action-search").click();
+    await page.getByTestId("search-input").fill("identical search phrase");
+    await expect(page.getByTestId("search-result")).toHaveCount(2);
+    await page.getByTestId("search-result").nth(1).click();
+    const selected = page.locator('[data-message-id="exact-two"]');
+    await expect(selected).toBeVisible();
+    await expect(selected).toHaveClass(/bg-signal/);
+    await expect(page.locator('[data-message-id="exact-one"]')).not.toHaveClass(
+      /bg-signal/,
+    );
+    await expect(page.getByRole("log")).not.toContainText("recent filler 239");
+    await page
+      .getByRole("button", { name: "Jump to latest messages", exact: true })
+      .first()
+      .click();
+    await expect(page.getByRole("log")).toContainText("recent filler 239");
+    // Search again while the same conversation already owns a mounted viewport.
+    await page.getByTestId("sidebar-action-search").click();
+    await expect(page.getByTestId("search-result")).toHaveCount(2);
+    await page.getByTestId("search-result").first().click();
+    await expect(page.locator('[data-message-id="exact-one"]')).toBeVisible();
+    await expect(page.locator('[data-message-id="exact-one"]')).toHaveClass(
+      /bg-signal/,
+    );
+  });
+
+  test("unavailable exact search context stays in the dialog with useful feedback", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    await page.getByTestId("sidebar-action-search").click();
+    await page.getByTestId("search-input").fill("welcome");
+    await expect(page.getByTestId("search-result")).toHaveCount(1);
+    await page.evaluate(() =>
+      (
+        window as unknown as { __mockFailNext: (command: string) => void }
+      ).__mockFailNext("owner_search_context"),
+    );
+    await page.getByTestId("search-result").click();
+    await expect(page.getByTestId("search-dialog")).toBeVisible();
+    await expect(page.getByRole("alert")).toContainText(
+      "This message is no longer available",
+    );
+  });
+
   test("search failure offers retry and never exposes stale results", async ({
     page,
   }) => {
@@ -569,7 +637,7 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.evaluate(() => {
       (
         window as unknown as { __mockFailNext: (command: string) => void }
-      ).__mockFailNext("search");
+      ).__mockFailNext("owner_search_recent");
     });
     await page.getByTestId("search-input").fill("welcome");
     await expect(page.getByRole("alert")).toContainText(
@@ -784,7 +852,18 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.getByTestId("sidebar-overflow").click();
     await page.getByTestId("sidebar-action-link").click();
     await expect(page.getByTestId("link-device-dialog")).toBeVisible();
-    await expect(page.getByText("Add another of your devices")).toBeVisible();
+    const linking = page.getByTestId("link-device-dialog");
+    await expect(
+      linking.getByText("Keep this device’s account", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      linking.getByText("Switch this device to another account", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(linking.getByTestId("link-source-identity")).toContainText(
+      "tester",
+    );
 
     // Show the pairing code: the FULL 32-char code must be visible (the user types it on the
     // other device) and must NOT overflow its container — regression for the truncated/

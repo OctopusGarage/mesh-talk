@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import type { PeerInfo } from "@/lib/types";
 import {
   memberDiscoverySources,
+  memberRegistrationOrigins,
   memberProfileDevices,
 } from "./memberProfileDetails";
 
@@ -28,6 +29,82 @@ const peers: PeerInfo[] = [
     post_office: true,
   },
 ];
+
+it("preserves the Windows origin separately from its Mac introducer and deduplicates devices", () => {
+  const origin = {
+    user_id: "windows-office",
+    name: "Windows 10 office",
+    expires_in_secs: 5,
+  };
+  const evidence = {
+    source: "directory" as const,
+    last_seen_secs: 0,
+    expires_in_secs: 10,
+    post_office: {
+      user_id: "mac-office",
+      name: "Mac office",
+      endpoint: "10.0.0.1:47479",
+    },
+    registration_origin: origin,
+  };
+  const presence = {
+    online: true,
+    last_seen_secs: 0,
+    devices: [
+      { user_id: "duncan-a", evidence: [evidence] },
+      { user_id: "duncan-b", evidence: [evidence] },
+    ],
+  };
+  expect(memberRegistrationOrigins(presence)).toEqual([origin]);
+  expect(memberDiscoverySources(presence)).toEqual([
+    { source: "directory", postOffice: evidence.post_office },
+  ]);
+});
+
+it("never infers registration origin from a legacy introducer or an expired proof", () => {
+  const origin = {
+    user_id: "windows-office",
+    name: "Windows 10 office",
+    expires_in_secs: 0,
+  };
+  expect(
+    memberRegistrationOrigins({
+      online: true,
+      last_seen_secs: 0,
+      devices: [
+        {
+          user_id: "duncan",
+          evidence: [
+            {
+              source: "directory",
+              last_seen_secs: 0,
+              expires_in_secs: 10,
+              post_office: { name: "Mac office", endpoint: "10.0.0.1:47479" },
+            },
+            {
+              source: "directory",
+              last_seen_secs: 0,
+              expires_in_secs: 10,
+              registration_origin: origin,
+            },
+            {
+              source: "directory",
+              last_seen_secs: 0,
+              expires_in_secs: 0,
+              registration_origin: { ...origin, expires_in_secs: 5 },
+            },
+            {
+              source: "local",
+              last_seen_secs: 0,
+              expires_in_secs: 10,
+              registration_origin: { ...origin, expires_in_secs: 5 },
+            },
+          ],
+        },
+      ],
+    }),
+  ).toEqual([]);
+});
 
 it("keeps local discovery and distinct introducing offices, deduplicating devices and expired evidence", () => {
   const office = {

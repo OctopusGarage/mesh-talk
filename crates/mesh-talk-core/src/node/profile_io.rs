@@ -36,40 +36,50 @@ impl Node {
     ) -> Result<(), NodeError> {
         let mut delivery = Vec::new();
         authorize(&mut || {
-            let mut store = self
-                .trust_cards
-                .lock()
-                .expect("trust cards mutex not poisoned");
-            if let Some(card) = store.get(&self.account_id())
-                && card.avatar != avatar
-            {
-                card.revision.checked_add(1).ok_or_else(|| {
-                    NodeError::InvalidInput("trust card revision exhausted".into())
-                })?;
-                self.account_profiles.validate_avatar_revision_headroom(1)?;
-            }
-            let payload = self.account_profiles.set_avatar(avatar.clone())?;
-            let needs_repair = store
-                .get(&self.account_id())
-                .is_some_and(|card| card.avatar != avatar);
-            if payload.is_none() && !needs_repair {
-                return Ok(());
-            }
-            let card = self.update_trust_avatar(&mut store, avatar.clone())?;
-            let wire = payload
-                .or_else(|| self.account_profiles.current())
-                .expect("avatar publication exists")
-                .encode();
-            for peer in self.profile_fanout_targets() {
-                let conv = if let Some(card) = &card {
-                    self.prepare_trust_card_delivery(&peer, card)
-                } else {
-                    self.prepare_profile_delivery(&peer, &wire)
-                };
-                let Some(conv) = conv else {
-                    continue;
-                };
-                delivery.push((peer, conv));
+            let mut store = self.profiles.lock().expect("profiles mutex not poisoned");
+            if let Some(mut profile) = store.get(&self.account_id()) {
+                if profile.avatar == avatar {
+                    // Repair a previous committed intent before acknowledging a retry.
+                    self.account_profiles
+                        .receive_account_profile(&profile)
+                        .map_err(NodeError::Log)?;
+                    return Ok(());
+                }
+                let last = profile.revision.max(
+                    self.account_profiles
+                        .current()
+                        .map_or(0, |value| value.updated_at),
+                );
+                profile.revision = last
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        NodeError::InvalidInput("account profile revision exhausted".into())
+                    })?
+                    .max(super::node::now_millis());
+                profile.avatar = avatar.clone();
+                profile.resign(&self.account);
+                if !store.record(profile.clone()).map_err(NodeError::Log)? {
+                    return Err(NodeError::InvalidInput(
+                        "invalid or over-budget account profile".into(),
+                    ));
+                }
+                self.account_profiles
+                    .receive_account_profile(&profile)
+                    .map_err(NodeError::Log)?;
+                // Keep the durable edit atomic, then release before channel/log work.
+                drop(store);
+                for peer in self.profile_fanout_targets() {
+                    if let Some(conv) = self.prepare_account_profile_delivery(&peer, &profile) {
+                        delivery.push((peer, conv));
+                    }
+                }
+            } else if let Some(payload) = self.account_profiles.set_avatar(avatar.clone())? {
+                drop(store);
+                for peer in self.profile_fanout_targets() {
+                    if let Some(conv) = self.prepare_profile_delivery(&peer, &payload.encode()) {
+                        delivery.push((peer, conv));
+                    }
+                }
             }
             Ok(())
         })?;
@@ -80,15 +90,50 @@ impl Node {
         Ok(())
     }
 
-    /// Re-publish our current profile to a single freshly-discovered `peer`, so a new
-    /// contact gets our signed card or legacy avatar without waiting for an edit.
-    /// A no-op when neither public profile exists.
-    pub(in crate::node) async fn republish_profile_to(&self, peer: &PeerRecord) {
-        let Some(conv) = self.prepare_current_profile_delivery(peer) else {
-            return;
+    /// Revision of the current public profile, including an avatar clear.
+    pub(in crate::node) fn public_profile_revision(&self) -> Option<u64> {
+        let card = self
+            .profiles
+            .lock()
+            .expect("profiles mutex not poisoned")
+            .get(&self.account_id())
+            .map(|card| card.revision);
+        let avatar = self
+            .account_profiles
+            .current()
+            .map(|profile| profile.updated_at);
+        card.into_iter().chain(avatar).max()
+    }
+
+    /// Report whether direct reconciliation or relay publication completed, so
+    /// a transient failure remains eligible for a later runtime poll.
+    pub(in crate::node) async fn deliver_profile_to(
+        &self,
+        peer: &PeerRecord,
+        conv: ConversationId,
+    ) -> bool {
+        let direct = async {
+            self.adaptive_control_timeout(&peer.public, self.deliver_direct(peer, conv))
+                .await
+                .is_some_and(|result| result.is_ok())
         };
-        let _ = self.deliver_direct(peer, conv).await;
-        let _ = self.replicate_to_post_office(conv).await;
+        let relay = async {
+            tokio::time::timeout(
+                super::route_timing::MAX_CONTROL_DEADLINE,
+                self.replicate_to_post_office(conv),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false)
+        };
+        tokio::pin!(direct, relay);
+        // Either successful path completes this publication. Dropping the other
+        // future closes its channel; retries reconstruct any round-local state.
+        tokio::select! {
+            delivered = &mut direct => delivered || relay.await,
+            published = &mut relay => published || direct.await,
+        }
     }
 
     /// Every distinct peer DEVICE to publish a profile to: every known peer (any account)
@@ -122,6 +167,10 @@ impl Node {
         wire: &[u8],
         required_parent: Option<crate::eventlog::event::EventId>,
     ) -> Option<(ConversationId, crate::eventlog::event::EventId)> {
+        #[cfg(test)]
+        if let Some(hook) = self.profile_prepare_hook.lock().unwrap().take() {
+            hook();
+        }
         if !self.known_account_allowed(&peer.public) {
             return None;
         }
@@ -178,6 +227,28 @@ impl Node {
                 .lock()
                 .expect("profiles_emitted mutex not poisoned")
                 .insert(event.id);
+            if plaintext.starts_with(b"MTP3") {
+                let Some(profile) = AccountProfile::decode(&plaintext) else {
+                    continue;
+                };
+                if peer_account.as_deref() != Some(profile.account_id().as_str()) {
+                    continue;
+                }
+                if profile.account_id() == self.account_id() && !self.device_sync_policy().profile {
+                    self.profiles_emitted
+                        .lock()
+                        .expect("profiles_emitted mutex not poisoned")
+                        .remove(&event.id);
+                    continue;
+                }
+                if self.receive_account_profile(&profile).is_err() {
+                    self.profiles_emitted
+                        .lock()
+                        .expect("profiles_emitted mutex not poisoned")
+                        .remove(&event.id);
+                }
+                continue;
+            }
             if plaintext.starts_with(b"MTC1") {
                 let Some(card) = TrustCard::decode(&plaintext) else {
                     continue;

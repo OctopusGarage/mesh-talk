@@ -21,6 +21,11 @@ UPnP = "UPnP"
 # PNG filter 4 uses the Paeth predictor (a proper algorithm name).
 paeth = "paeth"
 
+[type.changelog]
+extend-glob = ["CHANGELOG.md"]
+# Release-please commit-link labels are identifiers, not English words.
+extend-ignore-re = ['\[[0-9a-f]{7,40}\]\(https://github\.com/[^/\s]+/[^/\s]+/commit/[0-9a-f]{40}\)']
+
 [files]
 extend-exclude = [
   "Cargo.lock",
@@ -28,9 +33,10 @@ extend-exclude = [
   "package-lock.json",
   "src-tauri/icons/**",
   "specifications/**/*.md",
-  # UI translation catalogs: intentionally non-English (es/ja/zh-Hans/zh-Hant/yue),
+  # UI translation catalogs contain deliberately non-English text.
   # so the English spell-checker would flag every localized word (foto, contactos, tema…).
   "frontend/src/locales/**",
+  "site/locales/**",
   # Generated coverage artifacts (function-name fragments trip the checker).
   "**/lcov.info",
   "**/*.info",

@@ -28,6 +28,12 @@ cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
 
+Changes to configured portable browser specs and the portable configuration
+select the `portable-browser-reporting` diagnostic. It compares both core and extended
+inventories with Playwright discovery without launching browsers. Register new
+scenarios in `requiredBrowserPaths` and additional spec files in the owning
+validation contract. Discovery checks do not replace executed browser evidence.
+
 Portable browser acceptance runs through `scripts/evals/portable-runner.mjs`.
 Windows uses two sequential Playwright shards with separate browser/dev-server
 lifetimes; other platforms use one. Each shard writes a unique nested evidence
@@ -246,6 +252,11 @@ lock order. Build/Clippy and tests retain the existing resource isolation. The
 outer attempt includes retention waiting in its execution envelope; the inner
 `affected-heavy` attempt reports the shared-resource queue separately. Composed
 receipts bind required build outputs as well as source inputs.
+Selected Rust tests execute through Cargo after binary inventory, preserving
+repository environment settings such as the `RUST_TEST_THREADS` limit in
+`.cargo/config.toml`.
+Failed frontend JSON reports are summarized before temporary-file cleanup, so
+the command log retains suite errors and failed assertion diagnostics.
 Each phase recomputes its plan and checks a fingerprint of the source revision,
 changed source bytes (including untracked/deleted paths), obligations and ignored
 frontend environment inputs. Edits while queued or executing require fresh
@@ -438,8 +449,8 @@ independent checks run concurrently and heavy suites are not repeated by health.
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, dependency audits on Linux/macOS/Windows                                                                                                      |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
-| `ci.yml`                              | Frontend builds, built-JS compatibility, unit coverage, diagnostic/Python regressions, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; Linux Rust/E2E coverage and eval smoke |
-| `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, lite checks, portable browser matrices and scheduled extended scenarios                                                                       |
+| `ci.yml`                              | Frontend builds, built-JS compatibility, unit coverage, diagnostic/Python regressions, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage, Linux multi-process coverage and eval smoke |
+| `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, optional-pack checks, portable browser matrices and scheduled extended scenarios                                                                       |
 | Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                        |
 
 Every existing protected health name now requires both the source scanner job
@@ -469,7 +480,7 @@ resource failures rather than increasing assertion timeouts or enabling retries.
 
 Each Linux shard uploads raw browser coverage plus its source SHA and shard
 identity. A single same-workflow Linux unit-coverage producer supplies the line map to
-the full and lite consumers. Consumers check source SHA, workflow/run/attempt,
+the full and optional-pack consumers. Consumers check source SHA, workflow/run/attempt,
 platform/architecture, Node major and LCOV digest before restoring it. The
 coverage job requires that producer and all four distinct current-source shards before collecting their parts and producing
 one browser LCOV upload. It prefixes filenames so reports from different runners
@@ -479,7 +490,7 @@ workflow when retrying a failed attempt, so producer and shards belong to the
 same attempt. The extra producer job adds setup/queue/transfer cost; benchmark
 its net latency and runner-minute effect before claiming a speedup.
 The final UI gate requires successful browser, coverage, merged-report,
-lite and portable jobs, plus Firefox when selected. Blob reports and failure
+optional-pack and portable jobs, plus Firefox when selected. Blob reports and failure
 traces are retained per OS/shard/attempt, and an HTML report is merged per OS even
 when browser execution fails.
 
@@ -487,6 +498,18 @@ The Rust build cache maps the workspace root to `target/`, matching
 `cargo metadata --no-deps --format-version 1`. The CI cache has its own build
 configuration key; native release, mutation and sanitizer caches stay separate.
 Cached build output never replaces executing checks on the current revision.
+
+Mutation testing retains one rotating workspace sample across four runners. Its
+120-minute job budget covers setup, the unmutated baseline and the complete sample;
+it does not extend the 60-second per-test or 240-second per-suite deadlines. The
+October 25 sample selected 16–17 mutants per runner, with builds up to 130 seconds
+and successful suites around 180–217 seconds. A 60-minute job canceled unfinished
+shards despite passing baselines. Reassess this budget from selected counts and
+build/test timings as the workspace grows; incomplete reports still fail the gate.
+Loopback UDP reply fixtures connect their receiving socket to their own listener
+so concurrent discovery traffic cannot masquerade as a reply. Tests must still
+reject extra replies from that listener after a refresh.
+
 
 To assess performance after deployment, compare at least several unchanged-scope
 runs with warm caches and a cold-cache run. Record time from PR update to all

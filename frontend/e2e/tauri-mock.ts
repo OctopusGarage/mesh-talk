@@ -1,9 +1,33 @@
+import type {
+  FavoriteSource,
+  FavoriteMetadata,
+  MessageFavorite,
+} from "../src/lib/api/messageFavorites";
+import type {
+  AccountDocumentKey,
+  AccountDocumentMeta,
+  DocumentVersion,
+} from "../src/lib/api/accountDocuments";
 import { test as base, expect } from "@playwright/test";
-import type { PeerInfo, PresenceInfo } from "../src/lib/types";
+import type {
+  ChannelHistoryPolicy,
+  PeerInfo,
+  PresenceInfo,
+} from "../src/lib/types";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import v8ToIstanbul from "v8-to-istanbul";
+
+/** Controls only for retained-attachment scenarios; no product test hooks. */
+export interface FavoriteAttachmentMock {
+  bytes: number[];
+  calls: Array<{ command: string; args: Record<string, unknown> }>;
+  saved: Array<{ path: string; bytes: number[] }>;
+  authorized: boolean;
+  releaseRead?: () => void;
+  releaseSaveDialog?: () => void;
+}
 
 /**
  * Headless E2E runs the React frontend in plain Chromium — there is no Tauri runtime, so
@@ -39,7 +63,8 @@ export const test = base.extend({
       // adding test controls to the product UI: ?data=worst|huge|peers-huge|members-huge|empty|offline.
       const dataMode = new URLSearchParams(window.location.search).get("data");
       // --- Identity ---------------------------------------------------------
-      const trustCardStore: Record<string, Record<string, unknown>> = {};
+      const accountProfiles: Record<string, Record<string, unknown>> = {};
+      let ownDisplayName = "tester";
       const SELF = { device: "device_self_0001", account: "acc_self_aaaa1111" };
       (window as unknown as Record<string, unknown>).__mockReplaceIdentity = (
         accountId: string,
@@ -94,6 +119,11 @@ export const test = base.extend({
           account_id: CAROL.account_id,
         },
       ];
+      if (dataMode === "pairing-routes") {
+        peers[0].directly_reachable = true;
+        peers[1].directly_reachable = false;
+        peers[1].discovered_on_lan = false;
+      }
       if (dataMode === "post-office") {
         peers.push({
           user_id: "44444444444444444444444444444444",
@@ -178,6 +208,7 @@ export const test = base.extend({
           pending_invite: dataMode === "invite",
         },
       ];
+      const channelHistoryPolicies: Record<string, ChannelHistoryPolicy> = {};
       let channelOwner = dataMode === "invite" ? BOB.device_id : SELF.device;
 
       (window as unknown as Record<string, unknown>).__mockClearRoster = () => {
@@ -312,6 +343,7 @@ export const test = base.extend({
       // --- Messages (in-memory, per conversation) ---------------------------
       const BASE = 1_700_000_000_000;
       type Msg = {
+        protection?: "click" | "authenticate" | null;
         expires_at_ms?: number | null;
         id: string | null;
         from_me: boolean;
@@ -329,6 +361,24 @@ export const test = base.extend({
           file_conv: string;
           media: boolean;
         };
+      };
+      const stagedFiles = new Map<string, number[]>();
+      const stickerMediaFiles = new Map<string, number[]>();
+      const stickerFileMetadata = (path: unknown, fileConv: string) => {
+        const name = String(path).split(/[\\/]/).pop() || "file";
+        const bytes = stagedFiles.get(String(path));
+        if (!name.startsWith("mt-sticker-v1-") || !bytes) return {};
+        stickerMediaFiles.set(fileConv, [...bytes]);
+        const ext = name.split(".").pop()!;
+        const mime = (
+          {
+            png: "image/png",
+            jpg: "image/jpeg",
+            webp: "image/webp",
+            gif: "image/gif",
+          } as Record<string, string>
+        )[ext];
+        return { name, size: bytes.length, mime };
       };
       let mid = 100;
       const msg = (over: Partial<Msg>): Msg => ({
@@ -406,6 +456,8 @@ export const test = base.extend({
         Array<{ target: string; emoji: string; who: string[] }>
       > = {};
 
+      const protectedBodies: Record<string, string> = {};
+      const protectedModes: Record<string, string> = {};
       const recordSend = (
         conv: string,
         text: string,
@@ -484,6 +536,77 @@ export const test = base.extend({
         return null;
       };
 
+      // Account-owned message collections, separate from conversation pins.
+      const messageCollections: Record<
+        string,
+        Record<string, MessageFavorite>
+      > = {};
+      let collectionRevision = 0;
+
+      // Retained bytes deliberately have no source-chat message or ordinary media entry.
+      let favoriteAttachment: FavoriteAttachmentMock | undefined;
+      if (dataMode?.startsWith("favorites-attachment")) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 2;
+        canvas.height = 2;
+        const context = canvas.getContext("2d")!;
+        context.fillStyle = "#cc5533";
+        context.fillRect(0, 0, 2, 2);
+        const bytes = Array.from(atob(canvas.toDataURL().split(",")[1]), (c) =>
+          c.charCodeAt(0),
+        );
+        favoriteAttachment = { bytes, calls: [], saved: [], authorized: true };
+        (
+          window as unknown as { __favoriteAttachment: FavoriteAttachmentMock }
+        ).__favoriteAttachment = favoriteAttachment;
+        messageCollections.u_self = {
+          retained: {
+            id: "retained",
+            source: {
+              kind: "account",
+              target: BOB.account_id,
+              message_ids: ["removed-photo"],
+            },
+            source_label: BOB.name,
+            metadata: {
+              title: "Retained field photo",
+              description: "After source history was cleared",
+              notes: { "removed-photo": "Keep for the field report" },
+            },
+            messages: [
+              {
+                id: "removed-photo",
+                who: BOB.device_id,
+                sender_name: BOB.name,
+                text: "",
+                wall_clock: BASE,
+                expires_at_ms: null,
+                sticker: null,
+                file: {
+                  file_conv: "retained-photo",
+                  name: "field-photo.png",
+                  size: bytes.length,
+                  mime: "image/png",
+                  media: true,
+                },
+              },
+            ],
+            saved_at_ms: BASE,
+            revision: ++collectionRevision,
+            device_id: SELF.device,
+          },
+        };
+      }
+      const retainedFileAuthorized = (a: Record<string, unknown>) =>
+        !!favoriteAttachment?.authorized &&
+        a.owner === "u_self" &&
+        a.fileConv === "retained-photo" &&
+        Object.values(messageCollections.u_self ?? {}).some((item) =>
+          item.messages.some(
+            (message) => message.file?.file_conv === a.fileConv,
+          ),
+        );
+
       // --- Favorites (pin + alias), persisted in-memory ---------------------
       const favorites: Record<
         string,
@@ -535,6 +658,7 @@ export const test = base.extend({
         post_office_receive_enabled: true,
         physical_lan_only: false,
         bridge_discovery_enabled: false,
+        origin_sharing_enabled: false,
         ringtone: "classic",
         privacy_level: "balanced",
         notification_preview: true,
@@ -543,6 +667,36 @@ export const test = base.extend({
         confirm_sensitive_copy: false,
         clipboard_clear_seconds: 0,
       };
+      const localAgentAccess = {
+        enabled: false,
+        running: false,
+        lifetime: "one_hour" as "one_hour" | "persistent",
+        expires_at_ms: null as number | null,
+        expired: false,
+        recent_activity: [] as {
+          at_ms: number;
+          destination: { kind: string; id: string };
+          action: "accepted" | "retried";
+        }[],
+        activity_error: null as string | null,
+        destinations: [] as { kind: string; id: string }[],
+        available_destinations: [
+          {
+            destination: { kind: "account", id: BOB.account_id },
+            label: BOB.name,
+          },
+          {
+            destination: { kind: "channel", id: CHANNEL.channel_id },
+            label: CHANNEL.name,
+          },
+        ],
+        instructions_path: "/home/tester/.codex/AGENTS.md",
+        instructions: "",
+        error: null,
+      };
+      (window as unknown as Record<string, unknown>).__mockSetLocalAgentAccess =
+        (patch: Partial<typeof localAgentAccess>) =>
+          Object.assign(localAgentAccess, patch);
       let nativeLocked = false;
       let attachmentGlobalAuto = false;
       const attachmentContactAuto: Record<string, boolean> = {};
@@ -666,6 +820,19 @@ export const test = base.extend({
       const probedEndpoints: string[] = [];
       (window as unknown as Record<string, unknown>).__mockProbedEndpoints =
         probedEndpoints;
+      let deferredCommand: string | null = null;
+      let releaseCommand: (() => void) | null = null;
+      let deferredBarrier: Promise<void> | null = null;
+      (window as unknown as Record<string, unknown>).__mockDeferNext = (
+        command: string,
+      ) => {
+        deferredCommand = command;
+        deferredBarrier = new Promise<void>((resolve) => {
+          releaseCommand = resolve;
+        });
+      };
+      (window as unknown as Record<string, unknown>).__mockReleaseDeferred =
+        () => releaseCommand?.();
       let failNextCommand: string | null = null;
       let failNextMessage = "network unreachable";
       (window as unknown as Record<string, unknown>).__mockFailNext = (
@@ -708,6 +875,129 @@ export const test = base.extend({
       ) => {
         (delivery[account] ||= {})[id] = status;
       };
+      // Browser fixture only: account namespaces and CAS mirror the IPC contract;
+      // signatures, encrypted persistence and sibling transport are tested natively.
+      type MockDocument = { meta: AccountDocumentMeta; payload: string };
+      const documentCache = new Map<string, Record<string, MockDocument>>();
+      const documentScope = (args: Record<string, unknown>) => {
+        if (args.owner !== "u_self" || args.expectedAccount !== SELF.account)
+          throw new Error("Account changed");
+        return `${args.owner}:${args.expectedAccount}`;
+      };
+      const documents = (args: Record<string, unknown>) => {
+        const scope = documentScope(args);
+        let rows = documentCache.get(scope);
+        if (!rows) {
+          rows = JSON.parse(
+            localStorage.getItem(`mock-account-documents-${scope}`) ?? "{}",
+          );
+          documentCache.set(scope, rows!);
+        }
+        return rows!;
+      };
+      const persistDocuments = (args: Record<string, unknown>) => {
+        try {
+          localStorage.setItem(
+            `mock-account-documents-${documentScope(args)}`,
+            JSON.stringify(documents(args)),
+          );
+        } catch {
+          /* Large browser-only assets may exceed localStorage quota. */
+        }
+      };
+      const version = (meta: AccountDocumentMeta): DocumentVersion => ({
+        revision: meta.revision,
+        writer_device: meta.writer_device,
+        content_hash: meta.content_hash,
+      });
+      const matchesVersion = (
+        meta: AccountDocumentMeta,
+        expected: DocumentVersion | null,
+      ) =>
+        expected !== null &&
+        meta.revision === expected.revision &&
+        meta.writer_device === expected.writer_device &&
+        JSON.stringify(meta.content_hash) ===
+          JSON.stringify(expected.content_hash);
+      const writeDocument = (
+        args: Record<string, unknown>,
+        key: AccountDocumentKey,
+        payload: string,
+        expected: DocumentVersion | null,
+        tombstone = false,
+      ) => {
+        const rows = documents(args),
+          token = JSON.stringify(key),
+          old = rows[token];
+        if (old ? !matchesVersion(old.meta, expected) : expected !== null)
+          throw new Error("Document changed");
+        const revision =
+          Math.max(0, ...Object.values(rows).map((row) => row.meta.revision)) +
+          1;
+        const body = tombstone ? "" : payload;
+        const meta: AccountDocumentMeta = {
+          key,
+          revision,
+          writer_device: SELF.device,
+          content_hash: Array.from({ length: 32 }, (_, index) =>
+            tombstone ? 0 : (revision + index) % 256,
+          ),
+          content_len: atob(body).length,
+          tombstone,
+        };
+        rows[token] = { meta, payload: body };
+        persistDocuments(args);
+        return structuredClone(meta);
+      };
+      const snapshotDrafts = (args: Record<string, unknown>) => {
+        const drafts: Record<string, string> = {},
+          protections: Record<string, string> = {},
+          versions: Record<string, DocumentVersion> = {};
+        for (const { meta, payload } of Object.values(documents(args))) {
+          if (meta.key.kind !== "draft") continue;
+          const target = meta.key.conversation,
+            key = `${target.kind}:${target.id}`;
+          versions[key] = version(meta);
+          if (meta.tombstone) continue;
+          const value = JSON.parse(
+            new TextDecoder().decode(
+              Uint8Array.from(atob(payload), (character) =>
+                character.charCodeAt(0),
+              ),
+            ),
+          ) as { text: string; protection?: string | null };
+          if (value.text) drafts[key] = value.text;
+          if (value.protection) protections[key] = value.protection;
+        }
+        const snapshot = {
+          session: `mock-drafts-session:${documentScope(args)}`,
+          account_id: SELF.account,
+          drafts,
+          protections,
+          versions,
+          conflicts: [] as string[],
+        };
+        localStorage.setItem(
+          `mock-drafts-${documentScope(args)}`,
+          JSON.stringify(snapshot),
+        );
+        return snapshot;
+      };
+      const draftKey = (key: string): AccountDocumentKey => {
+        const [kind, ...parts] = key.split(":");
+        if (kind !== "account" && kind !== "channel")
+          throw new Error("Invalid draft conversation");
+        return { kind: "draft", conversation: { kind, id: parts.join(":") } };
+      };
+      const encodedDraft = (value: unknown) =>
+        btoa(
+          Array.from(new TextEncoder().encode(JSON.stringify(value)), (byte) =>
+            String.fromCharCode(byte),
+          ).join(""),
+        );
+
+      let backupConfirmed = false;
+      let backupDestination = "local";
       const responses: Record<string, (a: Record<string, unknown>) => unknown> =
         {
           owner_node_identity: (a) => ({
@@ -715,12 +1005,95 @@ export const test = base.extend({
             device_id: SELF.device,
             account_id: SELF.account,
           }),
-          owner_account_history: (a) => msgs[`acc:${a.account}`] ?? [],
+          owner_reveal_image: (a) => {
+            const reference = a.reference as { message_id: string };
+            if (!protectedModes[reference.message_id])
+              throw new Error("Image unavailable");
+            if (
+              protectedModes[reference.message_id] === "authenticate" &&
+              a.password !== "password123"
+            )
+              throw new Error("Verification failed");
+            return (
+              (window as unknown as { __lastWrittenFileBytes?: number[] })
+                .__lastWrittenFileBytes ??
+              Array.from(atob(TINY_PNG.split(",")[1]), (char) =>
+                char.charCodeAt(0),
+              )
+            );
+          },
+          owner_reveal_message: (a) => {
+            const reference = a.reference as { message_id: string };
+            const text = protectedBodies[reference.message_id];
+            if (
+              protectedModes[reference.message_id] === "authenticate" &&
+              a.password !== "password123"
+            )
+              throw new Error("Verification cancelled or failed");
+            if (text === undefined) throw new Error("Message unavailable");
+            return { text, visible_for_ms: 30000 };
+          },
+          owner_account_history: (a) =>
+            (msgs[`acc:${a.account}`] ?? []).slice(-Number(a.limit ?? 200)),
           owner_delivery_statuses: (a) =>
             (a.ids as string[]).flatMap((id) => {
               const status = delivery[String(a.account)]?.[id];
               return status ? [{ id, status }] : [];
             }),
+          owner_enqueue_channel_text: (a) => {
+            recordSend(
+              `ch:${a.channelId}`,
+              String(a.text),
+              a.replyTo,
+              a.expiresAtMs as number | null | undefined,
+            );
+            if (a.protection) {
+              const row =
+                msgs[`ch:${a.channelId}`][msgs[`ch:${a.channelId}`].length - 1];
+              protectedBodies[row.id!] = row.text;
+              protectedModes[row.id!] = String(a.protection);
+              row.text = "";
+              row.protection = a.protection as "click" | "authenticate";
+            }
+            return msgs[`ch:${a.channelId}`][
+              msgs[`ch:${a.channelId}`].length - 1
+            ].id;
+          },
+          owner_enqueue_channel_sticker: (a) => {
+            recordSticker(
+              `ch:${a.channelId}`,
+              String(a.stickerId),
+              String(a.fallback),
+            );
+            return msgs[`ch:${a.channelId}`][
+              msgs[`ch:${a.channelId}`].length - 1
+            ].id;
+          },
+          owner_enqueue_channel_file: (a) => {
+            const fileConv = `fc_${++mid}`;
+            const row = msg({
+              protection: a.protection as "click" | "authenticate" | undefined,
+              from_me: true,
+              who: SELF.device,
+              file: {
+                name: String(a.path).split(/[\\/]/).pop() || "file",
+                size: 123,
+                mime: a.protection ? "image/png" : "application/octet-stream",
+                file_conv: fileConv,
+                media: Boolean(a.media),
+                ...stickerFileMetadata(a.path, fileConv),
+              },
+            });
+            (msgs[`ch:${a.channelId}`] ||= []).push(row);
+            if (a.protection) protectedModes[row.id!] = String(a.protection);
+            return { id: row.id, fileConv };
+          },
+          channel_custody_statuses: (a) =>
+            (a.ids as string[]).map((id) => ({
+              id,
+              replicas: 0,
+              post_offices: 0,
+            })),
           owner_enqueue_text: (a) => {
             recordSend(
               `acc:${a.account}`,
@@ -728,6 +1101,14 @@ export const test = base.extend({
               a.replyTo,
               a.expiresAtMs as number | null | undefined,
             );
+            if (a.protection) {
+              const row =
+                msgs[`acc:${a.account}`][msgs[`acc:${a.account}`].length - 1];
+              protectedBodies[row.id!] = row.text;
+              protectedModes[row.id!] = String(a.protection);
+              row.text = "";
+              row.protection = a.protection as "click" | "authenticate";
+            }
             return acceptLast(String(a.account));
           },
           owner_enqueue_sticker: (a) => {
@@ -742,17 +1123,26 @@ export const test = base.extend({
             const fileConv = `fc_${++mid}`;
             (msgs[`acc:${a.account}`] ||= []).push(
               msg({
+                protection: a.protection as
+                  "click" | "authenticate" | undefined,
                 from_me: true,
                 who: SELF.device,
                 file: {
                   name: String(a.path).split(/[\\/]/).pop() || "file",
                   size: 123,
-                  mime: "application/octet-stream",
+                  mime: a.protection ? "image/png" : "application/octet-stream",
                   file_conv: fileConv,
                   media: Boolean(a.media),
+                  ...stickerFileMetadata(a.path, fileConv),
                 },
               }),
             );
+            if (a.protection)
+              protectedModes[
+                msgs[`acc:${a.account}`][
+                  msgs[`acc:${a.account}`].length - 1
+                ].id!
+              ] = String(a.protection);
             return { id: acceptLast(String(a.account)), fileConv };
           },
           // auth
@@ -760,12 +1150,14 @@ export const test = base.extend({
             success: true,
             user: { id: "u_self", username: "tester", display_name: "tester" },
           }),
+          retry_saved_session: () => "saved",
           login: (a) => {
             contactOwner = a.username === "other_user" ? "u_other" : "u_self";
             for (const account of erasedHistory())
               clearConversation(`acc:${account}`);
             return {
               success: true,
+              saved_session: appSettings.stay_signed_in ? "saved" : "disabled",
               user: {
                 id: contactOwner,
                 username: String(a.username ?? "tester"),
@@ -773,11 +1165,16 @@ export const test = base.extend({
               },
             };
           },
-          rename_account: (a) => ({
-            id: "u_self",
-            username: "tester",
-            display_name: String(a.newDisplayName ?? "tester"),
-          }),
+          rename_account: (a) => {
+            ownDisplayName = String(a.newDisplayName ?? "tester");
+            if (accountProfiles[SELF.account])
+              accountProfiles[SELF.account].display_name = ownDisplayName;
+            return {
+              id: "u_self",
+              username: "tester",
+              display_name: String(a.newDisplayName ?? "tester"),
+            };
+          },
           logout: () => {
             nativeLocked = false;
             return { success: true };
@@ -805,7 +1202,10 @@ export const test = base.extend({
           list_channels: () => channels.map((channel) => ({ ...channel })),
           // The test user (SELF) is the channel owner, so the member-management controls
           // (add/remove) stay visible to the existing e2e flow.
-          channel_members: () => ({
+          channel_members: (a) => ({
+            history_policy:
+              channelHistoryPolicies[String(a.channelId)] ??
+              "last_ten_within_three_days",
             owner: channelOwner,
             members: channelMembers,
           }),
@@ -886,8 +1286,18 @@ export const test = base.extend({
 
           // channels
           create_channel: () => "chan_new_eeee5555",
+          set_channel_history_policy: (a) => {
+            if (channelOwner !== SELF.device)
+              throw new Error(
+                "Only the channel owner may change history policy",
+              );
+            channelHistoryPolicies[String(a.channelId)] =
+              a.policy as ChannelHistoryPolicy;
+            return null;
+          },
           add_channel_member: ok,
           remove_channel_member: ok,
+          remove_channel_account_members: ok,
           dissolve_channel: () => {
             channels[0].dissolved = true;
             return null;
@@ -910,68 +1320,26 @@ export const test = base.extend({
             return null;
           },
 
-          // Signed public cards are separate from private verifiedAccounts.
-          get_trust_card: (a) => trustCardStore[String(a.accountId)] ?? null,
-          publish_trust_card: (a) => {
-            trustCardStore[SELF.account] = {
+          // Public profiles contain no private trust history or editable identity metadata.
+          get_account_profile: (a) =>
+            accountProfiles[String(a.accountId)] ?? {
+              account_id: String(a.accountId),
+              display_name:
+                String(a.accountId) === SELF.account ? ownDisplayName : "Bob",
+              bio:
+                String(a.accountId) === BOB.account_id ? "Hello from Bob" : "",
+              created_at_ms:
+                String(a.accountId) === SELF.account ? null : 1700000000000,
+            },
+          save_account_bio: (a) => {
+            accountProfiles[SELF.account] = {
               account_id: SELF.account,
-              revision: 1,
-              display_name: String(a.displayName),
+              display_name: ownDisplayName,
               bio: String(a.bio),
-              created_at_ms: a.createdAtMs ?? null,
-              avatar: null,
-              introductions: [],
-              witnesses: [],
-              signed_json: JSON.stringify({
-                schema: 1,
-                kind: "card",
-                payload: {
-                  account_id: SELF.account,
-                  display_name: a.displayName,
-                  bio: a.bio,
-                  created_at_ms: a.createdAtMs ?? null,
-                },
-              }),
+              created_at_ms: null,
             };
             return null;
           },
-          import_trust_artifact: (a) => {
-            const artifact = JSON.parse(String(a.json));
-            if (artifact.schema !== 1 || !artifact.payload)
-              throw new Error("Invalid signed artifact envelope");
-            if (artifact.payload.invalid_signature)
-              throw new Error("Invalid signature");
-            if (artifact.kind === "card") {
-              trustCardStore[artifact.payload.account_id] = {
-                ...artifact.payload,
-                revision: 1,
-                avatar: null,
-                introductions: [],
-                witnesses: [],
-                signed_json: String(a.json),
-              };
-            }
-            return null;
-          },
-          create_trust_introduction: (a) =>
-            JSON.stringify({
-              schema: 1,
-              kind: "introduction",
-              payload: {
-                account_id: a.accountId,
-                note: a.note,
-                issuer_account_id: SELF.account,
-              },
-            }),
-          witness_trust_creation: (a) =>
-            JSON.stringify({
-              schema: 1,
-              kind: "witness",
-              payload: {
-                account_id: a.accountId,
-                issuer_account_id: SELF.account,
-              },
-            }),
           // trust
           get_trust: (a) => ({
             account_id: String(a.accountId),
@@ -1032,7 +1400,9 @@ export const test = base.extend({
           read_file: () => new ArrayBuffer(0),
           // The durable chat-media store accessor. The mock has no store, so reject like the
           // real "no stored media" path → the preview hook falls back to read_file.
-          read_media: () => {
+          read_media: (a) => {
+            const stickerBytes = stickerMediaFiles.get(String(a.fileConv));
+            if (stickerBytes) return stickerBytes;
             if (dataMode === "screenshot-ipc-fallback") {
               return (
                 (window as unknown as { __lastWrittenFileBytes?: number[] })
@@ -1047,9 +1417,14 @@ export const test = base.extend({
             (
               window as unknown as { __lastWrittenFileBytes?: number[] }
             ).__lastWrittenFileBytes = a.bytes as number[];
-            return `/tmp/${String(a.name || "pasted.png")}`;
+            const path = `/tmp/${String(a.name || "pasted.png")}`;
+            stagedFiles.set(path, [...(a.bytes as number[])]);
+            return path;
           },
-          delete_temp_file: ok,
+          delete_temp_file: (a) => {
+            stagedFiles.delete(String(a.path));
+            return null;
+          },
           screenshot_available: () => dataMode !== "screenshot-unavailable",
           // A deterministic 320x180 PNG, generated in-browser so the mock always
           // supplies a decodable image for the selection and annotation flow.
@@ -1109,11 +1484,58 @@ export const test = base.extend({
             return Array.from(bin, (char) => char.charCodeAt(0));
           },
 
+          // Search contexts remain separate from the normal history cache.
+          owner_search_recent: (a) => ({
+            hits: responses.search(a),
+            coverage: {
+              scope: "recent-window",
+              per_conversation_limit: 500,
+              result_limit: 200,
+              truncated: false,
+            },
+          }),
+          owner_search_context: (a) => {
+            const reference = a.reference as {
+              kind: string;
+              target: string;
+              message_id: string | null;
+            };
+            const key =
+              reference.kind === "channel"
+                ? `ch:${reference.target}`
+                : `acc:${reference.target}`;
+            const rows = msgs[key] ?? [];
+            const index = rows.findIndex(
+              (row) => row.id === reference.message_id,
+            );
+            const response = {
+              status: index >= 0 ? "found" : "unavailable",
+              reference,
+              messages:
+                index >= 0
+                  ? rows.slice(Math.max(0, index - 25), index + 26)
+                  : [],
+              newer_entries: index >= 0 ? rows.length - index - 1 : null,
+            };
+            if (dataMode === "favorites-delayed-context")
+              return new Promise((resolve) => {
+                (
+                  window as unknown as { __releaseFavoriteContext?: () => void }
+                ).__releaseFavoriteContext = () => resolve(response);
+              });
+            return response;
+          },
           // search
           search: (a) => {
             const q = String(a.query ?? "").toLowerCase();
             if (!q) return [];
             const hits: Array<{
+              reference: {
+                kind: string;
+                target: string;
+                message_id: string | null;
+              };
+              expires_at_ms: number | null;
               is_channel: boolean;
               account_id?: string | null;
               target: string;
@@ -1128,6 +1550,12 @@ export const test = base.extend({
                 if (!m.text.toLowerCase().includes(q)) continue;
                 if (k.startsWith("ch:")) {
                   hits.push({
+                    reference: {
+                      kind: "channel",
+                      target: CHANNEL.channel_id,
+                      message_id: m.id,
+                    },
+                    expires_at_ms: m.expires_at_ms ?? null,
                     is_channel: true,
                     target: CHANNEL.channel_id,
                     label: CHANNEL.name,
@@ -1142,6 +1570,12 @@ export const test = base.extend({
                   // device-id target so go() can resolve it to the account
                   const dev = peers.find((p) => p.account_id === acct)?.user_id;
                   hits.push({
+                    reference: {
+                      kind: "account",
+                      target: acct,
+                      message_id: m.id,
+                    },
+                    expires_at_ms: m.expires_at_ms ?? null,
                     is_channel: false,
                     account_id: acct,
                     target: dev ?? acct,
@@ -1164,6 +1598,13 @@ export const test = base.extend({
                 '{"history":true,"attachments":false,"profile":true,"appearance":false,"contacts":false}',
             ),
           get_device_sync_status: () => [],
+          get_device_hostnames: () => ({}),
+          get_account_login_sync_status: () => ({
+            account_id: SELF.account,
+            available_revision: null,
+            applied_revision: null,
+            devices: [],
+          }),
           set_device_sync_category: (a) => {
             if (
               ![
@@ -1195,6 +1636,16 @@ export const test = base.extend({
                 `mock-account-preferences-${SELF.device}-${String(a.category)}`,
               ) ?? "[]",
             ),
+          seed_account_preference: (a) => {
+            documentScope(a);
+            const rows = responses.get_account_preferences(a) as Array<
+              Record<string, unknown>
+            >;
+            return (
+              rows.find((row) => row.key === a.key) ??
+              responses.set_account_preference(a)
+            );
+          },
           set_account_preference: (a) => {
             const key = `mock-account-preferences-${SELF.device}-${String(a.category)}`;
             const rows = JSON.parse(localStorage.getItem(key) ?? "[]") as Array<
@@ -1276,6 +1727,148 @@ export const test = base.extend({
             localStorage.setItem(key, JSON.stringify(next));
             return { owner: String(a.owner), contacts: next };
           },
+          owner_inspect_message_favorites: (a) => {
+            const source = a.source as FavoriteSource;
+            const items = Object.values(
+              messageCollections[String(a.owner)] ?? {},
+            ).filter(
+              (item) =>
+                item.source.kind === source.kind &&
+                item.source.target === source.target,
+            );
+            return {
+              existing: structuredClone(
+                items.find(
+                  (item) =>
+                    item.source.message_ids.length ===
+                      new Set(source.message_ids).size &&
+                    item.source.message_ids.every((id) =>
+                      source.message_ids.includes(id),
+                    ),
+                ) ?? null,
+              ),
+              saved_message_ids: [
+                ...new Set(items.flatMap((item) => item.source.message_ids)),
+              ].filter((id) => source.message_ids.includes(id)),
+            };
+          },
+          owner_favorite_file_available: (a) => retainedFileAuthorized(a),
+          owner_read_favorite_file: async (a) => {
+            if (!retainedFileAuthorized(a))
+              throw new Error("Favorite file unavailable");
+            const bytes = new Uint8Array(favoriteAttachment!.bytes).buffer;
+            if (dataMode === "favorites-attachment-delayed-read")
+              await new Promise<void>((resolve) => {
+                favoriteAttachment!.releaseRead = resolve;
+              });
+            // Native read commands return raw IPC bytes, not a JSON array.
+            return bytes;
+          },
+          owner_save_favorite_file: (a) => {
+            if (!retainedFileAuthorized(a))
+              throw new Error("Favorite file unavailable");
+            const path = String(a.dest);
+            favoriteAttachment!.saved.push({
+              path,
+              bytes: [...favoriteAttachment!.bytes],
+            });
+            return path;
+          },
+          owner_list_message_favorites: (a) => {
+            const q = String(a.query ?? "")
+              .trim()
+              .toLowerCase();
+            const items = Object.values(
+              messageCollections[String(a.owner)] ?? {},
+            )
+              .filter((item) =>
+                [
+                  item.metadata.title,
+                  item.metadata.description,
+                  item.source_label,
+                  ...Object.values(item.metadata.notes),
+                  ...item.messages.flatMap((message) => [
+                    message.text,
+                    message.sender_name,
+                    message.file?.name ?? "",
+                  ]),
+                ].some((value) => value.toLowerCase().includes(q)),
+              )
+              .sort((a, b) => b.saved_at_ms - a.saved_at_ms);
+            const offset = Number(a.offset ?? 0),
+              limit = Number(a.limit ?? 20);
+            return {
+              items: items.slice(offset, offset + limit),
+              has_more: items.length > offset + limit,
+            };
+          },
+          owner_save_message_favorite: (a) => {
+            if (dataMode === "favorites-write-fail")
+              throw new Error("disk full");
+            const source = a.source as FavoriteSource;
+            const metadata = a.metadata as FavoriteMetadata;
+            const key =
+              source.kind === "channel"
+                ? `ch:${source.target}`
+                : `acc:${source.target}`;
+            const selected = (msgs[key] ?? []).filter((message) =>
+              source.message_ids.includes(message.id!),
+            );
+            if (selected.length !== source.message_ids.length)
+              throw new Error("Message unavailable");
+            const canonical = {
+              ...source,
+              message_ids: selected.map((message) => message.id!),
+            };
+            const id = `${source.kind}:${source.target}:${canonical.message_ids.join(":")}`;
+            const collection = (messageCollections[String(a.owner)] ??= {});
+            if (collection[id]) return structuredClone(collection[id]);
+            const item: MessageFavorite = {
+              id,
+              source: canonical,
+              source_label: source.kind === "channel" ? CHANNEL.name : BOB.name,
+              metadata: structuredClone(metadata),
+              messages: selected.map((message) => ({
+                id: message.id!,
+                who: message.who,
+                sender_name: message.from_me ? "Me" : BOB.name,
+                text: message.text,
+                wall_clock: message.wall_clock,
+                expires_at_ms: message.expires_at_ms ?? null,
+                sticker: message.sticker ?? null,
+                file: message.file ?? null,
+              })),
+              saved_at_ms: Date.now(),
+              revision: ++collectionRevision,
+              device_id: SELF.device,
+            };
+            collection[id] = item;
+            return structuredClone(item);
+          },
+          owner_edit_message_favorite: (a) => {
+            const item = messageCollections[String(a.owner)]?.[String(a.id)];
+            if (
+              !item ||
+              item.revision !== a.expectedRevision ||
+              item.device_id !== a.expectedDeviceId
+            )
+              throw new Error("Favorite was modified; refresh and retry");
+            item.metadata = structuredClone(a.metadata as FavoriteMetadata);
+            item.revision = ++collectionRevision;
+            return structuredClone(item);
+          },
+          owner_remove_message_favorite: (a) => {
+            const collection = messageCollections[String(a.owner)] ?? {};
+            const item = collection[String(a.id)];
+            if (
+              !item ||
+              item.revision !== a.expectedRevision ||
+              item.device_id !== a.expectedDeviceId
+            )
+              throw new Error("Favorite was modified; refresh and retry");
+            delete collection[item.id];
+            return null;
+          },
           get_favorites: () => Object.values(favorites),
           set_favorite: (a) => {
             const id = String(a.id);
@@ -1335,7 +1928,10 @@ export const test = base.extend({
           },
           // avatars peers propagated to us (none in the mock); publishing is a no-op
           peer_avatars: () => receivedAvatars,
-          publish_avatar: ok,
+          publish_avatar: (args) => {
+            documentScope(args);
+            return null;
+          },
 
           // persistent login: no saved session in the mock → show the login screen
           auto_login: () => null,
@@ -1361,10 +1957,235 @@ export const test = base.extend({
           // Synthetic recovery fixture; never use this key outside browser tests.
           prepare_backup_key: () =>
             "11111111-22222222-33333333-44444444-55555555-66666666-77777777-88888888",
+          backup_setup: () => ({
+            recovery_key:
+              "11111111-22222222-33333333-44444444-55555555-66666666-77777777-88888888",
+            confirmed: backupConfirmed,
+            destination: backupDestination,
+          }),
+          confirm_backup_key: () => {
+            backupConfirmed = true;
+          },
+          set_backup_destination: (a) => {
+            backupDestination = String(a.destination);
+          },
+          google_drive_available: () => false,
+          google_drive_resume: () => false,
+          google_drive_disconnect: ok,
+          google_drive_forget: ok,
           backup_status: () => null,
 
           // settings
+          notification_permission: () => ({
+            status: "granted",
+            platform: "macos",
+            can_open_settings: true,
+          }),
+          request_notification_permission: () => ({
+            status: "granted",
+            platform: "macos",
+            can_open_settings: true,
+          }),
+          open_notification_settings: () => null,
+          get_local_agent_access: () => {
+            localAgentAccess.expired =
+              localAgentAccess.enabled &&
+              localAgentAccess.expires_at_ms !== null &&
+              localAgentAccess.expires_at_ms <= Date.now();
+            if (localAgentAccess.expired) {
+              localAgentAccess.running = false;
+              localAgentAccess.instructions = "";
+            }
+            return localAgentAccess;
+          },
+          set_local_agent_access: (a) => {
+            const destinations = a.destinations as {
+              kind: string;
+              id: string;
+            }[];
+            if (a.enabled && destinations.length === 0)
+              throw new Error("Select a conversation");
+            const chosen =
+              a.lifetime === "persistent" || a.lifetime === "one_hour"
+                ? a.lifetime
+                : localAgentAccess.lifetime;
+            const fresh =
+              a.enabled && (!localAgentAccess.enabled || a.renew === true);
+            if (fresh || chosen !== localAgentAccess.lifetime) {
+              localAgentAccess.expires_at_ms =
+                chosen === "one_hour" && a.enabled
+                  ? Date.now() + 60 * 60 * 1000
+                  : null;
+            }
+            localAgentAccess.lifetime = chosen;
+            localAgentAccess.expired =
+              Boolean(a.enabled) &&
+              localAgentAccess.expires_at_ms !== null &&
+              localAgentAccess.expires_at_ms <= Date.now();
+            Object.assign(localAgentAccess, {
+              enabled: a.enabled,
+              running: a.enabled && !localAgentAccess.expired,
+              destinations,
+              instructions:
+                a.enabled && !localAgentAccess.expired
+                  ? 'Mesh Talk local API: "http://127.0.0.1:12345/v1/help".\nRead this help URL before using the API for user-authorized tasks.\nThe desktop app must be running and unlocked, with agent access enabled.\n'
+                  : "",
+            });
+            return localAgentAccess;
+          },
           get_app_settings: () => appSettings,
+          reconcile_account_settings: () => appSettings,
+          load_conversation_drafts: snapshotDrafts,
+          save_conversation_drafts: (a) => {
+            if (a.session !== `mock-drafts-session:${documentScope(a)}`)
+              throw new Error("Draft writer retired");
+            const changes = a.changes as Record<
+              string,
+              {
+                text: string;
+                protection?: string;
+                expected: DocumentVersion | null;
+              }
+            >;
+            const conflicts: string[] = [];
+            for (const [key, change] of Object.entries(changes)) {
+              try {
+                writeDocument(
+                  a,
+                  draftKey(key),
+                  encodedDraft({
+                    text: change.text,
+                    protection: change.protection,
+                  }),
+                  change.expected,
+                  !change.text && !change.protection,
+                );
+              } catch {
+                conflicts.push(key);
+              }
+            }
+            return { ...snapshotDrafts(a), conflicts };
+          },
+          publish_legacy_account_controls: (a) => {
+            documentScope(a);
+            // This fixture has no historical reaction or recall controls to import.
+            return null;
+          },
+          publish_legacy_conversation_drafts: (a) => {
+            documentScope(a);
+            const legacy = JSON.parse(
+              localStorage.getItem(`mock-drafts-${a.owner}`) ?? "{}",
+            );
+            const texts = (legacy.drafts ?? legacy) as Record<string, string>,
+              protections = (legacy.protections ?? {}) as Record<
+                string,
+                string
+              >;
+            let imported = 0,
+              unmapped = 0;
+            for (const key of new Set([
+              ...Object.keys(texts),
+              ...Object.keys(protections),
+            ])) {
+              const documentKey = draftKey(key);
+              if (documents(a)[JSON.stringify(documentKey)]) continue;
+              if (documentKey.kind !== "draft") continue;
+              const target = documentKey.conversation;
+              if (
+                target.kind === "account"
+                  ? ![SELF.account, BOB.account_id, CAROL.account_id].includes(
+                      target.id,
+                    )
+                  : target.id !== CHANNEL.channel_id
+              ) {
+                unmapped++;
+                continue;
+              }
+              writeDocument(
+                a,
+                documentKey,
+                encodedDraft({
+                  text: texts[key] ?? "",
+                  protection: protections[key],
+                }),
+                null,
+              );
+              imported++;
+            }
+            return { imported, unmapped };
+          },
+          get_account_documents: (a) => {
+            const items = Object.values(documents(a))
+              .map((row) => row.meta)
+              .filter((meta) => meta.key.kind === a.domain)
+              .sort((left, right) =>
+                JSON.stringify(left.key).localeCompare(
+                  JSON.stringify(right.key),
+                ),
+              );
+            const after = a.after ? JSON.stringify(a.after) : null;
+            const remaining = after
+              ? items.filter(
+                  (meta) => JSON.stringify(meta.key).localeCompare(after) > 0,
+                )
+              : items;
+            const limit = Math.min(64, Math.max(1, Number(a.limit) || 64));
+            const selected = remaining.slice(0, limit);
+            return {
+              items: structuredClone(selected),
+              next:
+                remaining.length > limit
+                  ? selected[selected.length - 1].key
+                  : null,
+              digest: Array.from(
+                { length: 32 },
+                (_, index) => (items.length + index) % 256,
+              ),
+            };
+          },
+          get_account_document_meta: (a) =>
+            structuredClone(documents(a)[JSON.stringify(a.key)]?.meta ?? null),
+          read_account_document: (a) => {
+            const row = documents(a)[JSON.stringify(a.key)];
+            if (
+              !row ||
+              row.meta.tombstone ||
+              !matchesVersion(row.meta, a.expected as DocumentVersion)
+            )
+              throw new Error("Document changed");
+            return Array.from(atob(row.payload), (character) =>
+              character.charCodeAt(0),
+            );
+          },
+          put_account_document: (a) =>
+            writeDocument(
+              a,
+              a.key as AccountDocumentKey,
+              String(a.payloadBase64),
+              a.expected as DocumentVersion | null,
+            ),
+          remove_account_document: (a) =>
+            writeDocument(
+              a,
+              a.key as AccountDocumentKey,
+              "",
+              a.expected as DocumentVersion | null,
+              true,
+            ),
+          mark_account_message_seen: (a) => {
+            const key: AccountDocumentKey = {
+              kind: "read_receipt",
+              conversation: a.conversation as Extract<
+                AccountDocumentKey,
+                { kind: "draft" }
+              >["conversation"],
+              message_id: String(a.messageId),
+            };
+            return structuredClone(
+              documents(a)[JSON.stringify(key)]?.meta ??
+                writeDocument(a, key, "", null),
+            );
+          },
           set_app_settings: (a) => {
             Object.assign(appSettings, (a.settings as object) ?? {});
             if (appSettings.privacy_level === "balanced") {
@@ -1397,6 +2218,16 @@ export const test = base.extend({
 
           // Privacy has dedicated canonical-account scenarios in privacy.spec.ts.
           // Legacy roster fixtures use synthetic IDs, so keep this default empty.
+          get_account_binding_changes: (a) => ({
+            owner: String(a.owner),
+            changes: [],
+          }),
+          accept_account_binding_change: (a) => ({
+            owner: String(a.owner),
+            version: 1,
+            invisible: false,
+            allowed_accounts: [],
+          }),
           get_privacy: (a) => ({
             owner: String(a.owner),
             version: 1,
@@ -1444,6 +2275,17 @@ export const test = base.extend({
           // autostart plugin (invoked as plugin commands; mocked as no-ops below)
         };
 
+      (window as unknown as Record<string, unknown>).__mockSetAccountBio = (
+        accountId: string,
+        bio: string,
+      ) => {
+        accountProfiles[accountId] = {
+          account_id: accountId,
+          display_name: accountId === SELF.account ? ownDisplayName : "Bob",
+          bio,
+          created_at_ms: accountId === SELF.account ? null : 1700000000000,
+        };
+      };
       // Expose deterministic event emission for tests that simulate inbound traffic.
       (window as unknown as Record<string, unknown>).__mockEmit = (
         event: string,
@@ -1457,6 +2299,35 @@ export const test = base.extend({
       ) => {
         Object.assign(presenceMap, next);
       };
+
+      (window as unknown as Record<string, unknown>).__mockInjectStickerMedia =
+        (conv: string, name: string, bytes: number[], mime: string) => {
+          const fileConv = `received-sticker-${++mid}`;
+          stickerMediaFiles.set(fileConv, [...bytes]);
+          const entry = msg({
+            file: {
+              name,
+              size: bytes.length,
+              mime,
+              file_conv: fileConv,
+              media: true,
+            },
+          });
+          (msgs[conv] ||= []).push(entry);
+          for (const listener of listeners["file-received"] ?? [])
+            listener.cb({
+              from: BOB.device_id,
+              conv: conv.slice(4),
+              is_channel: false,
+              event_id: entry.id,
+              file_conv: fileConv,
+              name,
+              size: bytes.length,
+              mime,
+              media: true,
+            });
+          return entry.id;
+        };
 
       // Inject an inbound message into the store (so a subsequent history reload returns it),
       // mirroring how the real backend persists a received message before emitting its event.
@@ -1492,6 +2363,27 @@ export const test = base.extend({
             return id;
           },
           async invoke(cmd: string, args: Record<string, unknown>) {
+            if (cmd === deferredCommand) {
+              deferredCommand = null;
+              await deferredBarrier;
+            }
+            if (
+              favoriteAttachment &&
+              /^(owner_.*favorite|read_media$|read_file$|save_file|plugin:dialog\|save$)/.test(
+                cmd,
+              )
+            )
+              favoriteAttachment.calls.push({
+                command: cmd,
+                args: structuredClone(args ?? {}),
+              });
+            if (favoriteAttachment && cmd === "plugin:dialog|save") {
+              if (dataMode === "favorites-attachment-delayed-dialog")
+                await new Promise<void>((resolve) => {
+                  favoriteAttachment!.releaseSaveDialog = resolve;
+                });
+              return "/home/tester/Downloads/field-photo.png";
+            }
             if (cmd === failNextCommand) {
               failNextCommand = null;
               throw new Error(failNextMessage);

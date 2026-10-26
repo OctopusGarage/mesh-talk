@@ -327,7 +327,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                   {fileGlyph(f.name, f.mime)}
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium">
-                      {attachmentLabel(f.name, f.mime)}
+                      {attachmentLabel(f.name, f.mime, f)}
                     </div>
                     <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                       <IdentityGlyph

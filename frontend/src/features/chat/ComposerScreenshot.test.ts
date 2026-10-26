@@ -77,6 +77,78 @@ it("drops staged screenshots when their ownership is invalidated", async () => {
   ).toBeNull();
   expect(paste).not.toHaveBeenCalled();
 });
+
+it("sends a staged screenshot with Enter after focus returns to the page background", async () => {
+  const file = new File(["png"], "screenshot.png", { type: "image/png" });
+  await render(file);
+  container.querySelector("textarea")!.blur();
+  expect(document.activeElement).toBe(document.body);
+  await act(async () =>
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    ),
+  );
+  expect(paste).toHaveBeenCalledExactlyOnceWith([file]);
+});
+
+it.each([{ shiftKey: true }, { isComposing: true }, { keyCode: 229 }])(
+  "does not send a background screenshot for modified or IME Enter: %j",
+  async (options) => {
+    await render(new File(["png"], "screenshot.png", { type: "image/png" }));
+    container.querySelector("textarea")!.blur();
+    await act(async () =>
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          ...options,
+        }),
+      ),
+    );
+    expect(paste).not.toHaveBeenCalled();
+  },
+);
+
+it("leaves Enter to focused controls and modal dialogs", async () => {
+  await render(new File(["png"], "screenshot.png", { type: "image/png" }));
+  const dismiss = container.querySelector<HTMLButtonElement>(
+    '[aria-label="Dismiss screenshot.png"]',
+  )!;
+  dismiss.focus();
+  await act(async () =>
+    dismiss.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    ),
+  );
+  expect(paste).not.toHaveBeenCalled();
+  const dialog = document.createElement("div");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  container.append(dialog);
+  dismiss.blur();
+  await act(async () =>
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    ),
+  );
+  expect(paste).not.toHaveBeenCalled();
+});
+
+it("stops handling background Enter after the screenshot is removed", async () => {
+  await render(new File(["png"], "screenshot.png", { type: "image/png" }));
+  await render(null);
+  container.querySelector("textarea")!.blur();
+  await act(async () =>
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    ),
+  );
+  expect(paste).not.toHaveBeenCalled();
+});
 it("keeps the screenshot staged when sending fails", async () => {
   paste.mockRejectedValueOnce(new Error("disk full"));
   await render(new File(["png"], "screenshot.png", { type: "image/png" }));

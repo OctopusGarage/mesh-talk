@@ -11,6 +11,7 @@ use crate::storage::encryption::{
 use crate::storage::errors::StorageError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 #[derive(Serialize, Deserialize)]
 struct StoredKeys {
@@ -18,16 +19,32 @@ struct StoredKeys {
     x25519_secret: [u8; 32],
 }
 
+impl Zeroize for StoredKeys {
+    fn zeroize(&mut self) {
+        self.ed25519_secret.zeroize();
+        self.x25519_secret.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for StoredKeys {}
+
+impl Drop for StoredKeys {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 /// Encrypt `identity` with `password` and write it to `path` (creating parent
 /// directories as needed).
 pub fn save(path: &Path, password: &str, identity: &DeviceIdentity) -> Result<(), StorageError> {
-    let (ed, dh) = identity.secret_bytes();
-    let stored = StoredKeys {
-        ed25519_secret: ed,
-        x25519_secret: dh,
+    let mut stored = StoredKeys {
+        ed25519_secret: [0; 32],
+        x25519_secret: [0; 32],
     };
-    let plaintext =
-        bincode::serialize(&stored).map_err(|e| StorageError::Serialization(e.to_string()))?;
+    (stored.ed25519_secret, stored.x25519_secret) = identity.secret_bytes();
+    let plaintext = Zeroizing::new(
+        bincode::serialize(&stored).map_err(|e| StorageError::Serialization(e.to_string()))?,
+    );
 
     let salt = generate_salt();
     let key = EncryptionKey::from_password(password, &salt)?;
@@ -65,7 +82,7 @@ pub fn load(path: &Path, password: &str) -> Result<DeviceIdentity, StorageError>
     let ciphertext = &content[SALT_SIZE + NONCE_SIZE..];
 
     let key = EncryptionKey::from_password(password, &salt)?;
-    let plaintext = decrypt_data(ciphertext, &nonce, &key)?;
+    let plaintext = Zeroizing::new(decrypt_data(ciphertext, &nonce, &key)?);
     let stored: StoredKeys = bincode::deserialize(&plaintext)
         .map_err(|e| StorageError::Deserialization(e.to_string()))?;
 
@@ -89,6 +106,21 @@ pub fn load_or_create(path: &Path, password: &str) -> Result<DeviceIdentity, Sto
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_stored_keys_support_explicit_and_drop_zeroization() {
+        use zeroize::{Zeroize, ZeroizeOnDrop};
+
+        fn assert_wipes_on_drop<T: ZeroizeOnDrop>() {}
+        assert_wipes_on_drop::<StoredKeys>();
+        let mut keys = StoredKeys {
+            ed25519_secret: [7; 32],
+            x25519_secret: [9; 32],
+        };
+        keys.zeroize();
+        assert_eq!(keys.ed25519_secret, [0; 32]);
+        assert_eq!(keys.x25519_secret, [0; 32]);
+    }
 
     #[test]
     fn save_then_load_round_trips_the_identity() {

@@ -6,7 +6,7 @@
 use super::{ParticipantConfig, ParticipantRuntime, PreparedParticipant};
 use crate::discovery::candidates::CandidateSource;
 use crate::discovery::{PeerRecord, Roster};
-use crate::eventlog::LogError;
+use crate::eventlog::{ConversationId, LogError};
 use crate::identity::account_keystore;
 use crate::identity::device::PublicIdentity;
 use crate::identity::keystore;
@@ -14,16 +14,17 @@ use crate::node::name_directory::NameDirectory;
 use crate::node::{HistoryEntry, Node, NodeError, ReceivedDm};
 #[cfg(test)]
 use crate::transport::net::routed_ipv6_socket;
+use futures_util::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// How often the node checks for freshly-discovered peers and re-publishes its current
-/// avatar to them (so a new contact sees the photo without waiting for the next change).
-/// A no-op when no new peers appeared and when we've never set an avatar.
+/// How often the node checks for new peers and retries pending public profiles.
 const PROFILE_REPUBLISH_INTERVAL_SECS: u64 = 3;
+/// Keep background profile traffic within the shared connection budget.
+const MAX_PROFILE_PUBLICATIONS: usize = 2;
 
 #[cfg(test)]
 type InitializationHook = Box<dyn FnOnce() + Send>;
@@ -32,15 +33,19 @@ static NAMES_OPEN_HOOKS: std::sync::LazyLock<
     Mutex<std::collections::HashMap<std::path::PathBuf, InitializationHook>>,
 > = std::sync::LazyLock::new(Default::default);
 
-/// Which peers to (re)publish our profile to this round: those present now (excluding post
-/// offices, which relay rather than render avatars) that were ABSENT in the previous round.
-/// `present_prev` holds the PREVIOUS round's present set and is updated in place to this
-/// round's. Using a per-round present set — rather than a monotonic "ever seen" set — means a
-/// peer that goes offline (evicted after PEER_TTL) and reconnects is treated as new again and
-/// gets our current avatar, instead of being stuck on whatever it had before it restarted.
+struct ProfilePublication {
+    revision: u64,
+    conversation: ConversationId,
+    complete: bool,
+    last_attempt: Option<std::time::Instant>,
+}
+
+/// Keep publication state only for currently present peers. Missing or
+/// outdated revisions remain eligible until a direct or relay exchange succeeds.
 fn profile_republish_targets(
-    present_prev: &mut std::collections::HashSet<String>,
+    published: &mut std::collections::HashMap<String, ProfilePublication>,
     peers: &[PeerRecord],
+    revision: u64,
 ) -> Vec<PeerRecord> {
     let mut present_now = std::collections::HashSet::new();
     let mut targets = Vec::new();
@@ -49,12 +54,21 @@ fn profile_republish_targets(
             continue;
         }
         let uid = p.public.user_id();
-        if !present_prev.contains(&uid) {
+        if !published
+            .get(&uid)
+            .is_some_and(|publication| publication.revision == revision && publication.complete)
+        {
             targets.push(p.clone());
         }
         present_now.insert(uid);
     }
-    *present_prev = present_now;
+    published.retain(|uid, _| present_now.contains(uid));
+    // Untouched peers precede retries, then the oldest attempt goes first.
+    targets.sort_by_key(|peer| {
+        published
+            .get(&peer.public.user_id())
+            .and_then(|publication| publication.last_attempt)
+    });
     targets
 }
 
@@ -123,6 +137,14 @@ impl Default for RuntimeNetworkOptions {
     }
 }
 
+/// Public identifiers authenticated by the startup keystore unlocks.
+/// This observation does not grant access to a prepared or running node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeIdentity {
+    pub device_id: String,
+    pub account_id: String,
+}
+
 /// Inbound events forwarded to the host from independent runtime tasks.
 pub struct RuntimeEvents {
     pub on_dm: Box<dyn Fn(ReceivedDm) + Send + 'static>,
@@ -143,7 +165,7 @@ pub struct NodeRuntime {
     user_id: String,
     account_id: String,
     /// The display name this node advertises (for the diagnostics page).
-    display_name: String,
+    display_name: Mutex<String>,
     participant: ParticipantRuntime,
     /// Where the account keystore lives, so a successful device link can persist the
     /// adopted account secret (effective on next login).
@@ -295,6 +317,50 @@ impl NodeRuntime {
             &mut dyn FnMut(&str) -> NodeRuntime,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
+        Self::start_configured_guarded_with_network_observed(
+            config,
+            events,
+            network,
+            |_| Ok(()),
+            authorize_launch,
+        )
+        .await
+    }
+
+    /// Observe authenticated public identifiers before preparing durable stores.
+    /// Rejecting the observation stops startup before any listener or store opens.
+    pub async fn start_configured_guarded_with_network_observed(
+        config: RuntimeConfig<'_>,
+        events: RuntimeEvents,
+        network: RuntimeNetworkOptions,
+        observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> NodeRuntime,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
+        Self::start_configured_guarded_with_network_cost_observed(
+            config,
+            events,
+            network,
+            super::NetworkCost::Unrestricted,
+            observe_identity,
+            authorize_launch,
+        )
+        .await
+    }
+
+    /// Initialize a host's cost observation before participant producers start,
+    /// without adding required fields to the established SDK configuration types.
+    pub async fn start_configured_guarded_with_network_cost_observed(
+        config: RuntimeConfig<'_>,
+        events: RuntimeEvents,
+        network: RuntimeNetworkOptions,
+        network_cost: super::NetworkCost,
+        observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> NodeRuntime,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
         let RuntimeConfig {
             base_dir,
             account_id,
@@ -317,24 +383,26 @@ impl NodeRuntime {
         // The two keystore unlocks run sequential 600k-PBKDF2/Argon2 KDFs (~seconds of CPU,
         // the bulk of cold start). Offload them to the blocking pool so they don't monopolize
         // a tokio worker; the result is identical (same files, same ordering).
-        let (identity, account, account_created_at_ms) = {
+        let (identity, account) = {
             let identity_path = dir.join("identity.keystore");
             let account_path = dir.join("account.keystore");
             let password = password.to_string();
             tokio::task::spawn_blocking(move || {
                 let identity = keystore::load_or_create(&identity_path, &password)
                     .map_err(|e| RuntimeError::Open(e.into()))?;
-                let new_account = !account_path.try_exists()?;
                 let account = account_keystore::load_or_create(&account_path, &password)
                     .map_err(|e| RuntimeError::Open(e.into()))?;
-                let created_at_ms = new_account.then(super::node::now_millis);
-                Ok::<_, RuntimeError>((identity, account, created_at_ms))
+                Ok::<_, RuntimeError>((identity, account))
             })
             .await
             .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??
         };
         let self_uid = identity.public().user_id();
         let account_id = account.account_id();
+        observe_identity(RuntimeIdentity {
+            device_id: self_uid.clone(),
+            account_id: account_id.clone(),
+        })?;
 
         // Dual-stack TCP listener (IPv6 + IPv4-mapped, falling back to IPv4) so the node is
         // reachable over IPv6/link-local too; OS-assigned port (0).
@@ -385,10 +453,12 @@ impl NodeRuntime {
                     &sent_log,
                     &password,
                 )?;
-                // Only this branch knows it just generated a mesh account. Existing
-                // keystores, restored accounts and local login dates prove no age.
-                if let Some(created_at_ms) = account_created_at_ms {
-                    node.initialize_new_trust_card(initial_display_name, created_at_ms)
+                // The keystore already durably records creation metadata. Repeating
+                // initialization after a failed launch cannot invent or lose a date.
+                if node.account_profile(&node.account_id()).is_none()
+                    && node.linked_devices().len() == 1
+                {
+                    node.set_profile_display_name(&initial_display_name)
                         .map_err(|e| LogError::Io(std::io::Error::other(e.to_string())))?;
                 }
                 Ok::<_, LogError>(node)
@@ -406,6 +476,7 @@ impl NodeRuntime {
         );
         node.set_post_office_enabled(post_office_enabled);
         node.initialize_physical_lan_only(network.physical_lan_only);
+        node.set_network_cost(network_cost);
         let names = Arc::new(Mutex::new(names_result.map_err(|e| {
             RuntimeError::Io(std::io::Error::other(format!("join error: {e}")))
         })??));
@@ -442,6 +513,19 @@ impl NodeRuntime {
         )?;
 
         let mut launch = Some(move |current_name: &str| {
+            // A persisted account claim survives host-local nicknames and adoption.
+            // A rename committed while startup prepared still takes precedence.
+            let canonical_name = node
+                .account_profile(&node.account_id())
+                .map(|card| card.display_name)
+                .filter(|name| {
+                    crate::identity::user::User::validate_display_name(name).as_ref() == Some(name)
+                });
+            let current_name = if current_name == display_name {
+                canonical_name.as_deref().unwrap_or(current_name)
+            } else {
+                current_name
+            };
             let mut participant = prepared.launch(current_name);
             let mut tasks: Vec<JoinHandle<()>> = Vec::new();
             tasks.push(tokio::spawn(async move {
@@ -459,6 +543,12 @@ impl NodeRuntime {
                     on_file(f);
                 }
             }));
+            {
+                let node = node.clone();
+                tasks.push(tokio::spawn(async move {
+                    node.run_account_access_loop().await;
+                }));
+            }
             // Forward received peer profiles (avatar updates) to the host app.
             if let Some(mut profile_rx) = node.take_profile_receiver() {
                 tasks.push(tokio::spawn(async move {
@@ -475,51 +565,72 @@ impl NodeRuntime {
                     }
                 }));
             }
-            // Re-publish our signed card or legacy avatar to freshly-discovered peers.
-            // Poll the roster and send each newly present peer our current public profile.
+            // Publish to new peers and retry failed or outdated profile publications.
             // Bounded by the live roster; no-op when neither public profile exists.
             {
                 let node = Arc::clone(&node);
                 let roster = Arc::clone(&roster);
                 let names = Arc::clone(&names);
                 tasks.push(tokio::spawn(async move {
-                    // The set of peers PRESENT in the previous poll — NOT a monotonic "ever seen"
-                    // set. A peer is republished-to when it's present now but was absent last
-                    // round, which covers both first discovery AND a reconnect after the roster
-                    // evicted it (PEER_TTL). A monotonic set would never re-publish to a peer that
-                    // restarted, so it would keep showing our stale avatar until we re-set it.
-                    let mut present_prev: std::collections::HashSet<String> =
-                        std::collections::HashSet::new();
+                    // Futures stay owned by this task, so retirement drops their
+                    // channels together with the rest of the runtime's work.
+                    let mut published: std::collections::HashMap<String, ProfilePublication> =
+                        std::collections::HashMap::new();
+                    let mut in_flight = std::collections::HashSet::new();
+                    let mut attempts: FuturesUnordered<BoxFuture<'static, (String, u64, bool)>> =
+                        FuturesUnordered::new();
+                    let mut poll = tokio::time::interval(Duration::from_secs(PROFILE_REPUBLISH_INTERVAL_SECS));
+                    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
-                        let mut peers: Vec<PeerRecord> = {
-                            let r = roster.lock().expect("roster mutex not poisoned");
-                            r.peers()
-                        };
-                        // Remember every peer's announced name durably, so a member that later
-                        // goes offline (and is evicted from the live roster) still shows a name.
-                        // `record` is a no-op when unchanged, so this doesn't grow the log.
-                        {
-                            let mut dir = names.lock().expect("names mutex not poisoned");
-                            peers.sort_by_key(|peer| peer.last_seen);
-                            for p in &peers {
-                                let _ = dir.record_peer_name(
-                                    &p.public.user_id(),
-                                    if p.post_office {
-                                        None
-                                    } else {
-                                        p.account_id.as_deref()
-                                    },
-                                    &p.name,
-                                );
+                        tokio::select! {
+                            Some((uid, revision, complete)) = attempts.next(), if !attempts.is_empty() => {
+                                in_flight.remove(&uid);
+                                if let Some(publication) = published.get_mut(&uid)
+                                    && publication.revision == revision
+                                {
+                                    publication.complete = complete;
+                                }
+                            }
+                            _ = poll.tick() => {
+                                let mut peers: Vec<PeerRecord> = {
+                                    let r = roster.lock().expect("roster mutex not poisoned");
+                                    r.peers()
+                                };
+                                // Remember names independently of slow network exchanges.
+                                {
+                                    let mut dir = names.lock().expect("names mutex not poisoned");
+                                    peers.sort_by_key(|peer| peer.last_seen);
+                                    for p in &peers {
+                                        let _ = dir.record_peer_name(
+                                            &p.public.user_id(),
+                                            if p.post_office { None } else { p.account_id.as_deref() },
+                                            &p.name,
+                                        );
+                                    }
+                                }
+                                let Some(revision) = node.public_profile_revision() else { continue; };
+                                for peer in profile_republish_targets(&mut published, &peers, revision) {
+                                    if attempts.len() >= MAX_PROFILE_PUBLICATIONS { break; }
+                                    let uid = peer.public.user_id();
+                                    if in_flight.contains(&uid) { continue; }
+                                    let conversation = match published.get(&uid) {
+                                        Some(publication) if publication.revision == revision => publication.conversation,
+                                        _ => {
+                                            let Some(conversation) = node.prepare_current_profile_delivery(&peer) else { continue; };
+                                            published.insert(uid.clone(), ProfilePublication { revision, conversation, complete: false, last_attempt: None });
+                                            conversation
+                                        }
+                                    };
+                                    in_flight.insert(uid.clone());
+                                    published.get_mut(&uid).expect("prepared publication").last_attempt = Some(std::time::Instant::now());
+                                    let node = Arc::clone(&node);
+                                    attempts.push(Box::pin(async move {
+                                        let complete = node.deliver_profile_to(&peer, conversation).await;
+                                        (uid, revision, complete)
+                                    }));
+                                }
                             }
                         }
-                        // Re-publish our public profile to peers that just (re)appeared.
-                        // Bounded by the live roster size.
-                        for peer in profile_republish_targets(&mut present_prev, &peers) {
-                            node.republish_profile_to(&peer).await;
-                        }
-                        tokio::time::sleep(Duration::from_secs(PROFILE_REPUBLISH_INTERVAL_SECS))
-                            .await;
                     }
                 }));
             }
@@ -534,13 +645,29 @@ impl NodeRuntime {
                 names,
                 user_id: self_uid,
                 account_id,
-                display_name: current_name.to_string(),
+                display_name: Mutex::new(current_name.to_string()),
                 participant,
                 account_path: dir.join("account.keystore"),
                 password: password.to_string(),
             }
         });
-        authorize_launch(&mut |name| launch.take().expect("runtime launch is single-use")(name))
+        let runtime = authorize_launch(&mut |name| {
+            launch.take().expect("runtime launch is single-use")(name)
+        })?;
+        // Authorization may supply a name changed while stores were opening.
+        if (runtime.node.account_profile(runtime.account_id()).is_some()
+            || runtime.node.linked_devices().len() == 1
+            || runtime.display_name() != display_name)
+            && let Err(error) = runtime
+                .node
+                .set_profile_display_name(&runtime.display_name())
+        {
+            runtime.stop().await;
+            return Err(RuntimeError::Open(LogError::Io(std::io::Error::other(
+                error.to_string(),
+            ))));
+        }
+        Ok(runtime)
     }
 
     /// This node's own user-id fingerprint.
@@ -569,8 +696,8 @@ impl NodeRuntime {
     }
 
     /// The display name this node advertises to peers.
-    pub fn display_name(&self) -> &str {
-        &self.display_name
+    pub fn display_name(&self) -> String {
+        self.display_name.lock().expect("display name lock").clone()
     }
 
     /// Change the display name this node advertises, live: re-sign the announce with the
@@ -578,12 +705,21 @@ impl NodeRuntime {
     /// discovery loops broadcast it from their next send, and record our own name durably
     /// so it resolves consistently. Fires an immediate re-announce so peers converge fast.
     /// `account_id`/`user_id` are unchanged — only the human-readable name moves.
-    pub fn set_display_name(&mut self, display_name: &str) {
-        if self.participant.set_display_name(display_name).is_err() {
-            log::warn!("Unable to update node presence");
-            return;
+    pub fn set_display_name(&self, display_name: &str) {
+        if let Err(error) = self.try_set_display_name(display_name) {
+            log::warn!("Unable to update account profile: {error}");
         }
-        self.display_name = display_name.to_string();
+    }
+
+    pub fn try_set_display_name(&self, display_name: &str) -> Result<(), NodeError> {
+        let mut current = self.display_name.lock().expect("display name lock");
+        self.node.set_profile_display_name(display_name)?;
+        self.participant
+            .set_display_name(display_name)
+            .map_err(|error| {
+                NodeError::InvalidInput(format!("unable to update presence: {error}"))
+            })?;
+        *current = display_name.to_string();
         // Keep our own name in the durable directory too (it otherwise only tracks peers),
         // so `display_name_for(own_id)` stays consistent. A no-op when unchanged.
         let _ = self
@@ -591,6 +727,7 @@ impl NodeRuntime {
             .lock()
             .expect("names mutex not poisoned")
             .record(&self.user_id, display_name);
+        Ok(())
     }
 
     /// The local TCP port the node's accept loop is listening on.
@@ -685,6 +822,15 @@ impl NodeRuntime {
             .expect("roster mutex not poisoned")
             .peers();
         live.sort_by_key(|peer| peer.last_seen);
+        let live_bindings: std::collections::HashMap<_, _> = live
+            .iter()
+            .map(|peer| {
+                (
+                    peer.public.user_id(),
+                    (peer.public.clone(), peer.account_id.clone()),
+                )
+            })
+            .collect();
         {
             let mut directory = self.names.lock().expect("names mutex not poisoned");
             for peer in live {
@@ -705,12 +851,26 @@ impl NodeRuntime {
             let Some(account) = proof.account_id() else {
                 continue;
             };
-            let name = self.display_name_for(&proof.user_id).unwrap_or(proof.name);
+            // A retained physical device may now announce a different account.
+            // Its current nickname cannot rename the immutable historical principal.
+            let same_account =
+                live_bindings
+                    .get(&proof.user_id)
+                    .is_some_and(|(public, binding)| {
+                        *public == proof.public() && binding.as_deref() == Some(account.as_str())
+                    });
+            let name = if same_account {
+                self.display_name_for(&proof.user_id).unwrap_or(proof.name)
+            } else {
+                proof.name
+            };
             if !name.is_empty() {
-                devices
-                    .entry(account.clone())
-                    .or_default()
-                    .push(proof.user_id);
+                if same_account {
+                    devices
+                        .entry(account.clone())
+                        .or_default()
+                        .push(proof.user_id);
+                }
                 names.entry(account).or_default().push(name);
             }
         }
@@ -725,6 +885,31 @@ impl NodeRuntime {
             }) {
                 values.retain(|name| *name != latest);
                 values.insert(0, latest);
+            }
+        }
+        // This account's shared profile owns its nickname across its devices.
+        // For contacts, retain the verified announced nickname above: legacy
+        // public cards may still contain an old login/display label from before
+        // nickname edits updated those claims. A stale card must not rename a
+        // contact. Its name is a fallback only if no nickname is known.
+        for card in self
+            .node
+            .profiles
+            .lock()
+            .expect("profiles mutex not poisoned")
+            .all()
+        {
+            if crate::identity::user::User::validate_display_name(&card.display_name).as_ref()
+                == Some(&card.display_name)
+            {
+                let account = card.account_id();
+                let values = names.entry(account.clone()).or_default();
+                if account == self.account_id() {
+                    values.retain(|name| *name != card.display_name);
+                    values.insert(0, card.display_name);
+                } else if values.is_empty() {
+                    values.push(card.display_name);
+                }
             }
         }
         names
@@ -866,6 +1051,37 @@ impl NodeRuntime {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<String, NodeError> {
+        self.link_device_version_if(peer_user_id, code, false, |_| Ok(()), &mut authorize)
+            .await
+    }
+    pub async fn link_device_with_account_access_if(
+        &self,
+        peer_user_id: &str,
+        code: &str,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<String, NodeError> {
+        self.link_device_with_account_access_checked_if(peer_user_id, code, |_| Ok(()), authorize)
+            .await
+    }
+    pub async fn link_device_with_account_access_checked_if(
+        &self,
+        peer_user_id: &str,
+        code: &str,
+        preflight: impl FnMut(&super::AccountAccessSnapshot) -> Result<(), NodeError> + Send,
+        authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send,
+    ) -> Result<String, NodeError> {
+        self.link_device_version_if(peer_user_id, code, true, preflight, authorize)
+            .await
+    }
+    async fn link_device_version_if(
+        &self,
+        peer_user_id: &str,
+        code: &str,
+        access_required: bool,
+        preflight: impl FnMut(&super::AccountAccessSnapshot) -> Result<(), NodeError> + Send,
+        mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
+        + Send,
+    ) -> Result<String, NodeError> {
         let peer = {
             let roster = self.roster.lock().expect("roster mutex not poisoned");
             roster
@@ -873,12 +1089,31 @@ impl NodeRuntime {
                 .cloned()
                 .ok_or_else(|| NodeError::UnknownPeer(peer_user_id.to_string()))?
         };
-        let linked = self
-            .node
-            .link_to_device_if(peer.addr, &peer.public, code, &mut authorize)
-            .await?;
+        let linked = if access_required {
+            self.node
+                .link_to_device_with_account_access_checked_if(
+                    peer.addr,
+                    &peer.public,
+                    code,
+                    preflight,
+                    &mut authorize,
+                )
+                .await?
+        } else {
+            self.node
+                .link_to_device_if(peer.addr, &peer.public, code, &mut authorize)
+                .await?
+        };
+        if access_required && peer.account_id.as_deref() != Some(linked.account_id.as_str()) {
+            return Err(NodeError::Linking(super::LinkingError::InvalidResponse));
+        }
+        let mut adopted = false;
         authorize(&mut || {
-            let account = crate::identity::account::Account::from_secret_bytes(linked.secret);
+            let account = crate::identity::account::Account::from_secret_bytes_with_created_at(
+                linked.secret,
+                linked.created_at_ms,
+            )
+            .ok_or_else(|| NodeError::InvalidInput("invalid linked creation metadata".into()))?;
             let device_dir = self
                 .account_path
                 .parent()
@@ -897,6 +1132,7 @@ impl NodeRuntime {
                     })
                     .map_err(NodeError::Log)?;
             }
+            self.node.prepare_account_transition(&account)?;
             self.node
                 .persist_account_adoption(&account.account_id(), || {
                     crate::identity::account_keystore::save(
@@ -906,8 +1142,14 @@ impl NodeRuntime {
                     )
                     .map_err(|e| NodeError::Channel(format!("persist linked account: {e}")))
                 })?;
+            adopted = true;
             Ok(())
         })?;
+        if !adopted {
+            return Err(NodeError::Authorization(
+                "account adoption was not authorized".into(),
+            ));
+        }
         Ok(linked.account_id)
     }
 
@@ -923,6 +1165,28 @@ impl NodeRuntime {
     /// Channels this node is a member of.
     pub fn list_channels(&self) -> Vec<crate::node::ChannelSummary> {
         self.node.list_channels()
+    }
+
+    pub fn channel_owner_account_id(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+    ) -> Option<String> {
+        self.node.channel_owner_account_id(channel)
+    }
+    pub fn channel_can_manage(&self, channel: crate::eventlog::event::ConversationId) -> bool {
+        self.node.channel_can_manage(channel)
+    }
+
+    pub fn channel_can_send(&self, channel: crate::eventlog::event::ConversationId) -> bool {
+        self.node.channel_can_send(channel)
+    }
+
+    pub fn channel_member_account_binding(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+        member: &PublicIdentity,
+    ) -> Option<String> {
+        self.node.channel_member_account_binding(channel, member)
     }
 
     /// The current members of a channel (empty if unknown).

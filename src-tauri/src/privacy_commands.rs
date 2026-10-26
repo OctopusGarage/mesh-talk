@@ -3,7 +3,7 @@ use crate::{
     chat_commands::NodeState, commands::CommandError, runtime_admission::RuntimeAdmission,
     state::AppState,
 };
-use mesh_talk_core::node::PrivacySnapshot;
+use mesh_talk_core::node::{AccountBindingChange, PrivacySnapshot};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -122,6 +122,64 @@ pub async fn initiate_privacy_contact(
     dispatch(&app, &node, owner, Change::Initiate(account)).await
 }
 
+#[derive(Serialize)]
+pub struct AccountBindingChangesResponse {
+    owner: String,
+    changes: Vec<AccountBindingChange>,
+}
+
+#[tauri::command]
+pub async fn get_account_binding_changes(
+    owner: String,
+    account: String,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<AccountBindingChangesResponse, CommandError> {
+    RuntimeAdmission::capture(&app, &node, &owner)?
+        .with_runtime(|runtime| {
+            Ok(AccountBindingChangesResponse {
+                owner,
+                changes: runtime.handle().account_binding_changes(&account),
+            })
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn accept_account_binding_change(
+    owner: String,
+    change: AccountBindingChange,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<PrivacyResponse, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    admission
+        .detached(move |runtime, admission| {
+            Box::pin(async move {
+                runtime
+                    .handle()
+                    .accept_account_binding_change_guarded(&change, |commit| {
+                        admission.authorize_io(runtime, commit)
+                    })
+                    .await
+                    .map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::InvalidInput {
+                            CommandError::Validation(error.to_string())
+                        } else {
+                            CommandError::Io(error.to_string())
+                        }
+                    })?;
+                admission.checked(runtime, || {
+                    Ok(PrivacyResponse {
+                        owner,
+                        policy: runtime.privacy_snapshot(),
+                    })
+                })
+            })
+        })
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +197,7 @@ mod tests {
             "token".into(),
             User {
                 user_id: "alice".into(),
+                account_login_name: None,
                 name: "alice".into(),
                 display_name: "Alice".into(),
                 address: "fixture".into(),
@@ -164,7 +223,7 @@ mod tests {
         .await
         .unwrap();
         let node = runtime.handle();
-        *state.0.lock().await = Some(runtime);
+        *state.0.write().await = Some(runtime);
         let documents = || {
             ["privacy.policy", "peer-proofs", "peer-routes"]
                 .map(|name| std::fs::read(root.path().join("accounts/alice").join(name)).unwrap())
@@ -218,13 +277,13 @@ mod tests {
         caller.abort();
         assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
         assert!(
-            state.0.try_lock().is_err(),
+            state.0.try_write().is_err(),
             "cancelled IPC released live runtime producer"
         );
         app.session().clear();
         release.send(()).unwrap();
         assert!(holder.join().unwrap().is_err());
-        let runtime = state.0.lock().await.take().unwrap();
+        let runtime = state.0.write().await.take().unwrap();
         assert!(!runtime.privacy_snapshot().invisible);
         assert_eq!(documents(), before);
         runtime.stop().await;
@@ -277,6 +336,7 @@ mod tests {
             "test-token".into(),
             User {
                 user_id: "alice".into(),
+                account_login_name: None,
                 name: "alice".into(),
                 display_name: "Alice".into(),
                 address: "fixture".into(),
@@ -299,7 +359,7 @@ mod tests {
             |_| {},
         ))
         .unwrap();
-        *node.0.blocking_lock() = Some(runtime);
+        *node.0.blocking_write() = Some(runtime);
         let read = invoke("get_privacy", serde_json::json!({"owner":"alice"})).unwrap();
         assert_eq!(read.owner, "alice");
         assert!(!read.policy.invisible);
@@ -341,7 +401,7 @@ mod tests {
         // Poll until the operation waits for the runtime lifecycle lock, then
         // log out. A previously authorized queued write must not become durable.
         tauri::async_runtime::block_on(async {
-            let guard = node.0.lock().await;
+            let guard = node.0.write().await;
             let mut queued = std::pin::pin!(dispatch(
                 &app_state,
                 &node,
@@ -366,13 +426,13 @@ mod tests {
         );
         assert!(
             node.0
-                .blocking_lock()
+                .blocking_write()
                 .as_ref()
                 .unwrap()
                 .privacy_snapshot()
                 .invisible
         );
-        node.0.blocking_lock().take();
+        node.0.blocking_write().take();
         let saved = mesh_talk_core::node::PrivacyPolicy::open(
             &root.path().join("accounts/alice/privacy.policy"),
             "pw",

@@ -12,9 +12,11 @@ These screens offer marketplace installation and **Install ZIP** for a local pac
 
 ## Know what is shared
 
-Both default and lite editions can install packs. Lite starts without optional bundled libraries. Removing a bundled optional pack does not automatically reinstall it on restart.
+The app starts without optional libraries. Install packs from the marketplace or a local ZIP. Installed packs remain available after upgrades; removed packs stay removed after restart.
 
-Sticker messages send a pack/sticker identity and a fallback, rather than transferring the whole artwork library. Recipients need the matching pack to see its artwork; otherwise the fallback is displayed.
+New stickers send the selected image through encrypted media delivery. Recipients can view the single sticker without installing its pack. Installing a pack adds its collection to the sticker picker; it is independent from receiving and retaining message images. Updating or removing a pack does not change retained new-message artwork. Older ID-only messages still need their matching pack and otherwise show the sent fallback.
+
+Missing images show the fallback while the app waits for an authorized source. A message arriving does not prove that its image has arrived. Media recovery requires a reachable device or post office that still retains the permitted bytes; clearing retained media or losing every source can make an image unavailable.
 
 Appearance and wallpapers can differ with the installed library. Custom colors are not automatically corrected for contrast, so check readability before adopting a theme.
 

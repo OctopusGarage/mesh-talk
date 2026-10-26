@@ -75,7 +75,7 @@ pub async fn delete_contact(
         if let Some(entered) = captured.lock().unwrap().as_ref() {
             let _ = entered.send("contact-runtime-wait");
         }
-        let guard = node.0.blocking_lock();
+        let guard = node.0.blocking_read();
         policy.transaction_for_lease(&app, &lease, || {
             node.check_installation(&lease)
                 .map_err(|error| error.to_string())?;

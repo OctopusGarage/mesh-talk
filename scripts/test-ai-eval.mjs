@@ -184,7 +184,7 @@ test("source rubric cases include the owners of delegated guarantees", () => {
   contracts.push(
     ["base", "MT-AI-007", ["scripts/install-post-office-macos.sh", "scripts/e2e-post-office-lan.py", "scripts/e2e-four-machine-tailnet.py", "scripts/e2e-federation-recovery.py", "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs", "crates/mesh-talk-core/src/node/files.rs", "crates/mesh-talk-core/examples/network-acceptance.rs"]],
     ["base", "MT-AI-008", ["scripts/install-post-office-windows.ps1", "crates/mesh-talk-core/src/bin/mesh-talk-node.rs", "scripts/e2e-post-office-lan.py", "scripts/e2e-four-machine-tailnet.py", "crates/mesh-talk-core/src/node/delivery_runtime_tests.rs"]],
-    ["base", "MT-AI-010", ["docs/network-design-reference.md", "docs/post-office-federation.md", "scripts/e2e-four-machine-tailnet.py", "scripts/e2e-federation-recovery.py"]],
+    ["base", "MT-AI-010", ["docs/network-design-reference.md", "docs/post-office-federation.md", "scripts/e2e-four-machine-tailnet.py", "scripts/e2e-federation-recovery.py", "crates/mesh-talk-core/src/node/postbox.rs", "crates/mesh-talk-core/src/node/bridge_directory.rs", "crates/mesh-talk-core/src/postoffice/mod.rs", "crates/mesh-talk-core/src/postoffice/network.rs", "crates/mesh-talk-core/src/discovery/roster.rs", "crates/mesh-talk-core/src/discovery/announce.rs"]],
     ["group-reception", "MT-GROUP-UX-004", ["frontend/src/store/chat.ts", "frontend/src/store/reception.ts", "frontend/src/store/conversationHistory.ts", "frontend/src/store/conversationState.ts"]],
     ["group-reception", "MT-GROUP-UX-005", ["frontend/src/locales/en.json", "frontend/src/features/chat/ReceiveProgress.tsx", "frontend/src/features/chat/TransferBar.tsx", "frontend/src/store/conversationHistory.ts", "frontend/src/store/ownership.ts", "src-tauri/src/chat_commands/files.rs", "crates/mesh-talk-core/src/node/files.rs"]],
     ["group-reception", "MT-GROUP-UX-006", ["crates/mesh-talk-core/src/storage/record_log.rs", "crates/mesh-talk-core/src/node/expiry_policy.rs", "crates/mesh-talk-core/src/expiry.rs"]],
@@ -212,9 +212,24 @@ test("source rubric cases include the owners of delegated guarantees", () => {
     ["validation-velocity", "MT-VALIDATION-004", ["scripts/validation/changed.mjs", "scripts/validation/selectors.mjs"]],
     ["validation-velocity", "MT-VALIDATION-005", ["scripts/validation/frontend-graph.mjs"]],
   );
+  contracts.push(
+    ["local-agent-access", "MT-LOCAL-AGENT-001", ["crates/mesh-talk-integrations/src/model.rs", "crates/mesh-talk-integrations/src/service.rs", "crates/mesh-talk-core/src/node/outgoing_message.rs", "crates/mesh-talk-core/src/node/delivery_store.rs", "crates/mesh-talk-core/src/storage/record_log.rs"]],
+    ["local-agent-access", "MT-LOCAL-AGENT-002", ["src-tauri/src/integrations.rs", "crates/mesh-talk-core/src/node/participant_runtime.rs", "crates/mesh-talk-core/src/node/dm.rs"]],
+    ["local-agent-access", "MT-LOCAL-AGENT-003", ["src-tauri/src/desktop_session.rs", "src-tauri/src/app_lock.rs", "src-tauri/src/chat_commands/state.rs", "crates/mesh-talk-core/src/node/participant_runtime.rs", "crates/mesh-talk-integrations/src/ipc.rs", "crates/mesh-talk-core/src/node/delivery_store.rs"]],
+    ["local-agent-access", "MT-LOCAL-AGENT-004", ["src-tauri/src/integrations/local_access.rs"]],
+    ["local-agent-access", "MT-LOCAL-AGENT-005", ["frontend/src/features/chat/settings/useSettingsController.ts", "frontend/src/features/chat/settingsDialogSession.ts", "frontend/src/features/chat/settingSaveQueue.ts", "src-tauri/src/integrations/instructions.rs", "frontend/src/lib/contactVisibility.ts", "frontend/src/store/contactPolicy.ts"]],
+  );
   for (const [name, id, owners] of contracts) {
     const suite = JSON.parse(readFileSync(new URL(`../docs/evals/${name === "base" ? "ai-eval-suite" : `${name}-ai-eval-suite`}.json`, import.meta.url), "utf8"));
     const entry = suite.cases.find(entry => entry.id === id);
     for (const owner of owners) assert.ok(entry?.context_files?.includes(owner), `${id} cannot verify delegated guarantees without ${owner}`);
   }
+});
+
+test("federation source context stays within the model input budget", () => {
+  const suite = JSON.parse(readFileSync(new URL("../docs/evals/ai-eval-suite.json", import.meta.url), "utf8"));
+  const entry = suite.cases.find(entry => entry.id === "MT-AI-010");
+  const sources = [entry.subject_file, ...entry.context_files];
+  const bytes = sources.reduce((total, path) => total + readFileSync(new URL(path, ROOT)).byteLength, 0);
+  assert.ok(bytes < 1024 * 1024, `MT-AI-010 supplied sources exceed 1 MiB: ${bytes} bytes`);
 });

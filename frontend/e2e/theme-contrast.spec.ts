@@ -1,6 +1,7 @@
 import { waitForChatShell } from "./helpers/session";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./tauri-mock";
+import { seedMarketPacks } from "./helpers/packs";
 import { contrastRatio } from "./helpers/ui-audit";
 
 const BOB = "acc_bob_bbbb2222";
@@ -17,6 +18,16 @@ const THEMES = [
   "cat-acrylic",
 ];
 const MIN_TEXT_CONTRAST = 4.5;
+
+test.beforeEach(async ({ page }) => {
+  await seedMarketPacks(page, [
+    "argentina",
+    "barcelona",
+    "messi",
+    "nature",
+    "cat-acrylic",
+  ]);
+});
 
 test("attention text is readable on dialog surfaces in every theme", async ({
   page,
@@ -59,12 +70,10 @@ test("attention text is readable on dialog surfaces in every theme", async ({
 
 async function enterBobDm(page: Page) {
   await page.goto("/");
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill("tester");
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await waitForChatShell(page);
   await page.getByTestId(`conversation-row-${BOB}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
@@ -261,12 +270,10 @@ test("changed identity warning stays readable across every theme", async ({
   page,
 }) => {
   await page.goto("/?data=changed");
-  for (const tab of ["register", "signin"]) {
-    await page.getByTestId(`login-tab-${tab}`).click();
-    await page.getByTestId("login-username").fill("tester");
-    await page.getByTestId("login-password").fill("password123");
-    await page.getByTestId("login-submit").click();
-  }
+  await page.getByTestId("login-tab-signin").click();
+  await page.getByTestId("login-username").fill("tester");
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await page.getByTestId(`conversation-row-${BOB}`).click();
   await expect(page.getByTestId("verify-trigger")).toHaveAttribute(
     "data-trust",

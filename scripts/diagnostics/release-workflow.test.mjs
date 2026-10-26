@@ -8,6 +8,13 @@ import test from "node:test";
 
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 
+test("Linux release builds retain the Ubuntu 22.04 runtime baseline across architectures", () => {
+  assert.equal(workflow.match(/runner: (\S+)\n\s+target: x86_64-unknown-linux-gnu/)?.[1], "ubuntu-22.04");
+  assert.equal(workflow.match(/runner: (\S+)\n\s+target: aarch64-unknown-linux-gnu/)?.[1], "ubuntu-22.04-arm");
+  assert.ok(/key: \$\{\{ matrix\.target \}\}-\$\{\{ matrix\.runner \}\}-cargo-/.test(workflow),
+    "compiled build scripts and native objects must not cross runner baselines");
+});
+
 test("release matrix builds native Windows and Linux ARM64 packages", () => {
   assert.match(workflow, /runner: windows-11-(?:vs2026-)?arm[\s\S]*?target: aarch64-pc-windows-msvc/);
   assert.match(workflow, /runner: ubuntu-22\.04-arm[\s\S]*?target: aarch64-unknown-linux-gnu/);
@@ -89,4 +96,13 @@ test("Nightly runs gate main before the shared matrix and publish verified prere
   assert.match(verify, /prerelease: \$\{\{ needs.preflight.outputs.nightly == 'true' \}\}/);
   assert.match(verify, /make_latest: false/);
   assert.ok(verify.indexOf("release-state.mjs record") < verify.indexOf("release-state.mjs publish"));
+});
+
+
+test("Nightly preflight waits within a bounded job while publication retains immediate checks", () => {
+  const preflight = workflow.split("  preflight:\n")[1].split("  build-release:\n")[0];
+  assert.match(preflight, /timeout-minutes: 250/);
+  assert.match(preflight, /check-source-checks\.mjs "\$GITHUB_REPOSITORY" "\$GITHUB_SHA" --wait/);
+  const publication = workflow.split("  preflight:\n")[1].split("  build-release:\n")[1];
+  assert.doesNotMatch(publication, /check-source-checks\.mjs[^\n]*--wait/);
 });

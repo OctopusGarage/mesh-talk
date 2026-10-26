@@ -26,8 +26,10 @@ export async function prepareNativeDownloadFixture({ fixture, owner, invoke }) {
   assert.ok(owner, "native download setup requires the signed-in fixture owner");
   const directory = join(fixture, "downloads");
   await mkdir(directory, { recursive: true });
+  const expectedAccount = await invoke("account_id", {});
+  assert.match(typeof expectedAccount === "string" ? expectedAccount : "", /^[0-9a-f]{32}$/, "native download setup requires the current account");
   const settings = await invoke("get_app_settings", { owner });
-  await invoke("set_app_settings", { owner, settings: { ...settings, download_dir: directory } });
+  await invoke("set_app_settings", { owner, expectedAccount, settings: { ...settings, download_dir: directory }, patch: { download_dir: directory } });
   assert.equal((await invoke("get_app_settings", { owner })).download_dir, directory, "production settings retain the owned download directory");
   return directory;
 }
@@ -289,7 +291,7 @@ export async function revealHistoricalNativeMessage({ execute, until, command, k
 
 export function nativeMinimumWindowRequest(defaultRect, defaultViewport) {
   const width = defaultRect.width - defaultViewport.width, height = defaultRect.height - defaultViewport.height;
-  assert.ok(Number.isFinite(width) && Number.isFinite(height) && width >= 0 && height >= 0, "native window chrome must be measured from valid outer/client dimensions");
+  assert.ok(Number.isFinite(width) && Number.isFinite(height) && width >= 0 && height >= 0, `native window chrome must be measured from valid outer/client dimensions: ${JSON.stringify({ outer: defaultRect, client: defaultViewport })}`);
   return { width: 760 + width, height: 520 + height };
 }
 
@@ -497,4 +499,15 @@ export async function restartedCoreScenarios(c, state) {
   assert.equal(await c.execute("return document.querySelector('[data-testid=theme-light]')?.getAttribute('aria-pressed')==='true' && localStorage.getItem('mesh-talk-theme')==='light' && !document.documentElement.classList.contains('dark');"), true);
   await c.passed("settings-theme-persistence", { selected: state.selectedTheme, visibleSelection: true, persistedAfterRestart: true });
   await c.key("\uE00C");
+}
+
+/** Exercise the real creation/sign-in form once, then dismiss only the optional
+ * recovery reminder so subsequent native scenarios retain their normal layout. */
+export async function enterNativeAccount(ui, username, password, register = false) {
+  if (register) await ui.click("login-tab-register");
+  await ui.fill("login-username", username);
+  await ui.fill("login-password", password);
+  await ui.click("login-submit");
+  await ui.element("chat-shell");
+  if (register) await ui.click("account-protection-later");
 }

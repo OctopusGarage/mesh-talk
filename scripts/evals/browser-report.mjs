@@ -27,6 +27,7 @@ export function requiredBrowserPaths(tier) {
     paths.push(["automatic-delivery.spec.ts", `delivery details preserve keyboard focus and fit ${size}`]);
   }
   paths.push(
+    ["automatic-delivery.spec.ts", "delivery recovery survives its receipt and returns focus safely, then retires on logout"],
     ["automatic-delivery.spec.ts", "delivery details close on navigation and app lock, including a late status response"],
     ["automatic-delivery.spec.ts", "text, sticker and file card stay Awaiting until explicit authoritative mock projection"],
     ["automatic-delivery.spec.ts", "a native picker completed after conversation navigation cannot send to the new conversation"],
@@ -34,12 +35,16 @@ export function requiredBrowserPaths(tier) {
     ["automatic-delivery.spec.ts", "a scoped native delivery invalidation refreshes status without a polling response"],
     ["automatic-delivery.spec.ts", "submitted text stays in its bubble after acceptance and navigation"],
     ["automatic-delivery.spec.ts", "submitted text stays in its bubble after rejection and navigation"],
+    ["automatic-delivery.spec.ts", "channel acceptance reconciles repeated text once and confirmed post-office custody clears the waiting indicator"],
+    ["automatic-delivery.spec.ts", "linked-device channel history waits for copy confirmation before showing a check"],
     ["media-recovery.spec.ts", "received media recovers when bytes become available with stable fileConv"],
     ["media-lifecycle.spec.ts", "same-identity disable/re-enable never returns a revoked URL"],
     ["media-lifecycle.spec.ts", "cleanup during an admitted durable read prevents fallback and blob creation"],
     ["media-lifecycle.spec.ts", "same UUID relogin revokes the old owned URL exactly once"],
+    ["screenshot-portable.spec.ts", "Enter sends a staged screenshot after capture loses input focus"],
     ["screenshot-portable.spec.ts", "screenshot selection annotation and explicit send produce cropped PNG"],
     ["screenshot-portable.spec.ts", "hidden screenshot capture cancels without sending"],
+    ["screenshot-portable.spec.ts", "clipboard denial retains the edited screenshot for retry without staging"],
     ["screenshot-portable.spec.ts", "sender previews a screenshot when media IPC returns fallback byte arrays"],
     ["screenshot-portable.spec.ts", "rectangle arrow text and undo remain usable before send"],
     ["screenshot-portable.spec.ts", "unavailable capture is disabled and failed send preserves staged screenshot"],
@@ -67,6 +72,7 @@ export function requiredBrowserPaths(tier) {
     ["unread-badge.spec.ts", "history load failure leaves unread until the chat can be viewed"],
     ["unread-badge.spec.ts", "a replacement account does not inherit unread after identity lookup fails"],
     ["unread-badge.spec.ts", "one logical DM remains one unread badge across duplicate live events and history scanning"],
+    ["unread-badge.spec.ts", "channel mention indicator survives later traffic and clears when the mention is viewed"],
   );
   return paths;
 }

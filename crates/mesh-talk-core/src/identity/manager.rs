@@ -15,7 +15,7 @@ pub struct UserCredentials {
 
 #[derive(Debug, Clone)]
 pub struct IdentityManager {
-    file_manager: FileManager,
+    pub(super) file_manager: FileManager,
 }
 
 impl IdentityManager {
@@ -28,6 +28,10 @@ impl IdentityManager {
         if !User::validate_username(username) {
             return Err(IdentityError::InvalidUsername);
         }
+
+        // Canonical aliases and local usernames share one login namespace.
+        let _namespace_lock = self.account_login_namespace_lock()?;
+        self.ensure_account_login_available(username, username)?;
 
         // Check if user already exists
         if self.file_manager.file_exists(username, "meta/user.json") {

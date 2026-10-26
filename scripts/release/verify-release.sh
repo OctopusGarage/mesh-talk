@@ -16,20 +16,16 @@ source_sha="${6:?source commit required}"
 [[ "$source_ref" == refs/tags/* || "$source_ref" == refs/heads/* ]]
 
 for platform in macos_arm64 macos_x86_64 windows_arm64 windows_x86_64 linux_aarch64 linux_x86_64; do
-  for variant in default lite; do
-    suffix=""
-    if [[ "$variant" == lite ]]; then suffix="_lite"; fi
-    archive="$asset_dir/mesh-talk_${tag}_${platform}${suffix}.zip"
-    test -f "$archive" && test ! -L "$archive" && test -s "$archive"
-    test -f "$archive.bundle" && test ! -L "$archive.bundle" && test -s "$archive.bundle"
-    cosign verify-blob --bundle "$archive.bundle" \
-        --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@$source_ref" \
-        --certificate-oidc-issuer https://token.actions.githubusercontent.com "$archive"
-    gh attestation verify "$archive" --repo "$repository" \
-        --source-ref "$source_ref" --source-digest "$source_sha" \
-        --signer-workflow "$repository/.github/workflows/release.yml" \
-        --deny-self-hosted-runners
-  done
+  archive="$asset_dir/mesh-talk_${tag}_${platform}.zip"
+  test -f "$archive" && test ! -L "$archive" && test -s "$archive"
+  test -f "$archive.bundle" && test ! -L "$archive.bundle" && test -s "$archive.bundle"
+  cosign verify-blob --bundle "$archive.bundle" \
+      --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@$source_ref" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com "$archive"
+  gh attestation verify "$archive" --repo "$repository" \
+      --source-ref "$source_ref" --source-digest "$source_sha" \
+      --signer-workflow "$repository/.github/workflows/release.yml" \
+      --deny-self-hosted-runners
   archive="$asset_dir/mesh-talk-post-office_${tag}_${platform}.zip"
   test -f "$archive" && test ! -L "$archive" && test -s "$archive"
   test -f "$archive.bundle" && test ! -L "$archive.bundle" && test -s "$archive.bundle"
@@ -37,6 +33,19 @@ for platform in macos_arm64 macos_x86_64 windows_arm64 windows_x86_64 linux_aarc
       --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@$source_ref" \
       --certificate-oidc-issuer https://token.actions.githubusercontent.com "$archive"
   gh attestation verify "$archive" --repo "$repository" \
+      --source-ref "$source_ref" --source-digest "$source_sha" \
+      --signer-workflow "$repository/.github/workflows/release.yml" \
+      --deny-self-hosted-runners
+done
+
+# Optional delta roles and canonical standalone updater artifacts must carry the
+# same exact-source hosted provenance as their ZIP. The Python complete-set
+# verifier below rejects unknown names and binds every standalone byte to it.
+shopt -s nullglob
+standalone_assets=("$asset_dir"/mesh-talk-update_* "$asset_dir"/mesh-talk-update-raw_* "$asset_dir"/mesh-talk-patch_*)
+for asset in "${standalone_assets[@]}"; do
+  test -f "$asset" && test ! -L "$asset" && test -s "$asset"
+  gh attestation verify "$asset" --repo "$repository" \
       --source-ref "$source_ref" --source-digest "$source_sha" \
       --signer-workflow "$repository/.github/workflows/release.yml" \
       --deny-self-hosted-runners

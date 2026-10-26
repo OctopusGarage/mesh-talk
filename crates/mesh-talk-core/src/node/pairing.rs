@@ -17,6 +17,8 @@ const REQ_MAGIC: &[u8] = b"MTPQ1";
 const SELECTED_REQ_MAGIC: &[u8] = b"MTPQ2";
 const SELECTED_PAIR_DOMAIN: &[u8] = b"mesh-talk-pairing-v2";
 const RESP_MAGIC: &[u8] = b"MTPS1";
+const METADATA_REQ_MAGIC: &[u8] = b"MTPQ3";
+const METADATA_RESP_MAGIC: &[u8] = b"MTPS2";
 const BACKFILL_MAGIC: &[u8] = b"MTBF1";
 
 /// A one-time, high-entropy linking code shown by the linker and entered on the joiner.
@@ -79,6 +81,59 @@ impl PairingCode {
         h.finalize().into()
     }
 
+    pub fn authenticator_metadata(
+        &self,
+        linker_ed: &[u8; 32],
+        joiner_ed: &[u8; 32],
+        history: bool,
+    ) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(b"mesh-talk-pairing-v3");
+        h.update(self.0);
+        h.update(linker_ed);
+        h.update(joiner_ed);
+        h.update([u8::from(history)]);
+        h.finalize().into()
+    }
+
+    pub fn verify_metadata(
+        &self,
+        linker_ed: &[u8; 32],
+        joiner_ed: &[u8; 32],
+        history: bool,
+        tag: &[u8; 32],
+    ) -> bool {
+        ct_eq(
+            &self.authenticator_metadata(linker_ed, joiner_ed, history),
+            tag,
+        )
+    }
+
+    /// V4 authorizes mandatory private account access alongside the history choice.
+    pub fn authenticator_access(
+        &self,
+        linker: &[u8; 32],
+        joiner: &[u8; 32],
+        history: bool,
+    ) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(b"mesh-talk-pairing-v4");
+        h.update(self.0);
+        h.update(linker);
+        h.update(joiner);
+        h.update([u8::from(history), 1]);
+        h.finalize().into()
+    }
+    pub fn verify_access(
+        &self,
+        linker: &[u8; 32],
+        joiner: &[u8; 32],
+        history: bool,
+        tag: &[u8; 32],
+    ) -> bool {
+        ct_eq(&self.authenticator_access(linker, joiner, history), tag)
+    }
+
     /// Verify a V2 selection without accepting a V1 proof in its place.
     pub fn verify_selected(
         &self,
@@ -135,10 +190,28 @@ impl PairingRequest {
         frame(SELECTED_REQ_MAGIC, &(self, history))
     }
 
-    /// Recognize either version. Authorization must use `decode_selected` so the
-    /// selection and its proof domain are preserved.
+    pub fn encode_access(&self, history: bool) -> Vec<u8> {
+        frame(b"MTPQ4", &(self, history, true))
+    }
+    pub fn decode_access(bytes: &[u8]) -> Option<(Self, bool)> {
+        let (request, history, access): (Self, bool, bool) = unframe(b"MTPQ4", bytes)?;
+        access.then_some((request, history))
+    }
+    pub fn encode_metadata(&self, history: bool) -> Vec<u8> {
+        frame(METADATA_REQ_MAGIC, &(self, history))
+    }
+
+    pub fn decode_negotiated(bytes: &[u8]) -> Option<(Self, Option<bool>, bool)> {
+        if let Some((request, history)) = unframe(METADATA_REQ_MAGIC, bytes) {
+            return Some((request, Some(history), true));
+        }
+        Self::decode_selected(bytes).map(|(request, history)| (request, history, false))
+    }
+
+    /// Recognize all versions. Authorization must use `decode_negotiated` so
+    /// the selection and its proof domain are preserved.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        Self::decode_selected(bytes).map(|(request, _)| request)
+        Self::decode_negotiated(bytes).map(|(request, _, _)| request)
     }
 
     /// `None` selection denotes the unchanged V1 request, which requests history.
@@ -163,6 +236,19 @@ impl PairingResponse {
     pub fn encode(&self) -> Vec<u8> {
         frame(RESP_MAGIC, self)
     }
+    pub fn encode_metadata(&self, created_at_ms: Option<u64>) -> Vec<u8> {
+        frame(METADATA_RESP_MAGIC, &(self, created_at_ms))
+    }
+
+    pub fn decode_metadata(bytes: &[u8]) -> Option<(Self, Option<u64>)> {
+        let (response, created_at_ms) = unframe(METADATA_RESP_MAGIC, bytes)?;
+        crate::identity::account::Account::from_secret_bytes_with_created_at(
+            [0; 32],
+            created_at_ms,
+        )?;
+        Some((response, created_at_ms))
+    }
+
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         unframe(RESP_MAGIC, bytes)
     }
@@ -195,6 +281,26 @@ mod tests {
     use super::*;
     use crate::identity::account::Account;
     use crate::identity::device::DeviceIdentity;
+
+    #[test]
+    fn pairing_v3_metadata_proof_is_not_interchangeable_with_v2_or_v1() {
+        let code = PairingCode::generate();
+        let tag = code.authenticator_metadata(&[1; 32], &[2; 32], false);
+        assert!(code.verify_metadata(&[1; 32], &[2; 32], false, &tag));
+        assert!(!code.verify_metadata(&[1; 32], &[2; 32], true, &tag));
+        assert!(!code.verify_metadata(&[9; 32], &[2; 32], false, &tag));
+        assert!(!code.verify_metadata(&[1; 32], &[9; 32], false, &tag));
+        assert!(!code.verify_selected(&[1; 32], &[2; 32], false, &tag));
+        assert!(!code.verify(&[1; 32], &[2; 32], &tag));
+        let request = PairingRequest {
+            joiner: DeviceIdentity::generate().public(),
+            tag,
+        };
+        assert_eq!(
+            PairingRequest::decode_negotiated(&request.encode_metadata(false)),
+            Some((request, Some(false), true))
+        );
+    }
 
     #[test]
     fn pairing_v2_request_is_recognized_without_changing_legacy_bytes() {
@@ -314,5 +420,119 @@ mod tests {
     fn a_sync_like_frame_is_not_a_pairing_request() {
         // Bytes without the magic must not decode as a pairing request.
         assert!(PairingRequest::decode(&[0u8, 1, 2, 3, 4, 5]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    #[test]
+    fn v4_proof_binds_history_access_and_cannot_be_downgraded() {
+        let code = PairingCode::generate();
+        let linker = [1; 32];
+        let joiner = [2; 32];
+        let proof = code.authenticator_access(&linker, &joiner, false);
+        assert!(code.verify_access(&linker, &joiner, false, &proof));
+        assert!(!code.verify_access(&linker, &joiner, true, &proof));
+        assert!(!code.verify_selected(&linker, &joiner, false, &proof));
+        assert!(!code.verify_access(&linker, &[3; 32], false, &proof));
+        let request = PairingRequest {
+            joiner: PublicIdentity {
+                ed25519_pub: joiner,
+                x25519_pub: linker,
+            },
+            tag: proof,
+        };
+        assert_eq!(
+            PairingRequest::decode_access(&request.encode_access(false)),
+            Some((request.clone(), false))
+        );
+        assert!(PairingRequest::decode_selected(&request.encode_access(false)).is_none());
+        assert!(PairingRequest::decode_access(&request.encode_selected(false)).is_none());
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PairingAccessResponse {
+    pub account: PairingResponse,
+    pub access: super::AccountAccessSnapshot,
+    pub created_at_ms: Option<u64>,
+    pub profile: Option<super::AccountProfile>,
+}
+impl PairingAccessResponse {
+    const MAX_BYTES: usize = super::profile::MAX_AVATAR_BYTES + 16 * 1024;
+    const CHUNK: usize = 60 * 1024;
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        frame(b"MTPS4", self)
+    }
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        use bincode::Options;
+        if bytes.len() > Self::MAX_BYTES {
+            return None;
+        }
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(Self::MAX_BYTES as u64)
+            .reject_trailing_bytes()
+            .deserialize(bytes.strip_prefix(b"MTPS4")?)
+            .ok()
+    }
+    pub(crate) async fn send(
+        &self,
+        channel: &mut crate::transport::SecureChannel<tokio::net::TcpStream>,
+    ) -> Result<(), crate::transport::TransportError> {
+        let bytes = zeroize::Zeroizing::new(self.encode());
+        if bytes.len() > Self::MAX_BYTES {
+            return Err(crate::transport::TransportError::PlaintextTooLarge(
+                bytes.len(),
+            ));
+        }
+        if bytes.len() <= crate::transport::MAX_PLAINTEXT {
+            return channel.send(&bytes).await;
+        }
+        let count = bytes.len().div_ceil(Self::CHUNK);
+        for (index, chunk) in bytes.chunks(Self::CHUNK).enumerate() {
+            let mut frame = zeroize::Zeroizing::new(b"MTPC4".to_vec());
+            frame.extend((bytes.len() as u32).to_be_bytes());
+            frame.push(index as u8);
+            frame.push(count as u8);
+            frame.extend(chunk);
+            channel.send(&frame).await?;
+        }
+        Ok(())
+    }
+    pub(crate) async fn receive(
+        channel: &mut crate::transport::SecureChannel<tokio::net::TcpStream>,
+        first: &[u8],
+    ) -> Option<Self> {
+        if !first.starts_with(b"MTPC4") {
+            return Self::decode(first);
+        }
+        let header = first.get(..11)?;
+        let size = u32::from_be_bytes(header[5..9].try_into().ok()?) as usize;
+        let count = header[10] as usize;
+        if header[9] != 0
+            || size <= crate::transport::MAX_PLAINTEXT
+            || size > Self::MAX_BYTES
+            || count != size.div_ceil(Self::CHUNK)
+            || first.len() != 11 + Self::CHUNK
+        {
+            return None;
+        }
+        let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(size));
+        bytes.extend(&first[11..]);
+        for index in 1..count {
+            let next = zeroize::Zeroizing::new(channel.recv().await.ok()?);
+            let expected_len = (size - index * Self::CHUNK).min(Self::CHUNK);
+            if next.len() != 11 + expected_len
+                || next.get(..9)? != &header[..9]
+                || next[9] as usize != index
+                || next[10] as usize != count
+            {
+                return None;
+            }
+            bytes.extend(&next[11..]);
+        }
+        Self::decode(&bytes)
     }
 }

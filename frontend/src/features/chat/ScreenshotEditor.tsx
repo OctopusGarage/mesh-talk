@@ -367,13 +367,19 @@ export function ScreenshotEditor({
       );
       ctx.translate(-region.x, -region.y);
       marks.forEach((mark) => paintMark(ctx, mark, image));
-      const blob = await new Promise<Blob>((resolve, reject) =>
+      const png = new Promise<Blob>((resolve, reject) =>
         output.toBlob(
           (value) =>
             value ? resolve(value) : reject(new Error("PNG encoding failed")),
           "image/png",
         ),
       );
+      // Start the clipboard write during the confirmation gesture. WebKit needs
+      // user activation even though PNG encoding completes asynchronously.
+      const copied = navigator.clipboard.write([
+        new ClipboardItem({ "image/png": png }),
+      ]);
+      const [blob] = await Promise.all([png, copied]);
       await onSend(new Uint8Array(await blob.arrayBuffer()));
     } catch (error) {
       setFailure(error instanceof Error ? error.message : String(error));

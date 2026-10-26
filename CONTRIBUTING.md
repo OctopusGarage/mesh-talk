@@ -47,7 +47,7 @@ cargo run -p mesh-talk-core --bin mesh-talk-node -- \
    PR/release gates, or CI (`e2e-backend.yml`).
 3. **UI E2E** — `cd frontend && npm run e2e`: Playwright drives the real React app against
    mocked Tauri IPC and walks the full business flow. It includes large-roster stress,
-   keyboard and touch checks, seven default-edition theme snapshots, and representative WCAG A/AA scans.
+   keyboard and touch checks, theme snapshots with explicit pack fixtures, and representative WCAG A/AA scans.
    Add stable `data-testid` selectors for controls exercised by browser tests. CI runs
    them in `e2e-ui.yml`.
 4. **Fuzz** — `cargo check --manifest-path fuzz/Cargo.toml --bins` compiles the decoder

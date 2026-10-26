@@ -5,8 +5,9 @@ A dedicated headless participant can act as a bot; the desktop can delegate
 sending through the signed-in user's account. Both use the existing encrypted
 DM/group paths. AI execution stays in your agent application.
 
-The service exposes private local IPC and four MCP tools. It does not expose
-chat history, run models, or open an HTTP webhook endpoint. Interactive event
+The service exposes private local IPC and four MCP tools. Desktop settings also
+provide a loopback HTTP adapter over that same service. It does not expose chat
+history, run models, or receive incoming HTTP webhooks. Interactive event
 subscriptions, portable bot badges, cards, remote MCP/OAuth and incoming HTTP
 webhooks remain outside the current implementation. Future adapters must reuse
 the scoped integration service and core delivery journal; they must not own mesh
@@ -215,32 +216,117 @@ argument. A notification script can use the CLI directly without any MCP host.
 Receiving a chat message does not automatically wake an idle AI application;
 interactive event processing remains a later feature stage.
 
-## Enable desktop delegation
+## Desktop local agent access
 
-Desktop integration is disabled by default. Launch the app with
-`MESH_TALK_INTEGRATIONS=1`, then sign in. For development:
+Open **Settings → Integrations → Local agent access**, select up to 16 existing
+contacts or joined groups, then enable the switch. Access is off by default and
+belongs to the signed-in account on this computer. No separate bot, CLI install,
+MCP host or HTTP server process is required. Only the desktop Rust backend runs
+the local adapters; it reuses the same integration service, grants and encrypted
+message acceptance path.
 
-```sh
-MESH_TALK_INTEGRATIONS=1 make tauri-dev
-```
+New account scopes follow the current user's hidden-contact presentation policy;
+joined groups remain available. Existing grants remain listed for explicit
+revocation, including grants for subsequently hidden contacts. Hiding a contact
+does not change an existing authorization.
 
-The desktop creates a unique private
-`accounts/<host-profile>/integration-admin-<generation>-<nonce>.json` under its
-configured data root (`~/.mesh-talk` by default). Its filename is logged without
-the account identifier or credential. It refers to the account's stable
-`integration-endpoint.json`. Use the same administrative CLI above to export a
-scoped client grant. Messages use the user's existing account/device identity;
-remote clients do not receive a verified “sent by agent” label in this release.
-A content-free acceptance event refreshes the active desktop conversation through
-its normal history API, without adding unread counts or incoming notifications.
+The switch starts a numeric-loopback HTTP listener on an available port.
+**View agent instructions** expands a short English bootstrap containing its
+complete `http://127.0.0.1:PORT/v1/help` URL. **Copy instructions** copies exactly
+that bootstrap for another agent. It includes no credentials or conversation IDs.
 
-Lock, logout, profile replacement and runtime retirement invalidate captured
-requests at their actual commit boundary. The adapter never unlocks the app,
-changes profiles or opens a second node against its stores. While the desktop
-is closed or locked, delegated operations fail. On normal restart, a fresh admin
-file is issued and existing unrevoked scoped clients follow the new endpoint.
+Enabling also upserts one marked block in the Codex user-level `AGENTS.md` under
+`CODEX_HOME`, or `~/.codex/AGENTS.md` when that variable is unset. **View agent instructions** shows the actual path. Existing unrelated instructions and Unix file
+permissions are preserved; repeated toggles do not append duplicate blocks.
+Disabling removes only Mesh-Talk's block and stops local admission. Malformed or
+externally duplicated markers produce an error rather than guessing which user
+content to delete. Other agents may use different instruction locations; paste
+the copied bootstrap into their instructions. An already-running agent may need
+to reload instructions to discover a refreshed endpoint.
+
+### API discovery and authentication
+
+`GET /v1/help` is public local discovery. It returns a structured versioned
+catalog: fixed HTTP routes, request schemas derived from the actual Rust request
+types, examples, authentication instructions, response envelopes, resource limits,
+errors and retry semantics. It exposes no token, account principal, chat content
+or granted destinations. Agents learn the private credential-file location from
+this catalog; the prompt does not need to embed it or maintain a second API manual.
+
+The managed credential file is `agent-access.json` under the desktop's configured
+data root (`~/.mesh-talk` by default). It contains an HTTP `endpoint` and scoped
+`token`; read it privately and supply `Authorization: Bearer <token>` on every
+operation request. Never paste, print or log the token. A normal first operation
+is `POST /v1/context` with `{}` and `Content-Type: application/json`, which
+identifies the current granted destinations and limits. The help catalog describes
+`POST /v1/conversations`, `/v1/messages` and `/v1/send-result`; there are no HTTP
+administration or arbitrary RPC routes.
+
+The listener binds only `127.0.0.1`. Requests must use its exact numeric Host;
+browser Origin and Sec-Fetch metadata are rejected, and no CORS access is granted.
+This is local agent automation, not a remotely reachable API. Processes running
+as the same OS user remain within the documented local trust boundary. Existing
+private UDS transport on macOS/Linux and current-user named pipes on Windows
+retain their original framing and CLI/MCP compatibility.
+
+### Lifecycle and authority
+
+Enabling desktop local-agent access or adding selected conversations requires
+[fresh identity verification](privacy-controls.md#verify-sensitive-operations),
+including additions to a saved disabled scope. Disabling and scope reduction do
+not require a new prompt. Authentication is bound to the captured desktop
+session and lock revision and checked again at the grant/configuration commit.
+
+The saved preference, active listener and instructions state are distinct. The
+settings panel reports actual readiness and errors. Permission changes and startup
+reconciliation share one serialized desktop lifecycle owner; there is never a
+second grant-store writer or participant using the same desktop stores. Changing
+scope retires the previous listener and managed credential before replacement.
+New desktop authorizations default to **One hour**. Choose **Until I turn it off**
+explicitly for ongoing automation. Existing saved continuous authorizations keep
+their behavior and are labeled accordingly. Temporary authorization stores an
+absolute deadline: retrying service setup, editing conversations, locking and
+unlocking, or restarting the app does not start a new hour. **Renew authorization**
+is an explicit operation requiring fresh identity verification. Extending access
+or changing it to continuous also requires verification; disabling and reducing
+scope remain available without a new prompt.
+
+The grant is checked again at actual message acceptance, so a request waiting
+when authorization expires cannot commit afterward. Expiry does not recall
+messages already accepted. The UI distinguishes expired authorization from a
+service error. Restarting replaces credentials without extending the saved
+deadline, and an expired authorization stays expired until explicitly renewed.
+Across app launches, deadlines rely on the system clock. During a running
+process, monotonic elapsed time prevents clock rollback from reviving authority.
+CLI-issued grants retain their documented explicit expiry/restart behavior.
+
+The desktop must be running and unlocked. Lock, logout, profile replacement and
+runtime retirement reject captured requests at the actual message commit boundary.
+Closing admission prevents pending requests from accepting new work, then the
+runtime-owned supervisor shuts down both adapters and joins their producers.
+Disabling does not recall already accepted messages. Normal restart restores the
+unexpired saved scope, issues fresh managed credentials and refreshes the one instructions
+block. Core privacy, membership, rate limits and retry/delivery semantics above
+continue to apply. The service never unlocks the app or opens a second node.
+
+The advanced `MESH_TALK_INTEGRATIONS=1` startup opt-in remains compatible until an
+explicit settings preference is saved; it uses this same lifecycle owner. The
+private administrator configuration and CLI grant commands above remain available
+for manually managed clients. Settings takes precedence after an explicit choice.
 
 ## Revoke, inspect and stop
+
+Desktop General settings also shows recent activity for the **Local agent
+interface**. It includes recent accepted and retried sends, with time and target
+conversation, without message bodies, credentials or raw retry keys. Acceptance
+does not prove recipient delivery. The view contains at most 20 sends from the existing seven-day audit window
+and may be incomplete;
+an unavailable activity read is shown separately from an empty record.
+
+The desktop authorization is shared by local clients holding its credential.
+Activity identifies the local agent interface, not a verified AI application or
+vendor. It does not expose chat history or add an activity-reading tool to the
+producer API.
 
 ```sh
 ./target/debug/mesh-talk-integrations grant-list \
@@ -265,7 +351,7 @@ neutralize a stolen bot signing key or erase plaintext already copied by a
 member. A send-only client cannot read group history, but its trusted bot
 hosting gateway is an ordinary member with decryption capability.
 
-The service creates no public network API. Unix sockets are restricted to their
+The service creates no remotely reachable network API. Unix sockets are restricted to their
 owner; Windows pipes use current-user ACLs and reject remote clients. Requests
 are bounded to 64 KiB, 16 concurrent IPC connections and a 30-second I/O budget.
 Accepted messages survive a client timeout/cancellation through the encrypted

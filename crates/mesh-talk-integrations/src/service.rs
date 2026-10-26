@@ -1,4 +1,5 @@
 //! Closed application API shared by trusted host adapters and local transports.
+use crate::model::StatusRequest;
 use crate::policy::{Grant, GrantRegistry, equal_hash, token_hash};
 use crate::{Destination, GrantSpec, IntegrationError, SendMessage};
 use mesh_talk_core::node::{MessageAcceptance, Node, NodeError, OutgoingMessageRequest};
@@ -68,11 +69,6 @@ pub struct IntegrationService {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StatusRequest {
-    idempotency_key: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RevokeRequest {
     grant_id: String,
 }
@@ -136,6 +132,16 @@ fn request_id(account: &str, client: &str, key: &str) -> Result<[u8; 32], Integr
     Ok(hash.finalize().into())
 }
 impl IntegrationService {
+    /// Host-local settings observation. Does not expose raw administrative audit.
+    pub fn recent_send_activity(
+        &self,
+        client_id: &str,
+    ) -> Result<Vec<crate::policy::RecentSendActivity>, IntegrationError> {
+        self.registry
+            .lock()
+            .map_err(|_| IntegrationError::new("STORAGE_FAILURE", "Grant store unavailable"))?
+            .recent_send_activity(client_id)
+    }
     pub fn new(host: Arc<dyn IntegrationHost>, grants: GrantRegistry, admin_token: &str) -> Self {
         Self {
             host,
@@ -573,6 +579,101 @@ mod tests {
             "INVALID_INPUT"
         );
     }
+    #[tokio::test]
+    async fn a_send_paused_until_after_deadline_cannot_append_a_core_event() {
+        struct PausedHost {
+            inner: HeadlessHost,
+            entered: tokio::sync::Notify,
+            resume: tokio::sync::Notify,
+        }
+        impl IntegrationHost for PausedHost {
+            fn account_id(&self) -> &str {
+                self.inner.account_id()
+            }
+            fn send<'a>(
+                &'a self,
+                request: OutgoingMessageRequest,
+                authorization: Arc<dyn CommitAuthorization>,
+            ) -> HostFuture<'a, MessageAcceptance> {
+                Box::pin(async move {
+                    self.entered.notify_one();
+                    self.resume.notified().await;
+                    self.inner.send(request, authorization).await
+                })
+            }
+            fn with_node<'a>(&'a self, operation: HostOperation<'a>) -> HostFuture<'a, Value> {
+                self.inner.with_node(operation)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let node = test_node(dir.path());
+        let channel = node.create_channel("Deadline", vec![]).await.unwrap();
+        let destination = Destination::Channel {
+            id: hex::encode(channel.as_bytes()),
+        };
+        let host = Arc::new(PausedHost {
+            inner: HeadlessHost::new(node.clone()),
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        });
+        let registry =
+            GrantRegistry::open(&dir.path().join("grants"), "pw", &node.account_id()).unwrap();
+        let admin = new_token();
+        let service = Arc::new(IntegrationService::new(host.clone(), registry, &admin));
+        let deadline = now_ms() + 1_000;
+        let issued = service.handle(&admin,"grant_create",json!({"client_id":"desktop-local-agent","destinations":[destination],"describe":false,"expires_at_ms":deadline})).await.unwrap();
+        let request_service = service.clone();
+        let pending = tokio::spawn(async move {
+            request_service.handle(issued["token"].as_str().unwrap(),"send_message",json!({"destination":destination,"text":"must never append","idempotency_key":"paused-expiry"})).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), host.entered.notified())
+            .await
+            .expect("send must reach its pre-commit pause");
+        tokio::time::sleep(std::time::Duration::from_millis(
+            deadline.saturating_sub(now_ms()) + 1,
+        ))
+        .await;
+        host.resume.notify_one();
+        assert!(pending.await.unwrap().is_err());
+        assert!(node.channel_history(channel, 10).is_empty());
+        assert!(
+            service
+                .recent_send_activity("desktop-local-agent")
+                .unwrap()
+                .is_empty()
+        );
+        host.inner.retire().await;
+    }
+
+    #[tokio::test]
+    async fn deadline_invalidates_an_already_captured_commit_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = test_node(dir.path());
+        let admin = new_token();
+        let service = fixture(dir.path(), node, &admin);
+        let destination = Destination::Channel {
+            id: "cd".repeat(32),
+        };
+        let deadline = now_ms() + 150;
+        let issued = service.handle(&admin,"grant_create",json!({"client_id":"desktop-local-agent","destinations":[destination],"describe":false,"expires_at_ms":deadline})).await.unwrap();
+        let authority =
+            service.authority(issued["token"].as_str().unwrap(), Some(destination), false);
+        tokio::time::sleep(std::time::Duration::from_millis(
+            deadline.saturating_sub(now_ms()) + 1,
+        ))
+        .await;
+        let mut mutated = false;
+        assert!(
+            authority
+                .commit(&mut || {
+                    mutated = true;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!mutated, "deadline must be checked at the actual commit");
+    }
+
     #[tokio::test]
     async fn revocation_invalidates_an_already_captured_commit_authority() {
         let dir = tempfile::tempdir().unwrap();

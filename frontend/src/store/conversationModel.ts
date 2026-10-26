@@ -8,13 +8,20 @@ export interface Conversation {
   name: string;
 }
 
-export interface SearchTarget {
-  wallClock: number;
-  text: string;
-  fromMe: boolean;
-}
+export type SearchTarget =
+  | {
+      reference: import("@/lib/api/chat").SearchReference;
+      /** Read-only context presentation, separate from canonical history and unread evidence. */
+      context: ChatMessage[];
+    }
+  | {
+      wallClock: number;
+      text: string;
+      fromMe: boolean;
+    };
 
 export interface ChatMessage {
+  protection?: import("@/lib/types").MessageProtection | null;
   /** Authenticated absolute send-time deadline; null/absent means keep. */
   expiresAtMs?: number | null;
   receivedAt?: number;
@@ -25,8 +32,10 @@ export interface ChatMessage {
     kind: "attempting" | "retry_scheduled";
     ageMs: number;
     sampledAt: number;
+    reason?: "post_office_disabled" | "no_known_route" | "attempt_timed_out";
   };
   replicas?: number;
+  postOfficeCopies?: number;
   metadataPending?: boolean;
   id: string | null; // hex EventId; null while pending
   fromMe: boolean;
@@ -53,6 +62,7 @@ export interface ChatMessage {
 export type SendPayload =
   | {
       kind: "text";
+      protection?: import("@/lib/types").MessageProtection | null;
       text: string;
       replyTo: string | null;
       expiresAtMs?: number | null;
@@ -63,11 +73,21 @@ export type SendPayload =
       fallback: string;
       expiresAtMs?: number | null;
     }
-  | { kind: "file"; path: string; media: boolean; expiresAtMs?: number | null };
+  | {
+      kind: "file";
+      path: string;
+      media: boolean;
+      /** Selected sticker bytes retain their display metadata before manifest hydration. */
+      stickerMedia?: { name: string; size: number; mime: string };
+      expiresAtMs?: number | null;
+      protection?: import("@/lib/types").MessageProtection | null;
+    };
 export interface SendIntent {
   conversation: Conversation;
   payload: SendPayload;
   message: ChatMessage;
+  /** Consumed only on durable acceptance, including a later retry. */
+  onAccepted?: () => void;
   /** Exact deletion protection owned by the bounded intent, never by an LRU scope. */
   deletedIds?: string[];
   /** Capacity fallback: accepted messages need canonical history, never an overlay. */

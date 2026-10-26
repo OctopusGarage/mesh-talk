@@ -1,3 +1,6 @@
+import { useEffect, useLayoutEffect, useRef } from "react";
+import { useNotificationPermission } from "@/lib/notify";
+import { NotificationPermissionHelp } from "../NotificationPermissionHelp";
 import { Bell, BellRing, FlaskConical, Play } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Switch } from "@/components/ui/switch";
@@ -13,22 +16,45 @@ export function NotificationSettings({
 }) {
   const { t } = useTranslation();
   const s = c.settings;
+  const view = useRef({ active: false });
+  useLayoutEffect(() => {
+    const lifetime = { active: true };
+    view.current = lifetime;
+    return () => {
+      lifetime.active = false;
+    };
+  }, [c.identity]);
+  const requesting = useNotificationPermission((state) => state.requesting);
+  useEffect(() => {
+    if (s?.notifications) void useNotificationPermission.getState().refresh();
+  }, [s?.notifications]);
   if (!s) return null;
   return (
     <>
       <SettingsRow
         id="setting-notifications"
+        controlAlignment="start"
         icon={<Bell className="h-4 w-4" />}
         title={t("settings.notifications")}
-        desc={t("settings.notificationsDesc")}
+        desc={
+          <div className="space-y-3">
+            <p>{t("settings.notificationsDesc")}</p>
+            {s.notifications && <NotificationPermissionHelp />}
+          </div>
+        }
         control={
           <Switch
             id="setting-notifications"
             checked={s.notifications}
-            disabled={c.saving}
-            onCheckedChange={(on) =>
-              void c.update({ notifications: on }, "notifications")
-            }
+            disabled={c.saving || requesting}
+            onCheckedChange={async (on) => {
+              const lifetime = view.current;
+              const current = () => lifetime.active;
+              if (await c.update({ notifications: on }, "notifications")) {
+                if (on && current())
+                  void useNotificationPermission.getState().enable(current);
+              }
+            }}
           />
         }
       />

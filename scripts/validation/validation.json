@@ -15,7 +15,9 @@
         "scripts/e2e-network-handoff.py",
         "scripts/README.md"
       ],
-      "node": ["scripts/diagnostics/post-office-installer.test.mjs"],
+      "node": [
+        "scripts/diagnostics/post-office-installer.test.mjs"
+      ],
       "escalation": [
         "Network membership mode validates public policy/certificate before installation mutation and persists public files without authority private keys. Policy changes/renewal require restart; startup must bind the certificate to the existing device identity. Windows installer changes require native PowerShell execution in addition to macOS fixtures. Managed services must use main TCP 47479. Managed service discovery must use dedicated UDP 47478 and shared LAN UDP 47474 on all hosts; reject other installer values before mutation. Preserve mesh identity, credentials, custody data and service configuration during updates. macOS local-build updates must retain the installed code-signing identifier and verify the staged signature before replacement; publisher-issued signatures remain intact. See docs/post-office-macos-service.md. Validate real service restart, LAN multicast and routed discovery on the affected host; fixture tests and listener checks do not establish local-network access. Interface handoff changes require the opt-in Docker network-namespace harness: queued and new messages must converge with authenticated receipts without process restart or manual rescan; namespace evidence is separate from physical Wi-Fi hardware."
       ]
@@ -25,6 +27,7 @@
       "paths": [
         ".github/workflows/release.yml",
         ".github/workflows/release-maintenance.yml",
+        ".github/workflows/prepare-stable.yml",
         "release-please-config.json",
         ".release-please-manifest.json",
         "CHANGELOG.md",
@@ -49,7 +52,12 @@
         "scripts/diagnostics/version-contract.test.mjs",
         "scripts/diagnostics/version-automation.test.mjs",
         "site/index.html",
-        "docs/updates.md"
+        "docs/updates.md",
+        "scripts/diagnostics/release-updater.test.mjs",
+        "scripts/release/delta.mjs",
+        "scripts/release/delta_assets.py",
+        "scripts/diagnostics/release-delta.test.mjs",
+        "src-tauri/examples/delta-artifact.rs"
       ],
       "node": [
         "scripts/diagnostics/release-assets.test.mjs",
@@ -62,17 +70,28 @@
         "scripts/diagnostics/release-verifier.test.mjs",
         "scripts/diagnostics/release-workflow.test.mjs",
         "scripts/diagnostics/version-contract.test.mjs",
-        "scripts/diagnostics/version-automation.test.mjs"
+        "scripts/diagnostics/version-automation.test.mjs",
+        "scripts/diagnostics/release-updater.test.mjs",
+        "scripts/diagnostics/release-delta.test.mjs"
       ],
       "escalation": [
-        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Both editions and every platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Release-maintenance changes require hosted evidence for bot-PR permissions/checks, unpublished draft-only creation, explicit release build dispatch and reviewed next-target PR creation; local mocks do not prove those settings. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate."
+        "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Every desktop and relay platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Manual draft/maintenance changes require hosted evidence for explicit main-only preparation, unpublished draft-only creation, exact tagged build dispatch and reviewed next-target PR creation; local mocks do not prove those settings and actual preparation/publication requires explicit release intent. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate.",
+        "Optional macOS/Windows delta publication requires SDK full-version authentication of prior canonical payloads, exact native representation equivalence, production Rust decoder round-trip, complete signed metadata savings of at least 25 percent and 1 MiB, and ZIP/standalone digest and provenance acceptance. Actual Windows complete NSIS installation/restart and transferred delta bytes require native hosted evidence; executable-only patches and fixture success do not establish acceptance. Linux remains canonical full update only."
       ],
       "capability": {
-        "summary": "Maintain one Cargo product target and reviewed release/next-target PRs, publishing complete exact-source verified Stable releases and immutable automatic main-branch Nightlies.",
+        "summary": "Maintain one Cargo product target, curated version notes and reviewed version/next-target PRs, publishing complete exact-source verified Stable releases and immutable automatic main-branch Nightlies.",
         "guide": "docs/updates.md",
         "invariants": [
           {
-            "name": "Stable publication remains explicit; Nightly is opt-in, main-only and never latest, with all platform/edition assets verified before visibility.",
+            "name": "Linux x64 and ARM64 release builds retain the Ubuntu 22.04 glibc baseline; compiled Cargo caches are isolated by runner identity, and actual public AppImage launch remains required upgrade acceptance evidence.",
+            "reference": "docs/updates.md#download-verification-and-installation"
+          },
+          {
+            "name": "Nightly preflight waits at most four hours for missing or pending exact-source checks; completed unsuccessful checks, scanning alerts and API errors fail immediately. Final publication remains an immediate strict source recheck.",
+            "reference": "docs/updates.md#publish-nightly-builds"
+          },
+          {
+            "name": "Stable publication remains explicit; Nightly is opt-in, main-only and never latest, with all platform assets verified before visibility; desktop packages omit optional packs and edition suffixes.",
             "reference": "docs/updates.md"
           },
           {
@@ -80,8 +99,20 @@
             "reference": "docs/updates.md#version-ownership-and-lifecycle"
           },
           {
-            "name": "Release preparation creates reviewed PRs and unpublished drafts only; explicit build dispatch and next-target PRs preserve the existing final Stable publication gate without direct main pushes.",
-            "reference": "docs/updates.md#automated-release-preparation"
+            "name": "Ordinary main pushes create no release proposals. Explicit main-only Stable preparation validates canonical version, curated notes, historical provenance, exact-source CI and immutable tag/draft state before mutation; next-target PRs retain the existing final publication gate without direct main pushes.",
+            "reference": "docs/updates.md#manual-release-preparation"
+          },
+          {
+            "name": "Stable notes require one nonempty exact-version CHANGELOG section; Nightly never borrows another version. Templates retain download/installation/source verification, GitHub automatic product notes are disabled, and release-state reads revalidate cached responses.",
+            "reference": "docs/updates.md#manual-release-preparation"
+          },
+          {
+            "name": "Optional free updater signing binds the full logical build version; standalone native payloads and signatures must match the verified ZIP and form a complete platform matrix. Missing keys keep the manual path; partial signing configuration fails closed.",
+            "reference": "docs/updates.md#free-updater-signing-setup"
+          },
+          {
+            "name": "Optional macOS/Windows delta assets preserve the canonical full updater, authenticate at most two eligible installed-executable bases with the existing SDK full-version signature, round-trip exact native targets through the production decoder, and pass complete signed metadata savings, installer equivalence and standalone provenance checks before publication.",
+            "reference": "docs/updates.md#incremental-download-preparation"
           }
         ]
       }
@@ -179,6 +210,7 @@
         "scripts/pr-platform/",
         "scripts/validation/pr-scenarios.mjs",
         "scripts/diagnostics/prepare-pr.test.mjs",
+        "scripts/diagnostics/pr-platform.test.mjs",
         "scripts/diagnostics/pr-scenarios.test.mjs",
         "scripts/validation/native-build.mjs",
         "scripts/diagnostics/native-build.test.mjs"
@@ -221,6 +253,7 @@
     {
       "id": "ci-verification",
       "paths": [
+        "_typos.toml",
         "scripts/check-health.sh",
         "scripts/diagnostics/ci-latency.test.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
@@ -240,7 +273,8 @@
         ".github/workflows/dependency-review.yml",
         "scripts/ci/collect-ui-coverage.mjs",
         "scripts/ci/unit-coverage-artifact.mjs",
-        "scripts/diagnostics/health-workflow.test.mjs"
+        "scripts/diagnostics/health-workflow.test.mjs",
+        ".gitleaks.toml"
       ],
       "node": [
         "scripts/diagnostics/ci-latency.test.mjs",
@@ -250,12 +284,15 @@
         "scripts/diagnostics/health-workflow.test.mjs"
       ],
       "escalation": [
-        "Run actionlint and affected workflow regressions; source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
+        "Run actionlint and affected workflow regressions; preserve full mutation sample completion, strict report validation and bounded per-test/per-suite execution. Size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
       ]
     },
     {
       "id": "public-help",
-      "paths": ["tools/help/", "docs/help/"],
+      "paths": [
+        "tools/help/",
+        "docs/help/"
+      ],
       "node": [
         "tools/help/corpus.test.mjs",
         "tools/help/help.test.mjs",
@@ -271,14 +308,19 @@
         "docs/evals/README.md",
         "docs/evals/ai-eval-suite.json",
         "docs/evals/group-reception-ai-eval-suite.json",
+        "docs/evals/local-agent-access-ai-eval-suite.json",
         "docs/evals/linked-device-sync-ai-eval-suite.json",
         "docs/evals/person-presence-ai-eval-suite.json",
+        "docs/evals/protected-messages-ai-eval-suite.json",
         "docs/evals/tray-menu-ai-eval-suite.json",
         "docs/evals/validation-velocity-ai-eval-suite.json",
         "docs/evals/prompts/agent-contract-evaluator.md",
+        "scripts/test-ai-eval.mjs",
+        "docs/evals/desktop-updates-ai-eval-suite.json"
+      ],
+      "node": [
         "scripts/test-ai-eval.mjs"
       ],
-      "node": ["scripts/test-ai-eval.mjs"],
       "escalation": [
         "Context selection integrity checks validate rubric inputs; they do not execute the evaluated capabilities or establish native evidence."
       ]
@@ -286,11 +328,23 @@
     {
       "id": "portable-browser-reporting",
       "paths": [
+        "frontend/e2e/portable-core.spec.ts",
+        "frontend/e2e/automatic-delivery.spec.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "frontend/e2e/media-lifecycle.spec.ts",
+        "frontend/e2e/screenshot-portable.spec.ts",
+        "frontend/e2e/file-send-progress.spec.ts",
+        "frontend/e2e/directory-transfer.spec.ts",
+        "frontend/e2e/attachment-approval.spec.ts",
+        "frontend/e2e/unread-badge.spec.ts",
+        "frontend/playwright.portable.config.ts",
         "scripts/evals/browser-report.mjs",
         "scripts/evals/portable-runner.mjs",
         "scripts/diagnostics/browser-eval-report.test.mjs"
       ],
-      "node": ["scripts/diagnostics/browser-eval-report.test.mjs"],
+      "node": [
+        "scripts/diagnostics/browser-eval-report.test.mjs"
+      ],
       "escalation": [
         "Portable browser reporting requires exact scenario identities, unique trace and screenshot evidence, and zero skipped or flaky cases from the configured browser matrix. Diagnostic tests do not establish browser acceptance; see docs/testing-feedback-loop.md."
       ]

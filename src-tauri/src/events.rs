@@ -242,6 +242,7 @@ pub fn emit_call_signal<R: Runtime>(
 
 #[derive(serde::Serialize, Clone)]
 pub struct DmReceivedEvent {
+    pub protection: Option<mesh_talk_core::node::MessageProtection>,
     pub message_id: Option<String>,
     pub from_account: Option<String>,
     pub from: String,
@@ -252,6 +253,7 @@ pub struct DmReceivedEvent {
 
 #[derive(serde::Serialize, Clone)]
 pub struct ChannelMessageEvent {
+    pub protection: Option<mesh_talk_core::node::MessageProtection>,
     pub channel_id: String, // hex
     pub channel_name: String,
     pub from: String,
@@ -328,6 +330,7 @@ impl<R: Runtime> ProgressThrottle<R> {
 
 #[derive(serde::Serialize, Clone)]
 pub struct FileReceivedEvent {
+    pub protection: Option<mesh_talk_core::node::MessageProtection>,
     pub expires_at_ms: Option<u64>,
     pub conv: String, // hex (channel id for a channel file; the DM conv otherwise)
     pub is_channel: bool,
@@ -353,18 +356,27 @@ pub fn emit_dm_received<R: Runtime>(
     dm: mesh_talk_core::node::ReceivedDm,
 ) {
     let event = DmReceivedEvent {
+        protection: dm.protection,
         message_id: dm.message_id.map(|id| id.to_hex()),
         from_account: dm.from_account,
         from: dm.from,
         from_name: dm.from_name,
-        text: String::from_utf8_lossy(&dm.text).into_owned(),
+        text: if dm.protection.is_some() {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&dm.text).into_owned()
+        },
         reply_to: dm.reply_to.map(|id| hex::encode(id.as_bytes())),
     };
     notify_if_unfocused(
         app_handle,
         NotificationTarget::Dm(&event.from),
         &event.from_name,
-        &event.text,
+        if event.protection.is_some() {
+            "Protected message"
+        } else {
+            &event.text
+        },
     );
     if crate::app_lock::app_locked(app_handle) {
         return;
@@ -381,10 +393,15 @@ pub fn emit_channel_message<R: Runtime>(
 ) {
     use crate::channel_reception::Alert;
     let event = ChannelMessageEvent {
+        protection: msg.protection,
         channel_id: hex::encode(msg.channel_id.as_bytes()),
         channel_name: msg.channel_name,
         from: msg.from,
-        text: String::from_utf8_lossy(&msg.text).into_owned(),
+        text: if msg.protection.is_some() {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&msg.text).into_owned()
+        },
         reply_to: msg.reply_to.map(|id| hex::encode(id.as_bytes())),
         event_id: msg.event_id.to_hex(),
         authored_at: msg.wall_clock,
@@ -426,7 +443,11 @@ pub fn emit_channel_message<R: Runtime>(
             app_handle,
             NotificationTarget::Channel(&event.channel_id),
             &format!("# {}", event.channel_name),
-            &event.text,
+            if event.protection.is_some() {
+                "Protected message"
+            } else {
+                &event.text
+            },
         ),
         Alert::Summary(count) => notify_if_unfocused(
             app_handle,
@@ -451,11 +472,16 @@ pub fn emit_file_received<R: Runtime>(
 ) {
     use crate::channel_reception::Alert;
     let event = FileReceivedEvent {
+        protection: file.protection,
         expires_at_ms: file.expires_at_ms,
         conv: hex::encode(file.conv.as_bytes()),
         is_channel: file.is_channel,
         from: file.from,
-        name: file.name,
+        name: if file.protection.is_some() {
+            "Protected image".into()
+        } else {
+            file.name
+        },
         size: file.size,
         mime: file.mime,
         file_conv: hex::encode(file.file_conv.as_bytes()),
@@ -540,6 +566,7 @@ mod notification_policy_tests {
                 app.handle(),
                 ReceivedDm {
                     message_id: identity,
+                    protection: None,
                     from_account: account,
                     from: "sender-device".into(),
                     from_name: "Sender".into(),
@@ -563,6 +590,87 @@ mod notification_policy_tests {
                 assert!(event["from_account"].is_null());
             }
         }
+    }
+
+    #[test]
+    fn protected_image_event_preserves_protection_and_safe_file_metadata() {
+        let app = tauri::test::mock_app();
+        let settings = SettingsState::default();
+        settings.set(crate::settings::AppSettings {
+            notifications: false,
+            ..Default::default()
+        });
+        app.manage(settings);
+        app.manage(NotificationContextState::default());
+        let received = Arc::new(Mutex::new(None));
+        let sink = received.clone();
+        app.listen(EVENT_FILE_RECEIVED, move |event| {
+            *sink.lock().unwrap() =
+                Some(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
+        });
+        emit_file_received(
+            app.handle(),
+            "owner",
+            mesh_talk_core::node::ReceivedFile {
+                protection: Some(mesh_talk_core::node::MessageProtection::Authenticate),
+                expires_at_ms: None,
+                conv: mesh_talk_core::eventlog::ConversationId::new([1; 32]),
+                is_channel: false,
+                from: "sender".into(),
+                name: "private.png".into(),
+                size: 100,
+                mime: "image/png".into(),
+                file_conv: mesh_talk_core::eventlog::ConversationId::new([2; 32]),
+                media: true,
+                event_id: mesh_talk_core::eventlog::EventId::new([3; 32]),
+                authored_at: 1,
+                received_at: 2,
+                arrival_kind: "live",
+                own_device: false,
+                batch_id: None,
+                batch_complete: false,
+                batch_size: 1,
+            },
+        );
+        let event = received.lock().unwrap().take().unwrap();
+        assert_eq!(event["protection"], "authenticate");
+        assert_eq!(event["mime"], "image/png");
+        assert_eq!(event["media"], true);
+        assert_eq!(event["name"], "Protected image");
+        assert!(!event.to_string().contains("private.png"));
+    }
+
+    #[test]
+    fn protected_dm_event_never_emits_plaintext() {
+        let app = tauri::test::mock_app();
+        let settings = SettingsState::default();
+        settings.set(crate::settings::AppSettings {
+            notifications: false,
+            ..Default::default()
+        });
+        app.manage(settings);
+        let received = Arc::new(Mutex::new(None));
+        let sink = received.clone();
+        app.listen(EVENT_DM_RECEIVED, move |event| {
+            *sink.lock().unwrap() =
+                Some(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
+        });
+        emit_dm_received(
+            app.handle(),
+            mesh_talk_core::node::ReceivedDm {
+                message_id: Some(mesh_talk_core::eventlog::EventId::new([3; 32])),
+                from_account: None,
+                from: "sender".into(),
+                from_name: "Sender".into(),
+                text: b"never emit this secret".to_vec(),
+                protection: Some(mesh_talk_core::node::MessageProtection::Click),
+                reply_to: None,
+            },
+        );
+        let event = received.lock().unwrap().take().unwrap();
+        assert_eq!(event["text"], "");
+        assert_eq!(event["protection"], "click");
+        assert!(!event.to_string().contains("never emit this secret"));
     }
 
     #[test]

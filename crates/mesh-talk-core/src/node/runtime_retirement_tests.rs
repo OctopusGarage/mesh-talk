@@ -198,7 +198,7 @@ async fn retirement_waits_for_authenticated_private_route_probe_persistence() {
     let alice_dir = tempfile::tempdir().unwrap();
     let bob_dir = tempfile::tempdir().unwrap();
     let mut alice = start(alice_dir.path()).await;
-    let mut bob = start(bob_dir.path()).await;
+    let bob = start(bob_dir.path()).await;
     // Isolate this explicit probe from discovery, accept/delivery, and periodic
     // probes. Join producers and admitted children without closing admission.
     for task in &alice.participant.tasks {
@@ -384,4 +384,126 @@ async fn retirement_waits_for_file_staging_after_adopted_command_cancellation() 
             .await
             .is_err()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_identity_precedes_blocked_durable_store_and_matches_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    NAMES_OPEN_HOOKS.lock().unwrap().insert(
+        root.path().join("accounts/owner/names.log"),
+        Box::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }),
+    );
+    let (identity_tx, mut identity_rx) = tokio::sync::oneshot::channel();
+    let base = root.path().to_path_buf();
+    let startup = tokio::spawn(async move {
+        NodeRuntime::start_configured_guarded_with_network_observed(
+            RuntimeConfig {
+                base_dir: &base,
+                account_id: "owner",
+                display_name: "Owner",
+                password: "pw",
+                discovery_port: 0,
+                post_office_enabled: false,
+                candidate_source: None,
+            },
+            RuntimeEvents {
+                on_dm: Box::new(|_| {}),
+                on_channel: Box::new(|_| {}),
+                on_file: Box::new(|_| {}),
+                on_profile: Box::new(|_| {}),
+                on_call_signal: Box::new(|_| {}),
+            },
+            RuntimeNetworkOptions::default(),
+            move |identity| {
+                identity_tx.send(identity).unwrap();
+                Ok(())
+            },
+            |launch| Ok(launch("Owner")),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(15), entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let identity = identity_rx.try_recv();
+    let still_preparing = !startup.is_finished();
+    release_tx.send(()).unwrap();
+    let runtime = startup.await.unwrap().unwrap();
+    let actual_account = runtime.account_id().to_owned();
+    let actual_device = runtime.user_id().to_owned();
+    runtime.stop().await;
+    assert!(
+        still_preparing,
+        "durable preparation still blocks readiness"
+    );
+    let identity = identity.expect("authenticated identity must precede durable store readiness");
+    assert_eq!(identity.account_id, actual_account);
+    assert_eq!(identity.device_id, actual_device);
+}
+
+#[tokio::test]
+async fn startup_identity_rejection_stops_before_listener_and_durable_stores() {
+    let root = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_observed = observed.clone();
+    let result = NodeRuntime::start_configured_guarded_with_network_observed(
+        RuntimeConfig {
+            base_dir: root.path(),
+            account_id: "owner",
+            display_name: "Owner",
+            password: "pw",
+            discovery_port: 0,
+            post_office_enabled: false,
+            candidate_source: None,
+        },
+        RuntimeEvents {
+            on_dm: Box::new(|_| {}),
+            on_channel: Box::new(|_| {}),
+            on_file: Box::new(|_| {}),
+            on_profile: Box::new(|_| {}),
+            on_call_signal: Box::new(|_| {}),
+        },
+        RuntimeNetworkOptions::default(),
+        move |_| {
+            callback_observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "superseded").into())
+        },
+        |_| panic!("rejected identity cannot launch producers"),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+    for file in ["listen-port", "messages.log", "sent.log", "names.log"] {
+        assert!(!root.path().join("accounts/owner").join(file).exists());
+    }
+    // A wrong password must fail without publishing even public identifiers.
+    let result = NodeRuntime::start_configured_guarded_with_network_observed(
+        RuntimeConfig {
+            base_dir: root.path(),
+            account_id: "owner",
+            display_name: "Owner",
+            password: "wrong",
+            discovery_port: 0,
+            post_office_enabled: false,
+            candidate_source: None,
+        },
+        RuntimeEvents {
+            on_dm: Box::new(|_| {}),
+            on_channel: Box::new(|_| {}),
+            on_file: Box::new(|_| {}),
+            on_profile: Box::new(|_| {}),
+            on_call_signal: Box::new(|_| {}),
+        },
+        RuntimeNetworkOptions::default(),
+        |_| panic!("failed keystore authentication cannot publish identity"),
+        |_| panic!("failed keystore authentication cannot launch producers"),
+    )
+    .await;
+    assert!(result.is_err());
 }

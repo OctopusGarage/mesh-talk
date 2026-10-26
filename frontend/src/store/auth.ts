@@ -2,10 +2,16 @@ import { create } from "zustand";
 import { auth } from "@/lib/api/auth";
 import { chat } from "@/lib/api/chat";
 import { errorMessage as errMsg } from "@/lib/error";
-import type { UserInfo } from "@/lib/types";
+import type { LoginResult, SavedSessionStatus, UserInfo } from "@/lib/types";
 
 interface AuthState {
   user: UserInfo | null;
+  createdUsername: string | null;
+  newAccount: boolean;
+  savedSession: SavedSessionStatus | null;
+  dismissProtection: () => void;
+  dismissBackupReminder: () => void;
+  retrySavedSession: () => Promise<boolean>;
   generation: number;
   operation: number;
   /** True from app start until the one-shot auto-login attempt resolves; gates a brief
@@ -20,13 +26,74 @@ interface AuthState {
   tryAutoLogin: () => Promise<void>;
   login: (username: string, password: string) => Promise<boolean>;
   register: (username: string, password: string) => Promise<boolean>;
+  enrollDevice: (
+    enrollmentId: string,
+    sourceId: string,
+    code: string,
+    includeHistory: boolean,
+  ) => Promise<boolean>;
   /** Change the editable display name (nickname). Returns true on success. */
   rename: (newDisplayName: string) => Promise<boolean>;
   logout: () => Promise<void>;
 }
 
+/** All successful native authentication paths publish through one generation owner. */
+async function enterAuthenticatedSession(
+  request: () => Promise<LoginResult>,
+  newAccount: boolean,
+  set: (state: Partial<AuthState>) => void,
+  get: () => AuthState,
+): Promise<boolean> {
+  const generation = get().generation + 1;
+  const operation = get().operation + 1;
+  set({
+    generation,
+    operation,
+    user: null,
+    newAccount: false,
+    savedSession: null,
+    loading: true,
+    loggingOut: false,
+    error: null,
+  });
+  try {
+    const res = await request();
+    if (get().generation !== generation || get().operation !== operation)
+      return false;
+    if (!res.success || !res.user) throw new Error("Unable to sign in");
+    set({
+      user: res.user,
+      loading: false,
+      booting: false,
+      newAccount,
+      createdUsername: null,
+      savedSession: res.saved_session ?? null,
+    });
+    return true;
+  } catch (e) {
+    if (get().generation !== generation || get().operation !== operation)
+      return false;
+    set({ error: errMsg(e), loading: false });
+    return false;
+  }
+}
+
 export const useAuth = create<AuthState>((set, get) => ({
   user: null,
+  createdUsername: null,
+  newAccount: false,
+  savedSession: null,
+  dismissProtection: () => set({ newAccount: false, savedSession: null }),
+  dismissBackupReminder: () => set({ newAccount: false }),
+  retrySavedSession: async () => {
+    const { user, generation } = get();
+    if (!user) return false;
+    const result = await auth.retrySavedSession(user.id);
+    if (get().generation !== generation || get().user?.id !== user.id)
+      return false;
+    set({ savedSession: result });
+    return result === "saved";
+  },
   generation: 0,
   operation: 0,
   booting: true,
@@ -53,43 +120,47 @@ export const useAuth = create<AuthState>((set, get) => ({
     }
   },
 
-  login: async (username, password) => {
+  login: (username, password) =>
+    enterAuthenticatedSession(
+      () => auth.login(username, password),
+      get().createdUsername === username,
+      set,
+      get,
+    ),
+  enrollDevice: (enrollmentId, sourceId, code, includeHistory) =>
+    enterAuthenticatedSession(
+      () =>
+        auth.completeDeviceEnrollment(
+          enrollmentId,
+          sourceId,
+          code,
+          includeHistory,
+        ),
+      false,
+      set,
+      get,
+    ),
+
+  register: async (username, password) => {
     const generation = get().generation + 1;
     const operation = get().operation + 1;
     set({
       generation,
       operation,
-      user: null,
       loading: true,
       loggingOut: false,
       error: null,
+      createdUsername: null,
+      newAccount: false,
+      savedSession: null,
     });
-    try {
-      const res = await auth.login(username, password);
-      if (get().generation !== generation || get().operation !== operation)
-        return false;
-      if (!res.success || !res.user) throw new Error("Unable to sign in");
-      set({ user: res.user, loading: false, booting: false });
-      return true;
-    } catch (e) {
-      if (get().generation !== generation || get().operation !== operation)
-        return false;
-      set({ error: errMsg(e), loading: false });
-      return false;
-    }
-  },
-
-  register: async (username, password) => {
-    const generation = get().generation;
-    const operation = get().operation + 1;
-    set({ operation, loading: true, loggingOut: false, error: null });
     try {
       const res = await auth.register(username, password);
       if (get().generation !== generation || get().operation !== operation)
         return false;
       if (!res.success) throw new Error("Registration failed");
-      set({ loading: false });
-      return true;
+      set({ createdUsername: username });
+      return await get().login(username, password);
     } catch (e) {
       if (get().generation !== generation || get().operation !== operation)
         return false;
@@ -131,6 +202,9 @@ export const useAuth = create<AuthState>((set, get) => ({
     // Invalidate before native retirement awaits, including a same-UUID relogin.
     set((s) => ({
       user: null,
+      createdUsername: null,
+      newAccount: false,
+      savedSession: null,
       generation: s.generation + 1,
       operation: s.operation + 1,
       loading: false,

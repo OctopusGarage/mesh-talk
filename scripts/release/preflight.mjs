@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { getReleaseByTag, getPublishedNightly, getLatestPublishedStable } from "./release-api.mjs";
 
+import { releaseHighlights } from "./render-notes.mjs";
 import { checkVersions, compareVersions } from "./version.mjs";
 
 export function releaseInputs({ ref, runId, version, desktopVersion = version, existingRelease, publishRelease = false, nightly = false, runAttempt, latestStableTag = null }) {
@@ -42,6 +43,9 @@ function main() {
   const latestStableTag = nightly ? getLatestPublishedStable(repo)?.tag_name ?? null : null;
   const args = { ref, runId, version, latestStableTag, nightly, runAttempt: process.env.GITHUB_RUN_ATTEMPT, publishRelease: process.env.RELEASE_PUBLICATION === "true" };
   const candidate = releaseInputs({ ...args, existingRelease: null });
+  if (nightly || ref.startsWith("refs/tags/")) {
+    releaseHighlights(readFileSync("CHANGELOG.md", "utf8"), version, { required: !nightly });
+  }
   if (nightly && process.env.GITHUB_EVENT_NAME === "schedule") {
     const published = getPublishedNightly(repo, sha);
     if (published) {

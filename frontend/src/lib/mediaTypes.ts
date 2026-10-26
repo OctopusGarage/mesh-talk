@@ -1,3 +1,4 @@
+export const IMAGE_INLINE_CAP = 16 * 1024 * 1024;
 /** File-name media classification shared by pickers, previews, and history. */
 const IMAGE_MIME: Record<string, string> = {
   png: "image/png",
@@ -20,6 +21,12 @@ const VIDEO_MIME: Record<string, string> = {
 };
 
 export const IMAGE_EXTENSIONS = Object.keys(IMAGE_MIME);
+export const PROTECTED_IMAGE_EXTENSIONS = IMAGE_EXTENSIONS.filter(
+  (extension) => extension !== "svg",
+);
+export const isProtectedImage = (name: string): boolean =>
+  isImage(name) && !/\.svg$/i.test(name);
+
 export const VIDEO_EXTENSIONS = Object.keys(VIDEO_MIME);
 
 const IMAGE_EXT = new RegExp(`\\.(${IMAGE_EXTENSIONS.join("|")})$`, "i");

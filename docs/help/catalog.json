@@ -237,6 +237,10 @@
         "pair",
         "sync",
         "Your devices",
+        "message yourself",
+        "self-chat",
+        "给自己发消息",
+        "自聊",
         "多设备",
         "关联设备",
         "同步",
@@ -249,13 +253,20 @@
     {
       "id": "privacy",
       "title": "Choose privacy and visibility controls",
-      "summary": "Device privacy, invisible mode and hidden contacts solve different problems.",
+      "summary": "Protect the local screen, send concealed messages and control contact visibility.",
       "category": "privacy",
       "keywords": [
         "lock",
         "invisible",
         "hidden contacts",
         "clipboard",
+        "protected message",
+        "protected image",
+        "隐藏图片",
+        "click to view",
+        "verify to view",
+        "隐藏消息",
+        "点击查看",
         "隐私",
         "隐身",
         "锁定",
@@ -428,7 +439,7 @@
     },
     {
       "id": "profile",
-      "title": "Change your name and avatar",
+      "title": "Change your profile",
       "summary": "Open your profile from the sidebar to change your display name or picture.",
       "category": "personalization",
       "keywords": [
@@ -485,6 +496,52 @@
         "kind": "settings",
         "category": "appearance"
       }
+    },
+    {
+      "id": "local-agent-access",
+      "title": "Let a local agent send messages",
+      "summary": "Enable scoped local automation and copy a short API help hint for your agent.",
+      "category": "personalization",
+      "keywords": [
+        "agent",
+        "automation",
+        "HTTP API",
+        "local API",
+        "AGENTS.md",
+        "本地调用",
+        "自动化",
+        "智能体"
+      ],
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "document": "topics/local-agent-access.md",
+      "target": {
+        "kind": "settings",
+        "category": "general",
+        "controlId": "setting-local-agent-access"
+      }
+    },
+    {
+      "id": "favorites",
+      "title": "Collect useful messages in Favorites",
+      "summary": "Save related messages together with searchable titles, descriptions and individual notes.",
+      "category": "messaging",
+      "keywords": [
+        "favorites",
+        "collect",
+        "notes",
+        "multi-select",
+        "收藏夹",
+        "消息收藏",
+        "多选",
+        "备注",
+        "说明"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/favorites.md"
     }
   ]
 }
