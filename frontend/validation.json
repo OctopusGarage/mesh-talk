@@ -2,6 +2,29 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-production-runtime",
+      "paths": [
+        "frontend/vite.config.ts",
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        "scripts/diagnostics/react-singleton.test.mjs"
+      ],
+      "node": ["scripts/diagnostics/react-singleton.test.mjs"],
+      "capability": {
+        "summary": "Keep the production React renderer and hooks bound to one runtime across dependency layouts.",
+        "guide": "docs/testing-feedback-loop.md#production-frontend-startup",
+        "invariants": [
+          {
+            "name": "Production builds deduplicate React and React DOM even when dependency caches contain duplicate package trees.",
+            "reference": "docs/testing-feedback-loop.md#production-frontend-startup"
+          }
+        ]
+      },
+      "escalation": [
+        "Run the built production frontend in Chromium and WebKit, and verify the native startup screen without a display-error boundary. A development server or process-only installation check cannot certify production startup."
+      ]
+    },
+    {
       "id": "frontend-account-group-inventory",
       "paths": [
         "frontend/src/lib/types.ts",

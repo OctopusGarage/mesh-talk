@@ -904,6 +904,20 @@ scenario/fixture, platform/environment or external service before deciding
 whether an earlier check or a harness correction is appropriate. Retain the
 existing cancellation, sharding and comprehensive CI gates.
 
+## Production frontend startup
+
+React hooks and the renderer must resolve to one production runtime. The
+`react-singleton.test.mjs` diagnostic builds with the real Vite configuration
+and deliberately duplicated dependency trees; both React and React DOM must
+remain singletons. The diagnostic runs with the existing Node diagnostics gate.
+Development-server browser checks do not exercise production module resolution.
+
+Install deployment dependencies with `npm ci`, reusing the package manager's
+download cache rather than copying or merging `node_modules`. Matching lockfiles
+alone do not prove an installed dependency tree is intact. Native installation
+acceptance must verify the production frontend renders its expected screen
+without the display-error boundary; a process and visible window are insufficient.
+
 ## Explicit physical network acceptance
 
 These opt-in checks use disposable profiles and test-only `fast-test-kdf`
