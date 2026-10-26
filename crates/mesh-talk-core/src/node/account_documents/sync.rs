@@ -134,6 +134,20 @@ impl Default for DocumentSyncCursor {
     }
 }
 impl DocumentSyncCursor {
+    #[cfg(test)]
+    fn client_trace_state(&self) -> String {
+        format!(
+            "domain={:?} pending={} after={} deferred={} retry_ms={}",
+            DOMAINS[self.domain],
+            self.pending,
+            self.after.is_some(),
+            self.admission_deferred,
+            self.retry_at.map_or(0, |retry| retry
+                .saturating_duration_since(Instant::now())
+                .as_millis())
+        )
+    }
+
     /// Start one new comparison sweep after an external wake. A partial page or
     /// cycle must finish first; its owner retains one coalesced follow-up wake.
     pub(in crate::node) fn begin_refresh(&mut self) -> bool {
@@ -551,6 +565,36 @@ impl Node {
         .unwrap_or(false)
     }
     pub(in crate::node) async fn pull_account_documents_page(
+        self: &Arc<Self>,
+        peer: &PeerRecord,
+        cursor: &mut DocumentSyncCursor,
+    ) -> Result<(), NodeError> {
+        #[cfg(test)]
+        let started = {
+            let enabled = self.account_client_test_hook.lock().unwrap().is_some();
+            enabled.then(|| {
+                self.trace_account_client(&peer.public, || {
+                    format!("page_begin {}", cursor.client_trace_state())
+                });
+                Instant::now()
+            })
+        };
+        let result = self.pull_account_documents_page_inner(peer, cursor).await;
+        #[cfg(test)]
+        if let Some(started) = started {
+            self.trace_account_client(&peer.public, || {
+                format!(
+                    "page_end elapsed_ms={} outcome={} {}",
+                    started.elapsed().as_millis(),
+                    super::super::account_session::client_trace_outcome(&result),
+                    cursor.client_trace_state()
+                )
+            });
+        }
+        result
+    }
+
+    async fn pull_account_documents_page_inner(
         self: &Arc<Self>,
         peer: &PeerRecord,
         cursor: &mut DocumentSyncCursor,

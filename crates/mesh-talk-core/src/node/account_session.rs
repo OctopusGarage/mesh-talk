@@ -20,6 +20,25 @@ pub(in crate::node) type AccountSessionTestHook = dyn Fn(
     + Send
     + Sync;
 
+#[cfg(test)]
+pub(in crate::node) type AccountClientTestHook =
+    dyn Fn(crate::identity::device::PublicIdentity, String) + Send + Sync;
+
+#[cfg(test)]
+pub(in crate::node) fn client_trace_outcome<T>(result: &Result<T, NodeError>) -> &'static str {
+    match result {
+        Ok(_) => "ok",
+        Err(error) if super::account_sync::local_sync_capacity_busy(error) => "capacity_busy",
+        Err(NodeError::Channel(message)) if message == "account session negotiation timed out" => {
+            "negotiation_timeout"
+        }
+        Err(NodeError::Authorization(_)) => "authorization",
+        Err(NodeError::Session(super::session::SessionError::Transport(_))) => "transport",
+        Err(NodeError::Log(_)) => "storage",
+        Err(_) => "invalid_or_interrupted",
+    }
+}
+
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SESSION_REQUESTS: usize = 10_000;
@@ -64,25 +83,77 @@ async fn send(
     channel.send(&bytes).await
 }
 impl Node {
+    #[cfg(test)]
+    pub(in crate::node) fn trace_account_client(
+        &self,
+        peer: &crate::identity::device::PublicIdentity,
+        event: impl FnOnce() -> String,
+    ) {
+        let hook = self.account_client_test_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(peer.clone(), event());
+        }
+    }
+
     pub(in crate::node) async fn begin_account_exchange(
         &self,
         peer: &PeerRecord,
         version: AccountSyncVersion,
         request: AccountHistoryFrame,
     ) -> Result<AccountExchange, NodeError> {
+        #[cfg(test)]
+        let trace = {
+            let enabled = self.account_client_test_hook.lock().unwrap().is_some();
+            enabled.then(|| {
+                let domain = match &request {
+                    AccountHistoryFrame::DocumentsRequest { body } => {
+                        super::account_documents::wire::DocumentRequest::decode(body)
+                            .map(|request| request.domain)
+                    }
+                    _ => None,
+                };
+                self.trace_account_client(&peer.public, || {
+                    format!("negotiation_begin domain={domain:?}")
+                });
+                (std::time::Instant::now(), domain)
+            })
+        };
         if peer.account_id.as_deref() != Some(self.account_id().as_str())
             || !self.certified_sibling(&peer.public)
         {
+            #[cfg(test)]
+            if let Some(trace) = trace {
+                self.trace_account_client(&peer.public, || {
+                    format!(
+                        "negotiation_end domain={:?} elapsed_ms={} outcome=authorization",
+                        trace.1,
+                        trace.0.elapsed().as_millis()
+                    )
+                });
+            }
             return Err(NodeError::Authorization(
                 "account session requires a certified sibling".into(),
             ));
         }
-        tokio::time::timeout(
+        let result = tokio::time::timeout(
             NEGOTIATION_TIMEOUT,
             self.begin_account_exchange_inner(peer, version, request),
         )
         .await
-        .map_err(|_| NodeError::Channel("account session negotiation timed out".into()))?
+        .map_err(|_| NodeError::Channel("account session negotiation timed out".into()))
+        .and_then(|result| result);
+        #[cfg(test)]
+        if let Some(trace) = trace {
+            self.trace_account_client(&peer.public, || {
+                format!(
+                    "negotiation_end domain={:?} elapsed_ms={} outcome={}",
+                    trace.1,
+                    trace.0.elapsed().as_millis(),
+                    client_trace_outcome(&result)
+                )
+            });
+        }
+        result
     }
     async fn begin_account_exchange_inner(
         &self,

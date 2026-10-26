@@ -248,6 +248,9 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) account_session_test_hook:
         Mutex<Option<Arc<super::account_session::AccountSessionTestHook>>>,
+    #[cfg(test)]
+    pub(in crate::node) account_client_test_hook:
+        Mutex<Option<Arc<super::account_session::AccountClientTestHook>>>,
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
     /// Host preference. Relay selection and every relay dial consult this live flag.
     pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
@@ -879,6 +882,8 @@ impl Node {
             accepted_hook: Mutex::new(None),
             #[cfg(test)]
             account_session_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            account_client_test_hook: Mutex::new(None),
             privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),
             identity,
             account,

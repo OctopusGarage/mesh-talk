@@ -19,7 +19,7 @@ fn record_action_trace(
     event: String,
 ) {
     let mut trace = trace.lock().unwrap();
-    if trace.0.len() == 256 {
+    if trace.0.len() == 1024 {
         trace.0.pop_front();
         trace.1 += 1;
     }
@@ -217,6 +217,17 @@ async fn reference_message_action(recall: bool) {
         ("reference", &reference),
         ("sibling", &sibling),
     ] {
+        let client_trace = trace.clone();
+        let labels = peer_labels.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, event| {
+            let peer = labels.get(&peer.user_id()).copied().unwrap_or("unknown");
+            record_action_trace(
+                &client_trace,
+                trace_started,
+                label,
+                format!("client peer={peer} {event}"),
+            );
+        }));
         let trace = trace.clone();
         let labels = peer_labels.clone();
         *node.account_session_test_hook.lock().unwrap() = Some(Arc::new(move |peer, frame| {
@@ -552,6 +563,19 @@ async fn reference_message_action(recall: bool) {
             },
         )
         .await;
+        eprintln!(
+            "action client sample turn={turn}: {:?}",
+            trace
+                .lock()
+                .unwrap()
+                .0
+                .iter()
+                .filter(|(_, _, event)| event.contains("client peer=")
+                    && (event.contains("page_end") || event.contains("negotiation_end")))
+                .rev()
+                .take(12)
+                .collect::<Vec<_>>()
+        );
         eprintln!(
             "action propagation timing turn={turn}: {:?}",
             trace
