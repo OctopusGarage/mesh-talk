@@ -339,3 +339,41 @@ async fn group_inventory_releases_channels_before_profile_lookup() {
             .any(|member| member.name.as_deref() == Some("Alice"))
     );
 }
+
+#[test]
+fn account_display_name_prefers_signed_profile_and_retains_offline_discovery_names() {
+    use crate::discovery::announce::Announce;
+    use crate::identity::device::DeviceIdentity;
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        time::Duration,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path(), &Account::generate());
+    let contact = Account::generate();
+    let device = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&device, &contact, "Duncan", 47001);
+    node.roster
+        .lock()
+        .unwrap()
+        .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &node.user_id());
+    assert_eq!(
+        node.account_display_name(&contact.account_id()).as_deref(),
+        Some("Duncan")
+    );
+    node.roster.lock().unwrap().evict_stale(Duration::ZERO);
+    assert_eq!(
+        node.account_display_name(&contact.account_id()).as_deref(),
+        Some("Duncan")
+    );
+    let profile = AccountProfile::new(&contact, 1, "Duncan Jones".into(), String::new(), None);
+    node.receive_account_profile(&profile).unwrap();
+    assert_eq!(
+        node.account_display_name(&contact.account_id()).as_deref(),
+        Some("Duncan Jones")
+    );
+    assert_eq!(
+        node.account_display_name(&Account::generate().account_id()),
+        None
+    );
+}

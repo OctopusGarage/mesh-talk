@@ -1214,7 +1214,7 @@
     "copyFailed": "复制失败，请选择上方说明并手动复制。",
     "group": "群聊",
     "person": "联系人",
-    "selectedCount": "已选择 {{count}} / 16",
+    "selectedCount": "已选 {{count}} / {{total}} 个",
     "search": "搜索联系人和群组",
     "selectedOnly": "仅显示已选",
     "noMatches": "没有匹配的会话。",

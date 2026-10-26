@@ -49,7 +49,10 @@ export function AgentConversationPicker({
           {t("agentAccess.conversations")}
         </span>
         <span className="text-muted-foreground" aria-live="polite">
-          {t("agentAccess.selectedCount", { count: selected.size })}
+          {t("agentAccess.selectedCount", {
+            count: selected.size,
+            total: options.length,
+          })}
         </span>
         <ChevronDown
           aria-hidden="true"

@@ -56,9 +56,12 @@ see [backup and recovery](backup-recovery.md).
 
 ## Local agent access
 
+The conversation selector shows selected conversations out of the listed total.
+The separate scope hint states the authorization limit of 16 conversations.
+
 In **Integrations**, expand **Allowed conversations** to choose the contacts or joined
 groups a local agent may send to, then enable **Local agent access**. The collapsed
-picker shows the selected count out of 16. Search contacts and groups or use
+picker shows the selected count out of the listed total. Search contacts and groups or use
 **Selected only** to review and remove grants, including unavailable conversations.
 The list scrolls within a bounded area so large rosters do not grow the settings
 page. Search and filters never change saved permissions. Selecting or removing a
