@@ -749,7 +749,7 @@ mod tests {
             wrong_account
                 .to_string()
                 .contains("runtime account mismatch"),
-            "{wrong_account}"
+            "sticker registration must reject a different runtime account"
         );
         let name = "mt-sticker-v1-cGFjazpleGFtcGxlOndhdmUK8J-Riw.png";
         let bytes = hex::decode("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63f8cfc0f01f00050001ff89993d1d0000000049454e44ae426082").unwrap();
