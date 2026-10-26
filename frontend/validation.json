@@ -117,7 +117,23 @@
         "frontend/src/store/conversationHistory.ts",
         "frontend/src/store/conversationHistory.test.ts",
         "frontend/src/store/conversationState.ts",
-        "frontend/src/lib/types.ts"
+        "frontend/src/lib/types.ts",
+        "frontend/src/lib/messagePresentation.ts",
+        "frontend/src/lib/messagePresentation.test.ts",
+        "frontend/src/lib/conversationHistory.ts",
+        "frontend/src/lib/conversationHistory.test.ts",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/DeliveryFooter.tsx",
+        "frontend/src/features/chat/DeliveryDetails.tsx",
+        "frontend/src/features/chat/DeliveryDetails.test.ts",
+        "frontend/src/features/chat/favorites/FavoriteEditor.tsx",
+        "frontend/src/features/chat/favorites/FavoritesDialog.tsx",
+        "frontend/src/features/chat/favorites/FavoriteMessageText.tsx",
+        "frontend/src/lib/attachmentSave.ts",
+        "frontend/src/lib/attachmentSave.test.ts"
       ],
       "frontend": [
         "src/lib/stickerMedia.test.ts",
@@ -132,7 +148,14 @@
         "src/lib/linkedCustomizationPacks.test.ts",
         "src/store/reception.test.ts",
         "src/store/conversationHistory.test.ts",
-        "src/lib/unreadStorage.test.ts"
+        "src/lib/unreadStorage.test.ts",
+        "src/lib/messagePresentation.test.ts",
+        "src/lib/conversationHistory.test.ts",
+        "src/features/chat/sidebar/ConversationRow.test.ts",
+        "src/features/chat/DeliveryDetails.test.ts",
+        "src/features/chat/ConversationHistoryDialog.test.ts",
+        "src/features/chat/favorites/FavoriteEditor.test.ts",
+        "src/lib/attachmentSave.test.ts"
       ],
       "capability": {
         "summary": "Send selected sticker artwork as bounded ordinary media while preserving legacy sticker identities and account-owned file retry.",
@@ -149,11 +172,15 @@
           {
             "name": "Authenticated file-message aliases coalesce late live/history copies into one unread identity, preserve any actual read, survive bounded persistence and never merge independent sends by content.",
             "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Sent v2 semantic labels survive pack removal and retry; compact surfaces share one summary with localized legacy fallback and protected/recalled/expired content takes priority.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           }
         ]
       },
       "escalation": [
-        "Run e2e/stickers.spec.ts for receive without installed packs and pack-removal preservation; use existing protected-message/media and native file-delivery acceptance where those boundaries change. Unit tests do not prove native end-to-end transfer."
+        "Run e2e/stickers.spec.ts for semantic previews, replies/history search, receive without installed packs, pack-removal preservation and light/dark short-window layout. Use existing protected-message/media and native file-delivery acceptance where those boundaries change. Unit and mocked browser tests do not prove native transfer, notification appearance or linked-device/backup compatibility."
       ]
     },
     {

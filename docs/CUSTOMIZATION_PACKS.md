@@ -79,7 +79,7 @@ A sticker library:
 }
 ```
 
-A sticker pack has 1–100 stickers. Each sticker ID is unique within its pack, uses lowercase letters, digits, underscores, or hyphens, and is at most 40 characters. `fallback` is required, at most eight Unicode code points, and appears when a recipient has not installed the same pack. New sends snapshot the selected sticker image and deliver it as encrypted media with a pack/sticker identity and fallback. Recipients do not need to install the pack to view the image. Older ID-only messages still depend on an installed matching pack. Google Noto is a removable 40-sticker pack available from the marketplace. Older unprefixed Noto messages retain emoji fallbacks when the pack is removed. Noto Favorites has been retired from the active catalog; existing installations and messages remain usable.
+A sticker pack has 1–100 stickers. Each sticker ID is unique within its pack, uses lowercase letters, digits, underscores, or hyphens, and is at most 40 characters. `fallback` is required, at most eight Unicode code points, and appears when a recipient has not installed the same pack. New sends snapshot the selected sticker image and a short semantic label, then deliver them as encrypted media with a pack/sticker identity and fallback. Choose a concise label that describes the emotion or situation, such as `Wave` or `静下心`; it is used in conversation previews and quoted replies, not the source filename. Recipients do not need to install the pack to view the image. Older ID-only messages still depend on an installed matching pack. Google Noto is a removable 40-sticker pack available from the marketplace. Older unprefixed Noto messages retain emoji fallbacks when the pack is removed. Noto Favorites has been retired from the active catalog; existing installations and messages remain usable.
 
 Package the files with a normal ZIP tool, keeping `manifest.json` at the root. Open **Settings → Appearance → Install ZIP** for a theme, open an avatar gallery and choose **Install ZIP** for an avatar library, or open a chat's **Stickers → Manage sticker packs → Install ZIP** for stickers. The same screens show marketplace packs with their versions and **Install**, **Reinstall**, or **Replace** actions, plus **Remove** for installed packs. Invalid packs leave installed packs untouched.
 
@@ -127,15 +127,50 @@ and channel media continue using their existing transfer paths. Removing an
 installed pack cannot change an image already retained in message history.
 
 The deployed MFM3 media envelope remains unchanged. Its filename carries a
-versioned presentation marker:
-`mt-sticker-v1-<base64url-no-padding(UTF-8(id + newline + fallback))>.<extension>`.
-The ID is 1–126 lowercase ASCII letters, digits, colons, periods, underscores or
-hyphens. The fallback is 1–8 non-control Unicode scalar values, at most 32 UTF-8
-bytes. The canonical filename is at most 233 ASCII bytes; supported extensions
-are `png`, `jpg`, `webp` and `gif`, with matching MIME types. This marker conveys
-presentation and source identity, never read authorization. Older media-capable
-clients show the same attachment as an ordinary image. No new positional fields,
-event kinds or file-kind discriminants are introduced.
+versioned presentation marker; it is never the user-facing name of a recognized
+sticker:
+
+- Legacy v1: `mt-sticker-v1-<base64url-no-padding(UTF-8(id + newline + fallback))>.<extension>`.
+- Labelled v2: `mt-sticker-v2-<base64url-no-padding(UTF-8(id + newline + fallback + newline + label))>.<extension>`.
+
+Both keep the original ID and fallback rules. The ID is 1–126 lowercase ASCII
+letters, digits, colons, periods, underscores or hyphens. The fallback is 1–8
+non-control Unicode scalar values, at most 32 UTF-8 bytes. Supported extensions
+are `png`, `jpg`, `webp` and `gif`, with matching MIME types. V1 names remain
+bounded to 233 ASCII bytes; v2 names are bounded to 255 ASCII bytes including
+the extension. A v2 label must be nonempty, trimmed, at most 80 Unicode scalar
+values, and contain no controls, surrogate values, bidi formatting characters
+(U+061C, U+200E/F, U+202A–202E, U+2066–2069), or U+FEFF. Extra fields and
+noncanonical encodings are rejected by both the Rust and TypeScript readers.
+
+New sends clean creator labels, collapse whitespace, and fit them to the name's
+remaining UTF-8/base64 budget at whole grapheme boundaries. Prefer short semantic
+labels; long pack/sticker IDs leave less room. When no usable label remains,
+the sender retains v1 compatibility. The ZIP manifest stays at format 1 and does
+not require repackaging. V2 labels belong to the sent message and remain stable
+through pack replacement/removal, retries, history reload, linked-device sharing
+and backup restoration. Legacy messages can use an available local pack label
+as best-effort presentation; their original label cannot be reconstructed from
+an unknown ID alone.
+
+Conversation previews, reply banners/quotes, history search, Favorites summaries
+and accessible descriptions use `[label]`, or the localized `[Sticker]` when no
+label can be recovered. Protected, expired and recalled content takes priority
+over that presentation. History and Favorites search match the semantic label
+or emoji fallback instead of encoded transport names. Ordinary attachment names
+retain their existing behavior. Save-as dialogs suggest a filesystem-safe image
+name derived from the sticker label, or `sticker` for unlabelled media, rather
+than the encoded marker. Native file notifications use the received v2
+label or `[Sticker]` for valid sticker media, subject to the existing focus,
+lock, notification-preview and private-mode policy; native notification body
+copy remains English like the existing host notifications.
+
+This marker conveys presentation and source identity, never read authorization.
+Older media-capable clients show v2 as an ordinary image, without its semantic
+sticker treatment. No positional fields, event kinds or file-kind discriminants
+are introduced. Artwork is contained in the existing 128-pixel chat area without
+cropping or an added bubble. Sticker receipt details use a compact accessible
+trigger; receipt still does not mean read or image-download completion.
 
 Sticker payloads must be nonempty and at most 3 MiB, have at most 4096 pixels per
 side and 16 million canvas pixels, and decode as their declared format. Animations

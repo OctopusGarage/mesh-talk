@@ -26,6 +26,7 @@ import { cn } from "@/lib/utils";
 import { ease, useMotionOK } from "@/lib/motion";
 import { installedStickers } from "@/lib/stickerPacks";
 import { usePacks } from "@/store/packs";
+import { messageSummary } from "@/lib/messagePresentation";
 import { PackManager } from "@/components/PackManager";
 import type { ChatMessage } from "@/store/chat";
 import { clipboardFiles } from "./clipboardFiles";
@@ -555,9 +556,8 @@ export function Composer({
           <span className="min-w-0 flex-1 truncate text-muted-foreground">
             {t("composer.replyingTo")}{" "}
             <span className="text-foreground">
-              {replyTo.protection
-                ? t("protectedMessage.label")
-                : replyTo.text || t("composer.message")}
+              {messageSummary(replyTo, t, installedPacks) ||
+                t("composer.message")}
             </span>
           </span>
           <button

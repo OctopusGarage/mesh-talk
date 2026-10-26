@@ -317,6 +317,8 @@
     "source_unscoped": "Signed discovery (network scope unspecified)"
   },
   "message": {
+    "sticker": "[Sticker]",
+    "recalledSummary": "[Message recalled]",
     "expiresIn": "Expires in {{time}} after sending; removed on both sides",
     "delivery": {
       "postOfficeDisabled": "Post-office sending was disabled on this device when no direct route was known. Review connection settings if you want to use a trusted post office.",

@@ -317,6 +317,8 @@
     "source_unscoped": "Descoberta assinada (escopo de rede não especificado)"
   },
   "message": {
+    "sticker": "[Figurinha]",
+    "recalledSummary": "[Mensagem cancelada]",
     "expiresIn": "Expira em {{time}} após o envio; removida dos dois lados",
     "delivery": {
       "postOfficeDisabled": "O envio por postos de correio estava desativado neste dispositivo quando nenhuma rota direta era conhecida. Revise as configurações de conexão se quiser usar um posto de correio de confiança.",

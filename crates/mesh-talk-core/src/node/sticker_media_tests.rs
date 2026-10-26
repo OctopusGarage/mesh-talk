@@ -309,7 +309,7 @@ async fn channel_sticker_reuses_only_its_own_group_transfer() {
 }
 
 #[tokio::test]
-async fn sticker_media_delivers_after_source_removal_without_receiver_installation() {
+async fn v2_sticker_media_delivers_label_after_source_removal_without_receiver_installation() {
     use crate::discovery::Announce;
     use tokio::net::TcpListener;
     let ad = tempfile::tempdir().unwrap();
@@ -332,7 +332,10 @@ async fn sticker_media_delivers_after_source_removal_without_receiver_installati
     let (a, _, _) = super::test_support::node_with_files(ad.path(), alice, aa, &bp);
     let (b, _, mut received) =
         super::test_support::node_with_files(bd.path(), bob, bob_account, &ap);
-    let (path, bytes) = sticker(ad.path(), 0);
+    let (legacy_path, bytes) = sticker(ad.path(), 0);
+    let name = "mt-sticker-v2-cGFjazpjYXRzOmNhbG0K8J-ZggrpnZnkuIvlv4M.png";
+    let path = ad.path().join(name);
+    std::fs::rename(legacy_path, &path).unwrap();
     // Accept while the receiver is not serving. No source path is needed afterward.
     let (id, file) = a
         .enqueue_file_to_account(&target, &path, FileKind::Media)
@@ -357,6 +360,7 @@ async fn sticker_media_delivers_after_source_removal_without_receiver_installati
         .unwrap()
         .unwrap();
     assert!(offer.media);
+    assert_eq!(offer.name, name);
     assert_eq!(offer.file_conv, file);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -404,6 +408,17 @@ async fn sticker_media_delivers_after_source_removal_without_receiver_installati
         Account::from_secret_bytes(bob_account_secret),
     );
     assert_eq!(reopened.read_media(file).unwrap(), bytes);
+    let rows = reopened.account_history(&a.account_id(), 10);
+    let media = rows
+        .iter()
+        .find(|row| row.id == second_id)
+        .unwrap()
+        .file
+        .as_ref()
+        .unwrap();
+    assert_eq!(media.name, name);
+    let metadata = crate::file::sticker::from_name(&media.name).unwrap();
+    assert_eq!(metadata.label.as_deref(), Some("静下心"));
 }
 
 #[tokio::test]

@@ -81,6 +81,10 @@
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           },
           {
+            "name": "Canonical v1 sticker metadata remains readable; v2 carries a bounded safe label through encrypted delivery and retained history without changing authenticated image identity",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
             "name": "Bounded canonical presentation metadata remains compatible ordinary media and never grants cross-conversation read access",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           },

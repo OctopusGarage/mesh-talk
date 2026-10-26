@@ -45,7 +45,12 @@ export function MediaPreview({
   readOnly?: boolean;
 }) {
   const { t } = useTranslation();
-  const displayName = attachmentLabel(name, mime ?? "", { media: true, size });
+  const displayName = attachmentLabel(
+    name,
+    mime ?? "",
+    { media: true, size },
+    t("message.sticker"),
+  );
   const motionOK = useMotionOK();
   const setError = useChat((s) => s.setError);
   const savedPath = useSavedDownloads()[fileConv];
@@ -90,7 +95,9 @@ export function MediaPreview({
     if (!lease.current() || !available || saving) return;
     try {
       setSaving(true);
-      await saveAttachment({ fileConv, name, mime }, lease, { mode: "as" });
+      await saveAttachment({ fileConv, name, mime, size, media: true }, lease, {
+        mode: "as",
+      });
     } catch (e) {
       if (lease.current() && markUnavailableFileError(fileConv, e)) return;
       if (lease.current())

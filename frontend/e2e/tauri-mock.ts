@@ -367,7 +367,7 @@ export const test = base.extend({
       const stickerFileMetadata = (path: unknown, fileConv: string) => {
         const name = String(path).split(/[\\/]/).pop() || "file";
         const bytes = stagedFiles.get(String(path));
-        if (!name.startsWith("mt-sticker-v1-") || !bytes) return {};
+        if (!/^mt-sticker-v[12]-/.test(name) || !bytes) return {};
         stickerMediaFiles.set(fileConv, [...bytes]);
         const ext = name.split(".").pop()!;
         const mime = (

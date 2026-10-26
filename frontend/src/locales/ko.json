@@ -317,6 +317,8 @@
     "source_unscoped": "서명된 검색 (네트워크 범위 미지정)"
   },
   "message": {
+    "sticker": "[스티커]",
+    "recalledSummary": "[메시지 전송 취소됨]",
     "expiresIn": "전송 후 {{time}} 뒤 만료되어 양쪽에서 삭제됩니다",
     "delivery": {
       "postOfficeDisabled": "직접 연결 경로를 알 수 없을 때 이 기기의 우체국을 통한 전송이 꺼져 있었습니다. 신뢰할 수 있는 우체국을 사용하려면 연결 설정을 확인하세요.",

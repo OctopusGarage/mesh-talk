@@ -317,6 +317,8 @@
     "source_unscoped": "签名发现记录（网络范围未确定）"
   },
   "message": {
+    "sticker": "[表情]",
+    "recalledSummary": "[消息已撤回]",
     "expiresIn": "发送后倒计时 {{time}}，到期双方消息均消失",
     "delivery": {
       "postOfficeDisabled": "上次尝试时，本机没有已知的直接路由，且邮局发送已关闭。如需使用可信邮局，请检查连接设置。",

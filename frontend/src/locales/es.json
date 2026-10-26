@@ -317,6 +317,8 @@
     "source_unscoped": "Descubrimiento firmado (ámbito de red no determinado)"
   },
   "message": {
+    "sticker": "[Sticker]",
+    "recalledSummary": "[Mensaje retirado]",
     "expiresIn": "Caduca en {{time}} tras el envío; se elimina en ambos lados",
     "delivery": {
       "postOfficeDisabled": "En el último intento, este dispositivo no conocía una ruta directa y el envío por oficina postal estaba desactivado. Revisa la conexión si quieres usar una oficina postal de confianza.",

@@ -65,7 +65,7 @@ it("registers exact installed bytes once per runtime and refreshes replaced artw
     "owner",
     "account",
   ]);
-  expect(mocks.register.mock.calls[0][2]).toMatch(/^mt-sticker-v1-.*\.png$/);
+  expect(mocks.register.mock.calls[0][2]).toMatch(/^mt-sticker-v2-.*\.png$/);
   expect(mocks.register.mock.calls[0][3]).toEqual([1, 2, 3]);
   changed();
   await settle();

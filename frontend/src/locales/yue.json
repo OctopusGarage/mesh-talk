@@ -317,6 +317,8 @@
     "source_unscoped": "簽名發現記錄（網絡範圍未確定）"
   },
   "message": {
+    "sticker": "[表情]",
+    "recalledSummary": "[訊息已收回]",
     "expiresIn": "傳送後倒數 {{time}}，到期雙方訊息都會消失",
     "delivery": {
       "postOfficeDisabled": "上次嘗試時，呢部裝置冇已知嘅直接路由，而且郵局傳送已關閉。如要用可信郵局，請檢查連線設定。",
