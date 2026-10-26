@@ -483,24 +483,19 @@ impl Node {
 
     /// Authorize one immutable outgoing journal entry, then attempt local replay.
     /// Once the journal accepts it, replay failure must not become a retryable send.
-    pub(in crate::node) fn accept_outgoing_transaction(
+    pub(in crate::node) fn commit_outgoing_transaction(
         &self,
         store: &mut DeliveryStore,
         transaction: DeliveryTransaction,
-        authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<bool, NodeError> {
-        let mut transaction = Some(transaction);
-        authorize(&mut || {
-            self.log
-                .lock()
-                .expect("log lock")
-                .sync()
-                .map_err(NodeError::Log)?;
-            store
-                .begin(transaction.take().expect("accept is single-use"))
-                .map(|_| ())
-                .map_err(NodeError::Log)
-        })?;
+        // The caller encloses preparation and this WAL append in host authority.
+        // Never acquire host authority while retaining the journal mutex.
+        self.log
+            .lock()
+            .expect("log lock")
+            .sync()
+            .map_err(NodeError::Log)?;
+        store.begin(transaction).map_err(NodeError::Log)?;
         let recovered = self.recover_delivery(store).is_ok();
         self.delivery_notify.notify_one();
         Ok(recovered)
@@ -949,8 +944,44 @@ impl Node {
                         true,
                         false,
                     )),
+                    DeliveryTransaction::ChannelOutgoing { events, sent, .. }
+                        if events.last().is_some_and(|event| {
+                            event.kind == crate::eventlog::EventKind::FileManifest
+                        }) =>
+                    {
+                        Some((
+                            self.identity.public(),
+                            sent.conversation,
+                            super::received_log::ReceivedEntry {
+                                event_id: tx.id(),
+                                conversation: sent.conversation,
+                                from: self.user_id(),
+                                wall_clock: sent.wall_clock,
+                                plaintext: sent.plaintext.clone(),
+                            },
+                            true,
+                            false,
+                        ))
+                    }
                     _ => None,
                 });
+            // Channel manifests already carry their complete plaintext in the WAL.
+            // Retain their signed chunk scope before retiring that transaction; a
+            // failed scope/sidecar write remains recoverable after acceptance.
+            if let Some((_, channel, entry, true, false)) = &notification
+                && matches!(
+                    store.pending_transactions().first().map(|tx| tx.body()),
+                    Some(DeliveryTransaction::ChannelOutgoing { .. })
+                )
+                && let Some(manifest) = crate::file::decode_manifest(&entry.plaintext)
+            {
+                self.remember_sent_manifest_scope(
+                    manifest.file_conv(),
+                    *channel,
+                    crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub),
+                    entry.event_id,
+                )?;
+            }
             let wake_local =
                 store
                     .pending_transactions()
@@ -1074,11 +1105,16 @@ impl Node {
                                 .insert(manifest.file_conv());
                             if !self.certified_sibling(&sender) {
                                 let _ = self.file_incoming.send(ReceivedFile {
+                                    protection: manifest.protection(),
                                     expires_at_ms: crate::expiry::deadline(&entry.plaintext),
                                     conv: original_conv,
                                     is_channel: false,
                                     from: sender.user_id(),
-                                    name: manifest.name().to_owned(),
+                                    name: if manifest.protection().is_some() {
+                                        "Protected image".into()
+                                    } else {
+                                        manifest.name().to_owned()
+                                    },
                                     size: manifest.size(),
                                     mime: manifest.mime().to_owned(),
                                     file_conv: manifest.file_conv(),
@@ -1121,6 +1157,7 @@ impl Node {
                             from: sender.user_id(),
                             from_name,
                             text: body.text,
+                            protection: body.protection,
                             reply_to: body.reply_to,
                         });
                     }
@@ -1267,6 +1304,7 @@ impl Node {
             .collect()
     }
 
+    #[cfg(test)]
     pub(in crate::node) fn sent_entries_for_history(
         &self,
         conversation: ConversationId,
@@ -1642,9 +1680,16 @@ impl Node {
             .relay_drain_cursor
             .lock()
             .expect("relay cursor lock not poisoned");
-        let offset = cursors.get(scope).copied().unwrap_or(0) % candidates.len();
-        candidates.rotate_left(offset);
-        let next = offset.wrapping_add(candidates.len().min(4));
+        // Always retain the current best candidate; rotate alternatives so cold
+        // and recovered paths are sampled without delaying a healthy fast route.
+        let alternatives = candidates.len().saturating_sub(1);
+        let offset = if alternatives == 0 {
+            0
+        } else {
+            cursors.get(scope).copied().unwrap_or(0) % alternatives
+        };
+        candidates[1..].rotate_left(offset);
+        let next = offset.wrapping_add(alternatives.min(3));
         if cursors.len() >= MAX_RELAY_CUSTODY_HINTS
             && !cursors.contains_key(scope)
             && let Some(key) = cursors.keys().next().cloned()
@@ -1828,7 +1873,7 @@ impl Node {
                         Some(Ok((key, persistence_failed, progress, observation))) => {
                             if let Some(routes) = active.remove(&key) {
                                 retries.finished(key.retry_key(&routes.peer), routes.retry_routes(), progress, std::time::Instant::now());
-                                if let Some(token) = observation { self.finish_delivery_observation(token); }
+                                if let Some((token, reason)) = observation { self.finish_delivery_observation_with_reason(token, reason); }
                             }
                             if persistence_failed {
                                 diagnostic.warn_if_due();
@@ -1962,7 +2007,11 @@ impl Node {
                             .lock()
                             .expect("delivery lock not poisoned")
                             .contains_destination(id, destination.event.id);
-                        let progress = live && node.retry_one_destination(&destination).await;
+                        let (progress, reason) = if live {
+                            node.retry_one_destination_with_reason(&destination).await
+                        } else {
+                            (false, None)
+                        };
                         let failed = if progress {
                             let mut store =
                                 node.delivery.lock().expect("delivery lock not poisoned");
@@ -1971,7 +2020,7 @@ impl Node {
                         } else {
                             false
                         };
-                        let observation = attempt.token.take();
+                        let observation = attempt.token.take().map(|token| (token, reason));
                         (key, failed, progress, observation)
                     }));
                 }
@@ -2176,22 +2225,54 @@ impl Node {
     }
 
     async fn retry_one_destination(&self, destination: &DeliveryDestination) -> bool {
+        self.retry_one_destination_with_reason(destination).await.0
+    }
+
+    async fn retry_one_destination_with_reason(
+        &self,
+        destination: &DeliveryDestination,
+    ) -> (bool, Option<DeliveryRecoveryReason>) {
         if !self.delivery_destination_allowed(destination) {
-            return false;
+            return (false, None);
         }
+        let direct_peer = self
+            .routing_peer(&destination.device.user_id())
+            .filter(|p| {
+                p.public == destination.device
+                    && p.account_id == destination.account
+                    && self.known_account_allowed(&p.public)
+            });
+        // Snapshot only locally known and permitted alternatives. No remote
+        // presence conclusion follows from an empty eligible route set.
+        let reason = if direct_peer.is_none() {
+            if !self
+                .post_office_enabled
+                .load(std::sync::atomic::Ordering::Acquire)
+                || !self
+                    .post_office_send_enabled
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                Some(DeliveryRecoveryReason::PostOfficeDisabled)
+            } else {
+                let candidates = {
+                    let roster = self.roster.lock().expect("roster lock not poisoned");
+                    self.post_office_candidates_for(&roster, &destination.device)
+                };
+                (!candidates.iter().any(|p| {
+                    p.public != self.identity.public() && self.relay_send_allowed(&p.public)
+                }))
+                .then_some(DeliveryRecoveryReason::NoKnownRoute)
+            }
+        } else {
+            None
+        };
         let started = std::time::Instant::now();
         let budget = super::route_timing::MAX_CONTROL_DEADLINE;
         let direct = async {
             let mut held = false;
-            if let Some(peer) = self
-                .routing_peer(&destination.device.user_id())
-                .filter(|p| {
-                    p.public == destination.device
-                        && p.account_id == destination.account
-                        && self.known_account_allowed(&p.public)
-                })
-            {
-                held = self
+            let mut timed_out = false;
+            if let Some(peer) = direct_peer {
+                let outcome = self
                     .adaptive_control_timeout(&peer.public, async {
                         let held = self
                             .transfer_delivery_destination(
@@ -2212,27 +2293,28 @@ impl Node {
                         }
                         held
                     })
-                    .await
-                    .unwrap_or(false);
+                    .await;
+                timed_out = outcome.is_none();
+                held = outcome.unwrap_or(false);
             }
-            (held, started.elapsed())
+            (held, started.elapsed(), timed_out)
         };
         let relay = async {
-            let held =
+            let outcome =
                 tokio::time::timeout(budget, self.replicate_delivery_destination(destination))
-                    .await
-                    .unwrap_or(false);
-            (held, started.elapsed())
+                    .await;
+            let timed_out = outcome.is_err();
+            (outcome.unwrap_or(false), started.elapsed(), timed_out)
         };
         tokio::pin!(direct, relay);
         // Both alternatives share the same bounded wall-clock window. Custody
         // cannot cancel recipient progress; exact recipient confirmation can.
-        let ((held, direct_elapsed), (relay_held, relay_elapsed)) = tokio::select! {
+        let ((held, direct_elapsed, direct_timeout), (relay_held, relay_elapsed, relay_timeout)) = tokio::select! {
             result = &mut direct => {
                 let still_pending = self.delivery.lock().expect("delivery lock not poisoned")
                     .contains_work_event(destination.event.id);
                 if still_pending { (result, relay.await) }
-                else { (result, (false, started.elapsed())) }
+                else { (result, (false, started.elapsed(), false)) }
             },
             result = &mut relay => (direct.await, result),
         };
@@ -2241,7 +2323,17 @@ impl Node {
                 "slow delivery attempt direct_ms={} relay_ms={} direct_held={} relay_held={} budget_ms={}",
                 direct_elapsed.as_millis(), relay_elapsed.as_millis(), held, relay_held, budget.as_millis());
         }
-        held || relay_held
+        let progress = held || relay_held;
+        (
+            progress,
+            if progress {
+                None
+            } else if direct_timeout || relay_timeout {
+                Some(DeliveryRecoveryReason::AttemptTimedOut)
+            } else {
+                reason
+            },
+        )
     }
 
     pub(in crate::node) fn install_file_card_scopes(&self, store: &DeliveryStore) {
@@ -3133,6 +3225,10 @@ mod diagnostic_tests {
         assert!(!first.iter().any(|peer| peer.public == tail));
         let second = node.relay_candidate_batch("pull:peer", candidates.clone());
         assert_eq!(second.len(), 4);
+        assert_eq!(
+            second[0].public, first[0].public,
+            "keep the best candidate in every batch"
+        );
         let third = node.relay_candidate_batch("pull:peer", candidates);
         assert!(
             third.iter().any(|peer| peer.public == tail),
@@ -3142,6 +3238,33 @@ mod diagnostic_tests {
         assert_eq!(
             node.relay_candidate_batch("upload:peer", first.clone())[0].public,
             first[0].public
+        );
+        let candidates = node.post_office_candidates(&node.roster.lock().unwrap());
+        let fastest = candidates.last().unwrap();
+        for relay in &candidates {
+            node.sessions.control_succeeded(
+                &relay.public,
+                relay.addr,
+                std::time::Duration::from_millis(if relay.public == fastest.public {
+                    10
+                } else {
+                    900
+                }),
+            );
+        }
+        assert_eq!(
+            node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+            fastest.public
+        );
+        node.record_relay_attempt(&fastest.public, false);
+        assert_ne!(
+            node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+            fastest.public
+        );
+        node.record_relay_attempt(&fastest.public, true);
+        assert_eq!(
+            node.post_office_candidates(&node.roster.lock().unwrap())[0].public,
+            fastest.public
         );
     }
 

@@ -7,6 +7,7 @@ use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use zeroize::Zeroizing;
 
 const MAGIC: &[u8; 6] = b"MTAPRF";
 pub(crate) const MAX_KEYS: usize = 2048;
@@ -61,6 +62,32 @@ fn category_tag(category: SyncCategory) -> u8 {
 }
 
 impl AccountPreferences {
+    /// A local storage owner may adopt a different cryptographic account. Its
+    /// previous account's rows must not be re-exported under the new identity.
+    /// Legacy unscoped journals remain untouched: their rows do not contain an
+    /// account binding, so assigning them after an adoption would guess ownership.
+    pub(crate) fn open_for_account(
+        directory: &Path,
+        password: &str,
+        account_id: &str,
+    ) -> Result<Self, LogError> {
+        if account_id.len() != 32 || !account_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(LogError::CorruptFile(
+                "invalid preference account owner".into(),
+            ));
+        }
+        let account_id = account_id.to_ascii_lowercase();
+        // Bind decryption to the account as well as the filename. Renaming a
+        // journal cannot turn another account's rows into this account's state.
+        let scoped_password = Zeroizing::new(format!(
+            "mesh-talk-account-preferences-v1:{account_id}:{password}"
+        ));
+        Self::open(
+            &directory.join(format!("account-preferences-{account_id}.log")),
+            &scoped_password,
+        )
+    }
+
     pub(crate) fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, records) = EncryptedRecordLog::<AccountPreference>::open(path, password, MAGIC)?;
         let mut current: HashMap<(u8, String), AccountPreference> = HashMap::new();
@@ -127,6 +154,21 @@ impl AccountPreferences {
         Ok(record)
     }
 
+    fn seed_local(
+        &mut self,
+        category: SyncCategory,
+        key: String,
+        value: Option<String>,
+        device_id: String,
+        now_ms: u64,
+    ) -> Result<(AccountPreference, bool), LogError> {
+        if let Some(existing) = self.get(category, &key) {
+            return Ok((existing, false));
+        }
+        self.set_local(category, key, value, device_id, now_ms)
+            .map(|record| (record, true))
+    }
+
     pub(crate) fn merge(&mut self, record: AccountPreference) -> Result<bool, LogError> {
         if !record.valid() {
             return Err(LogError::CorruptFile("invalid account preference".into()));
@@ -148,9 +190,176 @@ impl AccountPreferences {
     }
 }
 
+impl super::Node {
+    /// Seed a saved local choice without replacing any account value, including
+    /// a tombstone received concurrently with the caller's earlier snapshot.
+    pub fn set_account_preference_if_absent(
+        &self,
+        category: SyncCategory,
+        key: String,
+        value: Option<String>,
+    ) -> Result<AccountPreference, super::NodeError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |duration| {
+                duration.as_millis().min(u64::MAX as u128) as u64
+            });
+        let (record, created) = self
+            .account_preferences
+            .lock()
+            .expect("account preferences mutex not poisoned")
+            .seed_local(category, key, value, self.user_id(), now_ms)
+            .map_err(super::NodeError::Log)?;
+        if created {
+            if self.device_sync_policy().enabled(category) {
+                self.account_sync_notify.notify_one();
+            }
+            self.note_ui_change();
+            self.note_account_local_change();
+        }
+        Ok(record)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_seed_preserves_existing_tombstone_and_record_arriving_after_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("preferences.log");
+        let mut store = AccountPreferences::open(&path, "pw").unwrap();
+        assert!(store.entries(SyncCategory::Appearance).is_empty());
+        let existing = store
+            .set_local(
+                SyncCategory::Appearance,
+                "theme".into(),
+                None,
+                "ab".repeat(16),
+                10,
+            )
+            .unwrap();
+        let (seeded, created) = store
+            .seed_local(
+                SyncCategory::Appearance,
+                "theme".into(),
+                Some("dark".into()),
+                "cd".repeat(16),
+                20,
+            )
+            .unwrap();
+        assert!(!created);
+        assert_eq!(seeded, existing);
+        let (first, created) = store
+            .seed_local(
+                SyncCategory::Appearance,
+                "settings.ringtone".into(),
+                Some("\"marimba\"".into()),
+                "ab".repeat(16),
+                30,
+            )
+            .unwrap();
+        assert!(created);
+        let (second, created) = store
+            .seed_local(
+                SyncCategory::Appearance,
+                "settings.ringtone".into(),
+                Some("\"digital\"".into()),
+                "cd".repeat(16),
+                40,
+            )
+            .unwrap();
+        assert!(!created);
+        assert_eq!(first, second);
+        drop(store);
+        let reopened = AccountPreferences::open(&path, "pw").unwrap();
+        assert_eq!(
+            reopened.get(SyncCategory::Appearance, "theme"),
+            Some(existing)
+        );
+        assert_eq!(
+            reopened.get(SyncCategory::Appearance, "settings.ringtone"),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn account_scoped_preferences_never_import_unattributed_legacy_or_another_account() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy_path = root.path().join("account-preferences.log");
+        let mut legacy = AccountPreferences::open(&legacy_path, "pw").unwrap();
+        legacy
+            .set_local(
+                SyncCategory::Contacts,
+                "favorite:old".into(),
+                Some("old alias".into()),
+                "aa".repeat(16),
+                1,
+            )
+            .unwrap();
+        drop(legacy);
+        let legacy_bytes = std::fs::read(&legacy_path).unwrap();
+        let a = "11".repeat(16);
+        let b = "22".repeat(16);
+        let mut first = AccountPreferences::open_for_account(root.path(), "pw", &a).unwrap();
+        assert!(
+            first.entries(SyncCategory::Contacts).is_empty(),
+            "legacy rows have no provable account owner"
+        );
+        first
+            .set_local(
+                SyncCategory::Contacts,
+                "favorite:current".into(),
+                Some("Mac remark".into()),
+                "aa".repeat(16),
+                2,
+            )
+            .unwrap();
+        drop(first);
+        let other = AccountPreferences::open_for_account(root.path(), "pw", &b).unwrap();
+        assert!(other.entries(SyncCategory::Contacts).is_empty());
+        drop(other);
+        let reopened = AccountPreferences::open_for_account(root.path(), "pw", &a).unwrap();
+        assert_eq!(
+            reopened
+                .get(SyncCategory::Contacts, "favorite:current")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("Mac remark")
+        );
+        assert_eq!(
+            std::fs::read(legacy_path).unwrap(),
+            legacy_bytes,
+            "ambiguous legacy data is preserved for recovery"
+        );
+    }
+
+    #[test]
+    fn account_scoped_preferences_reject_renamed_ciphertext_and_invalid_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let a = "11".repeat(16);
+        let b = "22".repeat(16);
+        let mut first = AccountPreferences::open_for_account(root.path(), "pw", &a).unwrap();
+        first
+            .set_local(
+                SyncCategory::Appearance,
+                "theme".into(),
+                Some("dark".into()),
+                "aa".repeat(16),
+                1,
+            )
+            .unwrap();
+        drop(first);
+        std::fs::copy(
+            root.path().join(format!("account-preferences-{a}.log")),
+            root.path().join(format!("account-preferences-{b}.log")),
+        )
+        .unwrap();
+        assert!(AccountPreferences::open_for_account(root.path(), "pw", &b).is_err());
+        assert!(AccountPreferences::open_for_account(root.path(), "pw", "../escape").is_err());
+    }
 
     #[test]
     fn exhausted_revision_rejects_local_edit_without_false_success() {

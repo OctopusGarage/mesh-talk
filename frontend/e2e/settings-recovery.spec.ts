@@ -3,6 +3,36 @@ import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { expect, test } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 
+test("origin sharing defaults off and can be disabled after bridge discovery is turned off", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "connection");
+  const sharing = page.getByRole("switch", {
+    name: "Share my originating post office",
+  });
+  const bridge = page.getByRole("switch", {
+    name: "Discover peers through a post office",
+  });
+  await expect(sharing).toHaveAttribute("aria-checked", "false");
+  await expect(sharing).toBeDisabled();
+  await bridge.click();
+  await expect(sharing).toBeEnabled();
+  await sharing.click();
+  await expect(sharing).toHaveAttribute("aria-checked", "true");
+  await page.getByRole("button", { name: "Close" }).click();
+  await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "connection");
+  await expect(sharing).toHaveAttribute("aria-checked", "true");
+  await bridge.click();
+  await expect(bridge).toHaveAttribute("aria-checked", "false");
+  await expect(sharing).toBeEnabled();
+  await sharing.click();
+  await expect(sharing).toHaveAttribute("aria-checked", "false");
+  await expect(sharing).toBeDisabled();
+});
+
 test("reopening settings selects General", async ({ page }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");

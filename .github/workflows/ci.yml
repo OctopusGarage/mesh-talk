@@ -7,7 +7,7 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    - cron: '0 6 * * 1' # Preserve the former weekly full-health Rust run.
+    - cron: "0 6 * * 1" # Preserve the former weekly full-health Rust run.
   workflow_dispatch:
     inputs:
       diagnostic_timing:
@@ -111,7 +111,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Diagnostic and release gate regressions (all platforms)
         shell: bash
@@ -131,7 +131,14 @@ jobs:
         working-directory: src-tauri
         run: cargo build --workspace --locked
 
-      # Linux runs the suite under llvm-cov (below); macOS + Windows run it directly.
+      # Collect each OS's workspace coverage without repeating its test suite.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2.87.28
+        with:
+          tool: cargo-llvm-cov
+
+      # Every platform collects coverage in its existing test pass: native-only
+      # updater policy cannot be represented by Linux's AppImage-only branch.
       # --workspace so BOTH crates (mesh-talk-core + the app) are tested, not just the app.
       - name: Test (macOS + Windows)
         if: matrix.os != 'ubuntu-latest'
@@ -144,10 +151,13 @@ jobs:
         run: |
           set -o pipefail
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
-            cargo test --workspace -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
+            cargo llvm-cov --workspace --lcov --output-path lcov.info -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
           else
-            cargo test --workspace
+            cargo llvm-cov --workspace --lcov --output-path lcov.info
           fi
+          # llvm-cov runs unit/integration tests; stable Rust doctests keep their
+          # original separate check without executing those suites twice.
+          cargo test --workspace --doc
 
       # Capture loader evidence when Windows cannot even start the test harness.
       # This diagnostic never turns a failed test step into a successful check.
@@ -156,7 +166,7 @@ jobs:
         shell: pwsh
         run: |
           $test = $null
-          foreach ($candidate in Get-ChildItem target/debug/deps/mesh_talk-*.exe) {
+          foreach ($candidate in Get-ChildItem target/llvm-cov-target/debug/deps/mesh_talk-*.exe -ErrorAction SilentlyContinue) {
             Write-Host "Checking test harness: $($candidate.Name)"
             & $candidate.FullName --list
             Write-Host "Harness exit code: $LASTEXITCODE"
@@ -183,14 +193,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Test harness still cannot load with Common Controls v6' }
           & $copy contact_policy::tests --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Native contact policy tests failed' }
-
-      # On Linux, run the tests through llvm-cov so we get coverage in the same
-      # pass (avoids compiling/running the suite twice).
-      - name: Install cargo-llvm-cov
-        if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2.87.28
-        with:
-          tool: cargo-llvm-cov
 
       - name: Test + coverage (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -230,14 +232,14 @@ jobs:
         # Dependabot PRs to dev cannot read the Actions CODECOV_TOKEN secret.
         # Their tests still run; only the unauthenticated upload is skipped.
         if: >-
-          matrix.os == 'ubuntu-latest' &&
           !(github.event_name == 'pull_request' &&
             github.base_ref == 'dev' &&
             github.event.pull_request.user.login == 'dependabot[bot]')
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: frontend/coverage/lcov.info,src-tauri/lcov.info,src-tauri/e2e-lcov.info
+          files: ${{ matrix.os == 'ubuntu-latest' && 'frontend/coverage/lcov.info,src-tauri/lcov.info,src-tauri/e2e-lcov.info' || 'src-tauri/lcov.info' }}
+          name: workspace-${{ matrix.os }}-${{ github.run_attempt }}
           # Branch protection requires codecov/patch; surface upload failures in CI too.
           fail_ci_if_error: true
 

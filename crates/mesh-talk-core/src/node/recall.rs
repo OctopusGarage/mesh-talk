@@ -11,7 +11,6 @@
 //! honoured only when the `Delete` event's author equals the target event's author.
 
 use super::node::{Node, now_millis};
-use super::queries::decode_account_entry;
 use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::node::NodeError;
@@ -27,6 +26,14 @@ use std::path::Path;
 pub const RECALL_WINDOW_MS: u64 = 2 * 60 * 1000;
 
 const RECALL_LOG_MAGIC: &[u8; 6] = b"MTRECL";
+
+/// Sticker artwork preserves message recall while ordinary attachments keep
+/// their existing contract. Validation prevents a filename alone granting it.
+fn recallable_manifest(bytes: &[u8]) -> bool {
+    super::files::validated_manifest(bytes).is_some_and(|manifest| {
+        manifest.protection().is_some() || crate::file::sticker::is_sticker_name(manifest.name())
+    })
+}
 
 /// The plaintext payload of a channel/DM `Delete` event: the message being recalled.
 /// Sealed like a reaction before it ships.
@@ -65,6 +72,7 @@ pub struct RecallMark {
 pub struct RecallLog {
     file: EncryptedRecordLog<RecallMark>,
     by_conversation: HashMap<ConversationId, Vec<RecallMark>>,
+    revision: u64,
 }
 
 impl RecallLog {
@@ -80,6 +88,7 @@ impl RecallLog {
         }
         Ok(Self {
             file,
+            revision: by_conversation.values().map(Vec::len).sum::<usize>() as u64,
             by_conversation,
         })
     }
@@ -104,12 +113,17 @@ impl RecallLog {
             target,
             wall_clock,
         };
-        self.file.append(&mark)?;
+        self.file.append_durable(&mark)?;
+        self.revision = self.revision.wrapping_add(1);
         self.by_conversation
             .entry(conversation)
             .or_default()
             .push(mark);
         Ok(())
+    }
+
+    pub(in crate::node) fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// The targets we ourselves recalled in `conversation`.
@@ -190,15 +204,39 @@ impl Node {
             let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
             sent.entries(&acct_conv)
                 .into_iter()
-                .find(|e| decode_account_entry(&e.plaintext).0 == target)
+                .find(|e| {
+                    super::DmEnvelope::decode(&e.plaintext).is_some_and(|env| {
+                        env.msg_id == *target.as_bytes()
+                            && env.route.sender_account == my_account
+                            && env.route.recipient_account == target_account_id
+                    })
+                })
                 .map(|e| e.wall_clock)
         };
+        let wall = wall.or_else(|| {
+            let files = self.received_files.lock().expect("received files lock");
+            files
+                .entries_ref(&acct_conv)
+                .iter()
+                .find(|row| {
+                    row.event_id == target
+                        && row.from == self.user_id()
+                        && recallable_manifest(&row.plaintext)
+                })
+                .map(|row| row.wall_clock)
+        });
         let Some(wall) = wall else {
             return Err(NodeError::Channel(
                 "can only recall your own message".into(),
             ));
         };
-        if now_millis().saturating_sub(wall) > RECALL_WINDOW_MS {
+        let already_accepted = self
+            .recalls
+            .lock()
+            .expect("recalls mutex")
+            .targets(&acct_conv)
+            .contains(&target);
+        if !already_accepted && now_millis().saturating_sub(wall) > RECALL_WINDOW_MS {
             return Err(NodeError::Channel(
                 "the 2-minute recall window has passed".into(),
             ));
@@ -225,7 +263,8 @@ impl Node {
             }
             // Account recalls retain their best-effort fanout contract, including
             // a durable local recall when every destination is currently unavailable.
-            self.record_my_recall(acct_conv, target, wall)
+            self.record_my_recall(acct_conv, target, wall)?;
+            self.publish_own_account_recall(target_account_id, target, wall)
         })?;
         for (peer, conv) in deliveries {
             self.deliver_direct(&peer, conv).await.ok();
@@ -256,6 +295,13 @@ impl Node {
     ) -> Result<(), NodeError> {
         authorize(&mut || Ok(()))?;
         let me = Author::from_ed25519(self.identity.public().ed25519_pub);
+        let recallable_file_target = self
+            .received_files
+            .lock()
+            .expect("received files lock")
+            .entries_ref(&channel)
+            .iter()
+            .any(|row| row.event_id == target && recallable_manifest(&row.plaintext));
         let wall = {
             let log = self.log.lock().expect("log mutex not poisoned");
             let event = log
@@ -266,7 +312,9 @@ impl Node {
                     "can only recall your own message".into(),
                 ));
             }
-            if event.kind != EventKind::Message {
+            if event.kind != EventKind::Message
+                && !(event.kind == EventKind::FileManifest && recallable_file_target)
+            {
                 return Err(NodeError::Channel("not a message".into()));
             }
             event.wall_clock
@@ -277,21 +325,36 @@ impl Node {
             ));
         }
 
-        let members = {
+        let (members, epoch) = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !state.is_accepted_member(&self.user_id()) {
+            if !self.channel_identity_is_current(state) {
                 return Err(NodeError::Channel("not a channel member".into()));
             }
-            state.members().to_vec()
+            (state.recipient_members(), state.epoch())
         };
         let payload = DeletePayload { target };
         let sealed =
             crate::node::channel::SealedPayload::seal(&self.identity, &members, &payload.encode())
                 .map_err(|e| NodeError::Channel(format!("recall seal failed: {e}")))?;
         authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
+            {
+                let book = self.channels.lock().expect("channels lock");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+                if state.epoch() != epoch || !self.channel_identity_is_current(state) {
+                    return Err(NodeError::Channel(
+                        "channel membership changed; retry the operation".into(),
+                    ));
+                }
+            }
             self.append_event(channel, EventKind::Delete, sealed.encode())?;
             self.record_my_recall(channel, target, wall)
         })?;
@@ -433,7 +496,7 @@ impl Node {
         // Collect the peer recall claims (target, claimed-sender-account) from Delete events,
         // already bound to the authenticating peer key. Decrypting these is the only required
         // work; if there are none we skip the expensive author_of rebuild below.
-        let mut claims: Vec<(EventId, String)> = Vec::new();
+        let mut claims: Vec<(EventId, String)> = self.private_dm_recall_claims(peer_account_id);
         for (conv, author_x, peer_account) in convs {
             let delete_events: Vec<Event> = {
                 let log = self.log.lock().expect("log mutex not poisoned");
@@ -463,28 +526,64 @@ impl Node {
 
         // Who authored each logical message in this account conversation (to authorise
         // peer recalls): our sends are ours, received entries carry the sender account.
+        let targets: HashSet<_> = claims.iter().map(|(target, _)| *target).collect();
         let mut author_of: HashMap<EventId, (String, u64)> = HashMap::new();
-        for e in self
-            .sentlog
-            .lock()
-            .expect("sentlog mutex not poisoned")
-            .entries(&acct_conv)
         {
-            author_of.insert(
-                decode_account_entry(&e.plaintext).0,
-                (my_account.clone(), e.wall_clock),
-            );
+            let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
+            let mut entries: Vec<_> = sentlog
+                .entries_ref(&acct_conv)
+                .iter()
+                .filter_map(|entry| {
+                    let id = super::DmEnvelope::decode_ref(&entry.plaintext)
+                        .map_or(EventId::new([0; 32]), |envelope| {
+                            EventId::new(envelope.msg_id)
+                        });
+                    targets.contains(&id).then_some((id, entry))
+                })
+                .collect();
+            // Keep the original entries() override order, using borrowed rows.
+            entries.sort_by_key(|(_, entry)| (entry.wall_clock, entry.seq));
+            for (id, entry) in entries {
+                author_of.insert(id, (my_account.clone(), entry.wall_clock));
+            }
         }
-        for e in self
-            .received
-            .lock()
-            .expect("received mutex not poisoned")
-            .entries(&acct_conv)
         {
-            author_of.insert(
-                decode_account_entry(&e.plaintext).0,
-                (e.from.clone(), e.wall_clock),
-            );
+            let received = self.received.lock().expect("received mutex not poisoned");
+            let mut entries: Vec<_> = received
+                .entries_ref(&acct_conv)
+                .iter()
+                .filter_map(|entry| {
+                    let id = super::DmEnvelope::decode_ref(&entry.plaintext)
+                        .map_or(EventId::new([0; 32]), |envelope| {
+                            EventId::new(envelope.msg_id)
+                        });
+                    targets.contains(&id).then_some((id, entry))
+                })
+                .collect();
+            entries.sort_by_key(|(_, entry)| entry.wall_clock);
+            for (id, entry) in entries {
+                author_of.insert(id, (entry.from.clone(), entry.wall_clock));
+            }
+        }
+        {
+            let mut authors: HashMap<String, String> = self
+                .historical_dm_peers()
+                .into_iter()
+                .filter_map(|proof| proof.account_id().map(|account| (proof.user_id, account)))
+                .collect();
+            authors.insert(self.user_id(), my_account.clone());
+            for device in self.linked_devices() {
+                authors.insert(device.public.user_id(), my_account.clone());
+            }
+            let files = self.received_files.lock().expect("received files lock");
+            for row in files.entries_ref(&acct_conv) {
+                if targets.contains(&row.event_id)
+                    && recallable_manifest(&row.plaintext)
+                    && let Some(account) = authors.get(&row.from)
+                {
+                    author_of.insert(row.event_id, (account.clone(), row.wall_clock));
+                }
+            }
         }
         // Only the message's own author account may recall it.
         for (target, sender_account) in claims {

@@ -63,6 +63,7 @@ export function startAutomaticDownloads() {
           typeof file.mime === "string" &&
           typeof file.fromName === "string" &&
           typeof file.size === "number" &&
+          !file.protection &&
           typeof file.media === "boolean" &&
           !known.has(file.fileConv),
       );
@@ -101,7 +102,7 @@ export function startAutomaticDownloads() {
 
   const candidates = () => {
     for (const file of useChat.getState().incomingFiles) {
-      if (!file.media || !file.mime.startsWith("image/"))
+      if (!file.protection && (!file.media || !file.mime.startsWith("image/")))
         pending.set(file.fileConv, file);
     }
     for (const fileConv of pending.keys()) {

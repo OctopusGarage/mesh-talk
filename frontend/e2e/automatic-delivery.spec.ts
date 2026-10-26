@@ -19,7 +19,7 @@ async function observeLocalDelivery(page: Page) {
         ) => Promise<unknown>;
       };
       __deliveryDetailsFixture: {
-        observation: { kind: string; age_ms: number } | null;
+        observation: { kind: string; age_ms: number; reason?: string } | null;
         hold: boolean;
         entered: boolean;
         seenKind: string | null;
@@ -27,9 +27,14 @@ async function observeLocalDelivery(page: Page) {
       };
     };
     const state = {
-      observation: { kind: "retry_scheduled", age_ms: 180000 } as {
+      observation: {
+        kind: "retry_scheduled",
+        age_ms: 180000,
+        reason: "post_office_disabled",
+      } as {
         kind: string;
         age_ms: number;
+        reason?: string;
       } | null,
       hold: false,
       entered: false,
@@ -87,6 +92,12 @@ for (const viewport of [
     await expect(details).toBeVisible();
     await expect(details).toHaveAccessibleName("Delivery details");
     await expect(details).toContainText(/Retry was scheduled .*minutes ago\./);
+    await expect(details).toContainText(
+      "Post-office sending was disabled on this device",
+    );
+    await expect(
+      details.getByRole("button", { name: "Review delivery settings" }),
+    ).toBeVisible();
     await expect(details.locator("[aria-live]")).toHaveCount(0);
     await expect(bubble.getByRole("button", { name: /resend/i })).toHaveCount(
       0,
@@ -110,6 +121,43 @@ for (const viewport of [
     await expect(trigger).toBeFocused();
     await trigger.press("Space");
     await expect(details).toBeVisible();
+    await details
+      .getByRole("button", { name: "Review delivery settings" })
+      .click();
+    const settings = page
+      .getByRole("dialog")
+      .filter({ has: page.locator("#setting-post-office") });
+    await expect(settings).toBeVisible();
+    await expect(page.locator("#setting-post-office")).toBeFocused();
+    await settings.press("Escape");
+    await expect(settings).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await page.evaluate(() => {
+      (
+        window as unknown as {
+          __deliveryDetailsFixture: { observation: unknown };
+        }
+      ).__deliveryDetailsFixture.observation = {
+        kind: "retry_scheduled",
+        age_ms: 0,
+        reason: "no_known_route",
+      };
+    });
+    await trigger.focus();
+    await trigger.press("Enter");
+    await expect(details).toContainText(
+      "No eligible route was known to this device",
+    );
+    await details
+      .getByRole("button", { name: "Open connection diagnostics" })
+      .click();
+    const diagnostics = page.getByRole("dialog");
+    await expect(diagnostics).toBeVisible();
+    await diagnostics.press("Escape");
+    await expect(diagnostics).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await trigger.focus();
+    await trigger.press("Enter");
     await page.evaluate(() => {
       (
         window as unknown as {
@@ -304,6 +352,10 @@ test("text, sticker and file card stay Awaiting until explicit authoritative moc
     .getByTestId("message-bubble")
     .filter({ hasText: "card.txt" })
     .locator('[data-delivery="delivered"]');
+  await expect(cardReceipt).toHaveAccessibleName("File offer received");
+  await expect(
+    cardReceipt.getByText("File offer received", { exact: true }),
+  ).toBeVisible();
   await cardReceipt.focus();
   await expect(cardReceipt.getByRole("tooltip")).toBeVisible();
   await expect(cardReceipt.getByRole("tooltip")).toContainText(
@@ -517,4 +569,183 @@ test("a scoped native delivery invalidation refreshes status without a polling r
           .__pushDelivery.reads,
     ),
   ).toBe(1);
+});
+
+test("delivery recovery survives its receipt and returns focus safely, then retires on logout", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await observeLocalDelivery(page);
+  await page
+    .getByTestId("composer-input")
+    .fill("Keep recovery open through receipt");
+  await page.getByTestId("composer-send").click();
+  const bubble = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "Keep recovery open through receipt" });
+  const trigger = bubble.getByTestId("delivery-details-trigger");
+  await trigger.focus();
+  await trigger.press("Enter");
+  await page
+    .getByTestId("delivery-details")
+    .getByRole("button", { name: "Review delivery settings" })
+    .click();
+  const settings = page.getByTestId("settings-dialog");
+  await expect(settings).toBeVisible();
+  await page.evaluate(async (account) => {
+    const scope = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<{ id: string }[]>;
+      };
+      __mockSetDelivery(account: string, id: string, status: string): void;
+    };
+    const rows = await scope.__TAURI_INTERNALS__.invoke(
+      "owner_account_history",
+      { owner: "u_self", account, limit: 500 },
+    );
+    scope.__mockSetDelivery(account, rows[rows.length - 1].id, "delivered");
+  }, BOB.account);
+  await expect(trigger).toHaveCount(0);
+  await expect(settings).toBeVisible();
+  await settings.press("Escape");
+  await expect(settings).toBeHidden();
+  await expect(page.getByTestId("chat-shell")).toBeFocused();
+  await page.getByTestId("composer-input").fill("Retire recovery on logout");
+  await page.getByTestId("composer-send").click();
+  const next = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "Retire recovery on logout" })
+    .getByTestId("delivery-details-trigger");
+  await next.focus();
+  await next.press("Enter");
+  await page
+    .getByTestId("delivery-details")
+    .getByRole("button", { name: "Review delivery settings" })
+    .click();
+  await expect(settings).toBeVisible();
+  await page.evaluate(async () => {
+    const modulePath = "/src/store/auth.ts";
+    const { useAuth } = await import(/* @vite-ignore */ modulePath);
+    await useAuth.getState().logout();
+  });
+  await expect(settings).toBeHidden();
+  await expect(page.getByTestId("chat-shell")).toHaveCount(0);
+});
+
+test("channel acceptance reconciles repeated text once and confirmed post-office custody clears the waiting indicator", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId("conversation-row-chan_team_dddd4444").click();
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      __channelCustody: boolean;
+    };
+    const original = w.__TAURI_INTERNALS__.invoke;
+    w.__channelCustody = false;
+    w.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "send_channel_message")
+        throw new Error("Legacy fanout IPC must not gate local acceptance");
+      if (cmd === "channel_custody_statuses")
+        return (args.ids as string[]).map((id) => ({
+          id,
+          replicas: 0,
+          post_offices: w.__channelCustody ? 1 : 0,
+        }));
+      return original(cmd, args);
+    };
+  });
+  for (let i = 0; i < 2; i++) {
+    await page.getByTestId("composer-input").fill("same channel text");
+    await page.getByTestId("composer-send").click();
+  }
+  const bubbles = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "same channel text" });
+  await expect(bubbles).toHaveCount(2);
+  await expect(bubbles.filter({ hasText: "sending…" })).toHaveCount(0);
+  await expect(bubbles.locator('[data-custody="0"]')).toHaveCount(2);
+  await page.evaluate(() => {
+    (window as unknown as { __channelCustody: boolean }).__channelCustody =
+      true;
+  });
+  await expect(bubbles.locator('[data-custody="1"]')).toHaveCount(2);
+  await expect(
+    bubbles.getByRole("img", { name: "Post office confirmed a stored copy" }),
+  ).toHaveCount(2);
+  await expect(bubbles).toHaveCount(2);
+});
+
+test("linked-device channel history waits for copy confirmation before showing a check", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.evaluate(() => {
+    const scope = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      __linkedCopyConfirmed: boolean;
+    };
+    const original = scope.__TAURI_INTERNALS__.invoke;
+    scope.__linkedCopyConfirmed = false;
+    scope.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "channel_custody_statuses")
+        return scope.__linkedCopyConfirmed
+          ? [{ id: "sibling-authored", replicas: 1, post_offices: 0 }]
+          : [];
+      if (command === "channel_history") {
+        const history = (await original(command, args)) as unknown[];
+        return [
+          ...history,
+          {
+            id: "sibling-authored",
+            from_me: true,
+            who: "device_linked_sibling",
+            text: "Group message synced from my linked device",
+            wall_clock: 1_700_000_200_000,
+            reply_to: null,
+          },
+        ];
+      }
+      return original(command, args);
+    };
+  });
+  await page.getByTestId("conversation-row-chan_team_dddd4444").click();
+  const bubble = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "Group message synced from my linked device" });
+  await expect(bubble.locator('[data-custody="unknown"]')).toBeVisible();
+  await expect(bubble).toContainText("Copy status unavailable");
+  await expect(bubble).not.toContainText("No member copy confirmed");
+  await expect(bubble).not.toContainText("✓");
+  await expect(bubble.locator("[data-delivery]")).toHaveCount(0);
+  await bubble.locator("[data-custody]").focus();
+  await expect(bubble.getByRole("tooltip")).toContainText(
+    "Another linked device may have newer information.",
+  );
+  await page.evaluate(() => {
+    (
+      window as unknown as { __linkedCopyConfirmed: boolean }
+    ).__linkedCopyConfirmed = true;
+  });
+  await expect(bubble.locator('[data-custody="1"]')).toBeVisible();
+  await expect(
+    bubble.getByRole("img", { name: "Last confirmed: 1 member copy" }),
+  ).toBeVisible();
+  await expect(bubble).toContainText("✓");
+  await expect(bubble.locator("[data-delivery]")).toHaveCount(0);
 });

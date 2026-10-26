@@ -68,7 +68,7 @@ pub async fn history<R: tauri::Runtime>(
     // Cap the page size so a frontend accident (e.g. a huge JS number) can't
     // request an unbounded scan; the node truncates to this anyway.
     let limit = limit.min(500);
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     let public = rt
         .peer_public(&peer)
@@ -166,7 +166,7 @@ pub async fn account_history<R: tauri::Runtime>(
     limit: usize,
 ) -> Result<Vec<HistoryItem>, CommandError> {
     let limit = limit.min(500);
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     let history = rt
         .account_history(&account, limit)
@@ -207,7 +207,7 @@ pub async fn reactions(
     state: tauri::State<'_, NodeState>,
     peer: String,
 ) -> Result<Vec<ReactionInfo>, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     let public = rt
         .peer_public(&peer)
@@ -245,7 +245,7 @@ pub async fn account_reactions(
     state: tauri::State<'_, NodeState>,
     account: String,
 ) -> Result<Vec<ReactionInfo>, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(to_reaction_infos(rt.account_reactions(&account)))
 }

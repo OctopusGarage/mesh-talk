@@ -1,6 +1,10 @@
 //! Bounded latency estimates for authenticated route attempts.
 
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 const MAX_ROUTES: usize = 256;
 const MIN_DEADLINE: Duration = Duration::from_secs(3);
@@ -11,6 +15,7 @@ const MIN_CONTROL_DEADLINE: Duration = Duration::from_secs(15);
 pub(super) const MAX_CONTROL_DEADLINE: Duration = Duration::from_secs(60);
 
 struct Estimate {
+    observed_at: Instant,
     authentication: Option<Sample>,
     control: Option<Sample>,
     backoff: Duration,
@@ -52,6 +57,26 @@ pub(super) struct RouteTimings {
 }
 
 impl RouteTimings {
+    /// Unclamped measured cost, separate from conservative protocol deadlines.
+    /// Expired hints cannot pin an automatic route after network conditions change.
+    pub(super) fn routing_cost(
+        &self,
+        device: &str,
+        address: SocketAddr,
+        now: Instant,
+    ) -> Option<Duration> {
+        let e = self.entries.get(&(device.to_owned(), address))?;
+        if now.saturating_duration_since(e.observed_at) >= Duration::from_secs(120) {
+            return None;
+        }
+        let measured = e
+            .control
+            .as_ref()
+            .map(Sample::margin)
+            .or_else(|| e.authentication.as_ref().map(|sample| sample.margin() * 3));
+        measured.map(|cost| cost.max(e.backoff * 3).max(e.control_backoff))
+    }
+
     pub(super) fn control_timed_out(&mut self, device: &str, address: SocketAddr) {
         let next = (self.control_deadline(device, address) * 2).min(MAX_CONTROL_DEADLINE);
         self.entry(device, address).control_backoff = next;
@@ -123,6 +148,7 @@ impl RouteTimings {
             }
         }
         let e = self.entries.entry(key).or_insert(Estimate {
+            observed_at: Instant::now(),
             authentication: None,
             control: None,
             backoff: Duration::ZERO,
@@ -131,6 +157,7 @@ impl RouteTimings {
             authentication_updated: 0,
             control_updated: 0,
         });
+        e.observed_at = Instant::now();
         e.updated = self.sequence;
         e
     }
@@ -156,6 +183,30 @@ mod tests {
     fn route() -> std::net::SocketAddr {
         "127.0.0.1:47479".parse().unwrap()
     }
+    #[test]
+    fn routing_cost_uses_unclamped_recent_samples_and_failure_penalties() {
+        let mut timings = RouteTimings::default();
+        let now = std::time::Instant::now();
+        timings.control_succeeded("fast", route(), Duration::from_millis(20));
+        timings.control_succeeded("slow", route(), Duration::from_millis(500));
+        assert!(
+            timings.routing_cost("fast", route(), now).unwrap()
+                < timings.routing_cost("slow", route(), now).unwrap()
+        );
+        timings.control_timed_out("fast", route());
+        assert!(
+            timings.routing_cost("fast", route(), now).unwrap()
+                > timings.routing_cost("slow", route(), now).unwrap()
+        );
+        assert!(
+            timings
+                .routing_cost("slow", route(), now + Duration::from_secs(121))
+                .is_none()
+        );
+        timings.clear();
+        assert!(timings.routing_cost("slow", route(), now).is_none());
+    }
+
     #[test]
     fn stalled_control_exchange_backs_off_even_when_authentication_is_fast() {
         let mut timings = RouteTimings::default();

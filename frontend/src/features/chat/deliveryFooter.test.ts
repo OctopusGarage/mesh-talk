@@ -36,6 +36,23 @@ const render = (m: ChatMessage, isChannel = false, isPersonal = false) =>
   );
 
 describe("automatic delivery footer", () => {
+  it("visibly identifies a received file offer instead of claiming file delivery", async () => {
+    await i18n.changeLanguage("en");
+    const html = render({
+      ...base,
+      delivery: "delivered",
+      file: {
+        fileConv: "file",
+        name: "photo.png",
+        size: 12,
+        mime: "image/png",
+        media: true,
+      },
+    });
+    expect(html).toContain('aria-label="File offer received"');
+    expect(html).toContain('aria-hidden="true">File offer received</span>');
+    expect(html).not.toContain('aria-label="Delivered"');
+  });
   it("distinguishes personal file metadata from bytes and external upload progress", async () => {
     await i18n.changeLanguage("en");
     const html = render(
@@ -112,6 +129,24 @@ describe("automatic delivery footer", () => {
       else expect(markup).toContain("No member copy confirmed");
     }
   });
+  it("explains what a confirmed copy means without claiming one for known zero", async () => {
+    await i18n.changeLanguage("en");
+    const html = render({ ...base, replicas: 0, postOfficeCopies: 0 }, true);
+    expect(html).toContain("No member copy confirmed");
+    expect(html).toContain("A confirmed copy means");
+    expect(html).not.toContain("An external member reported durable storage;");
+  });
+  it("does not turn missing linked-device copy status into a zero-copy claim", async () => {
+    await i18n.changeLanguage("en");
+    const html = render({ ...base, replicas: undefined }, true);
+    expect(html).not.toContain("No member copy confirmed");
+    expect(html).not.toContain('data-custody="0"');
+    expect(html).toContain('data-custody="unknown"');
+    expect(html).toContain("Copy status unavailable");
+    expect(html).toContain("Another linked device may have newer information.");
+    expect(html).not.toContain("✓");
+    expect(html).not.toContain("data-delivery=");
+  });
   it("has explicit automatic-receipt wording in all six locales and hides guessed file metadata", async () => {
     for (const language of ["en", "es", "ja", "yue", "zh-Hans", "zh-Hant"]) {
       for (const key of [
@@ -119,6 +154,8 @@ describe("automatic delivery footer", () => {
         "delivered",
         "help",
         "fileHelp",
+        "fileAwaiting",
+        "fileDelivered",
         "metadataPending",
         "detailsTitle",
         "attempted",
@@ -129,6 +166,10 @@ describe("automatic delivery footer", () => {
       ])
         expect(
           i18n.getResource(language, "translation", `message.delivery.${key}`),
+        ).toBeTruthy();
+      for (const key of ["unknown", "unknownHelp", "help"])
+        expect(
+          i18n.getResource(language, "translation", `message.custody.${key}`),
         ).toBeTruthy();
       await i18n.changeLanguage(language);
       const markup = render({
@@ -176,6 +217,15 @@ it("shows a countdown for each expiring message, including grouped incoming mess
   expect(html).toMatch(/4:5[89]/);
 });
 
+it("shows confirmed post-office custody without claiming member delivery", async () => {
+  await i18n.changeLanguage("en");
+  const html = render({ ...base, replicas: 0, postOfficeCopies: 1 }, true);
+  expect(html).toContain('data-custody="1"');
+  expect(html).toContain("Post office confirmed a stored copy");
+  expect(html).not.toContain("No member copy confirmed");
+  expect(html).not.toContain("sending…");
+});
+
 it("excludes details for recalled, pending, failed and unaccepted messages", () => {
   for (const message of [
     { ...base, recalled: true },
@@ -188,3 +238,27 @@ it("excludes details for recalled, pending, failed and unaccepted messages", () 
     );
   }
 });
+
+it.each([true, false])(
+  "conceals protected image filenames from accessible summaries (optimistic: %s)",
+  async (pending) => {
+    await i18n.changeLanguage("en");
+    const html = render({
+      ...base,
+      id: pending ? null : "history-image",
+      protection: "authenticate",
+      text: "",
+      pending,
+      metadataPending: pending,
+      file: {
+        name: "confidential-medical-results.png",
+        size: 10,
+        mime: "image/png",
+        fileConv: pending ? "" : "file-conv",
+        media: true,
+      },
+    });
+    expect(html).not.toContain("confidential-medical-results.png");
+    expect(html).toMatch(/aria-label="[^"]*Protected message/);
+  },
+);

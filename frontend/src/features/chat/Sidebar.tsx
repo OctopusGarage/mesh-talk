@@ -1,3 +1,5 @@
+import { canManageChannel } from "./channelPermissions";
+import { FavoritesDialog } from "./favorites/FavoritesDialog";
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, Network, Wifi, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -63,6 +65,8 @@ export function Sidebar() {
   const policyLoaded = useContactPolicy((s) => s.loaded);
   const policyError = useContactPolicy((s) => s.error);
   const owner = useAuth((s) => s.user?.id);
+  const generation = useAuth((s) => s.generation);
+  const favoritesScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
   const publiclyVisible = usePrivacy(
     (s) => s.owner === owner && s.loaded && s.snapshot?.invisible === false,
   );
@@ -174,7 +178,7 @@ export function Sidebar() {
   // or a channel I don't own (the core would reject the change) — gets a personal alias
   // instead. Single source of truth for that distinction, used by the rename flow + dialog.
   const ownedChannel = (id: string) =>
-    channels.find((c) => c.channel_id === id && c.owner === myId);
+    channels.find((c) => c.channel_id === id && canManageChannel(c, myId));
 
   const startRename = (id: string, current: string) => {
     setRenameId(id);
@@ -244,6 +248,7 @@ export function Sidebar() {
           <span>Mesh-Talk</span>
         </div>
         <SearchDialog />
+        <FavoritesDialog key={`${owner}:${generation}:${favoritesScope}`} />
         <ProfileDialog open={profileOpen} onOpenChange={setProfileOpen} />
       </div>
 

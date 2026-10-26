@@ -5,31 +5,17 @@ sign-up — peers on the same local network discover each other over signed broa
 directly with forward secrecy. Includes 1:1 DMs, group channels, file sharing, reactions,
 replies, @mentions, search, and multi-device.
 
-### Release highlights
-
-- Recover authorized group history and retained attachments from sharing members,
-  with bounded larger-group fanout and per-member sharing controls.
-- Keep durable retry, exact recipient confirmation, file consent, byte integrity
-  and completion as separate recoverable states.
-- Exchange eligible signed presence and opaque encrypted mailboxes among equal,
-  explicitly trusted post offices; no global hub is required.
-- Separate per-device public discovery and relay send/receive controls, including
-  physical-LAN-only discovery and direct LAN/Tailscale relay preference/fallback.
-- Harden certified device linking and category-controlled sibling replay across
-  restarts without relaxing account or group authority.
-- Provide signed native relay packages.
-<!-- STABLE_ONLY_START -->
-- Provide a verified Linux container image.
-<!-- STABLE_ONLY_END -->
+__RELEASE_HIGHLIGHTS__
 
 ### Downloads
 
-Pick the zip for your platform. Each zip contains the installer(s) **plus** a `SHA256SUMS`
+Download the ZIP for your platform from **Assets** at the bottom of this release.
+Each ZIP contains the installer(s) **plus** a `SHA256SUMS`
 file, and ships alongside a cosign signature (`.zip.bundle`) and a SLSA build-provenance
 attestation. A CycloneDX SBOM (`mesh-talk.cdx.json`) is attached to the release.
 The macOS zip contains a DMG; the app is inside that DMG.
 
-Each platform has a default edition with the current avatar and personal theme collections preinstalled, and a lite edition with an empty optional library. Both editions retain light, dark, and OLED themes and support ZIP installation. Lite shows emoji fallbacks for built-in Noto stickers without bundling their animations. Add `_lite` before `.zip` in the table below to select the lite edition. The two editions replace one another on the same device and preserve packs you have installed or removed.
+Each platform has one desktop package. The app starts without optional avatar, theme, or sticker packs and retains light, dark, and OLED themes. Install packs from the marketplace or a local ZIP. Built-in Noto stickers show emoji fallbacks until their artwork pack is installed. Upgrading preserves packs already installed on the device.
 
 | Platform              | Asset                                  |
 | --------------------- | -------------------------------------- |
@@ -39,6 +25,20 @@ Each platform has a default edition with the current avatar and personal theme c
 | Windows (ARM64)       | `mesh-talk___TAG___windows_arm64.zip`  |
 | Linux (x64)           | `mesh-talk___TAG___linux_x86_64.zip`   |
 | Linux (ARM64)         | `mesh-talk___TAG___linux_aarch64.zip`  |
+
+### Installation
+
+Quit Mesh-Talk before installing an update. Your existing local account and data
+remain in `~/.mesh-talk`; the update replaces the existing application.
+
+- **macOS**: unzip the download, open the `.dmg`, then drag `mesh-talk.app` into
+  **Applications**. Replace the existing app when upgrading, then launch it from
+  Applications. See **First run** below if macOS blocks the unsigned app.
+- **Windows**: unzip the download and run the `.exe` installer. The included `.msi`
+  is an alternative for managed installations. Launch Mesh-Talk after installation.
+- **Linux**: unzip the download, then install the `.deb` or `.rpm` with your package
+  manager. Alternatively, make the `.AppImage` executable with `chmod +x *.AppImage`
+  and run it.
 
 ### Post-office relay downloads
 
@@ -59,7 +59,6 @@ an owner-only password file. See the [post-office package and container guide](h
 
 These builds are **not signed by a commercial CA** (free distribution), but every artifact is
 independently verifiable. Replace `<os>_<arch>` with your platform (e.g. `macos_arm64`).
-For lite, append `_lite` after `<os>_<arch>` in the examples.
 
 **1. Checksum** — unzip, then in the extracted folder:
 

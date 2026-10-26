@@ -6,11 +6,37 @@ Search available local conversations and choose how long this device keeps histo
 
 Use the sidebar search for messages across available conversations, or open the history control in a conversation header to search that conversation. Results reflect the locally available history and the app's visibility and expiry rules.
 
+Sidebar search shows its recent-message window and tells you when more matches
+exist. Selecting a result opens that exact message, including a bounded context
+view when it is outside the current live history window. Use the return-to-latest
+control to resume the live conversation. A message that has expired, been
+recalled or become unavailable shows an explanation; matching text elsewhere
+does not substitute for the selected message.
+
 ## Read delayed messages
 
 Group messages can arrive after reconnecting through another authorized member or a post office. Their position follows retained conversation history rather than download time. While you read older content, the view keeps your place; use **New messages** or **Earlier messages received** to move to unread content.
 
 Opening a conversation does not mark every offscreen message read. Newly recovered content can remain unread even when it was authored before messages you already read. Catch-up notifications summarize recovered messages rather than treating every row as a new live alert. If the app cannot open a tracked message or asks you to review more unread history, use the offered review or explicit mark-read action. See [Channels](channels.md) for recovery and sharing limits.
+
+## Keep an unfinished message
+
+Text drafts stay with their conversation when you switch between contacts, groups
+and personal notes. Other conversations show a red **[Draft]** label and preview;
+opening the conversation restores the original text, including line breaks.
+
+Drafts are encrypted on this device and restore after restarting and signing in
+as the same local user. Saving happens after ten seconds without typing; continued typing restarts
+the idle timer. Switching conversations or leaving the
+window also requests a save. Quitting abruptly can lose recent edits. Drafts synchronize with certified linked devices when history sync is enabled.
+Attachments and reply targets are not draft content. Concurrent edits retain
+the local unsaved text until the version conflict is resolved; clearing or sending
+a draft publishes a deletion record so an older device cannot restore it. Protected
+drafts restore their protection mode with their text and show a concealed sidebar
+preview. Protected text remains a draft until local durable acceptance; a rejected
+send keeps both its text and protection mode for retry.
+Sending or clearing the text removes its draft. A save error keeps your text in
+the current window and offers **Retry**.
 
 ## Change retention
 

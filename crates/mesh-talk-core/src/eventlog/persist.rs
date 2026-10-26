@@ -166,6 +166,12 @@ impl PersistentEventLog {
     pub fn has(&self, id: &EventId) -> bool {
         self.log.has(id)
     }
+    pub fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
+        self.log.requires_channel_v3(conversation)
+    }
+    pub fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
+        self.log.requires_channel_v4(conversation)
+    }
     pub fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
         self.log.requires_channel_v2(conversation)
     }
@@ -467,6 +473,12 @@ const COMPACT_PROFILE_MIN: usize = 8;
 // NOTE: this impl is structurally identical to `impl SyncStore for EventLog`
 // in sync.rs — keep the two in sync.
 impl SyncStore for PersistentEventLog {
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
+        PersistentEventLog::requires_channel_v3(self, conversation)
+    }
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
+        PersistentEventLog::requires_channel_v4(self, conversation)
+    }
     fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
         PersistentEventLog::requires_channel_v2(self, conversation)
     }
@@ -510,6 +522,36 @@ mod tests {
             EventKind::Message,
             payload.to_vec(),
         )
+    }
+
+    #[test]
+    fn account_channel_version_index_rejects_invalid_events_and_survives_restart() {
+        use crate::eventlog::sync::SyncStore;
+        for kind in [
+            EventKind::ChannelAccountAuthority,
+            EventKind::ChannelDeviceInheritance,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("events.log");
+            let signer = DeviceIdentity::generate();
+            let conversation = ConversationId::new([7; 32]);
+            let unrelated = ConversationId::new([8; 32]);
+            let event = Event::new(&signer, conversation, 1, vec![], 1, 0, kind, vec![1]);
+            {
+                let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+                assert!(!log.requires_channel_v4(&conversation));
+                let mut invalid = event.clone();
+                invalid.sig[0] ^= 1;
+                assert!(log.append_durable(invalid).is_err());
+                assert!(!log.requires_channel_v4(&conversation));
+                log.append_durable(event).unwrap();
+                assert!(SyncStore::requires_channel_v4(&log, &conversation));
+                assert!(!log.requires_channel_v4(&unrelated));
+            }
+            let reopened = PersistentEventLog::open(&path, "pw").unwrap();
+            assert!(SyncStore::requires_channel_v4(&reopened, &conversation));
+            assert!(!reopened.requires_channel_v4(&unrelated));
+        }
     }
 
     #[test]

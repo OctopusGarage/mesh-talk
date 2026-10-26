@@ -159,8 +159,21 @@ pub fn save(
     dir: &Path,
     manifest: &AnyManifest,
 ) -> Result<PathBuf, NodeError> {
-    let name = manifest
-        .name()
+    let result = save_retained(dir, manifest.name(), manifest.size(), |archive| {
+        node.save_directory_archive(file_conv, archive)
+    })?;
+    node.complete_directory_save(file_conv);
+    Ok(result)
+}
+
+/// Reuse the same staged, bounded archive extraction for independently retained copies.
+pub(crate) fn save_retained(
+    dir: &Path,
+    name: &str,
+    size: u64,
+    write_archive: impl FnOnce(&Path) -> Result<(), NodeError>,
+) -> Result<PathBuf, NodeError> {
+    let name = name
         .strip_suffix(".tar")
         .filter(|name| !name.is_empty())
         .ok_or_else(|| invalid("invalid directory attachment name"))?;
@@ -174,8 +187,8 @@ pub fn save(
     let extracted = staging.path().join("folder");
     fs::create_dir(&extracted)
         .map_err(|e| NodeError::File(format!("create extraction directory: {e}")))?;
-    node.save_directory_archive(file_conv, &archive)?;
-    extract(&archive, &extracted, manifest.size())?;
+    write_archive(&archive)?;
+    extract(&archive, &extracted, size)?;
     #[cfg(unix)]
     sync_directories(&extracted)
         .map_err(|e| NodeError::File(format!("sync extracted directory: {e}")))?;
@@ -185,7 +198,6 @@ pub fn save(
     File::open(dir)
         .and_then(|folder| folder.sync_all())
         .map_err(|e| NodeError::File(format!("sync download directory: {e}")))?;
-    node.complete_directory_save(file_conv);
     Ok(dest)
 }
 

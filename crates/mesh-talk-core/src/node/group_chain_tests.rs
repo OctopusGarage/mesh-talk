@@ -246,6 +246,160 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
 }
 
 #[tokio::test]
+async fn metered_group_file_replica_pauses_both_directions_without_losing_history_or_chunks() {
+    assert_metered_group_file_replica(crate::file::FileKind::Media).await;
+}
+
+#[tokio::test]
+async fn metered_group_file_replica_preserves_explicit_attachment_consent() {
+    assert_metered_group_file_replica(crate::file::FileKind::File).await;
+}
+
+async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
+    use super::NetworkCost;
+    use crate::eventlog::sync::SyncStore;
+    let chain = Chain::new().await;
+    let group = chain.accepted_group().await;
+    let source = chain._dir.path().join("metered.png");
+    // C has authenticated A previously, but has no current route to A. File
+    // consent validates the original author independently of recovery holder B.
+    {
+        let mut roster = chain.nodes[2].roster.lock().unwrap();
+        roster.update(
+            &Announce::new(&chain.nodes[0].identity, "original author", 9),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &chain.nodes[2].user_id(),
+        );
+        roster.forget(&chain.nodes[0].identity.public());
+    }
+    let mut payload = vec![7; crate::file::CHUNK_SIZE * 3];
+    payload[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    std::fs::write(&source, &payload).unwrap();
+    let file = chain.nodes[0]
+        .send_file_channel(group, &source, kind)
+        .await
+        .unwrap();
+    chain.round(1, 0, group).await;
+    chain.nodes[1].process_file_events(group);
+    if kind == crate::file::FileKind::File {
+        assert_eq!(chain.nodes[1].file_progress(file).unwrap().done, 0);
+        chain.nodes[1].decide_attachment(file, true).unwrap();
+    }
+    chain.round(1, 0, file).await;
+    let holder = &chain.nodes[1];
+    assert!(holder.file_progress(file).unwrap().done > 0);
+    let retained = holder.log.lock().unwrap().events(&file).len();
+    let chunk_ids: std::collections::HashSet<_> = holder
+        .log
+        .lock()
+        .unwrap()
+        .events(&file)
+        .iter()
+        .map(|event| event.id)
+        .collect();
+    let group_events = holder.log.lock().unwrap().events(&group).len();
+    let peer = chain.nodes[2].identity.public();
+    let inbound = holder.serve_sync_store(&peer);
+    let outbound = holder.sync_store(&peer);
+    assert!(!inbound.lock().unwrap().event_ids(&file).is_empty());
+
+    holder.set_network_cost(NetworkCost::Restricted);
+    for store in [&inbound, &outbound] {
+        let store = store.lock().unwrap();
+        assert_eq!(
+            store
+                .event_ids(&file)
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            chunk_ids,
+            "a paused holder must advertise retained chunks to avoid duplicate downloads"
+        );
+        assert!(
+            store
+                .events_excluding(&file, &Default::default())
+                .is_empty()
+        );
+        assert!(store.authorized_event_ids(&file).is_empty());
+        assert!(
+            store
+                .authorized_event_page(&file, &chunk_ids, 50_000)
+                .is_empty()
+        );
+        assert!(
+            !store.event_ids(&group).is_empty(),
+            "text and offers remain available"
+        );
+    }
+    chain.round(2, 1, group).await;
+    chain.nodes[2].process_file_events(group);
+    if kind == crate::file::FileKind::File {
+        chain.nodes[2].decide_attachment(file, true).unwrap();
+    }
+    chain.round(2, 1, file).await;
+    assert_eq!(chain.nodes[2].file_progress(file).unwrap().done, 0);
+    assert_eq!(holder.log.lock().unwrap().events(&file).len(), retained);
+    assert_eq!(
+        holder.log.lock().unwrap().events(&group).len(),
+        group_events
+    );
+    assert!(holder.channel_replica_enabled(group, &holder.user_id()));
+    // The original source still supports the recipient's explicit download.
+    chain.nodes[0].set_network_cost(NetworkCost::Restricted);
+    assert!(
+        !chain.nodes[0]
+            .serve_sync_store(&holder.identity.public())
+            .lock()
+            .unwrap()
+            .event_ids(&file)
+            .is_empty()
+    );
+
+    holder.set_network_cost(NetworkCost::Unrestricted);
+    chain.round(2, 1, file).await;
+    assert_eq!(
+        chain.nodes[2].file_progress(file).unwrap().done,
+        holder.file_progress(file).unwrap().done
+    );
+    holder.set_network_cost(NetworkCost::Restricted);
+    let mut connection = holder
+        .privacy_dial(chain.addresses[2], &peer)
+        .await
+        .unwrap();
+    let report = super::session::request_round(&mut connection, &outbound, file)
+        .await
+        .unwrap();
+    assert_eq!(
+        report.duplicates, 0,
+        "a metered holder must not re-download its retained chunks"
+    );
+    assert!(holder.set_group_file_sharing_override(NetworkCost::Restricted, true));
+    assert!(
+        !outbound
+            .lock()
+            .unwrap()
+            .events_excluding(&file, &Default::default())
+            .is_empty()
+    );
+    holder
+        .set_channel_replica_enabled(group, false)
+        .await
+        .unwrap();
+    for store in [&inbound, &outbound] {
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .events_excluding(&file, &Default::default())
+                .is_empty(),
+            "a temporary network exception must not override the saved sharing preference"
+        );
+    }
+    assert_eq!(holder.log.lock().unwrap().events(&file).len(), retained);
+    let outsider = holder.serve_sync_store(&chain.nodes[6].identity.public());
+    assert!(outsider.lock().unwrap().event_ids(&group).is_empty());
+}
+
+#[tokio::test]
 async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
     let mut chain = Chain::new().await;
     let group = chain.accepted_group().await;
@@ -404,6 +558,41 @@ async fn public_group_idle_metadata_is_reused_across_fresh_peer_scoped_stores() 
         1,
         "idle probes share one authorized metadata projection across new connections"
     );
+}
+
+#[tokio::test]
+async fn public_group_history_capability_metadata_is_cached_and_principal_scoped() {
+    use crate::{channel::HistoryPolicy, eventlog::sync::SyncStore};
+    use std::sync::atomic::Ordering;
+    let chain = Chain::new().await;
+    let group = chain.accepted_group().await;
+    let node = &chain.nodes[0];
+    let member = chain.nodes[2].identity.public();
+    // Default invitations already contain a bounded history offer.
+    let original = node
+        .serve_sync_store(&member)
+        .lock()
+        .unwrap()
+        .fingerprint_and_len(&group);
+    node.set_channel_history_policy(group, HistoryPolicy::LastTen)
+        .await
+        .unwrap();
+    let before = node.channel_projection_replays.load(Ordering::Relaxed);
+    for _ in 0..2 {
+        let store = node.serve_sync_store(&member);
+        let store = store.lock().unwrap();
+        assert!(store.requires_channel_v3(&group));
+        assert!(!store.requires_channel_v2(&group));
+        assert_ne!(store.fingerprint_and_len(&group), original);
+    }
+    assert_eq!(
+        node.channel_projection_replays.load(Ordering::Relaxed) - before,
+        1
+    );
+    let outsider = node.serve_sync_store(&chain.nodes[6].identity.public());
+    let outsider = outsider.lock().unwrap();
+    assert!(!outsider.requires_channel_v3(&group));
+    assert!(outsider.event_ids(&group).is_empty());
 }
 
 #[tokio::test]

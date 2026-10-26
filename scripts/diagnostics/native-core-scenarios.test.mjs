@@ -256,22 +256,33 @@ test("native attachment fixture creates an owned download directory before confi
   const { prepareNativeDownloadFixture } = await import("./native-core-scenarios.mjs");
   const fixture = await mkdtemp(join(tmpdir(), "native-download-fixture-"));
   const owner = "fixture-user";
+  const account = "0123456789abcdef0123456789abcdef";
   let settings = { download_dir: "", stay_signed_in: false, retention_days: 30 };
   const calls = [];
   try {
     await assert.rejects(stat(join(fixture, "downloads")), { code: "ENOENT" });
     const invoke = async (command, args) => {
-      assert.equal(args.owner, owner, "fixture settings remain scoped to the signed-in owner");
       calls.push(command);
-      if (command === "get_app_settings") return settings;
+      if (command === "account_id") { assert.deepEqual(args, {}); return account; }
+      assert.equal(args.owner, owner, "fixture settings remain scoped to the signed-in owner");
+      if (command === "get_app_settings") {
+        const snapshot = { ...settings };
+        if (calls.filter((call) => call === "get_app_settings").length === 1)
+          settings = { ...settings, retention_days: 7 };
+        return snapshot;
+      }
       assert.equal(command, "set_app_settings");
-      assert.equal((await stat(args.settings.download_dir)).isDirectory(), true, "save destination exists before it is configured");
-      settings = args.settings;
+      assert.equal(args.expectedAccount, account, "settings target the current cryptographic account");
+      assert.deepEqual(Object.keys(args).sort(), ["expectedAccount", "owner", "patch", "settings"]);
+      assert.equal(args.settings.retention_days, 30, "required IPC settings carrier may be stale");
+      assert.equal((await stat(args.patch.download_dir)).isDirectory(), true, "save destination exists before it is configured");
+      assert.deepEqual(args.patch, { download_dir: join(fixture, "downloads") });
+      settings = { ...settings, ...args.patch };
     };
     const directory = await prepareNativeDownloadFixture({ fixture, owner, invoke });
     assert.equal(directory, join(fixture, "downloads"));
-    assert.deepEqual(settings, { download_dir: directory, stay_signed_in: false, retention_days: 30 });
-    assert.deepEqual(calls, ["get_app_settings", "set_app_settings", "get_app_settings"]);
+    assert.deepEqual(settings, { download_dir: directory, stay_signed_in: false, retention_days: 7 });
+    assert.deepEqual(calls, ["account_id", "get_app_settings", "set_app_settings", "get_app_settings"]);
   } finally { await rm(fixture, { recursive: true, force: true }); }
 });
 
@@ -317,4 +328,39 @@ test("public restoration rechecks an early empty CLI roster despite stale pre-pr
   });
   assert.equal(found, rawPeer);
   assert.equal(queries, 2, "old stdout and one early empty query cannot prove current public discovery");
+});
+
+test("native account entry submits once and defers the optional backup reminder", async () => {
+  const { enterNativeAccount } = await import("./native-core-scenarios.mjs");
+  for (const register of [false, true]) {
+    const calls = [];
+    const ui = {
+      click: async id => calls.push(["click", id]),
+      fill: async (id, value) => calls.push(["fill", id, value]),
+      element: async id => calls.push(["element", id]),
+    };
+    await enterNativeAccount(ui, "alice", "password123", register);
+    assert.deepEqual(calls, [
+      ...(register ? [["click", "login-tab-register"]] : []),
+      ["fill", "login-username", "alice"],
+      ["fill", "login-password", "password123"],
+      ["click", "login-submit"],
+      ["element", "chat-shell"],
+      ...(register ? [["click", "account-protection-later"]] : []),
+    ]);
+  }
+});
+
+
+test("native attachment fixture never writes settings without a current account", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { prepareNativeDownloadFixture } = await import("./native-core-scenarios.mjs");
+  const fixture = await mkdtemp(join(tmpdir(), "native-download-account-"));
+  const calls = [];
+  try {
+    await assert.rejects(prepareNativeDownloadFixture({ fixture, owner: "fixture-user", invoke: async (command) => { calls.push(command); return undefined; } }), /requires the current account/);
+    assert.deepEqual(calls, ["account_id"]);
+  } finally { await rm(fixture, { recursive: true, force: true }); }
 });

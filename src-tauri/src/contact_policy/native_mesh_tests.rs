@@ -111,6 +111,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     let session = state.session();
     let alice_user = crate::services::user::User {
         user_id: "alice".into(),
+        account_login_name: None,
         name: "alice".into(),
         display_name: "Alice".into(),
         address: String::new(),
@@ -124,7 +125,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         "fixture-password".into(),
     );
     let nodes = crate::chat_commands::NodeState::empty();
-    *nodes.0.blocking_lock() = Some(alice);
+    *nodes.0.blocking_write() = Some(alice);
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .manage(nodes.clone())
@@ -187,7 +188,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     assert!(
         nodes
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .peer_public(bob.user_id())
@@ -195,7 +196,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     );
     let peers_after_hide: Vec<_> = nodes
         .0
-        .blocking_lock()
+        .blocking_write()
         .as_ref()
         .unwrap()
         .peers()
@@ -225,7 +226,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     assert_eq!(bob_two.account_id(), bob_account);
     assert_ne!(bob_two.user_id(), bob.user_id());
     {
-        let guard = nodes.0.blocking_lock();
+        let guard = nodes.0.blocking_write();
         let alice = guard.as_ref().unwrap();
         announce(alice, c_port);
         announce(&bob_two, a_port);
@@ -233,7 +234,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     until("new device authentic discovery", || {
         nodes
             .0
-            .blocking_lock()
+            .blocking_write()
             .as_ref()
             .unwrap()
             .peer_public(bob_two.user_id())
@@ -289,7 +290,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     // Drop every handle before opening stores again, exactly as logout/relaunch does.
     let before_restart = alice_handle.account_history(&bob_account, 20);
     let old_node = Arc::downgrade(&alice_handle);
-    nodes.0.blocking_lock().take();
+    nodes.0.blocking_write().take();
     drop(alice_handle);
     until("old runtime tasks release their node and stores", || {
         old_node.upgrade().is_none()
@@ -357,7 +358,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     assert!(crate::chat_commands::online_account_ids(restarted.peers()).is_empty());
     let deletion_handle = restarted.handle();
     let deletion_weak = Arc::downgrade(&deletion_handle);
-    *nodes.0.blocking_lock() = Some(restarted);
+    *nodes.0.blocking_write() = Some(restarted);
     let deleted = invoke(
         "delete_contact",
         serde_json::json!({ "owner": "alice", "account": bob_account }),
@@ -365,7 +366,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     .unwrap();
     assert_eq!(deleted.deleted, vec![bob_account.clone()]);
     assert!(deletion_handle.account_history(&bob_account, 20).is_empty());
-    nodes.0.blocking_lock().take();
+    nodes.0.blocking_write().take();
     drop(deletion_handle);
     until("deleted runtime releases stores", || {
         deletion_weak.upgrade().is_none()

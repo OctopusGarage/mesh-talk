@@ -15,8 +15,13 @@ const mocks = vi.hoisted(() => ({
   check: vi.fn(),
   download: vi.fn(),
   cancel: vi.fn(),
+  prepare: vi.fn(),
+  install: vi.fn(),
   openUrl: vi.fn(),
   revealItemInDir: vi.fn(),
+}));
+vi.mock("@/store/updateRestart", () => ({
+  prepareUpdateRestart: vi.fn(async () => () => {}),
 }));
 vi.mock("@/lib/api", () => ({ updates: mocks }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
@@ -31,8 +36,8 @@ const candidate: UpdateCheck = {
   release_url:
     "https://github.com/OctopusGarage/mesh-talk/releases/tag/v0.4.4-nightly.42.1",
   notes: "Preview feature for early feedback",
-  edition: "lite",
-  package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64_lite.zip",
+  edition: "default",
+  package_name: "mesh-talk_v0.4.4-nightly.42.1_linux_x86_64.zip",
   package_size: 10485760,
 };
 let root: Root;
@@ -137,18 +142,35 @@ it("keeps channel selection disabled during checks and verified downloads, then 
   expect(host.querySelector("progress")?.value).toBe(5242880);
   expect(host.textContent).toContain("50%");
   await act(async () =>
+    progress({
+      downloaded: 0,
+      total: 0,
+      phase: "preparing",
+    } as DownloadProgress),
+  );
+  expect(host.textContent).toContain("Preparing update");
+  expect(host.querySelector("progress")?.hasAttribute("value")).toBe(false);
+  expect(select().disabled).toBe(true);
+  await act(async () =>
+    progress({
+      downloaded: 0,
+      total: 10485760,
+      phase: "fallback",
+    } as DownloadProgress),
+  );
+  expect(host.textContent).toContain("Downloading full update");
+  expect(host.querySelector("progress")?.value).toBe(0);
+  await act(async () =>
     downloaded({
-      path: "/Downloads/nightly-lite.zip",
-      file_name: "nightly-lite.zip",
+      path: "/Downloads/nightly.zip",
+      file_name: "nightly.zip",
     }),
   );
   expect(select().disabled).toBe(false);
   expect(host.textContent).toContain("Download verified");
   expect(host.textContent).toContain("DEB or RPM");
   await click("Show in Downloads");
-  expect(mocks.revealItemInDir).toHaveBeenCalledWith(
-    "/Downloads/nightly-lite.zip",
-  );
+  expect(mocks.revealItemInDir).toHaveBeenCalledWith("/Downloads/nightly.zip");
   mocks.revealItemInDir.mockRejectedValueOnce(
     new Error("Downloads unavailable"),
   );
@@ -187,4 +209,50 @@ it("reports a retryable check failure and an up-to-date installed identity", asy
   );
   expect(host.querySelector('[role="alert"]')).toBeNull();
   expect(host.querySelector('[data-testid="download-update"]')).toBeNull();
+});
+
+it("offers one-click updates only for eligible signed releases and shows native installation progress", async () => {
+  mocks.check.mockResolvedValue({ ...candidate, automatic_install: true });
+  mocks.prepare.mockResolvedValue({
+    path: "/private/payload",
+    file_name: "app.tar.gz",
+    installable: true,
+  });
+  let finish!: () => void;
+  let progress!: (value: "installing" | "restarting") => void;
+  mocks.install.mockImplementation((_version, callback) => {
+    progress = callback;
+    return new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+  });
+  await click("Check for updates");
+  expect(button("Update and restart").disabled).toBe(false);
+  await click("Update and restart");
+  expect(host.textContent).toContain("Installing update");
+  expect(select().disabled).toBe(true);
+  expect(
+    host.querySelector('button[data-testid="download-update"]'),
+  ).toBeNull();
+  await act(async () => progress("restarting"));
+  expect(host.textContent).toContain("Restarting Mesh-Talk");
+  await act(async () => finish());
+});
+
+it("keeps native install failures recoverable with retry and a manual release link", async () => {
+  mocks.check.mockResolvedValue({ ...candidate, automatic_install: true });
+  mocks.prepare.mockResolvedValue({
+    path: "/private/payload",
+    file_name: "app.tar.gz",
+    installable: true,
+  });
+  mocks.install.mockRejectedValue(new Error("Authorization canceled"));
+  await click("Check for updates");
+  await click("Update and restart");
+  expect(button("Restart to update").disabled).toBe(false);
+  expect(host.textContent).toContain("Authorization canceled");
+  expect(host.textContent).not.toContain("DEB or RPM");
+  expect(host.textContent).not.toContain("Show in Downloads");
+  await click("Download manually");
+  expect(mocks.openUrl).toHaveBeenLastCalledWith(candidate.release_url);
 });

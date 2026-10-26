@@ -37,7 +37,7 @@ pub struct DiagNetworkInfo {
 pub async fn diag_get_peers(
     state: tauri::State<'_, NodeState>,
 ) -> Result<Vec<DiagPeerInfo>, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt
         .peers()
@@ -140,7 +140,7 @@ pub async fn probe_peer_endpoint(
 pub async fn diag_network_info(
     state: tauri::State<'_, NodeState>,
 ) -> Result<DiagNetworkInfo, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(DiagNetworkInfo {
         own_user_id: rt.user_id().to_string(),
@@ -174,6 +174,7 @@ mod tests {
             "diagnostics".into(),
             crate::services::user::User {
                 user_id: "diagnostics-test".into(),
+                account_login_name: None,
                 name: "diagnostics".into(),
                 display_name: "Diagnostics Test".into(),
                 address: "local".into(),
@@ -207,7 +208,7 @@ mod tests {
         .await
         .unwrap();
         let own_user_id = runtime.user_id().to_owned();
-        *managed.0.lock().await = Some(runtime);
+        *managed.0.write().await = Some(runtime);
 
         assert!(diag_get_peers(state.clone()).await.unwrap().is_empty());
         let info = diag_network_info(state.clone()).await.unwrap();
@@ -244,7 +245,7 @@ mod tests {
         assert_eq!(remote.discovery_port(), remote_port);
         managed
             .0
-            .lock()
+            .write()
             .await
             .as_ref()
             .unwrap()
@@ -274,10 +275,10 @@ mod tests {
         );
         assert!(super::super::get_presence(state.clone()).await.unwrap()[&remote_account].online);
 
-        let node = managed.0.lock().await.as_ref().unwrap().handle();
+        let node = managed.0.write().await.as_ref().unwrap().handle();
         let public = managed
             .0
-            .lock()
+            .write()
             .await
             .as_ref()
             .unwrap()
@@ -340,7 +341,7 @@ mod tests {
         )
         .await
         .unwrap();
-        managed.0.lock().await.take().unwrap().stop().await;
+        managed.0.write().await.take().unwrap().stop().await;
         remote.stop().await;
     }
 }

@@ -120,15 +120,14 @@ impl Node {
             {
                 return Err(error);
             }
-            self.record_my_reaction(
-                acct_conv,
-                now_millis(),
-                ReactionPayload {
-                    target,
-                    emoji: emoji.to_string(),
-                    remove,
-                },
-            )
+            let wall = now_millis();
+            let payload = ReactionPayload {
+                target,
+                emoji: emoji.to_string(),
+                remove,
+            };
+            self.record_my_reaction(acct_conv, wall, payload.clone())?;
+            self.publish_own_account_reaction(target_account_id, wall, &payload)
         })?;
         for peer in &deliveries {
             let conv = dm_conversation_id(&self.identity.public(), &peer.public);
@@ -166,7 +165,8 @@ impl Node {
                 })
                 .collect()
         };
-        let mut decoded: Vec<(String, u64, ReactionPayload)> = Vec::new();
+        let mut decoded: Vec<(String, u64, ReactionPayload)> =
+            self.private_account_reactions(peer_account_id);
         for (conv, author, peer_account) in convs {
             let react_events: Vec<Event> = {
                 let log = self.log.lock().expect("log mutex not poisoned");
@@ -249,15 +249,15 @@ impl Node {
             emoji: emoji.to_string(),
             remove,
         };
-        let members = {
+        let (members, epoch) = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !state.is_accepted_member(&self.user_id()) {
+            if !self.channel_identity_is_current(state) {
                 return Err(NodeError::Channel("not a channel member".into()));
             }
-            state.members().to_vec()
+            (state.recipient_members(), state.epoch())
         };
         // Reactions must be re-readable by every member (aggregated on each `reactions`
         // call), so they are sealed per-member with the DM sealed box, not the
@@ -266,6 +266,21 @@ impl Node {
             crate::node::channel::SealedPayload::seal(&self.identity, &members, &payload.encode())
                 .map_err(|e| NodeError::Channel(format!("reaction seal failed: {e}")))?;
         authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
+            {
+                let book = self.channels.lock().expect("channels lock");
+                let state = book
+                    .state(&channel)
+                    .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+                if state.epoch() != epoch || !self.channel_identity_is_current(state) {
+                    return Err(NodeError::Channel(
+                        "channel membership changed; retry the operation".into(),
+                    ));
+                }
+            }
             self.append_event(channel, EventKind::React, sealed.encode())?;
             Ok(())
         })?;
@@ -370,6 +385,66 @@ mod acceptance_tests {
     use super::*;
     use crate::discovery::Announce;
     use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[tokio::test]
+    async fn channel_content_controls_recheck_membership_at_durable_acceptance() {
+        for recall in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let peer = DeviceIdentity::generate();
+            let proof = Announce::new_with_account(&peer, &Account::generate(), "peer", 1);
+            let (node, _, _) = super::super::test_support::node_with_files(
+                dir.path(),
+                DeviceIdentity::generate(),
+                Account::generate(),
+                &proof,
+            );
+            let channel = node.create_channel("group", vec![]).await.unwrap();
+            let target = node
+                .enqueue_channel_message_reply_expiring_if(
+                    channel,
+                    b"message",
+                    None,
+                    None,
+                    |commit| commit(),
+                )
+                .unwrap();
+            let authorize = |commit: &mut dyn FnMut() -> Result<(), NodeError>| {
+                let metadata = {
+                    let book = node.channels.lock().unwrap();
+                    let state = book.state(&channel).unwrap();
+                    crate::channel::ChannelMeta {
+                        name: state.name().into(),
+                        members: state.members().to_vec(),
+                        epoch: state.epoch() + 1,
+                        owner: state.owner().into(),
+                    }
+                };
+                node.append_event(channel, EventKind::MembershipChange, metadata.encode())?;
+                node.process_channel(channel);
+                commit()
+            };
+            let result = if recall {
+                node.recall_channel_if(channel, target, authorize).await
+            } else {
+                node.react_channel_if(channel, target, "👍", false, authorize)
+                    .await
+            };
+            assert!(
+                matches!(result, Err(NodeError::Channel(message)) if message.contains("membership changed"))
+            );
+            assert!(
+                !node
+                    .log
+                    .lock()
+                    .unwrap()
+                    .events(&channel)
+                    .iter()
+                    .any(|event| { matches!(event.kind, EventKind::React | EventKind::Delete) }),
+                "a pre-change sealed control must never be committed after the authority changes"
+            );
+            assert!(node.recalls.lock().unwrap().targets(&channel).is_empty());
+        }
+    }
 
     #[tokio::test]
     async fn rejected_reaction_append_does_not_create_durable_projection() {

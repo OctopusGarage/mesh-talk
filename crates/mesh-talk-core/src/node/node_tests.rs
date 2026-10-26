@@ -11,6 +11,223 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 
 #[tokio::test]
+async fn removing_account_removes_linked_devices_in_one_epoch_and_rechecks_stale_enrollment() {
+    use crate::identity::account::Account;
+    let directory = tempfile::tempdir().unwrap();
+    let owner_identity = DeviceIdentity::generate();
+    let owner_account = Account::generate();
+    let owner_account_id = owner_account.account_id();
+    let account = Account::generate();
+    let devices = [
+        DeviceIdentity::generate(),
+        DeviceIdentity::generate(),
+        DeviceIdentity::generate(),
+    ];
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let owner = Node::open_with_account(
+        owner_identity,
+        owner_account,
+        Arc::clone(&roster),
+        dm,
+        channel_tx,
+        file,
+        &directory.path().join("node.log"),
+        &directory.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    for (index, device) in devices.iter().enumerate() {
+        let proof = Announce::new_with_account(
+            device,
+            &account,
+            format!("device-{index}"),
+            47001 + index as u16,
+        );
+        roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &owner.user_id());
+    }
+    let channel = owner
+        .create_channel("two people", vec![devices[0].public(), devices[1].public()])
+        .await
+        .unwrap();
+    let stale = owner
+        .auto_enrollment_candidate()
+        .expect("third certified sibling is eligible");
+    let before = owner
+        .channels
+        .lock()
+        .unwrap()
+        .state(&channel)
+        .unwrap()
+        .epoch();
+    assert!(
+        owner
+            .remove_channel_account_members_if(channel, &owner_account_id, |commit| commit())
+            .await
+            .is_err()
+    );
+    assert!(
+        owner
+            .remove_channel_account_members_if(channel, &account.account_id(), |_commit| Err(
+                NodeError::Authorization("retired owner".into())
+            ))
+            .await
+            .is_err()
+    );
+    assert_eq!(owner.channel_members(channel).len(), 3);
+    owner
+        .remove_channel_account_members_if(channel, &account.account_id(), |commit| commit())
+        .await
+        .unwrap();
+    assert_eq!(
+        owner.channel_members(channel),
+        vec![owner.identity.public()]
+    );
+    assert_eq!(
+        owner
+            .channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .epoch(),
+        before + 1
+    );
+    assert!(
+        !owner
+            .add_channel_member_checked_if(stale.0, stale.1, true, |commit| commit())
+            .await
+            .unwrap()
+    );
+    assert!(owner.auto_enrollment_candidate().is_none());
+    assert_eq!(
+        owner
+            .channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .epoch(),
+        before + 1
+    );
+    owner
+        .remove_channel_account_members_if(channel, &account.account_id(), |commit| commit())
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .epoch(),
+        before + 1
+    );
+}
+
+#[tokio::test]
+async fn removing_account_uses_durable_bindings_and_controls_when_projection_is_deferred() {
+    use crate::identity::account::Account;
+    let directory = tempfile::tempdir().unwrap();
+    let owner_identity = DeviceIdentity::generate();
+    let owner_account = Account::generate();
+    let account = Account::generate();
+    let devices = [
+        DeviceIdentity::generate(),
+        DeviceIdentity::generate(),
+        DeviceIdentity::generate(),
+    ];
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let owner = Node::open_with_account(
+        owner_identity,
+        owner_account,
+        Arc::clone(&roster),
+        dm,
+        channel_tx,
+        file,
+        &directory.path().join("node.log"),
+        &directory.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    for (index, device) in devices.iter().enumerate() {
+        let proof = Announce::new_with_account(
+            device,
+            &account,
+            format!("device-{index}"),
+            47001 + index as u16,
+        );
+        roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &owner.user_id());
+    }
+    let channel = owner
+        .create_channel("two people", vec![devices[0].public(), devices[1].public()])
+        .await
+        .unwrap();
+    let stale = owner
+        .auto_enrollment_candidate()
+        .expect("third certified sibling is eligible");
+    let own = Announce::new_with_account(&owner.identity, &owner.account, "owner", 47000);
+    owner
+        .configure_privacy(
+            directory.path(),
+            "pw",
+            &own,
+            Arc::new(crate::discovery::DiscoveryVisibility::default()),
+        )
+        .unwrap();
+    owner.cached_peer_snapshot().unwrap();
+    owner.set_invisible(true).await.unwrap();
+    owner
+        .set_allowed(&account.account_id(), false)
+        .await
+        .unwrap();
+    owner.pending_channel_plaintext.lock().unwrap().retry_at =
+        Some(std::time::Instant::now() + Duration::from_secs(30));
+    owner
+        .remove_channel_account_members_if(channel, &account.account_id(), |commit| commit())
+        .await
+        .unwrap();
+    // Plaintext persistence is blocked, so the older book may still show peers.
+    assert_eq!(owner.channel_members(channel).len(), 3);
+    {
+        let log = owner.log.lock().unwrap();
+        let events = log.events(&channel);
+        let durable = ChannelBook::projected_members(channel, &events).unwrap();
+        assert_eq!(durable, vec![owner.identity.public()]);
+    }
+    assert!(
+        !owner
+            .add_channel_member_checked_if(stale.0, stale.1, true, |commit| commit())
+            .await
+            .unwrap()
+    );
+    // Repeating removal reads the durable epoch and is a true no-op.
+    owner
+        .remove_channel_account_members_if(channel, &account.account_id(), |commit| commit())
+        .await
+        .unwrap();
+    owner.pending_channel_plaintext.lock().unwrap().retry_at = None;
+    owner.process_channel(channel);
+    assert_eq!(
+        owner.channel_members(channel),
+        vec![owner.identity.public()]
+    );
+    assert!(owner.auto_enrollment_candidate().is_none());
+}
+
+#[tokio::test]
 async fn auto_enrollment_candidate_requires_accepted_certified_account_sibling() {
     use crate::identity::account::Account;
 
@@ -66,6 +283,25 @@ async fn auto_enrollment_candidate_requires_accepted_certified_account_sibling()
         Some((accepted, bob_sibling.public()))
     );
     assert_ne!(invited, accepted);
+
+    // Retaining the same physical owner key does not authorize its legacy
+    // groups for a newly adopted account. Only explicit source provenance does.
+    *owner.channel_migration.lock().unwrap() =
+        super::super::channel_account_maintenance::ChannelMigrationStore::open(
+            &dir.path().join("unknown-origin.log"),
+            "pw",
+            owner.account.public().ed25519_pub,
+            &owner.identity.public(),
+        )
+        .unwrap();
+    assert!(owner.auto_enrollment_candidate().is_none());
+    owner
+        .authorize_legacy_channel_migration_if(|commit| commit())
+        .unwrap();
+    assert_eq!(
+        owner.auto_enrollment_candidate(),
+        Some((accepted, bob_sibling.public()))
+    );
 }
 
 #[tokio::test]
@@ -728,7 +964,10 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     })
     .unwrap();
     assert_eq!(header.account_id, account_id);
-    assert_eq!(records.len(), 10);
+    assert_eq!(records.len(), 11);
+    assert!(records.iter().any(|record| matches!(record,
+        SnapshotRecordV1::AccountCreation { created_at_ms } if *created_at_ms == node.account.created_at_ms()
+    )));
     assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::SentDm { plaintext, .. } if plaintext == b"sent")));
     assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::ReceivedDm { plaintext, .. } if plaintext == b"received")));
     assert!(records.iter().any(|record| matches!(record, SnapshotRecordV1::MediaDescriptor { file_conv, size, .. } if *file_conv == [9; 32] && *size == media_bytes.len() as u64)));
@@ -772,6 +1011,10 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     )
     .unwrap();
     assert_eq!(restored.account_id(), account_id);
+    assert_eq!(
+        restored.account.created_at_ms(),
+        node.account.created_at_ms()
+    );
     assert_ne!(restored.user_id(), old_device_id);
     assert_eq!(restored.history(conversation, 10).len(), 3);
     assert!(
@@ -1013,10 +1256,62 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
     assert_eq!(preview.messages, 1);
     let original_id = source.channel_history(channel, 10)[0].id;
     source.recall_channel(channel, original_id).await.unwrap();
+    let member_dir = dir.path().join("member");
+    std::fs::create_dir_all(&member_dir).unwrap();
+    let (dm_tx, _member_dm_rx) = mpsc::unbounded_channel();
+    let (channel_tx, _member_channel_rx) = mpsc::unbounded_channel();
+    let (file_tx, _member_file_rx) = mpsc::unbounded_channel();
+    let member = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm_tx,
+        channel_tx,
+        file_tx,
+        &member_dir.join("messages.log"),
+        &member_dir.join("sent.log"),
+        "member password",
+    )
+    .unwrap();
     source
-        .add_channel_member(channel, DeviceIdentity::generate().public())
+        .add_channel_member(channel, member.identity.public())
         .await
         .unwrap();
+    assert_eq!(
+        source.list_channels()[0].member_count,
+        1,
+        "pending invitees are not accepted members"
+    );
+    // Exercise the recipient's signed acceptance before snapshotting two members.
+    // Copy the real event DAG without requiring a network listener in this recovery test.
+    let invitation = source
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for event in invitation {
+        member.log.lock().unwrap().append(event).unwrap();
+    }
+    member.process_channel(channel);
+    member.accept_channel_invite(channel).await.unwrap();
+    let acceptance = member
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .find(|event| event.kind == EventKind::ChannelAccept)
+        .unwrap()
+        .clone();
+    source.log.lock().unwrap().append(acceptance).unwrap();
+    source.process_channel(channel);
+    assert_eq!(
+        source.list_channels()[0].member_count,
+        2,
+        "snapshot includes both accepted members"
+    );
     source
         .rename_channel(channel, "Renamed archive")
         .await
@@ -1052,13 +1347,21 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
         "new password",
     )
     .unwrap();
-    assert!(reopened.list_channels().iter().any(|summary| {
-        summary.id == channel
-            && summary.archived
-            && summary.dissolved
-            && summary.member_count == 2
-            && summary.name == "Renamed archive"
-    }));
+    let restored_channels = reopened.list_channels();
+    let summary = restored_channels
+        .iter()
+        .find(|summary| summary.id == channel)
+        .expect("restored group remains visible");
+    assert!(summary.archived, "new device retains archive presentation");
+    assert!(summary.dissolved, "restored archive retains dissolution");
+    assert_eq!(
+        summary.member_count, 2,
+        "restored archive retains both member observations"
+    );
+    assert!(
+        summary.name == "Renamed archive",
+        "restored archive retains its last validated rename"
+    );
     assert!(
         reopened
             .channel_history(channel, 10)
@@ -1765,6 +2068,21 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
             .windows(b"relay-secret-room".len())
             .any(|window| window == b"relay-secret-room")
     }));
+    alice_node
+        .send_channel_message(group, b"relay custody")
+        .await
+        .unwrap();
+    let id = alice_node
+        .channel_history(group, 10)
+        .into_iter()
+        .find(|row| row.text == b"relay custody")
+        .unwrap()
+        .id;
+    assert_eq!(alice_node.channel_custody_count(group, id), Some(0));
+    assert_eq!(
+        alice_node.channel_post_office_custody_count(group, id),
+        Some(1)
+    );
     bob_node.drain_from_post_office().await;
     assert!(
         bob_node
@@ -1780,6 +2098,320 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
     assert_eq!(
         po_store.lock().unwrap().held_ids(&mailbox.id()),
         held_before
+    );
+}
+
+#[tokio::test]
+async fn channel_custody_inherited_holder_requires_signed_account_authority() {
+    use crate::{
+        identity::account::Account,
+        node::channel_account_authority::{AccountAuthorityControl, AccountGrant},
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let owner = personal_message_node(dir.path(), DeviceIdentity::generate(), Account::generate());
+    owner.set_post_office_enabled(false);
+    let bob = DeviceIdentity::generate();
+    let bob_sibling = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unavailable = listener.local_addr().unwrap();
+    drop(listener);
+    let bob_proof = Announce::new_with_account(&bob, &bob_account, "Bob", unavailable.port());
+    for proof in [
+        bob_proof.clone(),
+        Announce::new_with_account(
+            &bob_sibling,
+            &bob_account,
+            "Bob sibling",
+            unavailable.port(),
+        ),
+    ] {
+        owner
+            .roster
+            .lock()
+            .unwrap()
+            .update(&proof, unavailable.ip(), &owner.user_id());
+    }
+    let channel = owner
+        .create_channel("account custody fixture", vec![bob.public()])
+        .await
+        .unwrap();
+    let event = owner
+        .enqueue_channel_message_reply_expiring_if(
+            channel,
+            b"synthetic projected observation",
+            None,
+            None,
+            |commit| commit(),
+        )
+        .unwrap();
+    owner
+        .publish_channel_custody(channel, event, &bob_sibling.public(), true, false, false)
+        .unwrap();
+    assert_eq!(
+        owner.channel_custody_count(channel, event),
+        Some(0),
+        "a certificate cannot enroll a nonmember into a legacy channel"
+    );
+
+    let own_proof = owner.own_group_proof();
+    let projection = owner.account_group_projection(channel);
+    let bindings = vec![own_proof.clone(), bob_proof];
+    let grants = bindings
+        .iter()
+        .enumerate()
+        .map(|(index, proof)| {
+            let accepted = projection
+                .accepted
+                .iter()
+                .find(|member| member.public == proof.public())
+                .unwrap();
+            AccountGrant {
+                incarnation: [index as u8 + 1; 16],
+                pending: false,
+                original: proof.clone(),
+                membership_event: accepted.membership_event,
+                acceptance_event: accepted.acceptance_event,
+            }
+        })
+        .collect();
+    let authority = AccountAuthorityControl {
+        version: 1,
+        previous: None,
+        issuer: own_proof,
+        owner_account: owner.account.public().ed25519_pub,
+        grants,
+        revoked: Vec::new(),
+        legacy_bindings: bindings,
+        account_signature: Vec::new(),
+    };
+    owner
+        .append_event(
+            channel,
+            EventKind::ChannelAccountAuthority,
+            authority.signed_encode(channel, &owner.account),
+        )
+        .unwrap();
+    owner.process_channel(channel);
+    {
+        let book = owner.channels.lock().unwrap();
+        let state = book.state(&channel).unwrap();
+        assert_eq!(state.owner_account_id(), Some(owner.account_id().as_str()));
+        assert!(!state.members().contains(&bob_sibling.public()));
+    }
+    assert_eq!(
+        owner.channel_custody_count(channel, event),
+        Some(1),
+        "an accepted account grant admits its certified holder without another device invite"
+    );
+    owner
+        .publish_channel_custody(channel, event, &bob.public(), true, false, false)
+        .unwrap();
+    assert_eq!(
+        owner.channel_custody_count(channel, event),
+        Some(1),
+        "two certified holders of the same accepted account count once"
+    );
+    owner
+        .remove_channel_account_members_if(channel, &bob_account.account_id(), |commit| commit())
+        .await
+        .unwrap();
+    assert_eq!(
+        owner.channel_custody_count(channel, event),
+        Some(0),
+        "old observations cannot preserve a revoked account's eligibility"
+    );
+}
+
+#[tokio::test]
+async fn channel_custody_post_office_observation_survives_sibling_sync_without_relay() {
+    use crate::{identity::account::Account, node::account_devices::AccountDevice};
+
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let secret = account.secret_bytes();
+    let source = personal_message_node(
+        &dir.path().join("source"),
+        DeviceIdentity::generate(),
+        account,
+    );
+    let sibling_identity = DeviceIdentity::generate();
+    let sibling_secret = sibling_identity.secret_bytes();
+    let sibling_dir = dir.path().join("sibling");
+    let sibling = personal_message_node(
+        &sibling_dir,
+        sibling_identity,
+        Account::from_secret_bytes(secret),
+    );
+    for (left, right) in [(&source, &sibling), (&sibling, &source)] {
+        left.account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: right.identity.public(),
+                certificate: left.account.certify(&right.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let dead_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_addr = dead_listener.local_addr().unwrap();
+    drop(dead_listener);
+    source.roster.lock().unwrap().update(
+        &Announce::new_with_account(&bob, &bob_account, "offline member", bob_addr.port()),
+        bob_addr.ip(),
+        &source.user_id(),
+    );
+    let relay = DeviceIdentity::generate();
+    let relay_secret = relay.secret_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_addr = listener.local_addr().unwrap();
+    source.roster.lock().unwrap().update(
+        &Announce::new_post_office(&relay, "relay", relay_addr.port()),
+        relay_addr.ip(),
+        &source.user_id(),
+    );
+    let office = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("office.log"), "pw", relay).unwrap(),
+    ));
+    let relay_task = tokio::spawn(run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(relay_secret.0, relay_secret.1),
+        listener,
+        office,
+    ));
+    let sibling_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sibling_addr = sibling_listener.local_addr().unwrap();
+    source.roster.lock().unwrap().update(
+        &Announce::new_with_account(
+            &sibling.identity,
+            &sibling.account,
+            "sibling",
+            sibling_addr.port(),
+        ),
+        sibling_addr.ip(),
+        &source.user_id(),
+    );
+    let sibling_server = tokio::spawn(sibling.clone().run_accept_loop(sibling_listener));
+    let channel = source
+        .create_channel(
+            "relay custody account fixture",
+            vec![bob.public(), sibling.identity.public()],
+        )
+        .await
+        .unwrap();
+    assert!(
+        sibling
+            .list_channels()
+            .iter()
+            .any(|row| row.id == channel && !row.pending_invite),
+        "the authorized channel setup must reach the sibling before it goes offline"
+    );
+    sibling_server.abort();
+    let _ = sibling_server.await;
+    source.sessions.clear();
+    source
+        .roster
+        .lock()
+        .unwrap()
+        .forget(&sibling.identity.public());
+    source
+        .send_channel_message(channel, b"synthetic relay copy observation")
+        .await
+        .unwrap();
+    let event = source.channel_history(channel, 10)[0].id;
+    assert_eq!(source.channel_custody_count(channel, event), Some(0));
+    assert_eq!(
+        source.channel_post_office_custody_count(channel, event),
+        Some(1)
+    );
+    assert!(
+        source.channel_custody_observations(channel, event).iter().any(|meta| {
+            matches!(&meta.key, super::super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } if holder.starts_with("relay:")) && !meta.tombstone
+        }),
+        "actual wrapper custody must publish the private relay observation before sync"
+    );
+
+    relay_task.abort();
+    let _ = relay_task.await;
+    source.sessions.clear();
+    assert!(tokio::net::TcpStream::connect(relay_addr).await.is_err());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_addr = listener.local_addr().unwrap();
+    add_account_peer(
+        &sibling.roster,
+        &source.identity,
+        &source.account,
+        "source",
+        source_addr.port(),
+        &sibling.user_id(),
+    );
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let worker = tokio::spawn(sibling.clone().run_account_history_loop());
+    let imported = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let own_message = sibling
+                .channel_history(channel, 10)
+                .iter()
+                .any(|row| row.id == event && row.from_me);
+            if own_message
+                && sibling.channel_custody_count(channel, event) == Some(0)
+                && sibling.channel_post_office_custody_count(channel, event) == Some(1)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    worker.abort();
+    let _ = worker.await;
+    sibling.sessions.clear();
+    server.abort();
+    let _ = server.await;
+    let members = {
+        let book = sibling.channels.lock().unwrap();
+        book.state(&channel).map(|state| {
+            state
+                .members()
+                .iter()
+                .map(|member| member.user_id())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert!(
+        imported.is_ok(),
+        "sibling relay import: history={:?}, members={:?}, observations={}, copies={:?}/{:?}, sync={:?}",
+        sibling
+            .channel_history(channel, 10)
+            .iter()
+            .map(|row| (row.id, row.from_me))
+            .collect::<Vec<_>>(),
+        members,
+        sibling.channel_custody_observations(channel, event).len(),
+        sibling.channel_custody_count(channel, event),
+        sibling.channel_post_office_custody_count(channel, event),
+        sibling.device_sync_status(),
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while Arc::strong_count(&sibling) != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retired sibling work must finish before reopening its encrypted stores");
+    drop(sibling);
+    let reopened = personal_message_node(
+        &sibling_dir,
+        DeviceIdentity::from_secret_bytes(sibling_secret.0, sibling_secret.1),
+        Account::from_secret_bytes(secret),
+    );
+    assert_eq!(reopened.channel_custody_count(channel, event), Some(0));
+    assert_eq!(
+        reopened.channel_post_office_custody_count(channel, event),
+        Some(1)
     );
 }
 
@@ -4330,6 +4962,75 @@ async fn list_channels_reports_created_channels() {
 }
 
 #[tokio::test]
+async fn group_summary_and_presence_count_accounts_while_unknown_devices_remain_distinct() {
+    let directory = tempfile::tempdir().unwrap();
+    let roster = Arc::new(Mutex::new(Roster::default()));
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (files, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::clone(&roster),
+        dm,
+        channel_tx,
+        files,
+        &directory.path().join("messages.log"),
+        &directory.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let other_account = crate::identity::account::Account::generate();
+    let siblings = [DeviceIdentity::generate(), DeviceIdentity::generate()];
+    for (index, sibling) in siblings.iter().enumerate() {
+        let proof = Announce::new_with_account(
+            sibling,
+            &other_account,
+            "same person",
+            47001 + index as u16,
+        );
+        roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &node.user_id());
+    }
+    let unknown = DeviceIdentity::generate();
+    let channel = node
+        .create_channel(
+            "three people",
+            vec![siblings[0].public(), siblings[1].public(), unknown.public()],
+        )
+        .await
+        .unwrap();
+    let (accounts, unbound) = node.channel_member_account_sets(channel);
+    assert_eq!(accounts.len(), 2, "local account plus the remote account");
+    assert_eq!(
+        unbound.into_iter().collect::<Vec<_>>(),
+        vec![unknown.public().user_id()]
+    );
+    assert_eq!(
+        node.list_channels()
+            .iter()
+            .find(|row| row.id == channel)
+            .unwrap()
+            .member_count,
+        3
+    );
+    let pending = node
+        .create_channel_invited("one accepted person", vec![unknown.public()])
+        .await
+        .unwrap();
+    assert_eq!(
+        node.list_channels()
+            .iter()
+            .find(|row| row.id == pending)
+            .unwrap()
+            .member_count,
+        1,
+        "pending invitees are not accepted participants"
+    );
+}
+
+#[tokio::test]
 async fn owner_dissolves_channel_and_local_mutations_stop() {
     let me = DeviceIdentity::generate();
     let secrets = me.secret_bytes();
@@ -5337,6 +6038,106 @@ async fn a_dm_reaction_is_visible_to_both_peers() {
 /// `process_file_events`; the chunk conversation syncs separately. Bob is a
 /// non-creator member, so his send must first distribute his own sender key —
 /// the same path the creator-only-send fix repaired for messages.
+#[tokio::test]
+async fn stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_member() {
+    let root = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let bob_public = bob.public();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let roster = seed_roster(
+        &bob,
+        "Bob",
+        listener.local_addr().unwrap().port(),
+        &alice.user_id(),
+    );
+    let bob_roster = seed_roster(&alice, "Alice", 1, &bob.user_id());
+    let open = |name: &str, identity, roster| {
+        let directory = root.path().join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (files, received) = mpsc::unbounded_channel();
+        let node = Node::open(
+            identity,
+            roster,
+            dm,
+            channel,
+            files,
+            &directory.join("messages.log"),
+            &directory.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        (node, received)
+    };
+    let (sender, _) = open("sender", alice, roster.clone());
+    let (recipient, mut received) = open("recipient", bob, bob_roster);
+    for (name, node, port) in [
+        ("sender", &sender, 1),
+        (
+            "recipient",
+            &recipient,
+            listener.local_addr().unwrap().port(),
+        ),
+    ] {
+        node.configure_privacy(
+            &root.path().join(name),
+            "pw",
+            &node.signed_announce(name, port),
+            std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    }
+    let receiver = tokio::spawn(recipient.clone().run_accept_loop(listener));
+    let channel = sender
+        .create_channel("Photos", vec![bob_public])
+        .await
+        .unwrap();
+    let relay = DeviceIdentity::generate();
+    let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    roster.lock().unwrap().update(
+        &Announce::new_post_office(
+            &relay,
+            "Stalled relay",
+            relay_listener.local_addr().unwrap().port(),
+        ),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    // Keep the TCP connection open without completing authentication. A live
+    // member must get the bytes without waiting for this optional custody path.
+    let relay_task = tokio::spawn(async move {
+        let (_connection, _) = relay_listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let payload = b"\x89PNG\r\n\x1a\ninline photo payload";
+    let path = root.path().join("photo.png");
+    std::fs::write(&path, payload).unwrap();
+    let sending = tokio::spawn(async move {
+        sender
+            .send_file_channel(channel, &path, crate::file::FileKind::Media)
+            .await
+    });
+    let bytes = tokio::time::timeout(Duration::from_secs(3), async {
+        let offer = received.recv().await.expect("file offer");
+        loop {
+            if let Some(bytes) = recipient.read_media(offer.file_conv) {
+                break bytes;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    sending.abort();
+    relay_task.abort();
+    receiver.abort();
+    assert_eq!(
+        bytes.expect("an optional stalled relay must not hold back online photo bytes"),
+        payload
+    );
+}
+
 #[tokio::test]
 async fn two_nodes_transfer_a_file_in_a_channel() {
     let alice = DeviceIdentity::generate();
@@ -8424,6 +9225,325 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
     assert_eq!(reopened.conversation_len(&conv), 4);
 }
 
+#[tokio::test]
+async fn signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp() {
+    use crate::identity::account::Account;
+    use crate::postoffice::opaque::RelayMailbox;
+
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceIdentity::generate();
+    let alice_account = Account::generate();
+    let alice_account_id = alice_account.account_id();
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = dead.local_addr().unwrap().port();
+    drop(dead);
+    let alice_proof = Announce::new_with_account(&alice, &alice_account, "Alice", dead_port);
+    let bob_proof = Announce::new_with_account(&bob, &bob_account, "Bob", dead_port);
+    let (sender, _, _) = crate::node::test_support::node_with_files(
+        &dir.path().join("alice"),
+        alice,
+        alice_account,
+        &bob_proof,
+    );
+    let (receiver, mut incoming, _) = crate::node::test_support::node_with_files(
+        &dir.path().join("bob"),
+        bob,
+        bob_account,
+        &alice_proof,
+    );
+    sender.set_profile_display_name("Alice").unwrap();
+    let avatar = format!("data:image/jpeg;base64,{}", "A".repeat(32 * 1024)).into_bytes();
+    // No relay is known yet: prepare the signed events without uploading them.
+    sender.set_avatar(Some(avatar.clone())).await.unwrap();
+    let conv = dm_conversation_id(&sender.identity.public(), &receiver.identity.public());
+    let events: Vec<_> = sender
+        .log
+        .lock()
+        .unwrap()
+        .events(&conv)
+        .into_iter()
+        .cloned()
+        .collect();
+    assert_eq!(events.len(), 2);
+    // Opaque IDs conceal causal order. Select a relay salt which puts the child
+    // first, and use large avatars so the two wrappers require separate pages.
+    let relay = (0..32)
+        .find_map(|_| {
+            let candidate = DeviceIdentity::generate();
+            let mailbox = RelayMailbox::new(
+                &sender.identity,
+                &receiver.identity.public(),
+                &candidate.public(),
+            )
+            .unwrap();
+            let parent = mailbox.wrap(&events[0]).unwrap();
+            let child = mailbox.wrap(&events[1]).unwrap();
+            assert!(
+                parent.ciphertext.len() + child.ciphertext.len() > crate::transport::MAX_PLAINTEXT
+            );
+            (child.id < parent.id).then_some(candidate)
+        })
+        .expect("find a child-first opaque mailbox ordering");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (ed, x) = relay.secret_bytes();
+    let relay_announcement =
+        Announce::new_post_office(&relay, "Relay", listener.local_addr().unwrap().port());
+    let relay_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("relay.log"), "pw", relay).unwrap(),
+    ));
+    let relay_task = tokio::spawn(run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(ed, x),
+        listener,
+        relay_store,
+    ));
+    for node in [&sender, &receiver] {
+        node.roster.lock().unwrap().update(
+            &relay_announcement,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &node.user_id(),
+        );
+    }
+    receiver.replace_verified_dm_pull_peers(vec![alice_proof.public().user_id()]);
+    sender.replace_verified_dm_pull_peers(vec![bob_proof.public().user_id()]);
+    // A queued chat message shares this mailbox with the large signed profile.
+    // Child-first profile pages must not starve content or its exact receipt.
+    let message = sender
+        .enqueue_to_account(
+            &receiver.account_id(),
+            b"message behind a large avatar",
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !sender.replicate_to_post_office(conv).await.unwrap_or(false) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the relay must accept the signed profile events");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            receiver.drain_from_post_office().await;
+            if incoming
+                .try_recv()
+                .is_ok_and(|dm| dm.text == b"message behind a large avatar")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("a large avatar must not starve a message in the same relay mailbox");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            receiver.drain_from_post_office().await;
+            if receiver.peer_avatar(&alice_account_id).as_ref() == Some(&avatar)
+                && receiver.log.lock().unwrap().has(&events[1].id)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("child-first relay pages must not prevent receipt of the signed avatar");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            receiver
+                .replicate_to_post_office(crate::node::delivery_receipt::delivery_conversation_id(
+                    &sender.identity.public(),
+                    &receiver.identity.public(),
+                ))
+                .await
+                .unwrap();
+            sender.drain_from_post_office().await;
+            if sender.delivery_status(message) == Some(crate::node::DeliveryStatus::Delivered) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the recipient receipt must return through the relay without direct TCP");
+    assert_eq!(
+        receiver.account_profile(&alice_account_id).unwrap().avatar,
+        Some(avatar)
+    );
+    relay_task.abort();
+}
+
+#[tokio::test]
+async fn signed_avatar_retries_after_relay_publication_is_reenabled() {
+    use crate::identity::account::Account;
+    use crate::node::runtime::NodeRuntime;
+
+    let dir = tempfile::tempdir().unwrap();
+    let discovery = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let discovery_port = discovery.local_addr().unwrap().port();
+    drop(discovery);
+    let runtime = NodeRuntime::start(
+        &dir.path().join("sender"),
+        "alice",
+        "Alice",
+        "pw",
+        discovery_port,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let sender = runtime.handle();
+    sender.set_post_office_permissions(false, true);
+    let avatar = b"data:image/jpeg;base64,QUJD".to_vec();
+    sender.set_avatar(Some(avatar.clone())).await.unwrap();
+
+    let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = dead.local_addr().unwrap().port();
+    drop(dead);
+    let sender_proof =
+        Announce::new_with_account(&sender.identity, &sender.account, "Alice", dead_port);
+    let bob = DeviceIdentity::generate();
+    let bob_account = Account::generate();
+    let bob_proof = Announce::new_with_account(&bob, &bob_account, "Bob", dead_port);
+    let (receiver, _, _) = crate::node::test_support::node_with_files(
+        &dir.path().join("receiver"),
+        bob,
+        bob_account,
+        &sender_proof,
+    );
+    receiver.replace_verified_dm_pull_peers(vec![sender.user_id()]);
+    let relay = DeviceIdentity::generate();
+    let relay_account = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_proof = Announce::new_post_office_with_account(
+        &relay,
+        &relay_account,
+        "Relay",
+        listener.local_addr().unwrap().port(),
+    );
+    let (ed, x) = relay.secret_bytes();
+    let relay_store = Arc::new(Mutex::new(
+        PostOffice::open(&dir.path().join("relay.log"), "pw", relay).unwrap(),
+    ));
+    let relay_task = tokio::spawn(run_relay_accept_loop(
+        DeviceIdentity::from_secret_bytes(ed, x),
+        listener,
+        relay_store,
+    ));
+    // An older peer authenticates but never answers a sync request. It must not
+    // hold up profile publication to the healthy recipient later in the roster.
+    let stalled_identity = DeviceIdentity::generate();
+    let stalled_account = Account::generate();
+    let stalled_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stalled_proof = Announce::new_with_account(
+        &stalled_identity,
+        &stalled_account,
+        "Stalled",
+        stalled_listener.local_addr().unwrap().port(),
+    );
+    let stalled_task = tokio::spawn(async move {
+        let (stream, _) = stalled_listener.accept().await.unwrap();
+        let _channel = crate::transport::SecureChannel::accept(stream, &stalled_identity)
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    for node in [&sender, &receiver] {
+        node.roster.lock().unwrap().update(
+            &relay_proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &node.user_id(),
+        );
+    }
+    sender.roster.lock().unwrap().update(
+        &stalled_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    sender.roster.lock().unwrap().update(
+        &bob_proof,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &sender.user_id(),
+    );
+    let conv = dm_conversation_id(&sender.identity.public(), &receiver.identity.public());
+    tokio::time::timeout(Duration::from_secs(6), async {
+        while sender.log.lock().unwrap().events(&conv).is_empty() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the runtime must attempt its first profile publication");
+    receiver.drain_from_post_office().await;
+    assert_eq!(receiver.peer_avatar(&sender.account_id()), None);
+    let prepared_ids: Vec<_> = sender
+        .log
+        .lock()
+        .unwrap()
+        .events(&conv)
+        .iter()
+        .map(|event| event.id)
+        .collect();
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert_eq!(
+        sender
+            .log
+            .lock()
+            .unwrap()
+            .events(&conv)
+            .iter()
+            .map(|event| event.id)
+            .collect::<Vec<_>>(),
+        prepared_ids,
+        "failed retries must reuse the accepted profile events without log churn"
+    );
+    sender.set_post_office_permissions(true, true);
+
+    let recovered = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            receiver.drain_from_post_office().await;
+            if receiver.peer_avatar(&sender.account_id()).as_ref() == Some(&avatar) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    if recovered.is_err() {
+        runtime.stop().await;
+        relay_task.abort();
+        stalled_task.abort();
+        panic!("an unchanged peer must receive the pending avatar after relay recovery");
+    }
+
+    // A failed clear is also a pending revision for an already-present peer.
+    sender.set_post_office_permissions(false, true);
+    sender.set_avatar(None).await.unwrap();
+    receiver.drain_from_post_office().await;
+    assert_eq!(receiver.peer_avatar(&sender.account_id()), Some(avatar));
+    sender.set_post_office_permissions(true, true);
+    let cleared = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            receiver.drain_from_post_office().await;
+            if receiver.peer_profile_states().get(&sender.account_id()) == Some(&None) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    runtime.stop().await;
+    relay_task.abort();
+    stalled_task.abort();
+    cleared.expect("a pending clear must propagate without a peer reconnect or another edit");
+}
+
 // Avatar propagation: Alice sets a custom avatar; it must ride the reliable sync to Bob,
 // who ends up holding Alice's avatar bytes keyed by Alice's ACCOUNT id. Mirrors the
 // account-delivery rig.
@@ -9598,7 +10718,7 @@ fn archived_metadata_rejects_transfer_to_unaccepted_invitee() {
 }
 
 #[tokio::test]
-async fn trust_card_propagates_signed_claims_over_loopback() {
+async fn account_profile_propagates_signed_claims_over_loopback() {
     use crate::identity::account::Account;
     let alice = DeviceIdentity::generate();
     let alice_acct = Account::generate();
@@ -9632,7 +10752,11 @@ async fn trust_card_propagates_signed_claims_over_loopback() {
 
     let alice_node = Node::open_with_account(
         alice,
-        Account::from_secret_bytes(alice_acct.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(
+            alice_acct.secret_bytes(),
+            alice_acct.created_at_ms(),
+        )
+        .unwrap(),
         alice_roster,
         a_dm,
         a_ch,
@@ -9644,7 +10768,11 @@ async fn trust_card_propagates_signed_claims_over_loopback() {
     .unwrap();
     let bob_node = Node::open_with_account(
         bob,
-        Account::from_secret_bytes(bob_acct.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(
+            bob_acct.secret_bytes(),
+            bob_acct.created_at_ms(),
+        )
+        .unwrap(),
         bob_roster,
         b_dm,
         b_ch,
@@ -9658,17 +10786,14 @@ async fn trust_card_propagates_signed_claims_over_loopback() {
     tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
 
     alice_node
-        .publish_trust_card_if(
-            "Alice".into(),
-            "Self-declared bio".into(),
-            Some(42),
-            |commit| commit(),
-        )
+        .save_account_profile_if("Alice".into(), "Self-declared bio".into(), |commit| {
+            commit()
+        })
         .await
         .unwrap();
     let mut got = None;
     for _ in 0..50 {
-        got = bob_node.trust_card(&alice_acct.account_id());
+        got = bob_node.account_profile(&alice_acct.account_id());
         if got.is_some() {
             break;
         }
@@ -9677,31 +10802,25 @@ async fn trust_card_propagates_signed_claims_over_loopback() {
     let card = got.expect("bob received signed trust card");
     assert!(card.verify());
     assert_eq!(card.bio, "Self-declared bio");
-    assert_eq!(card.created_at_ms, Some(42));
-    assert!(bob_node.trust_card(&bob_acct.account_id()).is_none());
-    let witness = bob_node.witness_creation(&alice_acct.account_id()).unwrap();
+    assert_eq!(card.created_at_ms, alice_acct.created_at_ms());
+    assert!(bob_node.account_profile(&bob_acct.account_id()).is_none());
     alice_node
-        .attach_timestamp_witness_if(witness, |commit| commit())
+        .save_account_profile_if("Alice updated".into(), "Updated bio".into(), |commit| {
+            commit()
+        })
         .await
         .unwrap();
     assert_eq!(
         alice_node
-            .trust_card(&alice_acct.account_id())
+            .account_profile(&alice_acct.account_id())
             .unwrap()
-            .witnesses
-            .len(),
-        1
-    );
-    assert!(
-        alice_node
-            .publish_trust_card_if("Alice".into(), "edit".into(), Some(43), |commit| commit())
-            .await
-            .is_err()
+            .created_at_ms,
+        alice_acct.created_at_ms()
     );
 }
 
 #[tokio::test]
-async fn trust_card_projection_retry_and_restart_preserve_avatar_and_identity_lifetime() {
+async fn account_profile_projection_retry_and_restart_preserve_avatar_and_identity_lifetime() {
     use crate::identity::account::Account;
     let dir = tempfile::tempdir().unwrap();
     let identity = DeviceIdentity::generate();
@@ -9710,46 +10829,46 @@ async fn trust_card_projection_retry_and_restart_preserve_avatar_and_identity_li
         personal_message_node(
             dir.path(),
             DeviceIdentity::from_secret_bytes(identity.secret_bytes().0, identity.secret_bytes().1),
-            Account::from_secret_bytes(account.secret_bytes()),
+            Account::from_secret_bytes_with_created_at(
+                account.secret_bytes(),
+                account.created_at_ms(),
+            )
+            .unwrap(),
         )
     };
     let node = open();
-    assert!(node.trust_card(&account.account_id()).is_none());
-    let card = crate::node::TrustCard::new(
+    assert!(node.account_profile(&account.account_id()).is_none());
+    let card = crate::node::AccountProfile::new(
         &account,
         1,
         "Alice".into(),
         "bio".into(),
-        Some(42),
         Some(b"avatar".to_vec()),
     );
     node.account_profiles.fail_appends_for_test(true);
-    assert!(
-        node.import_trust_card_if(card.clone(), |commit| commit())
-            .await
-            .is_err()
+    assert!(node.receive_account_profile(&card).is_err());
+    assert_eq!(
+        node.account_profile(&account.account_id()),
+        Some(card.clone())
     );
-    assert_eq!(node.trust_card(&account.account_id()), Some(card.clone()));
     node.account_profiles.fail_appends_for_test(false);
-    node.import_trust_card_if(card, |commit| commit())
-        .await
-        .unwrap();
+    node.receive_account_profile(&card).unwrap();
     assert_eq!(
         node.peer_avatar(&account.account_id()),
         Some(b"avatar".to_vec())
     );
     node.set_avatar(Some(b"edited".to_vec())).await.unwrap();
     assert_eq!(
-        node.trust_card(&account.account_id()).unwrap().avatar,
+        node.account_profile(&account.account_id()).unwrap().avatar,
         Some(b"edited".to_vec())
     );
     drop(node);
     let node = open();
     assert_eq!(
-        node.trust_card(&account.account_id())
+        node.account_profile(&account.account_id())
             .unwrap()
             .created_at_ms,
-        Some(42)
+        account.created_at_ms()
     );
     assert_eq!(
         node.peer_avatar(&account.account_id()),
@@ -9762,87 +10881,85 @@ async fn trust_card_projection_retry_and_restart_preserve_avatar_and_identity_li
     let replacement_dir = dir.path().join("replacement");
     std::fs::create_dir_all(&replacement_dir).unwrap();
     std::fs::copy(
-        dir.path().join("trust-cards.log"),
-        replacement_dir.join("trust-cards.log"),
+        dir.path().join("account-profiles.log"),
+        replacement_dir.join("account-profiles.log"),
     )
     .unwrap();
     let node = personal_message_node(
         &replacement_dir,
         DeviceIdentity::generate(),
-        Account::from_secret_bytes(other.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(other.secret_bytes(), other.created_at_ms())
+            .unwrap(),
     );
-    assert!(node.trust_card(&other.account_id()).is_none());
+    assert!(node.account_profile(&other.account_id()).is_none());
     assert!(node.account_profiles.current().is_none());
 }
 
 #[tokio::test]
-async fn trust_card_reconciles_newer_sibling_legacy_avatar() {
+async fn account_profile_reconciles_newer_sibling_legacy_avatar() {
     use crate::identity::account::Account;
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let node = personal_message_node(
         dir.path(),
         DeviceIdentity::generate(),
-        Account::from_secret_bytes(account.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(account.secret_bytes(), account.created_at_ms())
+            .unwrap(),
     );
-    node.publish_trust_card_if("Alice".into(), "keep bio".into(), Some(42), |commit| {
-        commit()
-    })
-    .await
-    .unwrap();
-    let old = node.trust_card(&account.account_id()).unwrap();
+    node.save_account_profile_if("Alice".into(), "keep bio".into(), |commit| commit())
+        .await
+        .unwrap();
+    let old = node.account_profile(&account.account_id()).unwrap();
     let legacy = crate::node::ProfilePayload::new(
         &account,
         Some(b"sibling avatar".to_vec()),
         old.revision + 1,
     );
     assert!(node.receive_legacy_profile(&legacy).unwrap());
-    let card = node.trust_card(&account.account_id()).unwrap();
+    let card = node.account_profile(&account.account_id()).unwrap();
     assert_eq!(card.avatar, legacy.avatar);
     assert_eq!(card.bio, "keep bio");
-    assert_eq!(card.created_at_ms, Some(42));
+    assert_eq!(card.created_at_ms, account.created_at_ms());
     assert!(card.revision > legacy.updated_at);
     assert!(card.verify());
 }
 
 #[tokio::test]
-async fn trust_card_exhausted_avatar_revision_rejects_before_either_store_mutates() {
+async fn account_profile_exhausted_avatar_revision_rejects_before_either_store_mutates() {
     use crate::identity::account::Account;
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let node = personal_message_node(
         dir.path(),
         DeviceIdentity::generate(),
-        Account::from_secret_bytes(account.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(account.secret_bytes(), account.created_at_ms())
+            .unwrap(),
     );
-    let card = crate::node::TrustCard::new(
+    let card = crate::node::AccountProfile::new(
         &account,
-        u64::MAX - 1,
+        u64::MAX,
         "Alice".into(),
         "bio".into(),
-        None,
         Some(b"original".to_vec()),
     );
-    node.import_trust_card_if(card.clone(), |commit| commit())
-        .await
-        .unwrap();
+    node.receive_account_profile(&card).unwrap();
     let avatars_before = std::fs::read(dir.path().join("profiles.log")).unwrap();
-    let cards_before = std::fs::read(dir.path().join("trust-cards.log")).unwrap();
+    let cards_before = std::fs::read(dir.path().join("account-profiles.log")).unwrap();
     assert!(node.set_avatar(Some(b"edit".to_vec())).await.is_err());
     assert_eq!(node.peer_avatar(&account.account_id()), card.avatar);
-    assert_eq!(node.trust_card(&account.account_id()), Some(card));
+    assert_eq!(node.account_profile(&account.account_id()), Some(card));
     assert_eq!(
         std::fs::read(dir.path().join("profiles.log")).unwrap(),
         avatars_before
     );
     assert_eq!(
-        std::fs::read(dir.path().join("trust-cards.log")).unwrap(),
+        std::fs::read(dir.path().join("account-profiles.log")).unwrap(),
         cards_before
     );
 }
 
 #[tokio::test]
-async fn trust_card_terminal_legacy_avatar_reconciles_on_restart() {
+async fn account_profile_terminal_legacy_avatar_reconciles_on_restart() {
     use crate::identity::account::Account;
     let dir = tempfile::tempdir().unwrap();
     let identity = DeviceIdentity::generate();
@@ -9851,40 +10968,45 @@ async fn trust_card_terminal_legacy_avatar_reconciles_on_restart() {
         personal_message_node(
             dir.path(),
             DeviceIdentity::from_secret_bytes(identity.secret_bytes().0, identity.secret_bytes().1),
-            Account::from_secret_bytes(account.secret_bytes()),
+            Account::from_secret_bytes_with_created_at(
+                account.secret_bytes(),
+                account.created_at_ms(),
+            )
+            .unwrap(),
         )
     };
     let node = open();
-    let card = crate::node::TrustCard::new(
+    let card = crate::node::AccountProfile::new(
         &account,
         u64::MAX - 2,
         "Alice".into(),
         "bio".into(),
-        Some(42),
         Some(b"original".to_vec()),
     );
-    node.import_trust_card_if(card, |commit| commit())
-        .await
-        .unwrap();
+    node.receive_account_profile(&card).unwrap();
     let legacy =
         crate::node::ProfilePayload::new(&account, Some(b"terminal sibling".to_vec()), u64::MAX);
     assert!(node.account_profiles.receive(&legacy).unwrap());
     drop(node);
     let node = open();
-    let card = node.trust_card(&account.account_id()).unwrap();
+    let card = node.account_profile(&account.account_id()).unwrap();
     assert_eq!(card.revision, u64::MAX);
     assert_eq!(card.avatar, legacy.avatar);
-    assert_eq!(card.created_at_ms, Some(42));
+    assert_eq!(card.created_at_ms, account.created_at_ms());
     assert!(card.verify());
 }
 
 #[tokio::test]
-async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_parent() {
+async fn account_profile_linked_device_pair_preserves_metadata_and_requires_card_parent() {
     use crate::identity::account::Account;
     let alice = DeviceIdentity::generate();
     let alice_acct = Account::generate();
     let bob = DeviceIdentity::generate();
-    let bob_acct = Account::from_secret_bytes(alice_acct.secret_bytes());
+    let bob_acct = Account::from_secret_bytes_with_created_at(
+        alice_acct.secret_bytes(),
+        alice_acct.created_at_ms(),
+    )
+    .unwrap();
     let alice_uid = alice.public().user_id();
     let bob_uid = bob.public().user_id();
     let dir = tempfile::tempdir().unwrap();
@@ -9913,7 +11035,11 @@ async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_pare
 
     let alice_node = Node::open_with_account(
         alice,
-        Account::from_secret_bytes(alice_acct.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(
+            alice_acct.secret_bytes(),
+            alice_acct.created_at_ms(),
+        )
+        .unwrap(),
         alice_roster,
         a_dm,
         a_ch,
@@ -9925,7 +11051,11 @@ async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_pare
     .unwrap();
     let bob_node = Node::open_with_account(
         bob,
-        Account::from_secret_bytes(bob_acct.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(
+            bob_acct.secret_bytes(),
+            bob_acct.created_at_ms(),
+        )
+        .unwrap(),
         bob_roster,
         b_dm,
         b_ch,
@@ -9948,51 +11078,34 @@ async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_pare
             })
             .unwrap();
     }
-    let old = crate::node::TrustCard::new(
+    let old = crate::node::AccountProfile::new(
         &alice_acct,
         10,
         "Alice".into(),
         "old bio".into(),
-        Some(42),
         Some(b"old avatar".to_vec()),
     );
-    bob_node
-        .import_trust_card_if(old, |commit| commit())
-        .await
-        .unwrap();
-    let mut latest = crate::node::TrustCard::new(
+    bob_node.receive_account_profile(&old).unwrap();
+    let latest = crate::node::AccountProfile::new(
         &alice_acct,
         13,
         "Alice".into(),
         "new bio".into(),
-        Some(42),
         Some(b"new avatar".to_vec()),
     );
-    let issuer = Account::generate();
-    latest.introductions.push(crate::node::Introduction::new(
-        &issuer,
-        alice_acct.account_id(),
-        "known account".into(),
-        100,
-    ));
-    latest.resign(&alice_acct);
+    alice_node.receive_account_profile(&latest).unwrap();
     alice_node
-        .import_trust_card_if(latest, |commit| commit())
+        .save_account_profile_if("Alice".into(), "new bio".into(), |commit| commit())
         .await
         .unwrap();
-    alice_node
-        .publish_trust_card_if("Alice".into(), "new bio".into(), Some(42), |commit| {
-            commit()
-        })
-        .await
-        .unwrap();
-    let received = bob_node.trust_card(&alice_acct.account_id()).unwrap();
+    let received = bob_node.account_profile(&alice_acct.account_id()).unwrap();
     assert_eq!(received.bio, "new bio");
     assert_eq!(received.avatar, Some(b"new avatar".to_vec()));
-    assert_eq!(received.introductions.len(), 1);
     assert_eq!(
         received,
-        alice_node.trust_card(&alice_acct.account_id()).unwrap()
+        alice_node
+            .account_profile(&alice_acct.account_id())
+            .unwrap()
     );
 
     let conv = dm_conversation_id(&alice_node.identity.public(), &bob_node.identity.public());
@@ -10011,7 +11124,11 @@ async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_pare
     let delayed = personal_message_node(
         &dir.path().join("delayed"),
         DeviceIdentity::generate(),
-        Account::from_secret_bytes(alice_acct.secret_bytes()),
+        Account::from_secret_bytes_with_created_at(
+            alice_acct.secret_bytes(),
+            alice_acct.created_at_ms(),
+        )
+        .unwrap(),
     );
     add_account_peer(
         &delayed.roster,
@@ -10029,4 +11146,109 @@ async fn trust_card_linked_device_pair_preserves_metadata_and_requires_card_pare
     delayed.log.lock().unwrap().append(pair[1].clone()).unwrap();
     // The profile ciphertext is sealed to Bob, so admission proves causality;
     // Bob's real loopback session above proves decryption and metadata convergence.
+}
+
+#[tokio::test]
+async fn channel_acceptance_returns_exact_ids_without_waiting_for_network_fanout() {
+    let root = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (files, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_tx,
+        files,
+        &root.path().join("messages.log"),
+        &root.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("Acceptance", vec![]).await.unwrap();
+    let text = node
+        .enqueue_channel_message_reply_expiring_if(channel, b"kk", None, None, |accept| accept())
+        .unwrap();
+    let sticker = node
+        .enqueue_sticker_channel_expiring_if(channel, "heart", b"heart", None, |accept| accept())
+        .unwrap();
+    let path = root.path().join("photo.png");
+    std::fs::write(&path, b"\x89PNG\r\n\x1a\nphoto").unwrap();
+    let (photo, file) = node
+        .enqueue_file_channel_progress_expiring_if(
+            channel,
+            &path,
+            crate::file::FileKind::Media,
+            |_| {},
+            None,
+            |accept| accept(),
+        )
+        .await
+        .unwrap();
+    let history = node.channel_history(channel, 10);
+    assert_eq!(history.len(), 3);
+    for id in [text, sticker, photo] {
+        assert!(history.iter().any(|row| row.id == id));
+    }
+    assert!(node.file_progress(file).is_some());
+}
+
+#[tokio::test]
+async fn send_authorization_never_retains_the_delivery_journal_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel_tx, _) = mpsc::unbounded_channel();
+    let (files, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel_tx,
+        files,
+        &root.path().join("messages.log"),
+        &root.path().join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("Lock ordering", vec![]).await.unwrap();
+    let authorize = |commit: &mut dyn FnMut() -> Result<(), NodeError>| {
+        assert!(
+            node.delivery.try_lock().is_ok(),
+            "requesting host session authority while holding the delivery journal can deadlock signed-card publication"
+        );
+        commit()
+    };
+    node.enqueue_channel_message_reply_expiring_if(channel, b"channel", None, None, authorize)
+        .unwrap();
+    node.enqueue_to_account_if(&node.account_id(), b"self", None, authorize)
+        .await
+        .unwrap();
+    let path = root.path().join("file.txt");
+    std::fs::write(&path, b"file bytes").unwrap();
+    node.enqueue_file_to_account_progress_expiring_if(
+        &node.account_id(),
+        &path,
+        crate::file::FileKind::File,
+        |_| {},
+        None,
+        authorize,
+    )
+    .await
+    .unwrap();
+    let request = OutgoingMessageRequest {
+        request_id: [33; 32],
+        destination: MessageDestination::Channel(channel),
+        text: b"request".to_vec(),
+        reply_to: None,
+        expires_at_ms: None,
+    };
+    node.enqueue_message_once_if(&request, authorize)
+        .await
+        .unwrap();
+    assert!(
+        node.enqueue_message_once_if(&request, authorize)
+            .await
+            .unwrap()
+            .duplicate
+    );
 }

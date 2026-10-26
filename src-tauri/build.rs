@@ -1,4 +1,6 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=MESH_TALK_GOOGLE_CLIENT_ID");
+    println!("cargo:rerun-if-env-changed=MESH_TALK_GOOGLE_CLIENT_SECRET");
     // Tauri warns whenever this legacy variable is present, even on non-Windows
     // builds. Remove it before tauri-build and preserve its Windows override.
     println!("cargo:rerun-if-env-changed=STATIC_VCRUNTIME");
@@ -14,13 +16,7 @@ fn main() {
     if let Ok(target) = std::env::var("TARGET") {
         println!("cargo:rustc-env=TARGET={target}");
     }
-    println!("cargo:rerun-if-env-changed=MESH_TALK_VARIANT");
-    let variant = if std::env::var("MESH_TALK_VARIANT").as_deref() == Ok("lite") {
-        "lite"
-    } else {
-        "default"
-    };
-    println!("cargo:rustc-env=MESH_TALK_VARIANT={variant}");
+    println!("cargo:rerun-if-env-changed=MESH_TALK_UPDATER_PUBLIC_KEY");
     println!("cargo:rerun-if-env-changed=MESH_TALK_BUILD_TAG");
     let base_tag = format!("v{}", std::env::var("CARGO_PKG_VERSION").unwrap());
     let build_tag =

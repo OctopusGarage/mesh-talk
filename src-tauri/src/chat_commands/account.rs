@@ -4,21 +4,21 @@ use serde::Serialize;
 
 #[tauri::command]
 pub async fn my_id(state: tauri::State<'_, NodeState>) -> Result<String, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt.user_id().to_string())
 }
 
 #[tauri::command]
 pub async fn list_peers(state: tauri::State<'_, NodeState>) -> Result<Vec<PeerInfo>, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt.peers().into_iter().map(PeerInfo::from).collect())
 }
 
 #[tauri::command]
 pub async fn account_id(state: tauri::State<'_, NodeState>) -> Result<String, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt.account_id().to_string())
 }
@@ -32,15 +32,24 @@ pub async fn account_id(state: tauri::State<'_, NodeState>) -> Result<String, Co
 pub async fn publish_avatar(
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
+    owner: String,
+    expected_account: String,
     avatar: Option<String>,
 ) -> Result<(), CommandError> {
-    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let admission = RuntimeAdmission::capture(&app, &state, &owner)?;
     admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
                 let node = runtime.handle();
                 node.set_avatar_if(avatar.map(|s| s.into_bytes()), |commit| {
-                    admission.authorize_accept(runtime, commit)
+                    admission.authorize_accept(runtime, &mut || {
+                        if runtime.account_id() != expected_account {
+                            return Err(mesh_talk_core::node::NodeError::Authorization(
+                                "avatar account changed".into(),
+                            ));
+                        }
+                        commit()
+                    })
                 })
                 .await
                 .map_err(CommandError::from)
@@ -55,7 +64,7 @@ pub async fn publish_avatar(
 pub async fn peer_avatars(
     state: tauri::State<'_, NodeState>,
 ) -> Result<std::collections::HashMap<String, Option<String>>, CommandError> {
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt
         .peer_profile_states()
@@ -69,14 +78,67 @@ pub async fn peer_avatars(
         .collect())
 }
 
+async fn prepare_linking_sync(
+    admission: &RuntimeAdmission,
+    sync_all: Option<bool>,
+) -> Result<(), CommandError> {
+    if sync_all == Some(true) {
+        admission
+            .with_runtime(|runtime| {
+                use mesh_talk_core::node::SyncCategory;
+                let node = runtime.handle();
+                for category in [
+                    SyncCategory::History,
+                    SyncCategory::Attachments,
+                    SyncCategory::Profile,
+                    SyncCategory::Appearance,
+                    SyncCategory::Contacts,
+                ] {
+                    node.set_device_sync_category(category, true)?;
+                }
+                Ok(())
+            })
+            .await?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
-pub async fn start_linking(
+pub async fn start_linking<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
     app: tauri::State<'_, AppState>,
     state: tauri::State<'_, NodeState>,
+    password: Option<String>,
+    sync_all: Option<bool>,
 ) -> Result<String, CommandError> {
-    RuntimeAdmission::capture_current(&app, &state)?
-        .with_runtime(move |rt| Ok(rt.start_linking()))
-        .await
+    let admission = RuntimeAdmission::capture_current(&app, &state)?
+        .verify_identity(password, "link a Mesh-Talk device")
+        .await?;
+    prepare_linking_sync(&admission, sync_all).await?;
+    let source_app = app.inner().clone();
+    admission
+        .clone()
+        .detached(move |rt, admission| {
+            Box::pin(async move {
+                crate::shared_account_login::initialize_source(&source_app, admission, rt)?;
+                if rt.handle().account_profile(rt.account_id()).is_none() {
+                    rt.handle()
+                        .set_profile_display_name(&rt.display_name())
+                        .map_err(CommandError::from)?;
+                }
+                Ok(())
+            })
+        })
+        .await?;
+    crate::shared_account_login::apply_current(
+        handle,
+        crate::data_dir(),
+        app.inner().clone(),
+        state.inner().clone(),
+        admission.clone(),
+    )
+    .await?;
+    admission.with_runtime(|rt| Ok(rt.start_linking())).await
 }
 
 #[tauri::command]
@@ -98,15 +160,32 @@ pub async fn link_device(
     state: tauri::State<'_, NodeState>,
     peer: String,
     code: String,
+    password: Option<String>,
+    sync_all: Option<bool>,
 ) -> Result<String, CommandError> {
-    let admission = RuntimeAdmission::capture_current(&app, &state)?;
+    let admission = RuntimeAdmission::capture_current(&app, &state)?
+        .verify_identity(password, "link a Mesh-Talk device")
+        .await?;
+    prepare_linking_sync(&admission, sync_all).await?;
+    let app = app.inner().clone();
     admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
                 let rt = runtime;
-                rt.link_device_if(&peer, &code, |commit| {
-                    admission.authorize_accept(runtime, commit)
-                })
+                rt.link_device_with_account_access_checked_if(
+                    &peer,
+                    &code,
+                    |snapshot| {
+                        crate::shared_account_login::preflight(
+                            &crate::data_dir(),
+                            &app,
+                            admission,
+                            runtime,
+                            snapshot,
+                        )
+                    },
+                    |commit| admission.authorize_accept(runtime, commit),
+                )
                 .await
                 .map_err(CommandError::from)
             })
@@ -153,7 +232,7 @@ pub async fn list_accounts(
         if let Some(entered) = captured.lock().unwrap().as_ref() {
             let _ = entered.send("contact-runtime-wait");
         }
-        let guard = node.0.blocking_lock();
+        let guard = node.0.blocking_read();
         policy.transaction_for_lease(&app, &lease, || {
             node.check_installation(&lease)
                 .map_err(|error| error.to_string())?;
@@ -250,6 +329,8 @@ mod recovery_accounts_tests {
                 last_authenticated: None,
                 presence_expires_at: None,
                 presence_origin_expires_at: None,
+                registration_origin: None,
+                origin_hops: None,
             }],
             name: "Alice".into(),
             post_office: false,

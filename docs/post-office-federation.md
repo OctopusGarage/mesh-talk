@@ -217,8 +217,13 @@ retained idle sync sessions (at most seven per direction). Sequential sync may
 reuse an exact-identity/route/policy session for up to 15 idle seconds; one-shot
 protocols dial fresh. This is not one busy socket per relay. OS backlog, WebRTC
 media and other processes are outside the Node budget.
-Presence remains short-lived (about 45 seconds); forwarding does not renew its
-origin expiry. These bounds are resource limits, not a measured throughput SLA.
+New directory registrations use a 15-second origin lease; forwarding does not
+renew its expiry. Deployed 45-second origin metadata remains accepted for
+mixed-version routing compatibility, while new clients cap each public presence
+observation at 15 seconds and do not renew repeated identical origin expiry.
+These bounds are resource limits, not a measured throughput SLA. See the
+[presence contract](network-design-reference.md#person-presence-contract) for
+the distinction between retained route hints and current presence.
 
 The relay runtime separately limits seed discovery to eight concurrent probes
 and reconciliation to eight concurrent relay sessions. Known trusted LAN routes

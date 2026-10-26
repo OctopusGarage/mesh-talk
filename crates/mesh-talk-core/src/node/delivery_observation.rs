@@ -18,11 +18,22 @@ pub enum DeliveryObservationKind {
     RetryScheduled,
 }
 
+/// Locally evidenced recovery context, never a claim about remote presence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryRecoveryReason {
+    PostOfficeDisabled,
+    NoKnownRoute,
+    AttemptTimedOut,
+}
+
 /// Runtime-only elapsed age; absent after eviction, cancellation or restart.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct DeliveryObservation {
     pub kind: DeliveryObservationKind,
     pub age_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<DeliveryRecoveryReason>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -37,6 +48,7 @@ struct Entry {
     token: AttemptToken,
     kind: DeliveryObservationKind,
     observed: Instant,
+    reason: Option<DeliveryRecoveryReason>,
     touched: u64,
 }
 
@@ -88,13 +100,25 @@ impl DeliveryObservations {
                 token,
                 kind: DeliveryObservationKind::Attempting,
                 observed: now,
+                reason: None,
                 touched: self.serial,
             },
         );
         token
     }
 
+    #[cfg(test)]
     pub(super) fn finished(&mut self, token: AttemptToken, generation: u64, now: Instant) -> bool {
+        self.finished_with_reason(token, generation, now, None)
+    }
+
+    pub(super) fn finished_with_reason(
+        &mut self,
+        token: AttemptToken,
+        generation: u64,
+        now: Instant,
+        reason: Option<DeliveryRecoveryReason>,
+    ) -> bool {
         self.sync_generation(generation);
         let next = self.serial.checked_add(1).unwrap_or_else(|| {
             self.clear();
@@ -107,6 +131,7 @@ impl DeliveryObservations {
             .filter(|e| e.token == token && token.generation == generation)
         {
             entry.kind = DeliveryObservationKind::RetryScheduled;
+            entry.reason = reason;
             entry.observed = now;
             entry.touched = next;
             return true;
@@ -123,6 +148,7 @@ impl DeliveryObservations {
         self.sync_generation(generation);
         self.entries.get(&logical).map(|entry| DeliveryObservation {
             kind: entry.kind,
+            reason: entry.reason,
             age_ms: now
                 .saturating_duration_since(entry.observed)
                 .as_millis()
@@ -217,7 +243,16 @@ impl Node {
         Some(token)
     }
 
+    #[cfg(test)]
     pub(super) fn finish_delivery_observation(&self, token: AttemptToken) {
+        self.finish_delivery_observation_with_reason(token, None);
+    }
+
+    pub(super) fn finish_delivery_observation_with_reason(
+        &self,
+        token: AttemptToken,
+        reason: Option<DeliveryRecoveryReason>,
+    ) {
         let store = self.delivery.lock().expect("delivery lock not poisoned");
         let mut observations = self
             .delivery_observations
@@ -233,7 +268,7 @@ impl Node {
             .privacy
             .generation
             .load(std::sync::atomic::Ordering::SeqCst);
-        if observations.finished(token, generation, std::time::Instant::now()) {
+        if observations.finished_with_reason(token, generation, std::time::Instant::now(), reason) {
             self.delivery_status_notify.notify_waiters();
         }
     }
@@ -303,6 +338,39 @@ mod tests {
         let mut bytes = [0; 32];
         bytes[..2].copy_from_slice(&n.to_be_bytes());
         crate::eventlog::EventId::new(bytes)
+    }
+
+    #[test]
+    fn recovery_reason_is_exact_attempt_scoped_and_optional() {
+        let mut observations = DeliveryObservations::default();
+        let now = Instant::now();
+        let first = observations.begin(id(1), id(2), 0, now);
+        observations.finished_with_reason(
+            first,
+            0,
+            now,
+            Some(DeliveryRecoveryReason::NoKnownRoute),
+        );
+        assert_eq!(
+            observations.snapshot(id(1), 0, now).unwrap().reason,
+            Some(DeliveryRecoveryReason::NoKnownRoute)
+        );
+        let current = observations.begin(id(1), id(2), 0, now);
+        assert_eq!(observations.snapshot(id(1), 0, now).unwrap().reason, None);
+        observations.finished_with_reason(
+            first,
+            0,
+            now,
+            Some(DeliveryRecoveryReason::AttemptTimedOut),
+        );
+        assert_eq!(observations.snapshot(id(1), 0, now).unwrap().reason, None);
+        observations.finished_with_reason(
+            current,
+            1,
+            now,
+            Some(DeliveryRecoveryReason::PostOfficeDisabled),
+        );
+        assert!(observations.snapshot(id(1), 1, now).is_none());
     }
 
     #[test]
