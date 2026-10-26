@@ -97,6 +97,38 @@ async fn repeated_sticker_reuses_bytes_and_history_survives_source_removal_and_r
 }
 
 #[tokio::test]
+async fn repeated_sticker_restages_after_transient_chunk_reclamation() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let target = account.account_id();
+    let node = open(dir.path(), DeviceIdentity::generate(), account);
+    let (path, bytes) = sticker(dir.path(), 0);
+    let (first, file) = node
+        .enqueue_file_to_account(&target, &path, FileKind::Media)
+        .await
+        .unwrap();
+    // Completion can reclaim this transient DAG while durable preview survives.
+    node.log.lock().unwrap().drop_conversation(&file).unwrap();
+    assert!(node.read_file_internal(file).is_err());
+    assert_eq!(node.read_media(file).as_deref(), Some(bytes.as_slice()));
+    let (second, restaged) = node
+        .enqueue_file_to_account(&target, &path, FileKind::Media)
+        .await
+        .unwrap();
+    assert_ne!(first, second);
+    assert_ne!(
+        file, restaged,
+        "reclaimed signed chunks require fresh staging"
+    );
+    assert_eq!(node.read_file_internal(restaged).unwrap(), bytes);
+    assert_eq!(node.read_media(file).unwrap(), bytes);
+    let rows = node.account_history(&target, 10);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.iter().filter(|row| row.id == first).count(), 1);
+    assert_eq!(rows.iter().filter(|row| row.id == second).count(), 1);
+}
+
+#[tokio::test]
 async fn sticker_cache_does_not_alias_replaced_images_or_different_deadlines() {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();

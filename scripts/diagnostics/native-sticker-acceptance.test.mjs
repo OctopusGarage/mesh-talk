@@ -24,7 +24,7 @@ function validReport() {
     sha256: "a".repeat(64), decoded: true, width: 128, height: 128, delivered: true, captureSha256: "f".repeat(64),
   }]));
   return { native: true, mocked: false, buildVerified: true, sourceSha: "b".repeat(40), receiverRestarted: true,
-    originalMediaPreserved: true, productionRegistrationAccepted: true, originalSha256: "a".repeat(64), cases,
+    originalMediaPreserved: true, productionRegistrationAccepted: true, repeatTransferReused: true, originalSha256: "a".repeat(64), cases,
     limitations: ["Native older-peer and paired-device alias acceptance are not covered by this scenario."] };
 }
 test("native verdict rejects missing scenarios, stale reuse, duplicates, incorrect bytes and unverified builds", () => {
@@ -39,4 +39,19 @@ test("native verdict rejects missing scenarios, stale reuse, duplicates, incorre
     r => { r.cases.repeat.delivered = false; }, r => { r.productionRegistrationAccepted = false; },
     r => { r.originalMediaPreserved = false; }, r => { delete r.cases.missing.captureSha256; },
   ]) { const report = validReport(); mutate(report); assert.throws(() => validateStickerEvidence(report)); }
+});
+
+test("native repeat accepts verified reuse or fresh post-prune transfer without aliasing another scenario", () => {
+  const reused = validReport();
+  reused.repeatTransferReused = true;
+  validateStickerEvidence(reused);
+  const restaged = validReport();
+  restaged.cases.repeat.fileConv = "4".repeat(64);
+  restaged.repeatTransferReused = false;
+  validateStickerEvidence(restaged);
+  restaged.repeatTransferReused = true;
+  assert.throws(() => validateStickerEvidence(restaged));
+  restaged.repeatTransferReused = false;
+  restaged.cases.repeat.fileConv = restaged.cases.missing.fileConv;
+  assert.throws(() => validateStickerEvidence(restaged));
 });
