@@ -148,6 +148,10 @@
           {
             "name": "Affected canonical group access and inventory, followed by the exact durable operation result, publish before public fanout waits; canonical no-op retries allocate no invented public effect and obsolete owner authority cannot execute an awaiting control. Exact committed message IDs request durable member/relay custody in the same bounded full-control fanout round, excluding own-account siblings.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Direct or eligible-relay local admission backpressure retains the same committed fanout revision for bounded delayed retry; successful revisions deduplicate and overflow remains owned by the source journal.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           }
         ]
       },
@@ -302,7 +306,10 @@
             "private_probe_refreshes_public_presence_before_its_lease_expires",
             "private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_routes",
             "node::session_pool::",
-            "historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel"
+            "historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel",
+            "authentication_backpressure_preserves_document_progress_and_recovers",
+            "account_worker_retries_local_authentication_contention_without_a_false_sync_error",
+            "offline_dm_delivered_via_post_office_over_loopback"
           ]
         }
       ],
@@ -316,6 +323,10 @@
           },
           {
             "name": "Only actual outbound capacity timeouts contribute to a per-pool fixed-window bounded metadata warning; suppressed counts aggregate without sliding the next report.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Local admission backpressure preserves account-sync cursors and verified protocol support, releases bounded workers and resumes through delayed retry without exposing an authentication failure or spinning on coalesced wakes.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           }
         ]

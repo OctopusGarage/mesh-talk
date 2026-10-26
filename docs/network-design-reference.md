@@ -1996,6 +1996,21 @@ cancel before another request for that same key begins. These hints authorize
 neither peer identity nor recipient delivery. Repeated unreachable probes must
 leave bounded capacity for other authenticated peers and relay exchanges.
 
+Local authentication/TCP admission contention is backpressure, not a negative
+peer-authentication or protocol-capability observation. Account synchronization
+retains its verified page/digest and capability records, releases the worker and
+retries through its existing delayed loop. Coalesced refresh wakes must neither
+restart that deferred page nor create a no-I/O self-requeue loop. History,
+favorites and attachment progress remain pending; identity, framing and content
+validation failures retain their error paths. The socket and authentication
+limits are unchanged.
+
+Account group fanout retains the same committed journal revision after local
+admission backpressure on direct or eligible relay paths. The existing bounded
+queue retries after one second without blocking other ready groups; queue
+overflow returns the revision to its durable journal cursor. Successful rounds
+remain deduplicated, and retry never invents custody or recipient confirmation.
+
 Historical-route rounds launch at most two device probes concurrently. Each may
 race at most two candidates, so this producer alone consumes at most four of the
 seven outbound slots; other protocol producers still share the remaining

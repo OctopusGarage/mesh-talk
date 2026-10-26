@@ -458,6 +458,201 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     );
 }
 #[tokio::test]
+async fn account_worker_retries_local_authentication_contention_without_a_false_sync_error() {
+    use crate::{
+        discovery::Announce,
+        node::{SyncPhase, account_devices::AccountDevice},
+    };
+    use std::time::{Duration, Instant};
+    use tokio::net::TcpListener;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let target = node(&dir.path().join("target"), &account);
+    for (owner, sibling) in [(&source, &target), (&target, &source)] {
+        owner
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: sibling.identity.public(),
+                certificate: account.certify(&sibling.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    source
+        .put_account_document_if(key(), b"automatic retry".to_vec(), None, |commit| commit())
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    target.roster.lock().unwrap().update(
+        &Announce::new_with_account(&source.identity, &account, "source", address.port()),
+        address.ip(),
+        &target.user_id(),
+    );
+    let peer = target.routing_peer(&source.user_id()).unwrap();
+    let held = target
+        .sessions
+        .authentication_admission(target.peer_endpoint_key(address, &peer.public))
+        .await
+        .unwrap();
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let worker = tokio::spawn(target.clone().run_account_history_loop());
+    let until = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < until {
+        target.account_sync_notify.notify_one();
+        for status in target.device_sync_status() {
+            assert_ne!(status.phase, SyncPhase::Error, "{status:?}");
+            assert_ne!(status.document_phase, SyncPhase::Error, "{status:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!target.device_sync_status().is_empty());
+    assert!(target.account_document(&key()).unwrap().is_none());
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while target.account_document(&key()).unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        target.account_document(&key()).unwrap().unwrap().payload(),
+        b"automatic retry"
+    );
+    worker.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn authentication_backpressure_preserves_document_progress_and_recovers() {
+    use crate::{discovery::roster::PeerRecord, node::account_devices::AccountDevice};
+    use std::{sync::Arc, time::Instant};
+    use tokio::net::TcpListener;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let target = node(&dir.path().join("target"), &account);
+    for (owner, sibling) in [(&source, &target), (&target, &source)] {
+        owner
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: sibling.identity.public(),
+                certificate: account.certify(&sibling.identity.public().ed25519_pub),
+            })
+            .unwrap();
+        owner
+            .set_device_sync_category(SyncCategory::Appearance, true)
+            .unwrap();
+    }
+    let key = AccountDocumentKey::CustomizationPack {
+        pack_id: "queued".into(),
+    };
+    source
+        .put_account_document_if(key.clone(), b"queued settings".to_vec(), None, |commit| {
+            commit()
+        })
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = PeerRecord {
+        public: source.identity.public(),
+        addr,
+        name: "source".into(),
+        account_id: Some(account.account_id()),
+        last_seen: Instant::now(),
+        post_office: false,
+        routes: Vec::new(),
+    };
+    let held = target
+        .sessions
+        .authentication_admission(target.peer_endpoint_key(addr, &peer.public))
+        .await
+        .unwrap();
+    let domain = AccountDocumentDomain::CustomizationPack;
+    let mut cursor = sync::DocumentSyncCursor::for_domain(domain);
+    cursor.digests[domain as usize] = [9; 32];
+    let error = target
+        .pull_account_documents_page(&peer, &mut cursor)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("peer authentication capacity busy")
+    );
+    assert_eq!(
+        cursor.status(target.device_sync_policy()).0,
+        super::super::SyncPhase::CatchingUp,
+        "local admission contention is queued sync work, not an authentication failure"
+    );
+    assert_eq!(
+        cursor.digests[domain as usize], [9; 32],
+        "no exchange started: retain the verified cursor"
+    );
+    assert!(
+        cursor.retry_at.is_some(),
+        "retry must be delayed rather than spin"
+    );
+    assert!(
+        !cursor.begin_refresh(),
+        "coalesced wakes cannot restart a queued page"
+    );
+    let retry_at = cursor.retry_at;
+    target
+        .pull_account_documents_page(&peer, &mut cursor)
+        .await
+        .unwrap();
+    assert_eq!(cursor.retry_at, retry_at);
+    assert!(
+        !cursor.pending,
+        "a deferred turn cannot self-requeue without I/O"
+    );
+    target.group_operation_versions.lock().unwrap().insert(
+        source.user_id(),
+        sync::GroupOperationSupport {
+            public: source.identity.public(),
+            observed_at: Instant::now(),
+            kinds: crate::node::AccountGroupOperationKind::legacy_capabilities(),
+        },
+    );
+    let mut control = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::GroupControl);
+    let error = target
+        .pull_account_documents_page(&peer, &mut control)
+        .await
+        .unwrap_err();
+    assert!(super::super::account_sync::local_sync_capacity_busy(&error));
+    assert!(
+        target
+            .group_operation_versions
+            .lock()
+            .unwrap()
+            .contains_key(&source.user_id()),
+        "local contention cannot retire authenticated peer operation support"
+    );
+    drop(held);
+    let serving = Arc::clone(&source);
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let channel = serving.privacy_accept(stream).await.unwrap();
+        serving.serve_connection(channel).await;
+    });
+    cursor.retry_at = None;
+    target
+        .pull_account_documents_page(&peer, &mut cursor)
+        .await
+        .unwrap();
+    assert_eq!(
+        target.account_document(&key).unwrap().unwrap().payload(),
+        b"queued settings"
+    );
+    task.abort();
+}
+
+#[tokio::test]
 async fn certified_siblings_transfer_large_typed_document_over_existing_account_session() {
     use crate::{discovery::roster::PeerRecord, node::account_devices::AccountDevice};
     use std::{sync::Arc, time::Instant};

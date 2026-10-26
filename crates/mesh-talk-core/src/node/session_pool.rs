@@ -351,6 +351,13 @@ impl SessionPool {
     }
 }
 
+/// Admission backpressure occurs locally, before any peer exchange. It provides
+/// no negative evidence about the peer's identity or protocol capabilities.
+pub(in crate::node) fn local_capacity_busy(error: &TransportError) -> bool {
+    matches!(error, TransportError::Noise(message) if matches!(message.as_str(),
+        "peer authentication capacity busy" | "TCP connection capacity busy"))
+}
+
 pub(in crate::node) fn retryable_transport_error(error: &TransportError) -> bool {
     matches!(error, TransportError::Io(error) if matches!(error.kind(),
         std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset |
@@ -568,6 +575,24 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_capacity_backpressure_never_classifies_identity_or_protocol_failures_as_busy() {
+        for message in [
+            "peer authentication capacity busy",
+            "TCP connection capacity busy",
+        ] {
+            assert!(local_capacity_busy(&TransportError::Noise(message.into())));
+        }
+        for error in [
+            TransportError::IdentityMismatch,
+            TransportError::AdmissionDenied,
+            TransportError::Noise("invalid Noise handshake".into()),
+            TransportError::Io(std::io::ErrorKind::UnexpectedEof.into()),
+        ] {
+            assert!(!local_capacity_busy(&error));
+        }
+    }
 
     #[test]
     fn capacity_diagnostic_throttle_counts_timeouts_without_sliding_its_deadline() {

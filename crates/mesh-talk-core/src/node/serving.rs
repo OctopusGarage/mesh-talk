@@ -223,12 +223,19 @@ impl Node {
                 self.post_office_candidates_for(&roster, recipient)
             };
             let mut complete = false;
+            let mut capacity_error = None;
             for po in candidates {
                 if !self.relay_send_allowed(&po.public) {
                     continue;
                 }
-                let Ok(mut channel) = self.privacy_sync_dial(po.addr, &po.public).await else {
-                    continue;
+                let mut channel = match self.privacy_sync_dial(po.addr, &po.public).await {
+                    Ok(channel) => channel,
+                    Err(error) => {
+                        if super::session_pool::local_capacity_busy(&error) {
+                            capacity_error = Some(error);
+                        }
+                        continue;
+                    }
                 };
                 if !self.relay_send_allowed(&po.public) {
                     continue;
@@ -294,6 +301,9 @@ impl Node {
                 break;
             }
             if !complete {
+                if let Some(error) = capacity_error {
+                    return Err(SessionError::Transport(error));
+                }
                 return Ok(false);
             }
         }

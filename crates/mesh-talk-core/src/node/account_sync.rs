@@ -88,11 +88,13 @@ pub struct DeviceSyncStatus {
 #[derive(Default)]
 struct PeerCursor {
     documents: super::account_documents::sync::DocumentSyncCursor,
+    history_retry_at: Option<std::time::Instant>,
     favorite_next: Option<String>,
     favorite_digest: [u8; 32],
     favorite_sweep_digest: [u8; 32],
     favorites_supported: bool,
     favorite_error: Option<String>,
+    favorite_retry_at: Option<std::time::Instant>,
     next: Option<HistoryCursor>,
     known_digest: [u8; 32],
     sweep_digest: [u8; 32],
@@ -150,6 +152,11 @@ enum AttachmentOutcome {
 
 fn optional_attachment_closed(error: &NodeError) -> bool {
     matches!(error, NodeError::Session(SessionError::Transport(error)) if super::session_pool::retryable_transport_error(error))
+}
+
+pub(in crate::node) fn local_sync_capacity_busy(error: &NodeError) -> bool {
+    matches!(error, NodeError::Session(SessionError::Transport(error))
+        if super::session_pool::local_capacity_busy(error))
 }
 
 impl PeerCursor {
@@ -2148,8 +2155,8 @@ impl Node {
                 };
                 let task = fanout_tasks.spawn(permit.track(async move {
                     let members = node.channel_members(group);
-                    node.distribute_account_group_effects(group, &members).await;
-                    group
+                    let deferred = node.distribute_account_group_effects(group, &members).await;
+                    (group, deferred)
                 }));
                 fanout_owners.insert(task.id(), group);
             }
@@ -2164,6 +2171,15 @@ impl Node {
                     documents: super::account_documents::sync::DocumentSyncCursor::optional(),
                     ..PeerCursor::default()
                 });
+                if state
+                    .history_retry_at
+                    .is_some_and(|at| at > std::time::Instant::now())
+                {
+                    active.remove(&id);
+                    cursors.insert(id, state);
+                    continue;
+                }
+                state.history_retry_at = None;
                 let node = self.clone();
                 let Some(permit) = self.runtime_work.admit() else {
                     return;
@@ -2182,44 +2198,54 @@ impl Node {
                     });
                     state.favorite_error = None;
                     if result.is_ok() && node.device_sync_policy().history {
-                        let first = state.favorite_next.is_none();
-                        match tokio::time::timeout(
-                            Duration::from_secs(10),
-                            node.pull_message_favorites_page_at_digest(
-                                &peer,
-                                state.favorite_next.clone(),
-                                state.favorite_digest,
-                                &mut state.favorites_supported,
-                            ),
-                        )
-                        .await
+                        if state
+                            .favorite_retry_at
+                            .is_none_or(|at| at <= std::time::Instant::now())
                         {
-                            Ok(Ok((next, digest))) => {
-                                if first {
-                                    state.favorite_sweep_digest = digest;
+                            state.favorite_retry_at = None;
+                            let first = state.favorite_next.is_none();
+                            match tokio::time::timeout(
+                                Duration::from_secs(10),
+                                node.pull_message_favorites_page_at_digest(
+                                    &peer,
+                                    state.favorite_next.clone(),
+                                    state.favorite_digest,
+                                    &mut state.favorites_supported,
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok((next, digest))) => {
+                                    if first {
+                                        state.favorite_sweep_digest = digest;
+                                    }
+                                    state.favorite_next = next;
+                                    if state.favorite_next.is_none() {
+                                        state.favorite_digest =
+                                            if state.favorite_sweep_digest == digest {
+                                                digest
+                                            } else {
+                                                [0; 32]
+                                            };
+                                    }
                                 }
-                                state.favorite_next = next;
-                                if state.favorite_next.is_none() {
-                                    state.favorite_digest = if state.favorite_sweep_digest == digest
-                                    {
-                                        digest
-                                    } else {
-                                        [0; 32]
-                                    };
+                                Ok(Err(error)) if local_sync_capacity_busy(&error) => {
+                                    state.favorite_retry_at =
+                                        Some(std::time::Instant::now() + Duration::from_secs(5));
                                 }
-                            }
-                            failure => {
-                                state.favorite_next = None;
-                                state.favorite_digest = [0; 32];
-                                if state.favorites_supported {
-                                    state.favorite_error = Some(match failure {
-                                        Ok(Err(error)) => error.to_string(),
-                                        _ => "favorites exchange timed out".into(),
-                                    });
+                                failure => {
+                                    state.favorite_next = None;
+                                    state.favorite_digest = [0; 32];
+                                    if state.favorites_supported {
+                                        state.favorite_error = Some(match failure {
+                                            Ok(Err(error)) => error.to_string(),
+                                            _ => "favorites exchange timed out".into(),
+                                        });
+                                    }
                                 }
                             }
                         }
-                    } else {
+                    } else if !result.as_ref().is_err_and(local_sync_capacity_busy) {
                         state.favorite_next = None;
                     }
                     // Optional private documents share this bounded worker and session pool.
@@ -2232,22 +2258,42 @@ impl Node {
                 history_owners.insert(task.id(), owner);
             }
             let mut enqueue_all = false;
+            let fanout_retry = fanout.next_retry();
             tokio::select! {
+                _ = async {
+                    if let Some(at) = fanout_retry {
+                        tokio::time::sleep_until(at).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
                 _ = tick.tick() => { enqueue_all = true; }
                 _ = self.account_sync_notify.notified() => { enqueue_all = true; }
                 result = fanout_tasks.join_next_with_id(), if !fanout_tasks.is_empty() => {
-                    let group = match result {
-                        Some(Ok((task, group))) => { fanout_owners.remove(&task); Some(group) },
+                    let completion = match result {
+                        Some(Ok((task, completion))) => {
+                            fanout_owners.remove(&task);
+                            Some(completion)
+                        },
                         Some(Err(error)) => {
                             log::debug!("account control fanout worker terminated: {error}");
-                            fanout_owners.remove(&error.id())
+                            fanout_owners.remove(&error.id()).map(|group| (group, false))
                         }
                         None => None,
                     };
-                    if let Some(group) = group && fanout.finished(group)
-                        && let Some(sequence) = self.account_group_fanout_sequence(group)
-                        && !fanout.observe(group, sequence) {
-                        fanout_cursor = fanout_cursor.min(sequence.saturating_sub(1));
+                    if let Some((group, deferred)) = completion {
+                        if deferred {
+                            if !fanout.defer(group)
+                                && let Some(sequence) = self.account_group_fanout_sequence(group)
+                            {
+                                fanout_cursor = fanout_cursor.min(sequence.saturating_sub(1));
+                            }
+                        } else if fanout.finished(group)
+                            && let Some(sequence) = self.account_group_fanout_sequence(group)
+                            && !fanout.observe(group, sequence)
+                        {
+                            fanout_cursor = fanout_cursor.min(sequence.saturating_sub(1));
+                        }
                     }
                 }
                 result = mandatory.join_next_with_id(), if !mandatory.is_empty() => {
@@ -2276,7 +2322,7 @@ impl Node {
                             if refresh && state.begin_refresh() {
                                 mandatory_refresh.remove(&id);
                             }
-                            let continuation = refresh || state.pending;
+                            let continuation = (refresh && !state.admission_deferred()) || state.pending;
                             mandatory_statuses.insert(id.clone(), state.status(policy));
                             let mut status = self.account_sync_status.lock().expect("account sync status mutex not poisoned")
                                 .get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
@@ -2318,14 +2364,23 @@ impl Node {
                             let (document_phase,document_error,document_requires_upgrade)=combined_document_status(optional_statuses.get(&id), mandatory_statuses.get(&id));
                             let mut status = DeviceSyncStatus { device_id: id.clone(), phase: SyncPhase::CatchingUp,
                                 pending_attachments: 0, legacy_file_metadata: false, error: None,document_phase,document_error,document_requires_upgrade };
-                            let favorites_pending = state.favorite_next.is_some() || (state.favorites_supported && state.favorite_digest==[0;32] && state.favorite_error.is_none());
-                            let mut continuation = refresh || favorites_pending || state.documents.pending;
+                            let favorites_waiting = state.favorite_retry_at.is_some_and(|at|at > std::time::Instant::now());
+                            let favorites_pending = (state.favorite_next.is_some() || (state.favorites_supported && state.favorite_digest==[0;32] && state.favorite_error.is_none()))
+                                && !favorites_waiting;
+                            let mut continuation = (refresh && !state.documents.admission_deferred()) || favorites_pending || state.documents.pending;
                             match result {
                                 Ok((next, digest, version)) => {
                                     status.legacy_file_metadata = version == AccountSyncVersion::V1;
-                                    if state.complete_page(next, digest) && !favorites_pending { status.phase = SyncPhase::UpToDate; }
+                                    if state.complete_page(next, digest) && !favorites_pending && !favorites_waiting { status.phase = SyncPhase::UpToDate; }
                                     else { continuation |= state.next.is_some() || state.documents.pending; }
                                     if let Some(error)=&state.favorite_error {status.phase=SyncPhase::Error;status.error=Some(error.chars().take(160).collect());continuation=false;}
+                                }
+                                Err(error) if local_sync_capacity_busy(&error) => {
+                                    // Admission never began an exchange. Retain history and
+                                    // favorite cursors; the regular tick retries without a spin.
+                                    status.phase = SyncPhase::CatchingUp;
+                                    state.history_retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
+                                    continuation = false;
                                 }
                                 Err(error) => {
                                     status.phase = SyncPhase::Error;
@@ -2420,7 +2475,7 @@ impl Node {
                         if let Err(error) = result {
                             retry_attachment.insert(id.clone(), std::time::Instant::now() + RETRY_INTERVAL);
                             let previous_status = self.account_sync_status.lock().expect("account sync status mutex not poisoned").get(&id).cloned();
-                            if let Some(mut status) = previous_status {
+                            if let Some(mut status) = previous_status && !local_sync_capacity_busy(&error) {
                                 status.phase = SyncPhase::Error;
                                 status.error = Some(error.to_string().chars().take(160).collect());
                                 self.set_account_sync_status(id, status);

@@ -78,6 +78,7 @@ pub(in crate::node) struct DocumentSyncCursor {
     // optional operation probe. Its digest and continuation have a separate scope.
     operation_digest: [u8; 32],
     pub(in crate::node) retry_at: Option<Instant>,
+    admission_deferred: bool,
     last_failure_at: Option<Instant>,
     pub(in crate::node) error: Option<String>,
     error_domain: Option<AccountDocumentDomain>,
@@ -108,6 +109,7 @@ impl Default for DocumentSyncCursor {
             digests: [[0; 32]; 12],
             operation_digest: [0; 32],
             retry_at: None,
+            admission_deferred: false,
             last_failure_at: None,
             error: None,
             error_domain: None,
@@ -135,13 +137,17 @@ impl DocumentSyncCursor {
     /// Start one new comparison sweep after an external wake. A partial page or
     /// cycle must finish first; its owner retains one coalesced follow-up wake.
     pub(in crate::node) fn begin_refresh(&mut self) -> bool {
-        if self.pending || self.after.is_some() {
+        if self.pending || self.after.is_some() || self.admission_deferred {
             return false;
         }
         self.visited = 0;
         self.settled = 0;
         self.up_to_date = false;
         true
+    }
+
+    pub(in crate::node) fn admission_deferred(&self) -> bool {
+        self.admission_deferred
     }
 
     pub(in crate::node) fn mandatory() -> Self {
@@ -567,6 +573,7 @@ impl Node {
         if cursor.retry_at.is_some_and(|at| Instant::now() < at) {
             return Ok(());
         }
+        cursor.admission_deferred = false;
         cursor.error = None;
         cursor.error_domain = None;
         if cursor
@@ -638,7 +645,21 @@ impl Node {
             return Ok(());
         }
         let attempted_domain = DOMAINS[cursor.domain];
+        let operation_digest = cursor.operation_digest;
         let result = self.pull_document_exchange(peer, cursor).await;
+        if result
+            .as_ref()
+            .is_err_and(super::super::account_sync::local_sync_capacity_busy)
+        {
+            // No bytes were exchanged: preserve the page, digest, and verified
+            // peer capabilities. Release the worker and retry on a later tick.
+            cursor.pending = false;
+            cursor.admission_deferred = true;
+            cursor.operation_digest = operation_digest;
+            cursor.up_to_date = false;
+            cursor.retry_at = Some(Instant::now() + Duration::from_secs(5));
+            return result;
+        }
         if result.is_err() {
             cursor.last_failure_at = Some(Instant::now());
         }
@@ -697,7 +718,11 @@ impl Node {
     ) -> Result<(), NodeError> {
         let operation_probe = DOMAINS[cursor.domain] == AccountDocumentDomain::GroupControl;
         let result = self.pull_document_exchange_inner(peer, cursor).await;
-        if operation_probe && result.is_err() {
+        if operation_probe
+            && result
+                .as_ref()
+                .is_err_and(|error| !super::super::account_sync::local_sync_capacity_busy(error))
+        {
             self.retire_operation_support(&peer.public, Instant::now());
         }
         result
@@ -1355,6 +1380,35 @@ mod control_policy_status_tests {
 #[cfg(test)]
 mod group_control_tests {
     use super::*;
+    #[tokio::test]
+    async fn queued_operation_probe_retains_its_verified_digest() {
+        let mut fixture = UpgradeFixture::new().await;
+        seed_operation_support(&fixture);
+        let held = fixture
+            .target
+            .sessions
+            .authentication_admission(
+                fixture
+                    .target
+                    .peer_endpoint_key(fixture.peer.addr, &fixture.peer.public),
+            )
+            .await
+            .unwrap();
+        let mut cursor = DocumentSyncCursor::for_domain(AccountDocumentDomain::GroupControl);
+        cursor.operation_digest = [9; 32];
+        let error = fixture
+            .target
+            .pull_account_documents_page(&fixture.peer, &mut cursor)
+            .await
+            .unwrap_err();
+        assert!(super::super::super::account_sync::local_sync_capacity_busy(
+            &error
+        ));
+        assert_eq!(cursor.operation_digest, [9; 32]);
+        assert!(!cursor.begin_refresh());
+        drop(held);
+        fixture.servers.shutdown().await;
+    }
     #[tokio::test]
     async fn fresh_refresh_during_backoff_does_not_create_a_no_io_continuation() {
         let mut fixture = UpgradeFixture::new().await;

@@ -64,7 +64,7 @@ impl Node {
         &self,
         group: ConversationId,
         members: &[crate::identity::device::PublicIdentity],
-    ) {
+    ) -> bool {
         if let Some(event) = self.account_group_fanout_message(group) {
             let projection = self.account_group_projection(group);
             let eligible = self
@@ -79,14 +79,15 @@ impl Node {
                         && self.channel_identity_is_current_in(state, &projection)
                 });
             if eligible {
-                self.distribute_channel_confirming(group, members, event)
+                return self
+                    .distribute_channel_confirming(group, members, Some(event))
                     .await;
-                return;
             }
         }
         // Controls still reach every member, including departure/dissolution
         // effects and coalesced controls in groups larger than message fanout.
-        self.distribute_channel(group, members).await;
+        self.distribute_channel_confirming(group, members, None)
+            .await
     }
 
     /// Exercise the real admitted effect with the existing completion-write fault.

@@ -2067,6 +2067,22 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
         .create_channel("relay-secret-room", vec![bob_node.identity.public()])
         .await
         .unwrap();
+    alice_node.sessions.clear();
+    let held = alice_node
+        .sessions
+        .authentication_admission(alice_node.peer_endpoint_key(po_addr, &po_seed.public()))
+        .await
+        .unwrap();
+    let busy = alice_node
+        .replicate_to_post_office_targets_confirming(group, vec![bob_node.identity.public()], None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(busy, SessionError::Transport(error)
+        if crate::node::session_pool::local_capacity_busy(&error)),
+        "an unstarted relay exchange must retain admission backpressure for the existing retry owner"
+    );
+    drop(held);
     assert!(po_store.lock().unwrap().held_ids(&group).is_empty());
     let group_wrappers = po_store.lock().unwrap().held_events(&mailbox.id());
     assert!(group_wrappers.len() > stored.len());

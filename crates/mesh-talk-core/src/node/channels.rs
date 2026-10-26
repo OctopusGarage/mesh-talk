@@ -1862,10 +1862,10 @@ impl Node {
         &self,
         channel: ConversationId,
         members: &[PublicIdentity],
-        event: EventId,
-    ) {
-        self.distribute_channel_targets(channel, members, None, true, Some(event))
-            .await;
+        event: Option<EventId>,
+    ) -> bool {
+        self.distribute_channel_targets(channel, members, None, true, event)
+            .await
     }
 
     /// Finish direct offer/chunk fanout before optional relay custody. Waiting
@@ -2176,9 +2176,18 @@ impl Node {
         event_id: EventId,
         peer: &PeerRecord,
     ) -> u64 {
-        let Ok(mut conn) = self.privacy_sync_dial(peer.addr, &peer.public).await else {
-            return 0;
-        };
+        self.sync_and_confirm_custody_admitted(channel, event_id, peer)
+            .await
+            .unwrap_or(0)
+    }
+
+    async fn sync_and_confirm_custody_admitted(
+        &self,
+        channel: ConversationId,
+        event_id: EventId,
+        peer: &PeerRecord,
+    ) -> Result<u64, crate::transport::TransportError> {
+        let mut conn = self.privacy_sync_dial(peer.addr, &peer.public).await?;
         let before = conn.sent_frame_bytes();
         let store = self.sync_store(conn.peer_identity());
         let reusable = if request_round(&mut conn, &store, channel).await.is_ok() {
@@ -2218,7 +2227,7 @@ impl Node {
         if reusable {
             self.recycle_sync_channel(conn);
         }
-        bytes
+        Ok(bytes)
     }
 
     /// Periodically verify one old claim without first syncing the missing
@@ -2402,7 +2411,7 @@ impl Node {
         fanout: Option<usize>,
         replicate_to_post_office: bool,
         confirming: Option<EventId>,
-    ) {
+    ) -> bool {
         let me = self.identity.public().user_id();
         let peers: Vec<PeerRecord> = {
             members
@@ -2427,24 +2436,36 @@ impl Node {
         };
         // Controls still reach every routed member, but a stalled route must
         // neither block healthy members nor create an unbounded dial burst.
+        let deferred = std::sync::atomic::AtomicBool::new(false);
         stream::iter(targets)
-            .for_each_concurrent(CHANNEL_CONTROL_FANOUT_CONCURRENCY, |peer| async move {
-                let _ = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
-                    if let Some(event) = confirming {
-                        self.sync_and_confirm_custody(channel, event, &peer).await;
-                    } else if let Ok(mut ch) = self.privacy_sync_dial(peer.addr, &peer.public).await
-                    {
-                        let store = self.sync_store(ch.peer_identity());
-                        if request_round(&mut ch, &store, channel).await.is_ok() {
-                            self.recycle_sync_channel(ch);
+            .for_each_concurrent(CHANNEL_CONTROL_FANOUT_CONCURRENCY, |peer| {
+                let deferred = &deferred;
+                async move {
+                    let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
+                        if let Some(event) = confirming {
+                            self.sync_and_confirm_custody_admitted(channel, event, &peer)
+                                .await
+                                .map(|_| ())
+                        } else {
+                            let mut ch = self.privacy_sync_dial(peer.addr, &peer.public).await?;
+                            let store = self.sync_store(ch.peer_identity());
+                            if request_round(&mut ch, &store, channel).await.is_ok() {
+                                self.recycle_sync_channel(ch);
+                            }
+                            Ok(())
                         }
+                    })
+                    .await;
+                    if let Ok(Err(error)) = result
+                        && super::session_pool::local_capacity_busy(&error)
+                    {
+                        deferred.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
-                })
-                .await;
+                }
             })
             .await;
         if replicate_to_post_office {
-            let _ = self
+            let result = self
                 .replicate_to_post_office_targets_confirming(
                     channel,
                     members
@@ -2455,7 +2476,13 @@ impl Node {
                     confirming,
                 )
                 .await;
+            if let Err(super::session::SessionError::Transport(error)) = result
+                && super::session_pool::local_capacity_busy(&error)
+            {
+                deferred.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
+        deferred.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Reconcile one joined channel with an online member. A rotating cursor gives

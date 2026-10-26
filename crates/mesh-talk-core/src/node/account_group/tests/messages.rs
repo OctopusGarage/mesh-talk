@@ -2,7 +2,7 @@
 use super::*;
 use crate::node::{AccountGroupStickerInput, AccountGroupTextInput, MessageProtection};
 
-async fn account_operation_send_confirms_exact_custody(external_member: bool) {
+async fn account_operation_send_confirms_exact_custody(external_member: bool, backpressure: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let source = node(&dir.path().join("source"), &account);
@@ -64,7 +64,50 @@ async fn account_operation_send_confirms_exact_custody(external_member: bool) {
             |commit| commit(),
         )
         .unwrap();
-    source.maintain_account_group_operations().await;
+    if backpressure {
+        source.sessions.clear();
+        let held = source
+            .sessions
+            .authentication_admission(source.peer_endpoint_key(address, &holder.identity.public()))
+            .await
+            .unwrap();
+        let (started, first_fanout) = tokio::sync::oneshot::channel();
+        *source.control_fanout_start_test_hook.lock().unwrap() = Some(Box::new(move || {
+            let _ = started.send(());
+        }));
+        let worker = tokio::spawn(source.clone().run_account_history_loop());
+        tokio::time::timeout(std::time::Duration::from_secs(8), first_fanout)
+            .await
+            .unwrap()
+            .unwrap();
+        // Hold the exact gate beyond its two-second admission budget, then
+        // release it. No second operation or generic recovery loop may help.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                let status = source
+                    .account_group_operation_status(&account.account_id(), id)
+                    .unwrap();
+                if status.is_some_and(|status| {
+                    status.phase == AccountGroupOperationPhase::Committed
+                        && status.primary_event.is_some_and(|event| {
+                            holder.log.lock().unwrap().get(&event).is_some()
+                                && source.channel_custody_count(group, event)
+                                    == Some(usize::from(external_member))
+                        })
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the original committed effect must retry after local admission clears");
+        worker.abort();
+    } else {
+        source.maintain_account_group_operations().await;
+    }
     let status = source
         .account_group_operation_status(&account.account_id(), id)
         .unwrap()
@@ -91,12 +134,12 @@ async fn account_operation_send_confirms_exact_custody(external_member: bool) {
 
 #[tokio::test]
 async fn account_operation_send_fanout_confirms_external_member_custody() {
-    account_operation_send_confirms_exact_custody(true).await;
+    account_operation_send_confirms_exact_custody(true, false).await;
 }
 
 #[tokio::test]
 async fn account_operation_send_fanout_excludes_own_account_sibling_custody() {
-    account_operation_send_confirms_exact_custody(false).await;
+    account_operation_send_confirms_exact_custody(false, false).await;
 }
 
 async fn assert_member_message(sticker: bool, protected: bool) {
@@ -850,4 +893,9 @@ async fn private_send_completion_rejects_forged_or_unrelated_public_event_proofs
             "a newly signed private head cannot forge its public source event proof"
         );
     }
+}
+
+#[tokio::test]
+async fn account_operation_fanout_retries_original_effect_after_local_admission_backpressure() {
+    account_operation_send_confirms_exact_custody(true, true).await;
 }

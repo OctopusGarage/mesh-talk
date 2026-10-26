@@ -13,6 +13,7 @@ pub(super) struct FanoutQueue {
     queued: VecDeque<ConversationId>,
     active: HashMap<ConversationId, bool>,
     seen: HashMap<ConversationId, u64>,
+    retry_at: HashMap<ConversationId, tokio::time::Instant>,
 }
 
 impl FanoutQueue {
@@ -41,9 +42,38 @@ impl FanoutQueue {
         if self.active.len() >= WORKERS {
             return None;
         }
-        let group = self.queued.pop_front()?;
+        let now = tokio::time::Instant::now();
+        let index = self
+            .queued
+            .iter()
+            .position(|group| self.retry_at.get(group).is_none_or(|at| *at <= now))?;
+        let group = self.queued.remove(index)?;
+        self.retry_at.remove(&group);
         self.active.insert(group, false);
         Some(group)
+    }
+
+    /// Keep the observed revision pending after local admission backpressure.
+    /// Overflow returns ownership to the existing durable journal cursor.
+    pub(super) fn defer(&mut self, group: ConversationId) -> bool {
+        self.active.remove(&group);
+        if self.queued.len() >= CAPACITY {
+            self.seen.remove(&group);
+            return false;
+        }
+        self.queued.push_back(group);
+        self.retry_at.insert(
+            group,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+        true
+    }
+
+    pub(super) fn next_retry(&self) -> Option<tokio::time::Instant> {
+        if self.active.len() >= WORKERS {
+            return None;
+        }
+        self.retry_at.values().copied().min()
     }
 
     /// A newer committed effect during an active round needs one follow-up.
@@ -66,6 +96,48 @@ mod tests {
         let mut bytes = [0; 32];
         bytes[..8].copy_from_slice(&(index as u64).to_be_bytes());
         ConversationId::new(bytes)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_revision_waits_without_blocking_ready_groups_and_dedupes_success() {
+        let mut queue = FanoutQueue::default();
+        let first = group(1);
+        let second = group(2);
+        assert!(queue.observe(first, 1));
+        assert_eq!(queue.start_next(), Some(first));
+        assert!(queue.defer(first));
+        assert!(queue.observe(first, 1));
+        assert!(queue.observe(second, 1));
+        assert_eq!(queue.start_next(), Some(second));
+        assert!(!queue.finished(second));
+        assert_eq!(queue.start_next(), None);
+        let retry = queue.next_retry().unwrap();
+        tokio::time::advance(std::time::Duration::from_millis(999)).await;
+        assert_eq!(queue.start_next(), None);
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        assert_eq!(tokio::time::Instant::now(), retry);
+        assert_eq!(queue.start_next(), Some(first));
+        assert!(!queue.finished(first));
+        assert!(queue.observe(first, 1));
+        assert_eq!(queue.start_next(), None);
+        assert!(queue.next_retry().is_none());
+    }
+
+    #[test]
+    fn deferred_overflow_returns_same_revision_to_the_durable_cursor() {
+        let mut queue = FanoutQueue::default();
+        let first = group(CAPACITY + 1);
+        assert!(queue.observe(first, 1));
+        assert_eq!(queue.start_next(), Some(first));
+        for index in 0..CAPACITY {
+            assert!(queue.observe(group(index), 1));
+        }
+        assert!(!queue.defer(first));
+        assert_eq!(queue.queued.len(), CAPACITY);
+        assert!(!queue.seen.contains_key(&first));
+        assert!(queue.next_retry().is_none());
+        assert_eq!(queue.start_next(), Some(group(0)));
+        assert!(queue.observe(first, 1));
     }
 
     #[test]
