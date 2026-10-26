@@ -502,7 +502,8 @@
             "owner_commands::tests::",
             "chat_commands::state::tests::",
             "session_store::macos::tests::",
-            "events::notification_policy_tests::notification_presentation_"
+            "notification_presentation_queues_without_waiting_for_the_main_thread_session_lock",
+            "notification_presentation_drops_queued_work_after_session_or_runtime_replacement"
           ]
         }
       ],
