@@ -253,8 +253,8 @@ pub async fn screenshot_available(_app: tauri::AppHandle) -> bool {
 }
 
 #[tauri::command]
-pub async fn capture_screen(
-    app: tauri::AppHandle,
+pub async fn capture_screen<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     hide_window: bool,
 ) -> Result<Vec<u8>, CommandError> {
     let authority = crate::screenshot_shortcuts::CaptureAuthority::capture(
@@ -275,26 +275,52 @@ pub async fn capture_screen(
         .map_err(|e| CommandError::Internal(format!("cannot query screenshot display: {e}")))?
         .ok_or_else(|| CommandError::Internal("screenshot display unavailable".into()))?;
 
-    if hide_window {
-        let capture_window = window.clone();
-        authority
-            .on_main_thread(&app, move || {
-                if let Some(w) = &capture_window {
-                    let _ = crate::window_visibility::hide(w);
+    let hide = set_capture_window_hidden(&app, &authority, window.clone(), true);
+    let restore = set_capture_window_hidden(&app, &authority, window, false);
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let captured = capture_png(monitor);
+    #[cfg(target_os = "linux")]
+    let captured = super::linux_screenshot::capture(backend, capture_png());
+    capture_for_session(&authority, hide_window, hide, captured, restore).await
+}
+
+async fn set_capture_window_hidden<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    authority: &crate::screenshot_shortcuts::CaptureAuthority,
+    window: Option<tauri::Window<R>>,
+    hidden: bool,
+) -> Result<(), CommandError> {
+    authority
+        .on_main_thread(app, move || {
+            if let Some(window) = window {
+                if hidden {
+                    let _ = crate::window_visibility::hide(&window);
+                } else {
+                    let _ = window.unminimize();
+                    let _ = crate::window_visibility::show(&window);
+                    let _ = window.set_focus();
                 }
-            })
-            .await?;
-        // Give the compositor a moment to actually remove the window from the screen before
-        // we capture, otherwise it can still be in the shot.
+            }
+        })
+        .await
+}
+
+/// Keep the acquisition/restore lifetime independent of the OS pixel provider.
+/// The native futures authorize again when their main-thread commits execute.
+async fn capture_for_session(
+    authority: &crate::screenshot_shortcuts::CaptureAuthority,
+    hide_window: bool,
+    hide: impl std::future::Future<Output = Result<(), CommandError>>,
+    captured: impl std::future::Future<Output = Result<Vec<u8>, CommandError>>,
+    restore: impl std::future::Future<Output = Result<(), CommandError>>,
+) -> Result<Vec<u8>, CommandError> {
+    if hide_window {
+        hide.await?;
+        // Let the compositor remove the owned window before acquiring pixels.
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     }
-
     authority.ensure_current()?;
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let captured = capture_png(monitor).await;
-    #[cfg(target_os = "linux")]
-    let captured = super::linux_screenshot::capture(backend, capture_png()).await;
-    let result = captured.and_then(|bytes| {
+    let result = captured.await.and_then(|bytes| {
         if bytes.is_empty() || valid_screenshot_png(&bytes) {
             Ok(bytes)
         } else {
@@ -305,15 +331,7 @@ pub async fn capture_screen(
     });
 
     if hide_window {
-        authority
-            .on_main_thread(&app, move || {
-                if let Some(w) = &window {
-                    let _ = w.unminimize();
-                    let _ = crate::window_visibility::show(w);
-                    let _ = w.set_focus();
-                }
-            })
-            .await?;
+        restore.await?;
     }
     authority.ensure_current()?;
 
@@ -502,6 +520,254 @@ pub(super) fn valid_screenshot_png(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod screenshot_tests {
     use super::*;
+    use crate::screenshot_shortcuts::CaptureAuthority;
+    use crate::state::AppState;
+    use std::sync::{Arc, Mutex};
+
+    const PNG: &[u8] = &[137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82];
+
+    fn capture_host() -> (
+        tempfile::TempDir,
+        tauri::App<tauri::test::MockRuntime>,
+        AppState,
+        crate::services::user::User,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let service = crate::services::auth_service::AuthService::new(Arc::new(
+            mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+            ),
+        ));
+        let state = AppState::new(service);
+        let user = crate::services::user::User {
+            user_id: "capture-owner".into(),
+            account_login_name: None,
+            name: "capture".into(),
+            display_name: "Capture".into(),
+            address: "local".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        state
+            .session()
+            .publish("capture-session".into(), user.clone(), "pw".into());
+        let builder = tauri::test::mock_builder()
+            .manage(state.clone())
+            .manage(state.app_lock().clone());
+        #[cfg(target_os = "linux")]
+        let builder = builder.manage(crate::window_visibility::HiddenPositions::default());
+        let host = builder
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        (root, host, state, user)
+    }
+
+    #[tokio::test]
+    async fn capture_rejects_signed_out_and_locked_sessions_before_native_setup() {
+        let (_root, host, state, user) = capture_host();
+        assert!(state.session().logout("capture-session").is_ok());
+        assert!(matches!(
+            capture_screen(host.handle().clone(), true).await,
+            Err(CommandError::Authorization(_))
+        ));
+        state
+            .session()
+            .publish("replacement".into(), user, "pw".into());
+        crate::app_lock::lock_app(host.state(), host.state()).unwrap();
+        assert!(matches!(
+            capture_screen(host.handle().clone(), false).await,
+            Err(CommandError::Authorization(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn hidden_capture_restores_after_success_cancel_backend_error_and_invalid_pixels() {
+        for outcome in ["image", "cancel", "backend error", "invalid image"] {
+            let (_root, _host, state, _user) = capture_host();
+            let authority = CaptureAuthority::capture(&state).unwrap();
+            let trace = Mutex::new(Vec::new());
+            let result = capture_for_session(
+                &authority,
+                true,
+                async { authority.with_current(|| trace.lock().unwrap().push("hide")) },
+                async {
+                    trace.lock().unwrap().push("capture");
+                    match outcome {
+                        "image" => Ok(PNG.to_vec()),
+                        "cancel" => Ok(Vec::new()),
+                        "backend error" => {
+                            Err(CommandError::Internal("provider unavailable".into()))
+                        }
+                        _ => Ok(b"invalid provider pixels".to_vec()),
+                    }
+                },
+                async { authority.with_current(|| trace.lock().unwrap().push("restore")) },
+            )
+            .await;
+            match outcome {
+                "image" => assert!(result.is_ok_and(|pixels| pixels == PNG)),
+                "cancel" => assert!(result.is_ok_and(|pixels| pixels.is_empty())),
+                "backend error" => assert!(
+                    matches!(result, Err(CommandError::Internal(error)) if error == "provider unavailable")
+                ),
+                _ => assert!(
+                    matches!(result, Err(CommandError::Internal(error)) if error == "screen capture returned an invalid PNG")
+                ),
+            }
+            assert_eq!(*trace.lock().unwrap(), ["hide", "capture", "restore"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn visible_capture_leaves_window_futures_unpolled() {
+        let (_root, _host, state, _user) = capture_host();
+        let authority = CaptureAuthority::capture(&state).unwrap();
+        let result = capture_for_session(
+            &authority,
+            false,
+            async { Err(CommandError::Internal("unexpected hide".into())) },
+            async { Ok(PNG.to_vec()) },
+            async { Err(CommandError::Internal("unexpected restore".into())) },
+        )
+        .await;
+        assert!(result.is_ok_and(|pixels| pixels == PNG));
+    }
+
+    #[tokio::test]
+    async fn capture_drops_pixels_and_retired_restoration_after_backend_wait() {
+        for replace_owner in [false, true] {
+            let (_root, _host, state, user) = capture_host();
+            let authority = CaptureAuthority::capture(&state).unwrap();
+            let trace = Mutex::new(Vec::new());
+            let result = capture_for_session(
+                &authority,
+                true,
+                async { authority.with_current(|| trace.lock().unwrap().push("hide")) },
+                async {
+                    trace.lock().unwrap().push("capture");
+                    if replace_owner {
+                        state
+                            .session()
+                            .publish("replacement".into(), user, "pw".into());
+                    } else {
+                        state.app_lock().clear();
+                    }
+                    Ok(PNG.to_vec())
+                },
+                async { authority.with_current(|| trace.lock().unwrap().push("restore")) },
+            )
+            .await;
+            assert!(matches!(result, Err(CommandError::Authorization(_))));
+            assert_eq!(*trace.lock().unwrap(), ["hide", "capture"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_rechecks_after_hide_and_after_restore() {
+        for retire_after_hide in [true, false] {
+            let (_root, _host, state, _user) = capture_host();
+            let authority = CaptureAuthority::capture(&state).unwrap();
+            let trace = Mutex::new(Vec::new());
+            let result = capture_for_session(
+                &authority,
+                true,
+                async {
+                    authority.with_current(|| trace.lock().unwrap().push("hide"))?;
+                    if retire_after_hide {
+                        state.app_lock().clear();
+                    }
+                    Ok(())
+                },
+                async {
+                    trace.lock().unwrap().push("capture");
+                    Ok(PNG.to_vec())
+                },
+                async {
+                    authority.with_current(|| trace.lock().unwrap().push("restore"))?;
+                    state.app_lock().clear();
+                    Ok(())
+                },
+            )
+            .await;
+            assert!(matches!(result, Err(CommandError::Authorization(_))));
+            let expected = if retire_after_hide {
+                vec!["hide"]
+            } else {
+                vec!["hide", "capture", "restore"]
+            };
+            assert_eq!(*trace.lock().unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_surfaces_window_dispatch_failures_without_publishing_pixels() {
+        for hide_fails in [true, false] {
+            let (_root, _host, state, _user) = capture_host();
+            let authority = CaptureAuthority::capture(&state).unwrap();
+            let trace = Mutex::new(Vec::new());
+            let result = capture_for_session(
+                &authority,
+                true,
+                async {
+                    trace.lock().unwrap().push("hide");
+                    if hide_fails {
+                        Err(CommandError::Internal("dispatch unavailable".into()))
+                    } else {
+                        Ok(())
+                    }
+                },
+                async {
+                    trace.lock().unwrap().push("capture");
+                    Ok(PNG.to_vec())
+                },
+                async {
+                    trace.lock().unwrap().push("restore");
+                    Err(CommandError::Internal("dispatch unavailable".into()))
+                },
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CommandError::Internal(error)) if error == "dispatch unavailable")
+            );
+            let expected = if hide_fails {
+                vec!["hide"]
+            } else {
+                vec!["hide", "capture", "restore"]
+            };
+            assert_eq!(*trace.lock().unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_window_commits_require_the_captured_session() {
+        let (_root, host, state, user) = capture_host();
+        let authority = CaptureAuthority::capture(&state).unwrap();
+        let window = tauri::WebviewWindowBuilder::new(
+            &host,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .build()
+        .unwrap()
+        .as_ref()
+        .window();
+        for hidden in [true, false] {
+            set_capture_window_hidden(host.handle(), &authority, Some(window.clone()), hidden)
+                .await
+                .unwrap();
+            set_capture_window_hidden(host.handle(), &authority, None, hidden)
+                .await
+                .unwrap();
+        }
+        state
+            .session()
+            .publish("replacement".into(), user, "pw".into());
+        assert!(matches!(
+            set_capture_window_hidden(host.handle(), &authority, Some(window), false).await,
+            Err(CommandError::Authorization(_))
+        ));
+    }
 
     #[test]
     fn screenshot_bytes_must_be_a_png() {

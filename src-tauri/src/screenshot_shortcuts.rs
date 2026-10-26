@@ -113,6 +113,7 @@ trait Registry {
     type Key: Copy + PartialEq;
     fn register(&mut self, key: Self::Key) -> Result<(), String>;
     fn unregister(&mut self, key: Self::Key) -> Result<(), String>;
+    fn is_registered(&self, key: Self::Key) -> bool;
 }
 /// Register additions before touching active bindings. Rollback failures are surfaced too.
 fn replace_keys<R: Registry>(
@@ -148,8 +149,8 @@ fn replace_keys<R: Registry>(
     }
     Ok(())
 }
-struct NativeRegistry<'a, R: Runtime>(&'a tauri::AppHandle<R>);
-impl<R: Runtime> Registry for NativeRegistry<'_, R> {
+struct NativeRegistry<R: Runtime>(tauri::AppHandle<R>);
+impl<R: Runtime> Registry for NativeRegistry<R> {
     type Key = Shortcut;
     fn register(&mut self, key: Shortcut) -> Result<(), String> {
         self.0
@@ -162,6 +163,9 @@ impl<R: Runtime> Registry for NativeRegistry<'_, R> {
             .global_shortcut()
             .unregister(key)
             .map_err(|error| error.to_string())
+    }
+    fn is_registered(&self, key: Shortcut) -> bool {
+        self.0.global_shortcut().is_registered(key)
     }
 }
 
@@ -215,6 +219,22 @@ impl ScreenshotShortcutState {
                 "global screenshot shortcuts are unavailable in this Wayland session; use application shortcuts".into(),
             ));
         }
+        let handle = app.clone();
+        self.apply_with_registry(lease, settings, move || NativeRegistry(handle))
+            .await
+    }
+
+    async fn apply_with_registry<F, G>(
+        &self,
+        lease: &SessionLease,
+        settings: &ScreenshotShortcuts,
+        make_registry: F,
+    ) -> Result<(), CommandError>
+    where
+        F: FnOnce() -> G + Send + 'static,
+        G: Registry<Key = Shortcut> + Send + 'static,
+    {
+        settings.validate()?;
         let previous = self.inner.lock().unwrap().clone();
         let bindings = if settings.global {
             settings.bindings()?
@@ -224,7 +244,6 @@ impl ScreenshotShortcutState {
         let before: Vec<_> = previous.bindings.iter().map(|item| item.0).collect();
         let after: Vec<_> = bindings.iter().map(|item| item.0).collect();
         if before != after {
-            let handle = app.clone();
             let candidates = previous
                 .bindings
                 .iter()
@@ -232,11 +251,12 @@ impl ScreenshotShortcutState {
                 .copied()
                 .collect::<Vec<_>>();
             let (result, actual) = tokio::task::spawn_blocking(move || {
-                let result = replace_keys(&mut NativeRegistry(&handle), &before, &after);
+                let mut registry = make_registry();
+                let result = replace_keys(&mut registry, &before, &after);
                 let mut actual = Vec::new();
                 for binding in candidates {
                     if !actual.iter().any(|(key, _)| *key == binding.0)
-                        && handle.global_shortcut().is_registered(binding.0)
+                        && registry.is_registered(binding.0)
                     {
                         actual.push(binding);
                     }
@@ -284,8 +304,22 @@ impl ScreenshotShortcutState {
         app: &tauri::AppHandle<R>,
         registration_id: u64,
     ) -> Result<(), CommandError> {
+        let handle = app.clone();
+        self.suspend_with_registry(move || NativeRegistry(handle), registration_id)
+            .await
+    }
+    async fn suspend_with_registry<F, G>(
+        &self,
+        make_registry: F,
+        registration_id: u64,
+    ) -> Result<(), CommandError>
+    where
+        F: FnOnce() -> G + Send + 'static,
+        G: Registry<Key = Shortcut> + Send + 'static,
+    {
         let _operation = self.operation.lock().await;
-        self.suspend_locked(app, registration_id).await
+        self.suspend_locked_with_registry(make_registry, registration_id)
+            .await
     }
     /// Caller owns the registration operation lock; the token check is made
     /// inside that serialization rather than before an asynchronous wait.
@@ -294,19 +328,29 @@ impl ScreenshotShortcutState {
         app: &tauri::AppHandle<R>,
         registration_id: u64,
     ) -> Result<(), CommandError> {
+        let handle = app.clone();
+        self.suspend_locked_with_registry(move || NativeRegistry(handle), registration_id)
+            .await
+    }
+    async fn suspend_locked_with_registry<F, G>(
+        &self,
+        make_registry: F,
+        registration_id: u64,
+    ) -> Result<(), CommandError>
+    where
+        F: FnOnce() -> G + Send + 'static,
+        G: Registry<Key = Shortcut> + Send + 'static,
+    {
         let previous = self.inner.lock().unwrap().clone();
         if previous.registration_id != registration_id {
             return Ok(());
         }
         let before: Vec<_> = previous.bindings.iter().map(|item| item.0).collect();
         if !before.is_empty() {
-            let handle = app.clone();
-            tokio::task::spawn_blocking(move || {
-                replace_keys(&mut NativeRegistry(&handle), &before, &[])
-            })
-            .await
-            .map_err(|error| CommandError::Internal(error.to_string()))?
-            .map_err(CommandError::Internal)?;
+            tokio::task::spawn_blocking(move || replace_keys(&mut make_registry(), &before, &[]))
+                .await
+                .map_err(|error| CommandError::Internal(error.to_string()))?
+                .map_err(CommandError::Internal)?;
         }
         let mut inner = self.inner.lock().unwrap();
         inner.bindings.clear();
@@ -411,6 +455,15 @@ pub(crate) async fn suspend_screenshot_shortcuts(
     generation: u64,
     registration_id: u64,
 ) -> Result<(), CommandError> {
+    suspend_screenshot_shortcuts_for(&app, &owner, generation, registration_id).await
+}
+
+async fn suspend_screenshot_shortcuts_for<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    owner: &str,
+    generation: u64,
+    registration_id: u64,
+) -> Result<(), CommandError> {
     let state = app.state::<ScreenshotShortcutState>();
     let matches = state
         .inner
@@ -420,7 +473,7 @@ pub(crate) async fn suspend_screenshot_shortcuts(
         .as_ref()
         .is_some_and(|lease| lease.owner() == owner && lease.generation() == generation);
     if matches {
-        state.suspend(&app, registration_id).await?;
+        state.suspend(app, registration_id).await?;
     }
     Ok(())
 }
@@ -429,6 +482,13 @@ pub(crate) async fn suspend_screenshot_shortcuts(
 pub(crate) async fn wake_screenshot_window(
     app: tauri::AppHandle,
     owner: String,
+) -> Result<(), CommandError> {
+    wake_screenshot_window_for(&app, &owner).await
+}
+
+async fn wake_screenshot_window_for<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    owner: &str,
 ) -> Result<(), CommandError> {
     let app_state = app.state::<AppState>();
     let lease = app_state
@@ -583,13 +643,25 @@ pub(crate) fn handle_shortcut<R: Runtime>(
 
 /// Release OS accelerators after native lock/logout, even when the webview is unavailable.
 pub(crate) async fn suspend_retired<R: Runtime>(app: &tauri::AppHandle<R>) {
+    let handle = app.clone();
+    suspend_retired_for(app, move || NativeRegistry(handle)).await;
+}
+
+async fn suspend_retired_for<R, F, G>(app: &tauri::AppHandle<R>, make_registry: F)
+where
+    R: Runtime,
+    F: FnOnce() -> G + Send + 'static,
+    G: Registry<Key = Shortcut> + Send + 'static,
+{
     let state = app.state::<ScreenshotShortcutState>();
     let snapshot = state.inner.lock().unwrap().clone();
     if snapshot
         .lease
         .as_ref()
         .is_some_and(|lease| !current(&app.state::<AppState>(), lease))
-        && let Err(error) = state.suspend(app, snapshot.registration_id).await
+        && let Err(error) = state
+            .suspend_with_registry(make_registry, snapshot.registration_id)
+            .await
     {
         log::warn!("Could not suspend screenshot shortcuts: {error}");
     }
@@ -829,6 +901,489 @@ mod tests {
         assert!(state.inner.lock().unwrap().lease.as_ref() == Some(&second));
     }
 
+    struct ShortcutFixture {
+        _root: tempfile::TempDir,
+        host: tauri::App<tauri::test::MockRuntime>,
+        app: AppState,
+        shortcuts: ScreenshotShortcutState,
+        lease: SessionLease,
+    }
+
+    fn capture_user() -> crate::services::user::User {
+        crate::services::user::User {
+            user_id: "shortcut-coverage-owner".into(),
+            account_login_name: None,
+            name: "capture".into(),
+            display_name: "Capture".into(),
+            address: "local".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        }
+    }
+
+    fn shortcut_fixture(with_window: bool) -> ShortcutFixture {
+        let root = tempfile::tempdir().unwrap();
+        let service = crate::services::auth_service::AuthService::new(Arc::new(
+            mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+            ),
+        ));
+        let app = AppState::new(service);
+        let lease = app
+            .session()
+            .publish("capture-session".into(), capture_user(), "pw".into());
+        let shortcuts = ScreenshotShortcutState::default();
+        let settings = SettingsState::default();
+        settings.activate(lease.owner());
+        let host = tauri::test::mock_builder()
+            .manage(app.clone())
+            .manage(app.app_lock().clone())
+            .manage(shortcuts.clone())
+            .manage(settings)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        if with_window {
+            #[cfg(target_os = "linux")]
+            host.manage(crate::window_visibility::HiddenPositions::default());
+            tauri::WebviewWindowBuilder::new(&host, "main", Default::default())
+                .build()
+                .unwrap();
+        }
+        ShortcutFixture {
+            _root: root,
+            host,
+            app,
+            shortcuts,
+            lease,
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ShortcutRegistry(Arc<Mutex<ShortcutRegistryInner>>);
+    #[derive(Default)]
+    struct ShortcutRegistryInner {
+        keys: Vec<Shortcut>,
+        fail_register: Option<Shortcut>,
+        fail_unregister: Option<Shortcut>,
+    }
+    impl Registry for ShortcutRegistry {
+        type Key = Shortcut;
+        fn register(&mut self, key: Shortcut) -> Result<(), String> {
+            let mut inner = self.0.lock().unwrap();
+            if inner.fail_register == Some(key) {
+                return Err("occupied".into());
+            }
+            inner.keys.push(key);
+            Ok(())
+        }
+        fn unregister(&mut self, key: Shortcut) -> Result<(), String> {
+            let mut inner = self.0.lock().unwrap();
+            if inner.fail_unregister == Some(key) {
+                return Err("cannot unregister".into());
+            }
+            inner.keys.retain(|registered| *registered != key);
+            Ok(())
+        }
+        fn is_registered(&self, key: Shortcut) -> bool {
+            self.0.lock().unwrap().keys.contains(&key)
+        }
+    }
+    fn global_bindings() -> ScreenshotShortcuts {
+        ScreenshotShortcuts {
+            capture: Some("Control+Shift+KeyY".into()),
+            capture_hidden: Some("Control+Alt+Shift+KeyX".into()),
+            global: true,
+        }
+    }
+    async fn apply_registry(
+        fixture: &ShortcutFixture,
+        registry: &ShortcutRegistry,
+        settings: &ScreenshotShortcuts,
+    ) -> Result<(), CommandError> {
+        let _operation = fixture.shortcuts.operation.lock().await;
+        let registry = registry.clone();
+        fixture
+            .shortcuts
+            .apply_with_registry(&fixture.lease, settings, move || registry)
+            .await
+    }
+    fn requests(
+        host: &tauri::AppHandle<tauri::test::MockRuntime>,
+    ) -> Arc<Mutex<Vec<serde_json::Value>>> {
+        use tauri::Listener;
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let observed = received.clone();
+        host.listen_any("screenshot-shortcut", move |event| {
+            observed
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(event.payload()).unwrap());
+        });
+        received
+    }
+    fn shortcut_event(fixture: &ShortcutFixture, key: Shortcut, state: ShortcutState) {
+        handle_shortcut(
+            fixture.host.handle(),
+            &key,
+            tauri_plugin_global_shortcut::ShortcutEvent {
+                id: key.id(),
+                state,
+            },
+        );
+    }
+    fn register_event_bindings(fixture: &ShortcutFixture) -> (Shortcut, Shortcut) {
+        let capture: Shortcut = "Control+Shift+KeyY".parse().unwrap();
+        let hidden: Shortcut = "Control+Alt+Shift+KeyX".parse().unwrap();
+        let mut inner = fixture.shortcuts.inner.lock().unwrap();
+        inner.lease = Some(fixture.lease.clone());
+        inner.bindings = vec![(capture, false), (hidden, true)];
+        inner.registration_id = 7;
+        (capture, hidden)
+    }
+
+    #[tokio::test]
+    async fn local_sync_status_and_exact_suspend_tokens_preserve_newer_registration() {
+        let fixture = shortcut_fixture(false);
+        let handle = fixture.host.handle();
+        let status = sync_screenshot_shortcuts_for(handle, fixture.lease.owner())
+            .await
+            .ok()
+            .unwrap();
+        assert!(!status.global_active);
+        assert!(status.error.is_none());
+        assert_eq!(status.generation, fixture.lease.generation());
+        assert_eq!(status.registration_id, 1);
+        for (owner, generation, token) in [
+            ("another-owner", status.generation, 1),
+            (fixture.lease.owner(), status.generation + 1, 1),
+            (fixture.lease.owner(), status.generation, 2),
+        ] {
+            assert!(
+                suspend_screenshot_shortcuts_for(handle, owner, generation, token)
+                    .await
+                    .is_ok()
+            );
+            assert_eq!(fixture.shortcuts.status(&fixture.lease).registration_id, 1);
+        }
+        assert!(
+            suspend_screenshot_shortcuts_for(handle, fixture.lease.owner(), status.generation, 1)
+                .await
+                .is_ok()
+        );
+        assert!(fixture.shortcuts.inner.lock().unwrap().lease.is_none());
+        let replacement = sync_screenshot_shortcuts_for(handle, fixture.lease.owner())
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(replacement.registration_id, 3);
+        assert!(
+            suspend_screenshot_shortcuts_for(handle, fixture.lease.owner(), status.generation, 1)
+                .await
+                .is_ok()
+        );
+        assert_eq!(fixture.shortcuts.status(&fixture.lease).registration_id, 3);
+        assert!(
+            pause_screenshot_shortcuts_for(handle, fixture.lease.owner())
+                .await
+                .is_ok()
+        );
+        assert!(fixture.shortcuts.inner.lock().unwrap().lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_and_wake_require_the_current_unlocked_settings_owner() {
+        let fixture = shortcut_fixture(true);
+        let handle = fixture.host.handle();
+        assert!(
+            sync_screenshot_shortcuts_for(handle, "another-owner")
+                .await
+                .is_err()
+        );
+        assert!(
+            wake_screenshot_window_for(handle, "another-owner")
+                .await
+                .is_err()
+        );
+        assert!(
+            wake_screenshot_window_for(handle, fixture.lease.owner())
+                .await
+                .is_ok()
+        );
+        fixture
+            .host
+            .state::<SettingsState>()
+            .activate("different-settings-owner");
+        assert!(
+            sync_screenshot_shortcuts_for(handle, fixture.lease.owner())
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::app_lock::lock_app(
+                fixture.host.state::<AppState>(),
+                fixture.host.state::<crate::app_lock::AppLock>()
+            )
+            .is_ok()
+        );
+        assert!(
+            sync_screenshot_shortcuts_for(handle, fixture.lease.owner())
+                .await
+                .is_err()
+        );
+        assert!(
+            wake_screenshot_window_for(handle, fixture.lease.owner())
+                .await
+                .is_err()
+        );
+        fixture.app.session().clear();
+        assert!(
+            wake_screenshot_window_for(handle, fixture.lease.owner())
+                .await
+                .is_err()
+        );
+        assert!(
+            pause_screenshot_shortcuts_for(handle, fixture.lease.owner())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn global_registry_replacement_reports_success_and_matching_token_releases_keys() {
+        let fixture = shortcut_fixture(false);
+        let registry = ShortcutRegistry::default();
+        assert!(
+            apply_registry(&fixture, &registry, &global_bindings())
+                .await
+                .is_ok()
+        );
+        let status = fixture.shortcuts.status(&fixture.lease);
+        assert!(status.global_active);
+        assert!(status.error.is_none());
+        assert_eq!(registry.0.lock().unwrap().keys.len(), 2);
+        let unchanged = registry.clone();
+        assert!(
+            fixture
+                .shortcuts
+                .suspend_with_registry(move || unchanged, status.registration_id + 1)
+                .await
+                .is_ok()
+        );
+        assert_eq!(registry.0.lock().unwrap().keys.len(), 2);
+        let matching = registry.clone();
+        assert!(
+            fixture
+                .shortcuts
+                .suspend_with_registry(move || matching, status.registration_id)
+                .await
+                .is_ok()
+        );
+        assert!(registry.0.lock().unwrap().keys.is_empty());
+        assert!(fixture.shortcuts.inner.lock().unwrap().lease.is_none());
+        assert!(!fixture.shortcuts.status(&fixture.lease).global_active);
+    }
+
+    #[tokio::test]
+    async fn failed_global_replacement_preserves_active_registration_and_exposes_error() {
+        let fixture = shortcut_fixture(false);
+        let registry = ShortcutRegistry::default();
+        assert!(
+            apply_registry(&fixture, &registry, &global_bindings())
+                .await
+                .is_ok()
+        );
+        let before = fixture.shortcuts.inner.lock().unwrap().clone();
+        let key: Shortcut = "Control+Shift+KeyU".parse().unwrap();
+        registry.0.lock().unwrap().fail_register = Some(key);
+        let replacement = ScreenshotShortcuts {
+            capture: Some("Control+Shift+KeyU".into()),
+            capture_hidden: None,
+            global: true,
+        };
+        assert!(
+            apply_registry(&fixture, &registry, &replacement)
+                .await
+                .is_err()
+        );
+        let inner = fixture.shortcuts.inner.lock().unwrap();
+        assert!(inner.bindings == before.bindings);
+        assert_eq!(inner.registration_id, before.registration_id);
+        assert!(!inner.degraded);
+        drop(inner);
+        let status = fixture.shortcuts.status(&fixture.lease);
+        assert!(status.global_active);
+        assert!(
+            status
+                .error
+                .as_ref()
+                .is_some_and(|error| error.contains("occupied"))
+        );
+        let stale_lease =
+            fixture
+                .app
+                .session()
+                .publish("replacement".into(), capture_user(), "pw".into());
+        assert!(!fixture.shortcuts.status(&stale_lease).global_active);
+    }
+
+    #[tokio::test]
+    async fn partial_initial_registration_retains_actual_os_keys_for_later_retirement() {
+        let fixture = shortcut_fixture(false);
+        let registry = ShortcutRegistry::default();
+        let keys = global_bindings().bindings().ok().unwrap();
+        registry.0.lock().unwrap().fail_register = Some(keys[1].0);
+        registry.0.lock().unwrap().fail_unregister = Some(keys[0].0);
+        assert!(
+            apply_registry(&fixture, &registry, &global_bindings())
+                .await
+                .is_err()
+        );
+        {
+            let inner = fixture.shortcuts.inner.lock().unwrap();
+            assert!(inner.degraded);
+            assert!(inner.lease.as_ref() == Some(&fixture.lease));
+            assert!(inner.bindings == vec![keys[0]]);
+        }
+        assert!(!fixture.shortcuts.status(&fixture.lease).global_active);
+        fixture.app.session().clear();
+        let failing = registry.clone();
+        suspend_retired_for(fixture.host.handle(), move || failing).await;
+        assert_eq!(registry.0.lock().unwrap().keys.len(), 1);
+        assert!(fixture.shortcuts.inner.lock().unwrap().lease.is_some());
+        registry.0.lock().unwrap().fail_register = None;
+        registry.0.lock().unwrap().fail_unregister = None;
+        let retry = registry.clone();
+        suspend_retired_for(fixture.host.handle(), move || retry).await;
+        assert!(registry.0.lock().unwrap().keys.is_empty());
+        assert!(fixture.shortcuts.inner.lock().unwrap().lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn lock_logout_and_owner_replacement_retire_global_keys_but_live_owner_does_not() {
+        for transition in 0..3 {
+            let fixture = shortcut_fixture(false);
+            let registry = ShortcutRegistry::default();
+            assert!(
+                apply_registry(&fixture, &registry, &global_bindings())
+                    .await
+                    .is_ok()
+            );
+            let active = registry.clone();
+            suspend_retired_for(fixture.host.handle(), move || active).await;
+            assert_eq!(registry.0.lock().unwrap().keys.len(), 2);
+            match transition {
+                0 => fixture.app.session().clear(),
+                1 => {
+                    assert!(
+                        crate::app_lock::lock_app(
+                            fixture.host.state::<AppState>(),
+                            fixture.host.state::<crate::app_lock::AppLock>()
+                        )
+                        .is_ok()
+                    );
+                }
+                _ => {
+                    fixture.app.session().publish(
+                        "replacement".into(),
+                        capture_user(),
+                        "pw".into(),
+                    );
+                }
+            }
+            let retired = registry.clone();
+            suspend_retired_for(fixture.host.handle(), move || retired).await;
+            assert!(registry.0.lock().unwrap().keys.is_empty());
+            assert!(fixture.shortcuts.inner.lock().unwrap().lease.is_none());
+        }
+    }
+
+    #[test]
+    fn global_handler_emits_once_per_press_and_release_rearms_both_capture_modes() {
+        let fixture = shortcut_fixture(true);
+        let received = requests(fixture.host.handle());
+        let (capture, hidden) = register_event_bindings(&fixture);
+        shortcut_event(&fixture, capture, ShortcutState::Released);
+        assert!(received.lock().unwrap().is_empty());
+        shortcut_event(&fixture, capture, ShortcutState::Pressed);
+        shortcut_event(&fixture, capture, ShortcutState::Pressed);
+        assert_eq!(received.lock().unwrap().len(), 1);
+        shortcut_event(&fixture, capture, ShortcutState::Released);
+        shortcut_event(&fixture, capture, ShortcutState::Pressed);
+        shortcut_event(&fixture, hidden, ShortcutState::Pressed);
+        let events = received.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(
+            events
+                .iter()
+                .all(|event| event["owner"] == fixture.lease.owner()
+                    && event["generation"] == fixture.lease.generation()
+                    && event["hide_window"] == true)
+        );
+    }
+
+    #[test]
+    fn global_handler_denies_degraded_missing_unbound_locked_and_retired_authority() {
+        for denial in 0..6 {
+            let fixture = shortcut_fixture(false);
+            let received = requests(fixture.host.handle());
+            let (capture, _) = register_event_bindings(&fixture);
+            match denial {
+                0 => fixture.shortcuts.inner.lock().unwrap().degraded = true,
+                1 => fixture.shortcuts.inner.lock().unwrap().lease = None,
+                2 => fixture.shortcuts.inner.lock().unwrap().bindings.clear(),
+                3 => {
+                    assert!(
+                        crate::app_lock::lock_app(
+                            fixture.host.state::<AppState>(),
+                            fixture.host.state::<crate::app_lock::AppLock>()
+                        )
+                        .is_ok()
+                    );
+                }
+                4 => {
+                    fixture.app.session().publish(
+                        "replacement".into(),
+                        capture_user(),
+                        "pw".into(),
+                    );
+                }
+                _ => fixture.app.session().clear(),
+            }
+            shortcut_event(&fixture, capture, ShortcutState::Pressed);
+            assert!(received.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn main_thread_capture_action_runs_only_while_its_authority_is_current() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let fixture = shortcut_fixture(false);
+        let authority = CaptureAuthority::capture(&fixture.app).ok().unwrap();
+        let committed = Arc::new(AtomicUsize::new(0));
+        let observed = committed.clone();
+        assert!(
+            authority
+                .on_main_thread(fixture.host.handle(), move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                })
+                .await
+                .is_ok()
+        );
+        assert_eq!(committed.load(Ordering::SeqCst), 1);
+        fixture.app.app_lock().clear();
+        let observed = committed.clone();
+        assert!(
+            authority
+                .on_main_thread(fixture.host.handle(), move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(committed.load(Ordering::SeqCst), 1);
+    }
+
     #[derive(Default)]
     struct FakeRegistry {
         keys: Vec<u32>,
@@ -850,6 +1405,9 @@ mod tests {
             }
             self.keys.retain(|current| *current != key);
             Ok(())
+        }
+        fn is_registered(&self, key: u32) -> bool {
+            self.keys.contains(&key)
         }
     }
 }

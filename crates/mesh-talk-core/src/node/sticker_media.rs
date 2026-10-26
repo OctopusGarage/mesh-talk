@@ -356,3 +356,144 @@ impl Node {
         Some(headers)
     }
 }
+
+#[cfg(test)]
+mod source_cache_tests {
+    use super::*;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+    use base64::Engine;
+
+    const NAME: &str = "mt-sticker-v1-cGFjazpleGFtcGxlOndhdmUK8J-Riw.png";
+
+    fn node() -> (tempfile::TempDir, std::sync::Arc<Node>) {
+        let dir = tempfile::tempdir().unwrap();
+        let node = super::super::sticker_media_tests::open(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+        );
+        (dir, node)
+    }
+
+    fn artwork(identity: u32, size: usize) -> Vec<u8> {
+        let mut bytes = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==").unwrap();
+        bytes.resize(size.max(bytes.len() + 4), 0);
+        let end = bytes.len();
+        bytes[end - 4..].copy_from_slice(&identity.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn installed_source_count_limit_evicts_old_artwork_without_affecting_new_candidates() {
+        let (_dir, node) = node();
+        for identity in 0..129 {
+            node.register_sticker_source(NAME, &artwork(identity, 0))
+                .unwrap();
+        }
+        let oldest_hash = file_checksum(&artwork(0, 0));
+        let newest = artwork(128, 0);
+        let newest_hash = file_checksum(&newest);
+        let sources = node.sticker_sources.lock().unwrap();
+        assert_eq!(sources.entries.len(), 128);
+        assert_eq!(sources.bytes, 128 * artwork(0, 0).len());
+        assert!(!sources.entries.iter().any(|(hash, _)| *hash == oldest_hash));
+        assert!(
+            sources
+                .entries
+                .iter()
+                .any(|(hash, bytes)| *hash == newest_hash && bytes.as_ref() == newest.as_slice())
+        );
+        assert_eq!(
+            sources
+                .entries
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>(),
+            sources.bytes
+        );
+    }
+
+    #[test]
+    fn installed_source_byte_budget_evicts_before_count_limit_and_accepts_reinstallation() {
+        let (_dir, node) = node();
+        for identity in 0..11 {
+            node.register_sticker_source(NAME, &artwork(identity, sticker::MAX_STICKER_BYTES))
+                .unwrap();
+        }
+        let evicted_hash = file_checksum(&artwork(0, sticker::MAX_STICKER_BYTES));
+        {
+            let sources = node.sticker_sources.lock().unwrap();
+            assert_eq!(
+                sources.entries.len(),
+                10,
+                "the byte budget applies before the 128-image count limit"
+            );
+            assert_eq!(sources.bytes, 10 * sticker::MAX_STICKER_BYTES);
+            assert!(sources.bytes <= 32 * 1024 * 1024);
+            assert!(
+                !sources
+                    .entries
+                    .iter()
+                    .any(|(hash, _)| *hash == evicted_hash)
+            );
+        }
+        let restored = artwork(0, sticker::MAX_STICKER_BYTES);
+        node.register_sticker_source(NAME, &restored).unwrap();
+        let sources = node.sticker_sources.lock().unwrap();
+        assert_eq!(sources.entries.len(), 10);
+        assert_eq!(sources.bytes, 10 * sticker::MAX_STICKER_BYTES);
+        assert!(
+            sources
+                .entries
+                .iter()
+                .any(|(_, bytes)| bytes.as_ref() == restored.as_slice())
+        );
+        assert_eq!(
+            sources
+                .entries
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>(),
+            sources.bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_registration_wakes_recovery_without_growth_and_invalid_input_cannot_mutate_cache()
+     {
+        let (_dir, node) = node();
+        let bytes = artwork(7, 0);
+        node.register_sticker_source(NAME, &bytes).unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            node.file_pull_notify.notified(),
+        )
+        .await
+        .expect("new installed artwork wakes pending recovery");
+        let expected_hash = file_checksum(&bytes);
+        for (name, invalid) in [
+            (NAME, Vec::new()),
+            (NAME, b"not an image".to_vec()),
+            (NAME, artwork(9, sticker::MAX_STICKER_BYTES + 1)),
+            ("ordinary.png", bytes.clone()),
+        ] {
+            assert!(node.register_sticker_source(name, &invalid).is_err());
+            let sources = node.sticker_sources.lock().unwrap();
+            assert_eq!(sources.entries.len(), 1);
+            assert_eq!(sources.bytes, bytes.len());
+            assert_eq!(sources.entries[0].0, expected_hash);
+            assert_eq!(sources.entries[0].1.as_ref(), bytes.as_slice());
+        }
+        node.register_sticker_source(NAME, &bytes).unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            node.file_pull_notify.notified(),
+        )
+        .await
+        .expect("idempotent registration still retries a pending offer");
+        let sources = node.sticker_sources.lock().unwrap();
+        assert_eq!(sources.entries.len(), 1);
+        assert_eq!(sources.bytes, bytes.len());
+        assert_eq!(sources.entries[0].0, expected_hash);
+    }
+}

@@ -61,10 +61,11 @@
           "filters": [
             "file::sticker::tests::",
             "node::sticker_media_tests::",
+            "node::sticker_media::",
             "node::files::",
             "node::recall::",
             "node::file_completion::",
-            "node::session::tests::channel_history_envelopes_preserve_existing_wire_tags"
+            "node::session::tests::"
           ]
         }
       ],

@@ -2658,6 +2658,28 @@ mod tests {
         );
         let offered_id = offered.id;
         let expected_bundle = bundle.clone();
+        let server_message = Event::new(
+            &bob,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"ordinary server message".to_vec(),
+        );
+        let server_message_id = server_message.id;
+        let client_message = Event::new(
+            &alice,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"ordinary client message".to_vec(),
+        );
+        let client_message_id = client_message.id;
         let (a, b) = tokio::io::duplex(65536);
         let server = tokio::spawn(async move {
             let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
@@ -2668,9 +2690,24 @@ mod tests {
                 imported: vec![],
             });
             serve_one(&mut channel, &store).await.unwrap();
-            let store = store.lock().unwrap();
-            assert_eq!(store.imported[0].id, offered_id);
-            assert!(store.log.event_ids(&conv()).is_empty());
+            {
+                let mut snapshot = store.lock().unwrap();
+                assert_eq!(snapshot.imported[0].id, offered_id);
+                assert!(snapshot.log.event_ids(&conv()).is_empty());
+                snapshot.log.append(server_message).unwrap();
+            }
+            loop {
+                if matches!(
+                    serve_one(&mut channel, &store).await.unwrap(),
+                    Served::Closed
+                ) {
+                    break;
+                }
+            }
+            let snapshot = store.lock().unwrap();
+            assert_eq!(snapshot.log.event_ids(&conv()).len(), 2);
+            assert!(snapshot.log.get(&client_message_id).is_some());
+            assert!(snapshot.log.get(&offered_id).is_none());
         });
         let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
         let bundles = request_file_message_identities(
@@ -2681,6 +2718,503 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(bundles, vec![expected_bundle]);
+        let mut ordinary = EventLog::default();
+        ordinary.append(client_message).unwrap();
+        let ordinary = Mutex::new(ordinary);
+        request_round(&mut channel, &ordinary, conv())
+            .await
+            .unwrap();
+        assert_eq!(ordinary.lock().unwrap().event_ids(&conv()).len(), 2);
+        assert!(ordinary.lock().unwrap().get(&server_message_id).is_some());
+        drop(channel);
         server.await.unwrap();
+    }
+
+    async fn attachment_test_channels() -> (
+        SecureChannel<tokio::io::DuplexStream>,
+        SecureChannel<tokio::io::DuplexStream>,
+    ) {
+        let requester = DeviceIdentity::generate();
+        let responder = DeviceIdentity::generate();
+        let (client_io, server_io) = tokio::io::duplex(65536);
+        let (client, server) = tokio::join!(
+            SecureChannel::connect(client_io, &requester, None),
+            SecureChannel::accept(server_io, &responder)
+        );
+        (client.unwrap(), server.unwrap())
+    }
+
+    #[tokio::test]
+    async fn legacy_store_attachment_extensions_fail_closed_and_keep_ordinary_sync_usable() {
+        let source = DeviceIdentity::generate();
+        let ordinary = Event::new(
+            &source,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"retained ordinary message".to_vec(),
+        );
+        let ordinary_id = ordinary.id;
+        let offered = Event::new(
+            &DeviceIdentity::generate(),
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"optional unrecognized metadata".to_vec(),
+        );
+        let offered_id = offered.id;
+        let (mut client, mut server) = attachment_test_channels().await;
+        let server_task = tokio::spawn(async move {
+            let mut log = EventLog::default();
+            log.append(ordinary).unwrap();
+            let store = Mutex::new(log);
+            loop {
+                if matches!(
+                    serve_one(&mut server, &store).await.unwrap(),
+                    Served::Closed
+                ) {
+                    break;
+                }
+            }
+            let snapshot = store.lock().unwrap();
+            assert_eq!(snapshot.event_ids(&conv()), vec![ordinary_id]);
+            assert!(
+                snapshot.get(&offered_id).is_none(),
+                "unsupported control metadata is never an ordinary history event"
+            );
+        });
+        let manifest = EventId::new([52; 32]);
+        assert_eq!(
+            request_file_consent(&mut client, conv(), manifest)
+                .await
+                .unwrap(),
+            FileConsentStatus::Pending
+        );
+        assert!(
+            request_signed_file_consent(&mut client, conv(), manifest)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            request_sticker_file_consent(&mut client, conv(), manifest, vec![])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            request_sticker_file_proof(&mut client, conv(), manifest)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            request_file_message_identities(&mut client, vec![(conv(), manifest)], vec![offered])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let destination = Mutex::new(EventLog::default());
+        request_round(&mut client, &destination, conv())
+            .await
+            .unwrap();
+        assert_eq!(
+            destination.lock().unwrap().event_ids(&conv()),
+            vec![ordinary_id]
+        );
+        drop(client);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn optional_attachment_replies_must_match_exact_requested_file_and_manifest() {
+        for protocol in 0..3 {
+            for wrong_file in [false, true] {
+                let (mut client, mut server) = attachment_test_channels().await;
+                let manifest = EventId::new([61; 32]);
+                let response_file = if wrong_file {
+                    ConversationId::new([62; 32])
+                } else {
+                    conv()
+                };
+                let response_manifest = if wrong_file {
+                    manifest
+                } else {
+                    EventId::new([63; 32])
+                };
+                let response = match protocol {
+                    0 => SyncWire::SignedFileConsentResponse {
+                        file: response_file,
+                        manifest: response_manifest,
+                        control: None,
+                    },
+                    1 => SyncWire::StickerFileConsentResponse {
+                        file: response_file,
+                        manifest: response_manifest,
+                        control: None,
+                    },
+                    _ => SyncWire::StickerFileProofResponse {
+                        file: response_file,
+                        manifest: response_manifest,
+                        headers: None,
+                    },
+                };
+                let responder = tokio::spawn(async move {
+                    let request = decode(&server.recv().await.unwrap()).unwrap();
+                    assert!(matches!(
+                        request,
+                        SyncWire::SignedFileConsentRequest { .. }
+                            | SyncWire::StickerFileConsentRequest { .. }
+                            | SyncWire::StickerFileProofRequest { .. }
+                    ));
+                    server.send(&encode(&response).unwrap()).await.unwrap();
+                });
+                let rejected = match protocol {
+                    0 => matches!(
+                        request_signed_file_consent(&mut client, conv(), manifest).await,
+                        Err(SessionError::UnexpectedMessage)
+                    ),
+                    1 => matches!(
+                        request_sticker_file_consent(&mut client, conv(), manifest, vec![]).await,
+                        Err(SessionError::UnexpectedMessage)
+                    ),
+                    _ => matches!(
+                        request_sticker_file_proof(&mut client, conv(), manifest).await,
+                        Err(SessionError::UnexpectedMessage)
+                    ),
+                };
+                assert!(
+                    rejected,
+                    "optional replies cannot authorize another request's attachment"
+                );
+                responder.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn identity_client_enforces_request_offer_and_response_budgets() {
+        let signer = DeviceIdentity::generate();
+        let control = Event::new(
+            &signer,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"identity control".to_vec(),
+        );
+        let manifest = EventId::new([64; 32]);
+        let (mut client, mut server) = attachment_test_channels().await;
+        assert!(matches!(
+            request_file_message_identities(
+                &mut client,
+                vec![(conv(), manifest); MAX_FILE_IDENTITIES + 1],
+                vec![]
+            )
+            .await,
+            Err(SessionError::UnexpectedMessage)
+        ));
+        client.send(b"after rejected request budget").await.unwrap();
+        assert_eq!(
+            server.recv().await.unwrap(),
+            b"after rejected request budget",
+            "over-budget requests must not reach the wire"
+        );
+        assert!(matches!(
+            request_file_message_identities(
+                &mut client,
+                vec![],
+                vec![control.clone(); MAX_FILE_IDENTITIES + 1]
+            )
+            .await,
+            Err(SessionError::UnexpectedMessage)
+        ));
+        client.send(b"after rejected offer budget").await.unwrap();
+        assert_eq!(server.recv().await.unwrap(), b"after rejected offer budget");
+        let responder = tokio::spawn(async move {
+            assert!(matches!(
+                decode(&server.recv().await.unwrap()).unwrap(),
+                SyncWire::FileMessageIdentitiesRequest { .. }
+            ));
+            server
+                .send(
+                    &encode(&SyncWire::FileMessageIdentitiesResponse {
+                        bundles: vec![control; MAX_FILE_IDENTITIES + 1],
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        assert!(
+            matches!(
+                request_file_message_identities(&mut client, vec![(conv(), manifest)], vec![])
+                    .await,
+                Err(SessionError::UnexpectedMessage)
+            ),
+            "over-budget replies cannot enter the identity registry"
+        );
+        responder.await.unwrap();
+    }
+
+    struct AttachmentAdmissionProbe {
+        log: EventLog,
+        control: Event,
+        proof_calls: usize,
+        imported: usize,
+        identity_requests: std::sync::atomic::AtomicUsize,
+    }
+    impl SyncStore for AttachmentAdmissionProbe {
+        fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+            self.log.event_ids(conversation)
+        }
+        fn events_excluding(
+            &self,
+            conversation: &ConversationId,
+            have: &std::collections::HashSet<EventId>,
+        ) -> Vec<Event> {
+            self.log.events_excluding(conversation, have)
+        }
+        fn ingest(
+            &mut self,
+            event: Event,
+        ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
+            self.log.append(event)
+        }
+        fn file_message_identity(
+            &self,
+            _file: &ConversationId,
+            _manifest: &EventId,
+        ) -> Option<Event> {
+            self.identity_requests
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(self.control.clone())
+        }
+        fn accept_file_message_identity(&mut self, _bundle: Event) -> bool {
+            self.imported += 1;
+            true
+        }
+        fn sticker_file_consent(
+            &mut self,
+            _file: &ConversationId,
+            _manifest: &EventId,
+            _headers: Vec<Event>,
+        ) -> Option<Event> {
+            self.proof_calls += 1;
+            Some(self.control.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn attachment_wire_bounds_reject_before_callbacks_and_bounded_metadata_stays_out_of_history()
+     {
+        use std::sync::atomic::Ordering;
+        let signer = DeviceIdentity::generate();
+        let control = Event::new(
+            &signer,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"control".to_vec(),
+        );
+        let manifest = EventId::new([65; 32]);
+        let store = Mutex::new(AttachmentAdmissionProbe {
+            log: EventLog::default(),
+            control: control.clone(),
+            proof_calls: 0,
+            imported: 0,
+            identity_requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        for request in [
+            SyncWire::FileMessageIdentitiesRequest {
+                requests: vec![(conv(), manifest); MAX_FILE_IDENTITIES + 1],
+                offers: vec![],
+            },
+            SyncWire::FileMessageIdentitiesRequest {
+                requests: vec![(conv(), manifest)],
+                offers: vec![control.clone(); MAX_FILE_IDENTITIES + 1],
+            },
+        ] {
+            let (mut client, mut server) = attachment_test_channels().await;
+            client.send(&encode(&request).unwrap()).await.unwrap();
+            let wire = server.recv().await.unwrap();
+            assert!(matches!(
+                serve_wire_bytes(&mut server, &store, &wire).await,
+                Err(SessionError::UnexpectedMessage)
+            ));
+            let snapshot = store.lock().unwrap();
+            assert_eq!(snapshot.imported, 0);
+            assert_eq!(snapshot.identity_requests.load(Ordering::Relaxed), 0);
+        }
+        let mut malformed = Vec::new();
+        let mut header = control.clone();
+        header.ciphertext.clear();
+        malformed.push(vec![header.clone(); 65]);
+        let mut payload = header.clone();
+        payload.ciphertext.push(1);
+        malformed.push(vec![payload]);
+        let mut ancestry = header.clone();
+        ancestry.parents = vec![EventId::new([66; 32]), EventId::new([67; 32])];
+        malformed.push(vec![ancestry]);
+        let mut signature = header.clone();
+        signature.sig.pop();
+        malformed.push(vec![signature]);
+        for headers in malformed {
+            let (mut client, mut server) = attachment_test_channels().await;
+            client
+                .send(
+                    &encode(&SyncWire::StickerFileConsentRequest {
+                        file: conv(),
+                        manifest,
+                        headers,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let wire = server.recv().await.unwrap();
+            serve_wire_bytes(&mut server, &store, &wire).await.unwrap();
+            assert!(matches!(
+                decode(&client.recv().await.unwrap()).unwrap(),
+                SyncWire::StickerFileConsentResponse { control: None, .. }
+            ));
+            assert_eq!(
+                store.lock().unwrap().proof_calls,
+                0,
+                "invalid header envelopes must not invoke storage admission"
+            );
+        }
+        let (mut client, mut server) = attachment_test_channels().await;
+        client
+            .send(
+                &encode(&SyncWire::StickerFileConsentRequest {
+                    file: conv(),
+                    manifest,
+                    headers: vec![header],
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let wire = server.recv().await.unwrap();
+        serve_wire_bytes(&mut server, &store, &wire).await.unwrap();
+        assert!(matches!(
+            decode(&client.recv().await.unwrap()).unwrap(),
+            SyncWire::StickerFileConsentResponse {
+                control: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(store.lock().unwrap().proof_calls, 1);
+        let requests = vec![(conv(), manifest); MAX_FILE_IDENTITIES];
+        client
+            .send(
+                &encode(&SyncWire::FileMessageIdentitiesRequest {
+                    requests,
+                    offers: vec![control.clone(); MAX_FILE_IDENTITIES],
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let wire = server.recv().await.unwrap();
+        serve_wire_bytes(&mut server, &store, &wire).await.unwrap();
+        let SyncWire::FileMessageIdentitiesResponse { bundles } =
+            decode(&client.recv().await.unwrap()).unwrap()
+        else {
+            panic!("expected bounded metadata response")
+        };
+        assert_eq!(
+            bundles,
+            vec![control.clone()],
+            "identical returned controls are deduplicated within the request budget"
+        );
+        {
+            let snapshot = store.lock().unwrap();
+            assert_eq!(snapshot.imported, MAX_FILE_IDENTITIES);
+            assert_eq!(
+                snapshot.identity_requests.load(Ordering::Relaxed),
+                MAX_FILE_IDENTITIES
+            );
+            assert!(snapshot.log.event_ids(&conv()).is_empty());
+        }
+        for response in [
+            SyncWire::StickerFileConsentResponse {
+                file: conv(),
+                manifest,
+                control: None,
+            },
+            SyncWire::StickerFileProofResponse {
+                file: conv(),
+                manifest,
+                headers: None,
+            },
+            SyncWire::FileMessageIdentitiesResponse { bundles: vec![] },
+        ] {
+            assert!(
+                matches!(
+                    serve_wire_bytes(&mut server, &store, &encode(&response).unwrap()).await,
+                    Err(SessionError::UnexpectedMessage)
+                ),
+                "unsolicited metadata responses cannot mutate the responder"
+            );
+        }
+        let normal_server = Event::new(
+            &signer,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"normal server event".to_vec(),
+        );
+        let normal_server_id = normal_server.id;
+        store.lock().unwrap().log.append(normal_server).unwrap();
+        let normal_client = Event::new(
+            &DeviceIdentity::generate(),
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"normal client event".to_vec(),
+        );
+        let normal_client_id = normal_client.id;
+        let mut client_log = EventLog::default();
+        client_log.append(normal_client).unwrap();
+        let client_log = Mutex::new(client_log);
+        let responder = tokio::spawn(async move {
+            loop {
+                if matches!(
+                    serve_one(&mut server, &store).await.unwrap(),
+                    Served::Closed
+                ) {
+                    break;
+                }
+            }
+            let snapshot = store.lock().unwrap();
+            assert_eq!(snapshot.log.event_ids(&conv()).len(), 2);
+            assert!(snapshot.log.get(&normal_client_id).is_some());
+            assert!(snapshot.log.get(&control.id).is_none());
+        });
+        request_round(&mut client, &client_log, conv())
+            .await
+            .unwrap();
+        assert!(client_log.lock().unwrap().get(&normal_server_id).is_some());
+        drop(client);
+        responder.await.unwrap();
     }
 }
