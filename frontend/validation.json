@@ -2,6 +2,64 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-screenshot-shortcuts",
+      "paths": [
+        "frontend/src/lib/screenshotShortcuts.ts",
+        "frontend/src/lib/screenshotShortcuts.test.ts",
+        "frontend/src/lib/api/screenshotShortcuts.ts",
+        "frontend/src/features/chat/screenshot/shortcutRouter.ts",
+        "frontend/src/features/chat/screenshot/shortcutRouter.test.ts",
+        "frontend/src/features/chat/screenshot/useScreenshotShortcuts.ts",
+        "frontend/src/features/chat/screenshot/useScreenshotShortcuts.test.ts",
+        "frontend/src/features/chat/settings/ScreenshotShortcutSettings.tsx",
+        "frontend/src/features/chat/settings/ScreenshotShortcutSettings.test.ts",
+        "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/features/chat/settings/useSettingsController.ts",
+        "frontend/src/features/chat/settings/useSettingsController.test.ts",
+        "frontend/src/store/settings.ts",
+        "frontend/src/store/settings.test.ts",
+        "frontend/src/features/chat/SettingsDialog.tsx",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ScreenshotEditor.tsx",
+        "frontend/src/features/chat/screenshot/ScreenshotToolbar.tsx",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/e2e/screenshot-shortcuts.spec.ts",
+        "frontend/e2e/ui-audit-composer.spec.ts",
+        "frontend/e2e/ui-audit-composer.spec.ts-snapshots/composer-screenshot-dark-760x620.png",
+        "frontend/e2e/tauri-mock.ts",
+        "docs/settings.md",
+        "docs/help/topics/screenshots.md"
+      ],
+      "frontend": [
+        "src/lib/screenshotShortcuts.test.ts",
+        "src/store/settings.test.ts",
+        "src/features/chat/screenshot/shortcutRouter.test.ts",
+        "src/features/chat/screenshot/useScreenshotShortcuts.test.ts",
+        "src/features/chat/settings/ScreenshotShortcutSettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts",
+        "src/features/chat/ScreenshotEditor.test.ts",
+        "src/features/chat/ComposerScreenshot.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts"
+      ],
+      "capability": {
+        "summary": "Customize device-local screenshot bindings with default application scope, opt-in native global activation and truthful floating-control hints.",
+        "guide": "docs/settings.md#screenshot-shortcuts",
+        "invariants": [
+          {
+            "name": "Native registration is transactional and scoped to the unlocked session; retired cleanup cannot release a newer registration.",
+            "reference": "docs/settings.md#screenshot-shortcuts"
+          },
+          {
+            "name": "Local and global input share conversation-owned capture; editor and modal input never accidentally launch or send a screenshot.",
+            "reference": "docs/help/topics/screenshots.md#keyboard-shortcuts"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/screenshot-shortcuts.spec.ts and relevant screenshot browser scenarios; verify actual OS key delivery, occupied shortcuts, tray/background wakeup, lock/logout and window restoration in packaged apps. Linux global activation requires native X11. Browser events do not certify native behavior."
+      ]
+    },
+    {
       "id": "frontend-group-file-network-cost",
       "paths": [
         "frontend/src/features/chat/MembersDialog.tsx",
@@ -48,7 +106,34 @@
         "frontend/src/store/conversationModel.ts",
         "frontend/src/store/outgoingIntent.ts",
         "frontend/e2e/stickers.spec.ts",
-        "frontend/e2e/tauri-mock.ts"
+        "frontend/e2e/tauri-mock.ts",
+        "frontend/src/lib/installedStickerSources.ts",
+        "frontend/src/lib/installedStickerSources.test.ts",
+        "frontend/src/lib/linkedCustomizationPacks.ts",
+        "frontend/src/lib/linkedCustomizationPacks.test.ts",
+        "frontend/src/store/reception.ts",
+        "frontend/src/store/reception.test.ts",
+        "frontend/src/lib/unreadStorage.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/conversationHistory.test.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/src/lib/messagePresentation.ts",
+        "frontend/src/lib/messagePresentation.test.ts",
+        "frontend/src/lib/conversationHistory.ts",
+        "frontend/src/lib/conversationHistory.test.ts",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/DeliveryFooter.tsx",
+        "frontend/src/features/chat/DeliveryDetails.tsx",
+        "frontend/src/features/chat/DeliveryDetails.test.ts",
+        "frontend/src/features/chat/favorites/FavoriteEditor.tsx",
+        "frontend/src/features/chat/favorites/FavoritesDialog.tsx",
+        "frontend/src/features/chat/favorites/FavoriteMessageText.tsx",
+        "frontend/src/lib/attachmentSave.ts",
+        "frontend/src/lib/attachmentSave.test.ts"
       ],
       "frontend": [
         "src/lib/stickerMedia.test.ts",
@@ -58,24 +143,44 @@
         "src/features/chat/mediaFile.test.ts",
         "src/lib/stickerPacks.test.ts",
         "src/store/chat.test.ts",
-        "src/store/outgoingIntent.test.ts"
+        "src/store/outgoingIntent.test.ts",
+        "src/lib/installedStickerSources.test.ts",
+        "src/lib/linkedCustomizationPacks.test.ts",
+        "src/store/reception.test.ts",
+        "src/store/conversationHistory.test.ts",
+        "src/lib/unreadStorage.test.ts",
+        "src/lib/messagePresentation.test.ts",
+        "src/lib/conversationHistory.test.ts",
+        "src/features/chat/sidebar/ConversationRow.test.ts",
+        "src/features/chat/DeliveryDetails.test.ts",
+        "src/features/chat/ConversationHistoryDialog.test.ts",
+        "src/features/chat/favorites/FavoriteEditor.test.ts",
+        "src/lib/attachmentSave.test.ts"
       ],
       "capability": {
         "summary": "Send selected sticker artwork as bounded ordinary media while preserving legacy sticker identities and account-owned file retry.",
         "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
         "invariants": [
           {
-            "name": "A canonical bounded media filename carries source identity and fallback; the image manifest remains byte identity. Incoming artwork never installs or resolves a pack.",
+            "name": "A canonical bounded filename carries presentation identity; the authenticated manifest binds image bytes. Installed exact-byte snapshots are registered only with the current owner/account runtime and never install incoming packs.",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           },
           {
             "name": "Selected artwork is snapshotted before asynchronous staging; stale account work cannot dispatch, retained file intents retry the same bytes, and retention removes visible blob URLs.",
             "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Authenticated file-message aliases coalesce late live/history copies into one unread identity, preserve any actual read, survive bounded persistence and never merge independent sends by content.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Sent v2 semantic labels survive pack removal and retry; compact surfaces share one summary with localized legacy fallback and protected/recalled/expired content takes priority.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           }
         ]
       },
       "escalation": [
-        "Run e2e/stickers.spec.ts for receive without installed packs and pack-removal preservation; use existing protected-message/media and native file-delivery acceptance where those boundaries change. Unit tests do not prove native end-to-end transfer."
+        "Run e2e/stickers.spec.ts for semantic previews, replies/history search, receive without installed packs, pack-removal preservation and light/dark short-window layout. Use existing protected-message/media and native file-delivery acceptance where those boundaries change. Unit and mocked browser tests do not prove native transfer, notification appearance or linked-device/backup compatibility."
       ]
     },
     {

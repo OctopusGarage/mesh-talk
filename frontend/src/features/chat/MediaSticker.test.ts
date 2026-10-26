@@ -7,7 +7,9 @@ const state = vi.hoisted(() => ({
   status: undefined as { ready: boolean; unavailable?: boolean } | undefined,
 }));
 vi.mock("react-i18next", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string) => (key === "message.sticker" ? "[Sticker]" : key),
+  }),
 }));
 vi.mock("@/store/fileAvailability", () => ({
   useFileStatus: () => state.status,
@@ -30,13 +32,14 @@ afterEach(async () => {
   await act(async () => root.unmount());
   vi.unstubAllGlobals();
 });
-async function render(readOnly = false) {
+async function render(readOnly = false, label?: string) {
   await act(async () =>
     root.render(
       createElement(MediaSticker, {
         fileConv: "media",
         mime: "image/png",
         fallback: "👋",
+        label,
         readOnly,
       }),
     ),
@@ -50,8 +53,18 @@ it("shows the fallback while waiting and the received image with accessible alt 
   state.url = "blob:received";
   await render();
   expect(host.querySelector("img")?.getAttribute("src")).toBe("blob:received");
-  expect(host.querySelector("img")?.getAttribute("alt")).toBe("👋");
+  expect(host.querySelector("img")?.getAttribute("alt")).toBe("[Sticker]");
   expect(host.querySelector("img")?.className).toContain("h-32 w-32");
+});
+it("keeps a semantic accessible name while media is missing and after it arrives", async () => {
+  await render(false, "静下心");
+  expect(host.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe(
+    "[静下心]",
+  );
+  state.status = { ready: true };
+  state.url = "blob:received";
+  await render(false, "静下心");
+  expect(host.querySelector("img")?.getAttribute("alt")).toBe("[静下心]");
 });
 it("falls back on decode failure with retry and suppresses retry in read-only history", async () => {
   state.status = { ready: true };

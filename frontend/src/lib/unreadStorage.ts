@@ -116,6 +116,7 @@ const LEDGER_PREFIX = "mesh-talk-reception-v2";
 const LEDGER_SNAPSHOT_LIMIT = 3_000_000;
 import {
   boundLedger,
+  validMessageAliases,
   type ReceptionLedger,
   type ReceptionEntry,
 } from "@/store/reception";
@@ -148,7 +149,9 @@ export function loadReceptionLedger(
         const e = entry as ReceptionEntry;
         if (typeof e.seen !== "boolean" || typeof e.late !== "boolean")
           continue;
+        const aliases = validMessageAliases(e.messageAliases, id);
         valid[id] = {
+          ...(aliases.length ? { messageAliases: aliases } : {}),
           ...(e.mentioned === true ? { mentioned: true } : {}),
           seen: e.seen,
           late: e.late,
@@ -173,8 +176,21 @@ export function saveReceptionLedger(
   ledger: ReceptionLedger,
 ): void {
   try {
-    const bounded = boundLedger(ledger);
-    // The entry/identifier caps fit within this bounded snapshot without dropping unread.
+    let bounded = boundLedger(ledger);
+    // Optional bindings yield before canonical unread state when the snapshot is full.
+    if (JSON.stringify(bounded).length > LEDGER_SNAPSHOT_LIMIT) {
+      bounded = Object.fromEntries(
+        Object.entries(bounded).map(([conversation, entries]) => [
+          conversation,
+          Object.fromEntries(
+            Object.entries(entries).map(([id, entry]) => {
+              const { messageAliases: _aliases, ...metadata } = entry;
+              return [id, metadata];
+            }),
+          ),
+        ]),
+      );
+    }
     if (JSON.stringify(bounded).length > LEDGER_SNAPSHOT_LIMIT) return;
     localStorage.setItem(
       `${LEDGER_PREFIX}:${owner}:${accountId}`,

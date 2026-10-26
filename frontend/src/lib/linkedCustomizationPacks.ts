@@ -1,3 +1,4 @@
+import { startInstalledStickerSources } from "./installedStickerSources";
 import {
   accountDocuments,
   documentVersion,
@@ -131,6 +132,7 @@ export function startLinkedCustomizationPacks(
   const store = usePacks.getState();
   store.setScope(owner, scope.account, scope.session);
   const installedScope = usePacks.getState().scope;
+  const stopStickerSources = startInstalledStickerSources(owner);
   const reconcile = async () => {
     if (!current()) return;
     if (running) {
@@ -208,6 +210,7 @@ export function startLinkedCustomizationPacks(
   const timer = window.setInterval(() => void reconcile(), 10_000);
   return () => {
     active = false;
+    stopStickerSources();
     unsubscribe();
     unlisten();
     window.clearInterval(timer);

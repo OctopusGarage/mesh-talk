@@ -20,6 +20,8 @@ import { useMessageFavorites } from "@/store/messageFavorites";
 import { captureRuntimeOwner } from "@/store/ownership";
 import { errorMessage } from "@/lib/error";
 import { formatDay, formatTime } from "@/lib/format";
+import { messageSummary } from "@/lib/messagePresentation";
+import { usePacks } from "@/store/packs";
 
 export const noteClass =
   "min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
@@ -39,6 +41,7 @@ export function FavoriteEditor({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  const packs = usePacks((s) => s.packs);
   const lease = useRef(captureRuntimeOwner()).current;
   const mounted = useRef(false);
   useEffect(() => {
@@ -152,7 +155,7 @@ export function FavoriteEditor({
                       text={message.text}
                       sticker={message.sticker}
                       fallback={
-                        message.file?.name ||
+                        messageSummary(message, t, packs, clock) ||
                         t("messageFavorites.contentUnavailable")
                       }
                     />

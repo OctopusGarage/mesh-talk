@@ -184,6 +184,8 @@ pub(in crate::node) struct FileTransfer {
     phase: FilePhase,
     sync: super::session::SyncProgress,
     legacy: bool,
+    sticker_proof_attempted: bool,
+    identity_offered: bool,
     last_used: std::time::Instant,
     candidate_cursor: usize,
     candidate_count: usize,
@@ -204,6 +206,8 @@ impl FileTransfer {
             phase: FilePhase::Dial,
             sync: super::session::SyncProgress::default(),
             legacy: false,
+            sticker_proof_attempted: false,
+            identity_offered: false,
             last_used: std::time::Instant::now(),
             candidate_cursor: 0,
             candidate_count: 0,
@@ -519,6 +523,19 @@ impl Node {
         }
         let manifest = super::files::validated_manifest(&received.plaintext)
             .ok_or_else(|| LogError::CorruptFile("invalid file manifest".into()))?;
+        let logical = self.file_message_row_logical_id(&received);
+        if self
+            .account_suppression
+            .lock()
+            .expect("account suppression lock")
+            .contains(received.conversation, logical)
+        {
+            self.files
+                .lock()
+                .expect("files lock")
+                .mark_emitted(event.id);
+            return Ok(());
+        }
         if store.manifest_event_erased(event.id)
             || manifest.file_conv() == event.conversation_id
             || manifest.file_conv() == received.conversation
@@ -1119,7 +1136,7 @@ impl Node {
                                     mime: manifest.mime().to_owned(),
                                     file_conv: manifest.file_conv(),
                                     media: super::media_store::manifest_is_media(&manifest),
-                                    event_id: entry.event_id,
+                                    event_id: self.file_message_row_logical_id(&entry),
                                     authored_at: entry.wall_clock,
                                     received_at: super::node::now_millis(),
                                     arrival_kind: "live",
@@ -2709,6 +2726,45 @@ impl Node {
                 };
             }
             FilePhase::Consent => {
+                if !transfer.identity_offered {
+                    transfer.identity_offered = true;
+                    if self
+                        .offer_file_message_identity(channel, binding.event_id)
+                        .await
+                        .is_err()
+                    {
+                        transfer.channel = None;
+                        transfer.phase = FilePhase::Dial;
+                        transfer.sync = super::session::SyncProgress::default();
+                        return Ok(false);
+                    }
+                }
+                if !transfer.sticker_proof_attempted {
+                    transfer.sticker_proof_attempted = true;
+                    if let Some(headers) = self.sticker_chunk_proof(file.file_conversation) {
+                        match super::session::request_sticker_file_consent(
+                            channel,
+                            file.file_conversation,
+                            binding.event_id,
+                            headers,
+                        )
+                        .await
+                        {
+                            Ok(Some(control)) => {
+                                let _ = self.accept_file_consent_event(&control, &binding.device);
+                            }
+                            Ok(None) => {}
+                            Err(_) => {
+                                // Older endpoints close on optional appended messages.
+                                // Reconnect once, then use their ordinary consent path.
+                                transfer.channel = None;
+                                transfer.phase = FilePhase::Dial;
+                                transfer.sync = super::session::SyncProgress::default();
+                                return Ok(false);
+                            }
+                        }
+                    }
+                }
                 match self
                     .query_file_consent(
                         channel,
@@ -3041,6 +3097,42 @@ impl Node {
                     return false;
                 }
                 if !relay {
+                    if self
+                        .offer_file_message_identity(&mut channel, binding.event_id)
+                        .await
+                        .is_err()
+                    {
+                        drop(channel);
+                        let Ok(reconnected) = self.privacy_dial(peer.addr, &peer.public).await
+                        else {
+                            return false;
+                        };
+                        channel = reconnected;
+                    }
+                    if let Some(headers) = self.sticker_chunk_proof(file.file_conversation) {
+                        match super::session::request_sticker_file_consent(
+                            &mut channel,
+                            file.file_conversation,
+                            binding.event_id,
+                            headers,
+                        )
+                        .await
+                        {
+                            Ok(Some(control)) => {
+                                let _ = self.accept_file_consent_event(&control, &binding.device);
+                            }
+                            Ok(None) => {}
+                            Err(_) => {
+                                drop(channel);
+                                let Ok(reconnected) =
+                                    self.privacy_dial(peer.addr, &peer.public).await
+                                else {
+                                    return false;
+                                };
+                                channel = reconnected;
+                            }
+                        }
+                    }
                     match self
                         .query_file_consent(
                             &mut channel,
@@ -3058,6 +3150,7 @@ impl Node {
                         }
                         Err(_) => {
                             // Reconnect before speaking the original chunk protocol.
+                            drop(channel);
                             let Ok(reconnected) = self.privacy_dial(peer.addr, &peer.public).await
                             else {
                                 return false;
@@ -3094,6 +3187,7 @@ impl Node {
                             phase.store(3, std::sync::atomic::Ordering::Relaxed);
                             // Legacy endpoints may close on the optional probe.
                             // Reconnect and preserve manifest-first ordinary transfer.
+                            drop(channel);
                             let Ok(reconnected) = self.privacy_dial(peer.addr, &peer.public).await
                             else {
                                 return false;

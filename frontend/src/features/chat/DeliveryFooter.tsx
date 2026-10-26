@@ -13,11 +13,13 @@ export function DeliveryFooter({
   isChannel,
   isPersonal = false,
   showTime = true,
+  compact = false,
 }: {
   message: ChatMessage;
   isChannel: boolean;
   isPersonal?: boolean;
   showTime?: boolean;
+  compact?: boolean;
 }) {
   const { t } = useTranslation();
   const tooltip = useId();
@@ -109,7 +111,7 @@ export function DeliveryFooter({
   )
     return null;
   return (
-    <span className="mt-1 flex items-center gap-1 px-1 text-xs tabular-nums text-muted-foreground">
+    <span className="mt-1 flex max-w-full flex-wrap items-center gap-x-1 gap-y-0.5 px-1 text-[11px] tabular-nums text-muted-foreground">
       {seconds !== null && (
         <span
           data-testid="message-expiry"
@@ -140,7 +142,7 @@ export function DeliveryFooter({
         </span>
       )}
       {delivery === "awaiting" && (
-        <DeliveryDetails key={detailsKey} message={message} />
+        <DeliveryDetails key={detailsKey} message={message} compact={compact} />
       )}
       {delivery === "delivered" && (
         <span
@@ -152,7 +154,7 @@ export function DeliveryFooter({
           data-delivery={delivery}
         >
           <span aria-hidden="true">{delivery === "delivered" ? "✓" : "◷"}</span>
-          {message.file && <span aria-hidden="true">{label}</span>}
+          {message.file && !compact && <span aria-hidden="true">{label}</span>}
           <span
             id={tooltip}
             role="tooltip"

@@ -83,6 +83,8 @@ pub(in crate::node) struct SessionPool {
     idle: Arc<Mutex<Vec<Idle>>>,
     timings: Mutex<super::route_timing::RouteTimings>,
     account_unsupported: Mutex<std::collections::VecDeque<(PeerEndpointKey, Instant)>>,
+    file_identity_unsupported: Mutex<std::collections::VecDeque<(PeerEndpointKey, Instant)>>,
+    file_identity_scans: Mutex<std::collections::VecDeque<(PublicIdentity, u8, usize)>>,
     route_affinities: Mutex<std::collections::VecDeque<(PeerEndpointKey, SocketAddr)>>,
 }
 
@@ -97,6 +99,8 @@ impl Default for SessionPool {
             idle: Arc::new(Mutex::new(Vec::new())),
             timings: Mutex::new(super::route_timing::RouteTimings::default()),
             account_unsupported: Mutex::new(Default::default()),
+            file_identity_unsupported: Mutex::new(Default::default()),
+            file_identity_scans: Mutex::new(Default::default()),
             route_affinities: Mutex::new(Default::default()),
         }
     }
@@ -144,6 +148,8 @@ impl SessionPool {
     pub(in crate::node) fn clear(&self) {
         self.idle.lock().unwrap().clear();
         self.account_unsupported.lock().unwrap().clear();
+        self.file_identity_unsupported.lock().unwrap().clear();
+        self.file_identity_scans.lock().unwrap().clear();
         self.route_affinities.lock().unwrap().clear();
     }
 
@@ -324,6 +330,55 @@ impl SessionPool {
             }
         }
         None
+    }
+
+    /// Independent bounded cursors keep one peer's scan from skipping another's rows.
+    pub(in crate::node) fn file_identity_scan_offset(
+        &self,
+        peer: &PublicIdentity,
+        scan_kind: u8,
+        total: usize,
+        width: usize,
+    ) -> usize {
+        if total == 0 {
+            return 0;
+        }
+        let mut scans = self.file_identity_scans.lock().unwrap();
+        let old = scans
+            .iter()
+            .position(|(public, kind, _)| public == peer && *kind == scan_kind)
+            .and_then(|index| scans.remove(index))
+            .map_or(0, |(_, _, offset)| offset);
+        if scans.len() >= MAX_ACCOUNT_CAPABILITIES {
+            scans.pop_front();
+        }
+        let offset = old % total;
+        scans.push_back((peer.clone(), scan_kind, (offset + width.min(total)) % total));
+        offset
+    }
+
+    pub(in crate::node) fn file_identity_capability_due(&self, key: &PeerEndpointKey) -> bool {
+        let mut entries = self.file_identity_unsupported.lock().unwrap();
+        entries.retain(|(_, at)| at.elapsed() < ACCOUNT_CAPABILITY_COOLDOWN);
+        !entries.iter().any(|(candidate, _)| candidate == key)
+    }
+
+    pub(in crate::node) fn note_file_identity_unsupported(&self, key: PeerEndpointKey) {
+        let mut entries = self.file_identity_unsupported.lock().unwrap();
+        entries.retain(|(candidate, at)| {
+            candidate != &key && at.elapsed() < ACCOUNT_CAPABILITY_COOLDOWN
+        });
+        if entries.len() >= MAX_ACCOUNT_CAPABILITIES {
+            entries.pop_front();
+        }
+        entries.push_back((key, Instant::now()));
+    }
+
+    pub(in crate::node) fn note_file_identity_supported(&self, key: &PeerEndpointKey) {
+        self.file_identity_unsupported
+            .lock()
+            .unwrap()
+            .retain(|(candidate, _)| candidate != key);
     }
 
     pub(in crate::node) fn account_capability_due(&self, key: &PeerEndpointKey) -> bool {
@@ -706,6 +761,31 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(pool.authentication_gates.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn identity_capability_cooldown_is_bounded_and_independent_of_account_sessions() {
+        let pool = SessionPool::default();
+        let key = authentication_key(41001);
+        pool.note_file_identity_unsupported(key.clone());
+        assert!(!pool.file_identity_capability_due(&key));
+        assert!(pool.account_capability_due(&key));
+        let mut changed = key.clone();
+        changed.generation += 1;
+        assert!(pool.file_identity_capability_due(&changed));
+        assert!(pool.file_identity_capability_due(&authentication_key(41002)));
+        pool.note_file_identity_supported(&key);
+        assert!(pool.file_identity_capability_due(&key));
+        for port in 1..=300 {
+            pool.note_file_identity_unsupported(authentication_key(port));
+        }
+        assert_eq!(
+            pool.file_identity_unsupported.lock().unwrap().len(),
+            MAX_ACCOUNT_CAPABILITIES
+        );
+        assert!(pool.file_identity_capability_due(&authentication_key(1)));
+        pool.clear();
+        assert!(pool.file_identity_capability_due(&authentication_key(300)));
     }
 
     #[test]

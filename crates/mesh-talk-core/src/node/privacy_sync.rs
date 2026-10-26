@@ -75,6 +75,271 @@ impl Node {
         })
     }
 
+    pub(super) fn file_identity_endpoint_key(
+        &self,
+        addr: std::net::SocketAddr,
+        peer: &PublicIdentity,
+    ) -> super::session_pool::PeerEndpointKey {
+        let announcement = self
+            .roster
+            .lock()
+            .expect("roster lock")
+            .announcement(peer)
+            .cloned();
+        let candidate = self
+            .privacy_route_candidates(addr, peer, announcement.as_ref())
+            .first()
+            .copied()
+            .unwrap_or(addr);
+        self.peer_endpoint_key(candidate, peer)
+    }
+
+    pub(super) fn file_identity_capability_due(
+        &self,
+        addr: std::net::SocketAddr,
+        peer: &PublicIdentity,
+    ) -> bool {
+        self.sessions
+            .file_identity_capability_due(&self.file_identity_endpoint_key(addr, peer))
+    }
+
+    /// Missing-only bounded catch-up repairs retained legacy manifests without heuristics.
+    pub(super) fn pending_file_message_identities(
+        &self,
+        peer: &PublicIdentity,
+    ) -> Vec<(ConversationId, EventId)> {
+        let sibling = self.certified_sibling(peer);
+        let peer_account = self
+            .historical_author(&peer.ed25519_pub)
+            .and_then(|proof| proof.account_id());
+        let peer_host = peer_account.map(|account| {
+            super::conversation::account_conversation_id(&self.account_id(), &account)
+        });
+        let snapshot = {
+            let rows = self.received_files.lock().expect("received files lock");
+            let mut hosts = rows.conversations();
+            hosts.sort_unstable_by_key(|host| *host.as_bytes());
+            let total: usize = hosts.iter().map(|host| rows.entries_ref(host).len()).sum();
+            let offset = self.sessions.file_identity_scan_offset(peer, 0, total, 256);
+            let mut remaining = total.min(256);
+            let mut snapshot = Vec::new();
+            for start in [offset, 0] {
+                let mut skip = start;
+                for host in &hosts {
+                    let entries = rows.entries_ref(host);
+                    if skip >= entries.len() {
+                        skip -= entries.len();
+                        continue;
+                    }
+                    let count = remaining.min(entries.len() - skip);
+                    snapshot.extend(
+                        entries[skip..skip + count]
+                            .iter()
+                            .filter(|row| {
+                                sibling
+                                    || row.from == peer.user_id()
+                                        && Some(row.conversation) == peer_host
+                            })
+                            .cloned(),
+                    );
+                    remaining -= count;
+                    skip = 0;
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+                if remaining == 0 {
+                    break;
+                }
+            }
+            snapshot
+        };
+        let personal_host =
+            super::conversation::account_conversation_id(&self.account_id(), &self.account_id());
+        let mut candidates: Vec<_> = snapshot
+            .into_iter()
+            .filter(|row| {
+                row.conversation != personal_host
+                    && self
+                        .channels
+                        .lock()
+                        .expect("channels lock")
+                        .state(&row.conversation)
+                        .is_none()
+            })
+            .filter(|row| !self.has_file_message_identity(row.conversation, row.event_id))
+            .filter(|row| !self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock))
+            .filter(|row| {
+                let logical = self.file_message_row_logical_id(row);
+                let delivery = self.delivery.lock().expect("delivery lock");
+                if delivery.file_erased(row.conversation, row.event_id)
+                    || delivery.manifest_event_erased(row.event_id)
+                {
+                    return false;
+                }
+                let suppression = self.account_suppression.lock().expect("suppression lock");
+                !suppression.contains(row.conversation, row.event_id)
+                    && !suppression.contains(row.conversation, logical)
+            })
+            .filter_map(|row| {
+                super::files::validated_manifest(&row.plaintext)
+                    .map(|manifest| (manifest.file_conv(), row.event_id))
+            })
+            .collect();
+        if !candidates.is_empty() {
+            let offset = self.sessions.file_identity_scan_offset(
+                peer,
+                2,
+                candidates.len(),
+                super::session::MAX_FILE_IDENTITIES,
+            );
+            candidates.rotate_left(offset);
+            candidates.truncate(super::session::MAX_FILE_IDENTITIES);
+        }
+        candidates
+    }
+
+    pub(super) fn file_message_identity_controls_for(
+        &self,
+        peer: &PublicIdentity,
+        missing_only: bool,
+    ) -> Vec<Event> {
+        let manifests: Vec<_> = {
+            let delivery = self.delivery.lock().expect("delivery lock");
+            let total = delivery.file_cards().count();
+            let offset = self.sessions.file_identity_scan_offset(
+                peer,
+                1,
+                total,
+                super::session::MAX_FILE_IDENTITIES,
+            );
+            delivery
+                .file_cards()
+                .skip(offset)
+                .take(super::session::MAX_FILE_IDENTITIES)
+                .flat_map(|card| {
+                    card.destinations
+                        .iter()
+                        .filter(|destination| destination.binding.device == *peer)
+                        .map(|destination| {
+                            (
+                                card.conversation,
+                                card.file_conversation,
+                                destination.binding.event_id,
+                            )
+                        })
+                })
+                .collect()
+        };
+        let manifests = manifests
+            .into_iter()
+            .filter(|(host, _, manifest)| {
+                !missing_only || !self.has_file_message_identity(*host, *manifest)
+            })
+            .take(super::session::MAX_FILE_IDENTITIES);
+        let store = self.sync_store(peer);
+        manifests
+            .filter_map(|(_, file, manifest)| {
+                store
+                    .lock()
+                    .expect("sync store lock")
+                    .file_message_identity(&file, &manifest)
+            })
+            .collect()
+    }
+
+    /// Exchange supplemental identities without changing existing media/history bytes.
+    pub(super) async fn exchange_file_message_identities(
+        &self,
+        channel: &mut crate::transport::SecureChannel<tokio::net::TcpStream>,
+        requests: Vec<(ConversationId, EventId)>,
+        offers: Vec<Event>,
+    ) -> Result<(), super::session::SessionError> {
+        self.exchange_file_message_identities_at_revision(channel, requests, offers, None)
+            .await
+    }
+
+    pub(super) async fn exchange_file_message_identities_at_revision(
+        &self,
+        channel: &mut crate::transport::SecureChannel<tokio::net::TcpStream>,
+        requests: Vec<(ConversationId, EventId)>,
+        offers: Vec<Event>,
+        revision: Option<u64>,
+    ) -> Result<(), super::session::SessionError> {
+        let peer = channel.peer_identity().clone();
+        let key = self.peer_endpoint_key(
+            channel
+                .tcp_peer_addr()
+                .map_err(crate::transport::TransportError::Io)?,
+            &peer,
+        );
+        if !self.sessions.file_identity_capability_due(&key) {
+            return Ok(());
+        }
+        let bundles = match super::session::request_file_message_identities(
+            channel,
+            requests.clone(),
+            offers,
+        )
+        .await
+        {
+            Ok(bundles) => {
+                self.sessions.note_file_identity_supported(&key);
+                bundles
+            }
+            Err(error) => {
+                self.sessions.note_file_identity_unsupported(key);
+                return Err(error);
+            }
+        };
+        self.accept_file_message_identity_response(&peer, &requests, bundles, revision)
+    }
+
+    pub(super) fn accept_file_message_identity_response(
+        &self,
+        peer: &PublicIdentity,
+        requests: &[(ConversationId, EventId)],
+        bundles: Vec<Event>,
+        revision: Option<u64>,
+    ) -> Result<(), super::session::SessionError> {
+        let _commit = revision.map(|_| {
+            self.account_sync_commit
+                .lock()
+                .expect("account sync commit lock")
+        });
+        if revision.is_some_and(|revision| self.device_sync_policy_snapshot().1 != revision) {
+            return Err(super::session::SessionError::UnexpectedMessage);
+        }
+        let store = self.sync_store(peer);
+        for bundle in bundles {
+            if !requests.iter().any(|(file, manifest)| {
+                super::file_message_identity::bundle_covers(&bundle, *file, *manifest)
+            }) {
+                return Err(super::session::SessionError::UnexpectedMessage);
+            }
+            if !store
+                .lock()
+                .expect("sync store lock")
+                .accept_file_message_identity(bundle)
+            {
+                return Err(super::session::SessionError::UnexpectedMessage);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn offer_file_message_identity(
+        &self,
+        channel: &mut crate::transport::SecureChannel<tokio::net::TcpStream>,
+        manifest: EventId,
+    ) -> Result<(), super::session::SessionError> {
+        if let Some(bundle) = self.file_message_identity_bundle(manifest) {
+            self.exchange_file_message_identities(channel, vec![], vec![bundle])
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(in crate::node) fn shares_replica(&self, conversation: &ConversationId) -> bool {
         let me = self.user_id();
         let book = self.channels.lock().expect("channels lock not poisoned");
@@ -1299,6 +1564,177 @@ impl SyncStore for GuardedSyncStore<'_> {
             .direct_file_consent_control(&self.peer, *file, *manifest)
             .ok()
             .flatten()
+    }
+    fn file_message_identity(&self, file: &ConversationId, manifest: &EventId) -> Option<Event> {
+        if self.denied
+            || self
+                .node
+                .delivery_suspended
+                .load(std::sync::atomic::Ordering::Acquire)
+            || !self.node.known_account_allowed(&self.peer)
+        {
+            return None;
+        }
+        let bundle = self.node.file_message_identity_bundle(*manifest)?;
+        if !super::file_message_identity::bundle_covers(&bundle, *file, *manifest) {
+            return None;
+        }
+        let (source_account, recipient_account) =
+            super::file_message_identity::bundle_accounts(&bundle)?;
+        let sibling = self.node.certified_sibling(&self.peer);
+        if sibling {
+            let policy = self.node.device_sync_policy();
+            if !policy.history && !policy.attachments {
+                return None;
+            }
+        } else {
+            let peer_account = self
+                .node
+                .historical_author(&self.peer.ed25519_pub)
+                .filter(|proof| proof.public() == self.peer)
+                .and_then(|proof| proof.account_id())?;
+            if source_account != self.node.account_id() || recipient_account != peer_account {
+                return None;
+            }
+        }
+        let references = super::file_message_identity::bundle_references(&bundle);
+        let alias_ids: HashSet<_> = references.iter().map(|(_, alias)| *alias).collect();
+        let local_source = source_account == self.node.account_id();
+        let host =
+            super::conversation::account_conversation_id(&source_account, &recipient_account);
+        let rows = {
+            let files = self
+                .node
+                .received_files
+                .lock()
+                .expect("received files lock");
+            let mut rows: Vec<_> = files
+                .entries_ref(&host)
+                .iter()
+                .filter(|row| alias_ids.contains(&row.event_id))
+                .take(64)
+                .cloned()
+                .collect();
+            if rows.is_empty() && local_source {
+                rows = references
+                    .iter()
+                    .filter_map(|(_, alias)| files.entry(*alias).cloned())
+                    .collect();
+            }
+            rows
+        };
+        let delivery = self.node.delivery.lock().expect("delivery lock");
+        let suppression = self
+            .node
+            .account_suppression
+            .lock()
+            .expect("suppression lock");
+        rows.iter()
+            .any(|row| {
+                (super::file_message_identity::bundle_matches_row(&bundle, row)
+                    || local_source
+                        && super::file_message_identity::bundle_matches_source_row(&bundle, row))
+                    && !self
+                        .node
+                        .recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
+                    && !delivery.file_erased(row.conversation, row.event_id)
+                    && !delivery.manifest_event_erased(row.event_id)
+                    && !suppression.contains(row.conversation, row.event_id)
+            })
+            .then_some(bundle)
+    }
+    fn accept_file_message_identity(&mut self, bundle: Event) -> bool {
+        if self.denied
+            || self.pull_only
+            || self
+                .node
+                .delivery_suspended
+                .load(std::sync::atomic::Ordering::Acquire)
+            || !self.node.known_account_allowed(&self.peer)
+        {
+            return false;
+        }
+        let Some((source_account, _)) = super::file_message_identity::bundle_accounts(&bundle)
+        else {
+            return false;
+        };
+        if self.node.certified_sibling(&self.peer) {
+            let policy = self.node.device_sync_policy();
+            if !policy.history && !policy.attachments {
+                return false;
+            }
+        } else if self
+            .node
+            .historical_author(&self.peer.ed25519_pub)
+            .filter(|proof| proof.public() == self.peer)
+            .and_then(|proof| proof.account_id())
+            .as_deref()
+            != Some(source_account.as_str())
+        {
+            return false;
+        }
+        self.node.import_file_message_identity(bundle).is_ok()
+    }
+    fn sticker_file_proof(&self, file: &ConversationId, manifest: &EventId) -> Option<Vec<Event>> {
+        if self.denied || !self.node.known_account_allowed(&self.peer) {
+            return None;
+        }
+        let authorized = self
+            .node
+            .delivery
+            .lock()
+            .expect("delivery lock")
+            .cards_for_file(*file)
+            .iter()
+            .any(|card| {
+                card.destinations.iter().any(|destination| {
+                    destination.binding.event_id == *manifest
+                        && destination.binding.device == self.peer
+                })
+            });
+        if !authorized {
+            return None;
+        }
+        let host =
+            super::conversation::dm_conversation_id(&self.node.identity.public(), &self.peer);
+        if !self
+            .visible_projection(&host, false)
+            .iter()
+            .any(|event| event.id == *manifest && event.kind == EventKind::FileManifest)
+        {
+            return None;
+        }
+        let headers = self.node.sticker_chunk_proof(*file)?;
+        let visible: HashSet<_> = self
+            .visible_projection(file, false)
+            .into_iter()
+            .map(|event| event.id)
+            .collect();
+        headers
+            .iter()
+            .all(|event| visible.contains(&event.id))
+            .then_some(headers)
+    }
+    fn sticker_file_consent(
+        &mut self,
+        file: &ConversationId,
+        manifest: &EventId,
+        headers: Vec<Event>,
+    ) -> Option<Event> {
+        if self.denied || self.pull_only {
+            return None;
+        }
+        if let Some(chunks) = self
+            .node
+            .reconstruct_sticker_proof(*file, *manifest, &self.peer, headers)
+        {
+            for chunk in chunks {
+                self.ingest(chunk).ok()?;
+            }
+            self.node.persist_media_if_complete(*file);
+            self.node.note_file_change();
+        }
+        self.signed_file_consent(file, manifest)
     }
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
         if !self.visible(conversation).iter().any(|e| e.id == *id) {

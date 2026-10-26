@@ -24,7 +24,12 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/store/chat", () => ({
   useChat: { getState: () => ({ myAccountId: mocks.account }) },
 }));
-vi.mock("./api/chat", () => ({ chat: { getDeviceSyncPolicy: mocks.policy } }));
+vi.mock("./api/chat", () => ({
+  chat: {
+    getDeviceSyncPolicy: mocks.policy,
+    registerStickerSource: vi.fn().mockResolvedValue(undefined),
+  },
+}));
 vi.mock("./packImages", () => ({ verifyPackImages: async () => {} }));
 vi.mock("./api/accountDocuments", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api/accountDocuments")>()),

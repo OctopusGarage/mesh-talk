@@ -28,6 +28,35 @@ const base: ChatMessage = {
   delivery: "awaiting",
   deliveryObservation: { kind: "attempting", ageMs: 3000, sampledAt: 100 },
 };
+it("keeps sticker receipts compact and accessible while retaining delivery details", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  await i18n.changeLanguage("en");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () =>
+    root.render(
+      createElement(DeliveryFooter, {
+        message: base,
+        isChannel: false,
+        compact: true,
+      }),
+    ),
+  );
+  const button = host.querySelector<HTMLButtonElement>(
+    '[data-testid="delivery-details-trigger"]',
+  )!;
+  expect(button.getAttribute("aria-label")).toBe("Awaiting receipt");
+  expect(button.querySelector(".sr-only")?.textContent).toBe(
+    "Awaiting receipt",
+  );
+  await act(async () => button.click());
+  expect(
+    document.querySelector('[data-testid="delivery-details"]')?.textContent,
+  ).toContain("Awaiting receipt");
+  await act(async () => root.unmount());
+  host.remove();
+});
 it("opens local past-tense facts with monotonic age, accessible description, and Escape focus restoration", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   await i18n.changeLanguage("en");

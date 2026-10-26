@@ -7,6 +7,38 @@ import { useSettings } from "./settings";
 import { DEFAULT_RINGTONE } from "@/lib/ringtones";
 import { useAuth } from "./auth";
 import { registerRuntimeSnapshot } from "./ownership";
+import { DEFAULT_SCREENSHOT_SHORTCUTS } from "@/lib/screenshotShortcuts";
+
+it("loads device-local screenshot bindings and clears them when the owner changes", async () => {
+  const shortcuts = { capture: "Alt+KeyB", capture_hidden: null, global: true };
+  invoke.mockResolvedValue({ screenshot_shortcuts: shortcuts });
+  await useSettings.getState().load();
+  expect(useSettings.getState().screenshotShortcuts).toEqual(shortcuts);
+  useSettings.getState().setOwner("bob");
+  expect(useSettings.getState().screenshotShortcuts).toEqual(
+    DEFAULT_SCREENSHOT_SHORTCUTS,
+  );
+  expect(useSettings.getState().screenshotRegistration.global_active).toBe(
+    false,
+  );
+});
+
+it("ignores registration status from a replaced login generation", async () => {
+  let finish!: (status: unknown) => void;
+  invoke.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = useSettings.getState().syncScreenshotShortcuts();
+  useAuth.setState({ generation: 2 });
+  finish({ global_active: true, generation: 17, error: null });
+  await pending;
+  expect(useSettings.getState().screenshotRegistration.global_active).toBe(
+    false,
+  );
+});
 
 beforeEach(() => {
   registerRuntimeSnapshot(() => ({ runEpoch: 0, identityEpoch: 0 }));

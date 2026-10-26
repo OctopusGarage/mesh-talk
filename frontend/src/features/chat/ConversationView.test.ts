@@ -34,8 +34,10 @@ const { chatState, policyState } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/store/chat", () => ({
-  useChat: (selector: (state: typeof chatState) => unknown) =>
-    selector(chatState),
+  useChat: Object.assign(
+    (selector: (state: typeof chatState) => unknown) => selector(chatState),
+    { getState: () => chatState },
+  ),
   convKey: (conv: { kind: string; id: string }) => `${conv.kind}:${conv.id}`,
   captureChatOwnership: () => ({ current: () => true }),
 }));

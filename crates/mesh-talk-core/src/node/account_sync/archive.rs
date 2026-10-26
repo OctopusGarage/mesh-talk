@@ -381,7 +381,7 @@ impl Node {
                 {
                     page.scanned.insert((4, host), index + 1);
                     if entry.plaintext.is_empty()
-                        || recalled_in(recalled, host, entry.event_id)
+                        || recalled_in(recalled, host, self.file_message_row_logical_id(entry))
                         || self.recipient_expired(
                             &entry.plaintext,
                             entry.event_id,
@@ -610,7 +610,12 @@ impl Node {
             | ArchiveRow::ReceivedChannel { conversation, .. }
             | ArchiveRow::File { conversation, .. } => *conversation,
         };
-        if key.tag != 1 && recalled_in(recalled, conversation, EventId::new(key.id)) {
+        let target = if key.tag == 2 {
+            self.file_message_logical_id(conversation, EventId::new(key.id))
+        } else {
+            EventId::new(key.id)
+        };
+        if key.tag != 1 && recalled_in(recalled, conversation, target) {
             return Ok(None);
         }
         if self

@@ -159,6 +159,32 @@ async fn account_history_pages_reuse_one_authenticated_connection() {
         .enqueue_file_to_account(&source.account_id(), &path, crate::file::FileKind::File)
         .await
         .unwrap();
+    let external = open_sibling(&dir.path().join("external"), &Account::generate());
+    sibling_peer(&external, &source, "127.0.0.1:9".parse().unwrap());
+    sibling_peer(&source, &external, "127.0.0.1:9".parse().unwrap());
+    let (external_id, external_file) = external
+        .enqueue_file_to_account(&source.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let event = external
+        .delivery
+        .lock()
+        .unwrap()
+        .message(external_id)
+        .unwrap()
+        .destinations[0]
+        .event
+        .clone();
+    source
+        .log
+        .lock()
+        .unwrap()
+        .append_durable(event.clone())
+        .unwrap();
+    source.process_file_events(event.conversation_id);
+    source
+        .import_file_message_identity(external.file_message_identity_bundle(external_id).unwrap())
+        .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer = reusable_sibling_peer(
         dir.path(),
@@ -166,6 +192,23 @@ async fn account_history_pages_reuse_one_authenticated_connection() {
         &source,
         listener.local_addr().unwrap(),
     );
+    // The fixture's raw event insertion bypasses the verified Noise ingress.
+    // Persist the peer proof after privacy bootstrap, as that ingress does.
+    source
+        .remember_peer(
+            &external.identity.public(),
+            Some(&external.signed_announce("external", 9)),
+            "127.0.0.1".parse().unwrap(),
+        )
+        .unwrap();
+    let (records, _, _) = source.export_sync_records(
+        &receiver.identity.public(),
+        None,
+        true,
+        true,
+        AccountSyncVersion::V2,
+    );
+    assert!(records.iter().any(|record| matches!(record, HistoryRecord::FileCard(card) if card.event_id == *external_id.as_bytes())), "the real external file must be eligible for sibling export before testing metadata reuse");
     let accepted = Arc::new(AtomicUsize::new(0));
     let server_accepted = accepted.clone();
     let server = tokio::spawn(async move {
@@ -193,6 +236,12 @@ async fn account_history_pages_reuse_one_authenticated_connection() {
             .await
             .unwrap();
     }
+    let external_host = account_conversation_id(&receiver.account_id(), &external.account_id());
+    assert!(
+        receiver.has_file_message_identity(external_host, external_id),
+        "external attachment identity metadata must arrive on the existing account socket"
+    );
+    assert!(!receiver.has_media(external_file));
     assert_eq!(accepted.load(Ordering::SeqCst), 1);
     receiver.send_account_wake(&peer, 1).await.unwrap();
     assert_eq!(accepted.load(Ordering::SeqCst), 1);
@@ -2852,4 +2901,316 @@ async fn recalled_private_file_blocks_late_cards_and_stale_sibling_byte_release(
     ));
     stale_server.abort();
     let _ = stale_server.await;
+}
+
+#[tokio::test]
+async fn account_file_history_deduplicates_recipient_device_manifest_copies() {
+    let (dir, source, receiver) = sibling_nodes();
+    let sender = open_sibling(&dir.path().join("sender"), &Account::generate());
+    let address = "127.0.0.1:9".parse().unwrap();
+    for recipient in [&source, &receiver] {
+        sibling_peer(&sender, recipient, address);
+        sibling_peer(recipient, &sender, address);
+    }
+    let path = dir.path().join("wave.bin");
+    std::fs::write(&path, b"one logical attachment").unwrap();
+    let (id, file) = sender
+        .enqueue_file_to_account(&receiver.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let destinations = sender
+        .delivery
+        .lock()
+        .unwrap()
+        .message(id)
+        .unwrap()
+        .destinations
+        .clone();
+    assert_eq!(destinations.len(), 2);
+    assert_ne!(destinations[0].event.id, destinations[1].event.id);
+    for recipient in [&source, &receiver] {
+        let event = destinations
+            .iter()
+            .find(|destination| destination.device == recipient.identity.public())
+            .unwrap()
+            .event
+            .clone();
+        recipient
+            .log
+            .lock()
+            .unwrap()
+            .append_durable(event.clone())
+            .unwrap();
+        recipient.process_file_events(event.conversation_id);
+        assert_eq!(recipient.account_history(&sender.account_id(), 10).len(), 1);
+    }
+    let (records, _, _) = source.export_sync_records(
+        &receiver.identity.public(),
+        None,
+        true,
+        true,
+        AccountSyncVersion::V2,
+    );
+    let mut imported = 0;
+    for record in records {
+        if let HistoryRecord::FileCard(record) = record {
+            receiver
+                .import_account_file_card(&record, AccountSyncVersion::V2)
+                .unwrap();
+            imported += 1;
+        }
+    }
+    assert_eq!(imported, 1);
+    assert_eq!(
+        receiver.account_history(&sender.account_id(), 10).len(),
+        2,
+        "physical copies remain distinct before authenticated identity metadata arrives"
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = sibling_peer(&receiver, &sender, listener.local_addr().unwrap());
+    let server = tokio::spawn(sender.clone().run_accept_loop(listener));
+    let stranger = open_sibling(&dir.path().join("stranger"), &Account::generate());
+    let stranger_peer = sibling_peer(&stranger, &sender, peer.addr);
+    let mut unrelated = stranger
+        .privacy_dial(stranger_peer.addr, &stranger_peer.public)
+        .await
+        .unwrap();
+    let unrelated_manifest = destinations
+        .iter()
+        .find(|destination| destination.device == receiver.identity.public())
+        .unwrap()
+        .event
+        .id;
+    assert!(
+        super::super::session::request_file_message_identities(
+            &mut unrelated,
+            vec![(file, unrelated_manifest)],
+            vec![]
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+        "an authenticated unrelated account cannot fetch a private attachment identity bundle"
+    );
+    drop(unrelated);
+    let manifest = destinations
+        .iter()
+        .find(|destination| destination.device == receiver.identity.public())
+        .unwrap()
+        .event
+        .id;
+    let mut channel = receiver
+        .privacy_sync_dial(peer.addr, &peer.public)
+        .await
+        .unwrap();
+    receiver
+        .exchange_file_message_identities(&mut channel, vec![(file, manifest)], vec![])
+        .await
+        .unwrap();
+    drop(channel);
+    server.abort();
+    let _ = server.await;
+    let history = receiver.account_history(&sender.account_id(), 10);
+    assert_eq!(
+        history.len(),
+        1,
+        "one send to two devices is one logical file card"
+    );
+    assert_eq!(history[0].file.as_ref().unwrap().file_conv, file);
+    // An unchanged V2 page still repairs metadata-only siblings, without blobs.
+    for node in [&source, &receiver] {
+        node.set_device_sync_category(SyncCategory::History, true)
+            .unwrap();
+        node.set_device_sync_category(SyncCategory::Attachments, false)
+            .unwrap();
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = sibling_peer(&source, &receiver, listener.local_addr().unwrap());
+    let (_, _, digest) = receiver.export_sync_records(
+        &source.identity.public(),
+        None,
+        true,
+        false,
+        AccountSyncVersion::V2,
+    );
+    let server = tokio::spawn(receiver.clone().run_accept_loop(listener));
+    source
+        .pull_account_history_page(&peer, None, digest)
+        .await
+        .unwrap();
+    let source_manifest = destinations
+        .iter()
+        .find(|destination| destination.device == source.identity.public())
+        .unwrap()
+        .event
+        .id;
+    let host = account_conversation_id(&source.account_id(), &sender.account_id());
+    assert!(source.has_file_message_identity(host, source_manifest));
+    assert!(
+        !source.has_media(file),
+        "identity reconciliation does not fetch image or attachment bytes"
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn file_identity_repair_bounds_each_history_scan_and_advances_past_legacy_rows() {
+    let (dir, _source, receiver) = sibling_nodes();
+    let sender = open_sibling(&dir.path().join("identity-source"), &Account::generate());
+    let address = "127.0.0.1:9".parse().unwrap();
+    sibling_peer(&sender, &receiver, address);
+    sibling_peer(&receiver, &sender, address);
+    let path = dir.path().join("bounded.bin");
+    std::fs::write(&path, b"metadata source").unwrap();
+    let (id, file) = sender
+        .enqueue_file_to_account(&receiver.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let row = sender
+        .received_files
+        .lock()
+        .unwrap()
+        .entry(id)
+        .unwrap()
+        .clone();
+    {
+        let mut rows = receiver.received_files.lock().unwrap();
+        for index in 0u32..256 {
+            let mut legacy = row.clone();
+            let mut event = [101; 32];
+            event[..4].copy_from_slice(&index.to_be_bytes());
+            legacy.event_id = EventId::new(event);
+            legacy.plaintext = b"unreadable legacy card".to_vec();
+            rows.record_file_alias_durable(&legacy).unwrap();
+        }
+        rows.record_file_alias_durable(&row).unwrap();
+    }
+    assert!(
+        receiver
+            .pending_file_message_identities(&sender.identity.public())
+            .is_empty(),
+        "one pass must not parse beyond its256-row budget"
+    );
+    assert_eq!(
+        receiver.pending_file_message_identities(&sender.identity.public()),
+        vec![(file, id)],
+        "the next bounded pass reaches later metadata instead of restarting at old rows"
+    );
+}
+
+#[tokio::test]
+async fn optional_identity_request_rejection_preserves_reusable_account_capability() {
+    use super::super::account_sync_wire::AccountSessionRequest;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+    let (dir, source, receiver) = sibling_nodes();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = reusable_sibling_peer(
+        dir.path(),
+        &receiver,
+        &source,
+        listener.local_addr().unwrap(),
+    );
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let server_count = accepted.clone();
+    let server = tokio::spawn(async move {
+        let mut sessions = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            server_count.fetch_add(1, Ordering::SeqCst);
+            let source = source.clone();
+            sessions.spawn(async move {
+                let mut channel = source.privacy_accept(stream).await.unwrap();
+                while let Ok(bytes) = channel.recv().await {
+                    let Some((
+                        AccountSyncVersion::V2,
+                        AccountHistoryFrame::SessionRequest {
+                            request_id,
+                            request,
+                        },
+                    )) = AccountHistoryFrame::decode_versioned(&bytes)
+                    else {
+                        return;
+                    };
+                    // Emulate a deployed reusable sibling that predates just the
+                    // appended identity request, rather than all account sessions.
+                    let AccountSessionRequest::History {
+                        account_id,
+                        cursor,
+                        known_digest,
+                        wanted,
+                        ..
+                    } = request
+                    else {
+                        return;
+                    };
+                    send_frame(
+                        &mut channel,
+                        AccountSyncVersion::V2,
+                        &AccountHistoryFrame::SessionReady { request_id },
+                    )
+                    .await
+                    .unwrap();
+                    if !source
+                        .serve_account_history(
+                            &mut channel,
+                            AccountSyncVersion::V2,
+                            &account_id,
+                            cursor,
+                            known_digest,
+                            wanted,
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    let mut rejected = false;
+    receiver
+        .pull_account_history_version(&peer, None, [0; 32], AccountSyncVersion::V2, &mut rejected)
+        .await
+        .unwrap();
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    assert!(
+        receiver
+            .begin_account_exchange(
+                &peer,
+                AccountSyncVersion::V2,
+                AccountHistoryFrame::FileMessageIdentitiesRequest {
+                    account_id: receiver.account_id(),
+                    requests: vec![([1; 32], [2; 32])],
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        receiver
+            .sessions
+            .account_capability_due(&receiver.file_identity_endpoint_key(peer.addr, &peer.public)),
+        "unknown identity metadata must not mark reusable account sessions unsupported"
+    );
+    for _ in 0..2 {
+        receiver
+            .pull_account_history_version(
+                &peer,
+                None,
+                [0; 32],
+                AccountSyncVersion::V2,
+                &mut rejected,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        3,
+        "one fresh history connection after optional rejection must remain reusable"
+    );
+    server.abort();
+    let _ = server.await;
 }

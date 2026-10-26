@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { strToU8, unzipSync, zipSync } from "fflate";
 import type { Page } from "@playwright/test";
-import { revealComposerTools } from "./helpers/session";
+import { revealComposerTools, seedThemeBeforeLoad } from "./helpers/session";
 import { seedMarketPacks, waitForPackBootstrap } from "./helpers/packs";
 
 const BOB = { account: "acc_bob_bbbb2222" };
@@ -92,15 +92,18 @@ test("an installed cat sticker collection can send artwork", async ({
     panel.locator('[data-testid^="sticker-option-pack:cats:"]'),
   ).toHaveCount(45);
   const option = page.getByTestId("sticker-option-pack:cats:cat-01-01");
+  const label = await option.getAttribute("title");
   await expect(option.locator("img")).toBeVisible();
   await option.click();
   await expect(page.getByTestId("message-sticker").last()).toHaveAttribute(
     "alt",
-    "😎",
+    `[${label}]`,
   );
 });
 
-test("removing a sticker ZIP preserves sent image bytes", async ({ page }) => {
+test("removing a sticker ZIP preserves sent image bytes and label", async ({
+  page,
+}) => {
   const files = unzipSync(
     readFileSync(resolve("../site/market/packs/google-noto.zip")),
   );
@@ -149,7 +152,12 @@ test("removing a sticker ZIP preserves sent image bytes", async ({ page }) => {
   );
   await expect(page.getByTestId("message-sticker").last()).toHaveAttribute(
     "alt",
-    "😂",
+    `[${manifest.stickers.find((sticker: { id: string }) => sticker.id === "1f602").label}]`,
+  );
+  await expect(
+    page.getByTestId(`conversation-row-${BOB.account}`),
+  ).toContainText(
+    `[${manifest.stickers.find((sticker: { id: string }) => sticker.id === "1f602").label}]`,
   );
   await page.reload();
   await enterBobDm(page);
@@ -276,7 +284,7 @@ test("received sticker image displays without installing the sender's pack", asy
   );
   await expect(page.getByTestId("message-sticker").last()).toHaveAttribute(
     "alt",
-    item.fallback,
+    "[Sticker]",
   );
   await expect
     .poll(() =>
@@ -291,3 +299,82 @@ test("received sticker image displays without installing the sender's pack", asy
   await page.getByTestId("composer-stickers").click();
   await expect(page.getByTestId("sticker-pack-uninstalled")).toHaveCount(0);
 });
+
+for (const theme of ["light", "dark"] as const) {
+  test(`semantic stickers stay readable across previews, replies and history (${theme})`, async ({
+    page,
+  }, testInfo) => {
+    await seedThemeBeforeLoad(page, theme);
+    await enterBobDm(page);
+    const files = unzipSync(
+      readFileSync(resolve("../site/market/packs/cats.zip")),
+    );
+    const manifest = JSON.parse(
+      new TextDecoder().decode(files["manifest.json"]),
+    );
+    const item = manifest.stickers[0];
+    const bytes = Array.from(files[item.file]);
+    const ext = item.file.split(".").pop();
+    const mime = ext === "jpg" ? "image/jpeg" : `image/${ext}`;
+    const name = `mt-sticker-v2-${Buffer.from(`pack:uninstalled:calm\n🙂\n静下心`).toString("base64url")}.${ext}`;
+    await page.evaluate(
+      ({ name, bytes, mime, account }) => {
+        (
+          window as unknown as {
+            __mockInjectStickerMedia: (
+              conv: string,
+              name: string,
+              bytes: number[],
+              mime: string,
+            ) => string;
+          }
+        ).__mockInjectStickerMedia(`acc:${account}`, name, bytes, mime);
+      },
+      { name, bytes, mime, account: BOB.account },
+    );
+    const sticker = page.getByTestId("message-sticker").last();
+    await expect(sticker).toHaveAttribute("alt", "[静下心]");
+    await expect(sticker).toHaveAttribute("src", /^blob:/);
+    await expect(
+      page.getByTestId(`conversation-row-${BOB.account}`),
+    ).toContainText("[静下心]");
+    await expect(page.getByTestId("chat-shell")).not.toContainText(name);
+    await sticker.click({ button: "right" });
+    await page.getByTestId("msg-reply").click();
+    await expect(page.getByTestId("composer-reply-banner")).toContainText(
+      "[静下心]",
+    );
+    await page.getByRole("button", { name: "Cancel reply" }).click();
+    await page.getByTestId("conversation-history-trigger").click();
+    await page.getByTestId("history-search-input").fill("静下心");
+    await expect(page.getByTestId("history-row")).toHaveCount(1);
+    await expect(page.getByTestId("history-row")).toContainText("[静下心]");
+    await expect(
+      page.getByTestId("conversation-history-dialog"),
+    ).not.toContainText(name);
+    await page.keyboard.press("Escape");
+    for (const viewport of [
+      { width: 1100, height: 800 },
+      { width: 760, height: 620 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await expect(sticker).toBeVisible();
+      await expect
+        .poll(async () => {
+          const bounds = await sticker.boundingBox();
+          return (
+            bounds !== null &&
+            bounds.width > 0 &&
+            bounds.width <= 128 &&
+            bounds.height > 0 &&
+            bounds.height <= 128
+          );
+        })
+        .toBe(true);
+      const screenshotName = `sticker-${theme}-${viewport.width}x${viewport.height}`;
+      const path = testInfo.outputPath(`${screenshotName}.png`);
+      await page.screenshot({ path });
+      await testInfo.attach(screenshotName, { path, contentType: "image/png" });
+    }
+  });
+}

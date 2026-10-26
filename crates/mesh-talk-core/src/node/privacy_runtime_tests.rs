@@ -3429,3 +3429,111 @@ async fn account_change_recovery_is_read_only_until_exact_device_acceptance() {
         )
     );
 }
+
+#[tokio::test]
+async fn authenticated_preferred_route_keeps_last_slot_ahead_of_known_stalled_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    // One wildcard listener accepts two loopback destination IPs on one port.
+    // The stale IP accepts TCP but pauses before Noise authentication.
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let good = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let stale = std::net::SocketAddr::from(([127, 0, 0, 2], port));
+    let proof = bob.signed_announce("Bob", port);
+    let expected = bob.identity.public();
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, good.ip(), &alice.user_id());
+    let (connected, accepted) = tokio::join!(alice.privacy_dial(good, &expected), async {
+        let (stream, _) = listener.accept().await.unwrap();
+        bob.privacy_accept(stream).await.unwrap()
+    },);
+    drop(connected.unwrap());
+    drop(accepted);
+    assert_eq!(
+        alice.preferred_routes.lock().unwrap().get(&bob.user_id()),
+        Some(&good)
+    );
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update_routed(&proof, stale.ip(), &alice.user_id());
+    let held: Vec<_> = (1..super::session_pool::MAX_DIRECTION_CONNECTIONS)
+        .map(|_| alice.sessions.try_outbound().unwrap())
+        .collect();
+    let stalled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_stalls = stalled.clone();
+    let server = tokio::spawn(async move {
+        let mut stalled_sockets = Vec::new();
+        let mut accepted_channels = Vec::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            if stream.local_addr().unwrap().ip() == stale.ip() {
+                observed_stalls.fetch_add(1, Ordering::SeqCst);
+                stalled_sockets.push(stream);
+            } else {
+                accepted_channels.push(bob.privacy_accept(stream).await.unwrap());
+            }
+        }
+    });
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(700),
+        alice.privacy_dial(stale, &expected),
+    )
+    .await;
+    server.abort();
+    let _ = server.await;
+    assert!(
+        outcome.is_ok(),
+        "a known stale supplied endpoint consumed the last outbound slot before the authenticated preferred route"
+    );
+    let channel = outcome.unwrap().unwrap();
+    assert_eq!(channel.peer_identity(), &expected);
+    assert_eq!(
+        stalled.load(Ordering::SeqCst),
+        0,
+        "the known stale endpoint should never lead the healthy authenticated path"
+    );
+    drop(channel);
+    drop(held);
+}
+
+#[test]
+fn fresh_one_off_routes_lead_and_signed_ports_supersede_cached_ports() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice, _) = node(&dir.path().join("alice"));
+    let (bob, _) = node(&dir.path().join("bob"));
+    let expected = bob.identity.public();
+    let old = std::net::SocketAddr::from(([127, 0, 0, 1], 41001));
+    let replacement = std::net::SocketAddr::from(([127, 0, 0, 1], 41002));
+    let one_off = std::net::SocketAddr::from(([127, 0, 0, 3], 41003));
+    let proof = bob.signed_announce("Bob", replacement.port());
+    alice
+        .preferred_routes
+        .lock()
+        .unwrap()
+        .insert(bob.user_id(), old);
+    alice
+        .roster
+        .lock()
+        .unwrap()
+        .update(&proof, replacement.ip(), &alice.user_id());
+    let candidates = alice.privacy_route_candidates(replacement, &expected, Some(&proof));
+    assert_eq!(candidates[0], replacement);
+    assert!(
+        !candidates.contains(&old),
+        "a newer signed listening port supersedes a cached port on the same IP"
+    );
+    let candidates = alice.privacy_route_candidates(one_off, &expected, Some(&proof));
+    assert_eq!(
+        candidates[0], one_off,
+        "a genuinely new one-off listener retains explicit priority"
+    );
+    assert!(candidates.contains(&replacement));
+    assert!(!candidates.contains(&old));
+}

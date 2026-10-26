@@ -3,20 +3,24 @@ import { useTranslation } from "react-i18next";
 import { useFileStatus } from "@/store/fileAvailability";
 import { useFileObjectUrl } from "./mediaFile";
 import { ReceiveProgress } from "./ReceiveProgress";
+import { stickerSummary } from "@/lib/stickerMedia";
 
 /** Artwork belongs to the received manifest, independently of installed packs. */
 export function MediaSticker({
   fileConv,
   mime,
   fallback,
+  label,
   readOnly = false,
 }: {
   fileConv: string;
   mime: string;
   fallback: string;
+  label?: string;
   readOnly?: boolean;
 }) {
   const { t } = useTranslation();
+  const description = stickerSummary({ label }, t("message.sticker"));
   const status = useFileStatus(fileConv || undefined);
   const [readFailed, setReadFailed] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
@@ -32,20 +36,21 @@ export function MediaSticker({
     return (
       <img
         src={url}
-        alt={fallback}
+        alt={description}
+        title={label}
         data-testid="message-sticker"
         draggable={false}
         onError={() => setFailedUrl(url)}
-        className="h-32 w-32 select-none object-contain"
+        className="h-32 w-32 max-w-full select-none object-contain"
       />
     );
   return (
-    <div className="w-32 text-center">
+    <div className="w-32 max-w-full space-y-2 text-center">
       <span
         data-testid="message-sticker-fallback"
         role="img"
-        aria-label={fallback}
-        className="inline-flex h-32 w-32 items-center justify-center text-6xl"
+        aria-label={description}
+        className="inline-flex h-32 w-32 max-w-full items-center justify-center text-6xl"
       >
         {fallback}
       </span>

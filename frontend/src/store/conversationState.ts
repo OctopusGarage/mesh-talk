@@ -64,6 +64,9 @@ export const convKey = (c: Conversation) => `${c.kind}:${c.id}`;
 export function fromHistoryItem(h: HistoryItem): ChatMessage {
   return {
     id: h.id,
+    ...(h.file_message_aliases?.length
+      ? { fileMessageAliases: h.file_message_aliases }
+      : {}),
     fromMe: h.from_me,
     who: h.who,
     text: h.protection ? "" : h.text,
