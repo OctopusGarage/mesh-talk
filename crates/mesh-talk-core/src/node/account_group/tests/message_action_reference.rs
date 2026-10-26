@@ -5,6 +5,29 @@ use crate::node::AccountGroupTextInput;
 #[path = "reaction_account_reduction.rs"]
 mod reaction_account_reduction;
 
+type ActionTrace = Arc<
+    std::sync::Mutex<(
+        std::collections::VecDeque<(u128, &'static str, String)>,
+        usize,
+    )>,
+>;
+
+fn record_action_trace(
+    trace: &ActionTrace,
+    started: std::time::Instant,
+    label: &'static str,
+    event: String,
+) {
+    let mut trace = trace.lock().unwrap();
+    if trace.0.len() == 256 {
+        trace.0.pop_front();
+        trace.1 += 1;
+    }
+    trace
+        .0
+        .push_back((started.elapsed().as_millis(), label, event));
+}
+
 async fn wait_action_fixture(ready: impl FnMut() -> bool, message: &'static str) {
     wait_action_fixture_diagnosed(ready, || message).await;
 }
@@ -176,7 +199,117 @@ async fn reference_message_action(recall: bool) {
             }
         }
     }
+    let trace: ActionTrace = Arc::new(std::sync::Mutex::new((
+        std::collections::VecDeque::new(),
+        0,
+    )));
+    let trace_started = std::time::Instant::now();
+    let peer_labels: std::collections::HashMap<_, _> = [
+        (source.user_id(), "source"),
+        (reference.user_id(), "reference"),
+        (external.user_id(), "external"),
+        (sibling.user_id(), "sibling"),
+    ]
+    .into_iter()
+    .collect();
+    for (label, node) in [
+        ("source", &source),
+        ("reference", &reference),
+        ("sibling", &sibling),
+    ] {
+        let trace = trace.clone();
+        let labels = peer_labels.clone();
+        *node.account_session_test_hook.lock().unwrap() = Some(Arc::new(move |peer, frame| {
+            let trace = trace.clone();
+            let peer = labels.get(&peer.user_id()).copied().unwrap_or("unknown");
+            Box::pin(async move {
+                use crate::node::account_sync_wire::AccountHistoryFrame;
+                let event = match frame {
+                    AccountHistoryFrame::DocumentsRequest { body } => {
+                        crate::node::account_documents::wire::DocumentRequest::decode(&body).map(
+                            |request| {
+                                format!(
+                                    "request from={peer} domain={:?} after={} probe={}",
+                                    request.domain,
+                                    request.after.is_some(),
+                                    request.operation.is_some()
+                                )
+                            },
+                        )
+                    }
+                    AccountHistoryFrame::DocumentHeader { body } => {
+                        serde_json::from_slice::<crate::node::AccountDocumentMeta>(&body)
+                            .ok()
+                            .map(|meta| {
+                                format!(
+                                    "header to={peer} domain={:?} revision={} hash={}",
+                                    meta.key.domain(),
+                                    meta.revision,
+                                    &hex::encode(meta.content_hash)[..12]
+                                )
+                            })
+                    }
+                    AccountHistoryFrame::DocumentsComplete { body } => {
+                        serde_json::from_slice::<serde_json::Value>(&body)
+                            .ok()
+                            .map(|complete| {
+                                format!(
+                                    "complete to={peer} domain={} next={} operation={}",
+                                    complete["domain"],
+                                    !complete["next"].is_null(),
+                                    !complete["operation"].is_null()
+                                )
+                            })
+                    }
+                    _ => None,
+                };
+                if let Some(event) = event {
+                    record_action_trace(&trace, trace_started, label, event);
+                }
+            })
+        }));
+    }
     let mut tasks = tokio::task::JoinSet::new();
+    for (label, node) in [
+        ("source", source.clone()),
+        ("reference", reference.clone()),
+        ("sibling", sibling.clone()),
+    ] {
+        let trace = trace.clone();
+        let mut updates = node.subscribe_account_documents();
+        let writers = [source.user_id(), reference.user_id(), sibling.user_id()];
+        tasks.spawn(async move {
+            let mut observed = std::collections::BTreeMap::new();
+            loop {
+                for writer in &writers {
+                    let key = crate::node::AccountDocumentKey::GroupOperation {
+                        channel: hex::encode(group.as_bytes()),
+                        source_device: writer.clone(),
+                    };
+                    if let Some(meta) = node.account_document_meta(&key) {
+                        let current = (meta.revision, meta.content_hash);
+                        if observed.get(writer) != Some(&current) {
+                            observed.insert(writer.clone(), current);
+                            record_action_trace(
+                                &trace,
+                                trace_started,
+                                label,
+                                format!(
+                                    "durable operation writer={} revision={} hash={}",
+                                    &writer[..8],
+                                    meta.revision,
+                                    &hex::encode(meta.content_hash)[..12]
+                                ),
+                            );
+                        }
+                    }
+                }
+                if updates.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
     for (target, listener) in nodes.into_iter().zip(listeners) {
         tasks.spawn(target.clone().run_accept_loop(listener));
     }
@@ -369,8 +502,30 @@ async fn reference_message_action(recall: bool) {
             },
             "React must switch to capable D; Recall must retain original author A"
         );
+        record_action_trace(
+            &trace,
+            trace_started,
+            "reference",
+            format!("admitted turn={turn}"),
+        );
+        let mut observed_phases = [false; 3];
         wait_action_fixture_diagnosed(
             || {
+                for (index, label, ready) in [
+                    (0, "source", (if recall || turn == 0 { &source } else { &sibling })
+                        .account_group_operation_status(&account.account_id(), id).unwrap()
+                        .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)),
+                    (1, "reference", reference.account_group_operation_status(&account.account_id(), id).unwrap()
+                        .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)),
+                    (2, "external", (if recall || turn == 0 { &source } else { &sibling })
+                        .account_group_operation_status(&account.account_id(), id).unwrap()
+                        .and_then(|status| status.primary_event).is_some_and(|event| external.log.lock().unwrap().get(&event).is_some())),
+                ] {
+                    if ready && !observed_phases[index] {
+                        observed_phases[index] = true;
+                        record_action_trace(&trace, trace_started, label, format!("committed_or_effect turn={turn}"));
+                    }
+                }
                 reference
                     .account_group_operation_status(&account.account_id(), id)
                     .unwrap()
@@ -382,6 +537,7 @@ async fn reference_message_action(recall: bool) {
                     })
             },
             || {
+                eprintln!("action propagation trace (before-write frame hooks; durable events are committed): {:?}", trace.lock().unwrap());
                 super::messages::panic_account_send_timeout(
                     if recall || turn == 0 {
                         &source
@@ -396,6 +552,17 @@ async fn reference_message_action(recall: bool) {
             },
         )
         .await;
+        eprintln!(
+            "action propagation timing turn={turn}: {:?}",
+            trace
+                .lock()
+                .unwrap()
+                .0
+                .iter()
+                .filter(|(_, _, event)| event.starts_with("admitted")
+                    || event.starts_with("committed_or_effect"))
+                .collect::<Vec<_>>()
+        );
         let status = reference
             .account_group_operation_status(&account.account_id(), id)
             .unwrap()

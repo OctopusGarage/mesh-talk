@@ -260,7 +260,11 @@ impl Node {
         frame: &AccountHistoryFrame,
     ) -> Result<(), NodeError> {
         #[cfg(test)]
-        if matches!(frame, AccountHistoryFrame::DocumentHeader { .. }) {
+        if matches!(
+            frame,
+            AccountHistoryFrame::DocumentHeader { .. }
+                | AccountHistoryFrame::DocumentsComplete { .. }
+        ) {
             let hook = self.account_session_test_hook.lock().unwrap().clone();
             if let Some(hook) = hook {
                 hook(channel.peer_identity().clone(), frame.clone()).await;
