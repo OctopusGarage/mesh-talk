@@ -587,14 +587,18 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
         let alice = DeviceIdentity::generate();
         let aa = Account::generate();
         let bob = DeviceIdentity::generate();
-        let ba = Account::generate();
-        let target = ba.account_id();
+        let bob_account = Account::generate();
+        let target = bob_account.account_id();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", 4000);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let bp =
-            Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+        let bp = Announce::new_with_account(
+            &bob,
+            &bob_account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
         let (a, _, _) = super::test_support::node_with_files(ad.path(), alice, aa, &bp);
-        let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, ba, &ap);
+        let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, bob_account, &ap);
         let (path, mut bytes) = sticker(ad.path(), 0);
         if chunk_count > 1 {
             // Valid PNG trailing bytes exercise original-author parent chains.
@@ -696,14 +700,18 @@ async fn installed_sticker_wire_reuse_and_legacy_mismatch_fallback() {
         let alice = DeviceIdentity::generate();
         let aa = Account::generate();
         let bob = DeviceIdentity::generate();
-        let ba = Account::generate();
-        let target = ba.account_id();
+        let bob_account = Account::generate();
+        let target = bob_account.account_id();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", 4000);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let bp =
-            Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+        let bp = Announce::new_with_account(
+            &bob,
+            &bob_account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
         let (a, _, _) = super::test_support::node_with_files(ad.path(), alice, aa, &bp);
-        let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, ba, &ap);
+        let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, bob_account, &ap);
         let (path, bytes) = sticker(ad.path(), 0);
         let mut installed = bytes.clone();
         if !matching {
@@ -840,14 +848,15 @@ async fn installed_sticker_receiver_recovery_requests_only_authorized_headers() 
         let alice = DeviceIdentity::generate();
         let aa = Account::generate();
         let bob = DeviceIdentity::generate();
-        let ba = Account::generate();
-        let target = ba.account_id();
+        let bob_account = Account::generate();
+        let target = bob_account.account_id();
         let al = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bl = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", al.local_addr().unwrap().port());
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", bl.local_addr().unwrap().port());
+        let bp =
+            Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
         let (a, _, _) = super::test_support::node_with_files(ad.path(), alice, aa, &bp);
-        let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, ba, &ap);
+        let (b, _, _) = super::test_support::node_with_files(bd.path(), bob, bob_account, &ap);
         let (path, bytes) = sticker(ad.path(), 0);
         let mut installed = bytes.clone();
         if !matching {
