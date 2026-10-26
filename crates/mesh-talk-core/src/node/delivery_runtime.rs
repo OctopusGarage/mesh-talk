@@ -3459,13 +3459,17 @@ mod diagnostic_tests {
         let alice = DeviceIdentity::generate();
         let bob = DeviceIdentity::generate();
         let aa = Account::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
-        let bp =
-            Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+        let bp = Announce::new_with_account(
+            &bob,
+            &bob_account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
         let (sender, _, _) = node_with_files(source_dir.path(), alice, aa, &bp);
-        let (recipient, _, _) = node_with_files(target_dir.path(), bob, ba, &ap);
+        let (recipient, _, _) = node_with_files(target_dir.path(), bob, bob_account, &ap);
         let unrelated_identity = DeviceIdentity::generate();
         let unrelated_account = Account::generate();
         let unrelated =

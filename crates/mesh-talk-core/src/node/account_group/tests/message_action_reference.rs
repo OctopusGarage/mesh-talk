@@ -25,7 +25,7 @@ async fn wait_action_fixture_diagnosed(
 /// Role-page publication can invalidate the authenticated page mid-transfer.
 /// Retain the cursor and retry only that precise transport interruption; other
 /// errors remain fixture failures, and operation execution keeps its own budget.
-async fn pull_reference_action_control(
+pub(super) async fn pull_reference_action_control(
     target: &Arc<Node>,
     source: &Node,
     address: std::net::SocketAddr,
@@ -68,6 +68,7 @@ async fn pull_reference_action_control(
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
                 Err(error) => {
+                    let capacity_busy = crate::node::account_sync::local_sync_capacity_busy(&error);
                     let page_interrupted = matches!(&error,
                         crate::node::NodeError::Session(
                             crate::node::session::SessionError::Transport(
@@ -81,14 +82,16 @@ async fn pull_reference_action_control(
                         && target.certified_sibling(&peer.public)
                         && peer.public == source.identity.public();
                     assert!(
-                        page_interrupted,
-                        "only an authenticated pending GroupControl EOF is retryable: {error}"
+                        capacity_busy || page_interrupted,
+                        "only local admission backpressure or authenticated pending GroupControl EOF is retryable: {error}"
                     );
-                    interruptions += 1;
-                    assert!(
-                        interruptions <= 3,
-                        "role page repeatedly invalidated during bootstrap"
-                    );
+                    if page_interrupted {
+                        interruptions += 1;
+                        assert!(
+                            interruptions <= 3,
+                            "role page repeatedly invalidated during bootstrap"
+                        );
+                    }
                     // Honor both public retry_at and the owner's private short
                     // GroupControl cooldown without discarding cursor progress.
                     let delay = cursor

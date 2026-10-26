@@ -554,6 +554,7 @@ impl Node {
     fn inventory_directory(
         &self,
         reference: &GroupInventoryReference,
+        previous: Option<&GroupInventoryReference>,
         controls: &[String],
         frontier: &[EventId],
         history_policy: crate::channel::HistoryPolicy,
@@ -588,9 +589,19 @@ impl Node {
         });
         certified.sort_by_key(|binding| binding.public.user_id());
         certified.dedup_by(|left, right| left.public == right.public);
-        let acknowledgements = {
+        // Retain exact acknowledgements of evaluated, incompatible heads. A
+        // compatible source may have changed only its own acknowledgements;
+        // acknowledging that version would make two unchanged sources publish
+        // forever. This is the same retained floor used by GroupControl.
+        let mut acknowledgements: BTreeMap<_, _> = previous
+            .and_then(|reference| reference.directory.as_ref())
+            .into_iter()
+            .flat_map(|directory| &directory.acknowledgements)
+            .map(|ack| (ack.source.clone(), ack.clone()))
+            .collect();
+        {
             let store = self.account_documents.lock().expect("documents mutex");
-            store
+            for ack in store
                 .inventory_channel_rows(&reference.channel_id)
                 .into_iter()
                 .filter(|meta| !meta.tombstone && meta.writer_device != self.user_id())
@@ -613,6 +624,17 @@ impl Node {
                     {
                         return None;
                     }
+                    let compatible = !directory.unavailable
+                        && directory.fingerprint == fingerprint
+                        && directory.event_count == controls.len()
+                        && other.name == reference.name
+                        && other.owner == reference.owner
+                        && other.owner_account_id == reference.owner_account_id
+                        && other.member_count == reference.member_count
+                        && directory.history_policy == history_policy;
+                    if compatible {
+                        return None;
+                    }
                     Some(DirectoryAcknowledgement {
                         source: other.source_device,
                         revision: meta.revision,
@@ -620,8 +642,14 @@ impl Node {
                     })
                 })
                 .take(MAX_DIRECTORY_SOURCES)
-                .collect::<Vec<_>>()
-        };
+            {
+                acknowledgements.insert(ack.source.clone(), ack);
+            }
+        }
+        let acknowledgements = acknowledgements
+            .into_values()
+            .take(MAX_DIRECTORY_SOURCES)
+            .collect();
         let mut directory = GroupDirectoryObservation {
             version: 1,
             source: self.own_group_proof(),
@@ -857,8 +885,13 @@ impl Node {
                 directory: None,
                 directory_reconciling: false,
             };
-            reference.directory =
-                Some(self.inventory_directory(&reference, &controls, &frontier, history_policy));
+            reference.directory = Some(self.inventory_directory(
+                &reference,
+                old.as_ref(),
+                &controls,
+                &frontier,
+                history_policy,
+            ));
             if reference.bounded_payload(key.limit()).is_none() {
                 let directory = reference.directory.as_mut().expect("directory present");
                 directory.unavailable = true;

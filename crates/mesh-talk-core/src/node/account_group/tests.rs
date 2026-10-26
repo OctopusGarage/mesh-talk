@@ -490,30 +490,9 @@ fn link(left: &Node, right: &Node) {
 }
 
 async fn pull_group_control(target: &Arc<Node>, source: &Node, address: std::net::SocketAddr) {
-    target.roster.lock().unwrap().update(
-        &Announce::new_with_account(
-            &source.identity,
-            &source.account,
-            "Owner source",
-            address.port(),
-        ),
-        address.ip(),
-        &target.user_id(),
-    );
-    let peer = target.routing_peer(&source.user_id()).unwrap();
-    let mut cursor = crate::node::account_documents::sync::DocumentSyncCursor::default();
-    target
-        .pull_account_documents_page(&peer, &mut cursor)
-        .await
-        .unwrap();
-    assert!(
-        target
-            .account_documents(AccountDocumentDomain::GroupControl, None, 64)
-            .unwrap()
-            .items
-            .iter()
-            .any(|meta| meta.writer_device == source.user_id())
-    );
+    // Reuse the bounded role-page bootstrap, including exact local capacity
+    // backpressure. Authentication and protocol failures still fail the fixture.
+    message_action_reference::pull_reference_action_control(target, source, address).await;
 }
 
 fn inbound_server(node: Arc<Node>, listener: TcpListener) -> tokio::task::JoinHandle<()> {

@@ -422,6 +422,125 @@ fn group_inventory_directory_wide_frontier_receipt_is_atomic_and_recovers_after_
 }
 
 #[test]
+fn group_inventory_directory_mutual_acknowledgements_reach_a_fixed_point() {
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let a = node(&directory.path().join("a"), &account);
+    let b = node(&directory.path().join("b"), &account);
+    let reference_only = node(&directory.path().join("reference"), &account);
+    for (source, sibling) in [(&a, &b), (&b, &a)] {
+        source
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: sibling.identity.public(),
+                certificate: account.certify(&sibling.identity.public().ed25519_pub),
+            })
+            .unwrap();
+        source.roster.lock().unwrap().update(
+            &sibling.own_group_proof(),
+            "127.0.0.1".parse().unwrap(),
+            &source.user_id(),
+        );
+    }
+    let group = group_inventory_legacy_fixture(&a, &b, "Stable shared directory");
+    copy_public_group(&b, &a, group);
+    let exchange = || {
+        let first = group_inventory_source_document(&a, group);
+        let second = group_inventory_source_document(&b, group);
+        a.account_documents
+            .lock()
+            .unwrap()
+            .merge(second.meta.clone(), second.payload())
+            .unwrap();
+        b.account_documents
+            .lock()
+            .unwrap()
+            .merge(first.meta.clone(), first.payload())
+            .unwrap();
+    };
+    // Give each authenticated source the other's complete, unchanged public
+    // observation before measuring convergence. No membership or policy changes.
+    for _ in 0..3 {
+        exchange();
+    }
+    let first = group_inventory_source_document(&a, group);
+    let second = group_inventory_source_document(&b, group);
+    // Synchronize the final observed heads so both digests cover the same keys.
+    a.account_documents
+        .lock()
+        .unwrap()
+        .merge(second.meta.clone(), second.payload())
+        .unwrap();
+    b.account_documents
+        .lock()
+        .unwrap()
+        .merge(first.meta.clone(), first.payload())
+        .unwrap();
+    let first_digest = a
+        .account_documents
+        .lock()
+        .unwrap()
+        .digest(AccountDocumentDomain::GroupInventory);
+    let second_digest = b
+        .account_documents
+        .lock()
+        .unwrap()
+        .digest(AccountDocumentDomain::GroupInventory);
+    for _ in 0..6 {
+        exchange();
+        for document in [&first, &second] {
+            reference_only
+                .account_documents
+                .lock()
+                .unwrap()
+                .merge(document.meta.clone(), document.payload())
+                .unwrap();
+        }
+        // A new sibling with no public causal cut consumes the directory but
+        // must not manufacture another source or acknowledgements of its own.
+        reference_only.publish_group_inventory_for(group);
+        assert!(reference_only.channel_shared_reference(group).is_some());
+        assert!(
+            reference_only
+                .account_documents
+                .lock()
+                .unwrap()
+                .meta(&AccountDocumentKey::GroupInventory {
+                    channel: hex::encode(group.as_bytes()),
+                    source_device: reference_only.user_id(),
+                })
+                .is_none()
+        );
+        assert_eq!(
+            group_inventory_source_document(&a, group).meta,
+            first.meta,
+            "ordinary acknowledgement exchange must not create another A publication"
+        );
+        assert_eq!(
+            group_inventory_source_document(&b, group).meta,
+            second.meta,
+            "ordinary acknowledgement exchange must not create another B publication"
+        );
+        assert_eq!(
+            a.account_documents
+                .lock()
+                .unwrap()
+                .digest(AccountDocumentDomain::GroupInventory),
+            first_digest
+        );
+        assert_eq!(
+            b.account_documents
+                .lock()
+                .unwrap()
+                .digest(AccountDocumentDomain::GroupInventory),
+            second_digest
+        );
+    }
+}
+
+#[test]
 fn group_inventory_directory_private_history_growth_reaches_a_fixed_point() {
     let directory = tempfile::tempdir().unwrap();
     let account = Account::generate();
@@ -790,6 +909,29 @@ fn group_inventory_directory_known_unavailable_source_can_be_acknowledged_by_ano
             .unwrap()
             .directory_reconciling
     );
+    // Resource-limited sources clear their acknowledgements rather than
+    // reciprocating an available source's exact acknowledgement forever.
+    a.account_documents
+        .lock()
+        .unwrap()
+        .merge(available.meta.clone(), available.payload())
+        .unwrap();
+    for _ in 0..3 {
+        let next_unavailable = group_inventory_source_document(&a, group);
+        assert_eq!(next_unavailable.meta, unavailable.meta);
+        b.account_documents
+            .lock()
+            .unwrap()
+            .merge(next_unavailable.meta.clone(), next_unavailable.payload())
+            .unwrap();
+        let next_available = group_inventory_source_document(&b, group);
+        assert_eq!(next_available.meta, available.meta);
+        a.account_documents
+            .lock()
+            .unwrap()
+            .merge(next_available.meta.clone(), next_available.payload())
+            .unwrap();
+    }
 }
 
 #[test]

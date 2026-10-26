@@ -762,6 +762,13 @@ current legacy device membership and modern account binding remain separate
 eligibility rules. A local absence is not evidence of global deletion. Source
 retractions and later observations retain their version ordering, and one source
 cannot erase another source's valid reference.
+Signed directory acknowledgements retain exact evaluated source heads. Compatible
+observations do not acknowledge each other's acknowledgement-only revisions;
+unchanged public control cuts therefore reach a publication fixed point. An
+incompatible or unavailable observation still requires its exact signed head to
+be acknowledged after evaluating its public cut. A stale acknowledgement cannot
+suppress a later independent source observation. Reference-only devices never
+publish borrowed observations or acknowledgements.
 
 Authoritative local state wins over descriptive references. Borrowed member facts
 are display data: they cannot enter the ChannelBook, establish network account

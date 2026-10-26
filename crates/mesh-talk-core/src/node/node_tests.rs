@@ -4628,13 +4628,78 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         resumed_addr.port(),
         &bob_uid,
     );
-    bob_node.retry_channel_departures().await;
+    let departure = bob_node
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ChannelLeave && event.author.user_id() == bob_uid)
+        .max_by_key(|event| (event.lamport, event.id))
+        .cloned()
+        .expect("the offline departure must retain its original signed event");
     assert!(
-        alice_node
-            .channel_members(channel)
-            .iter()
-            .all(|member| member.user_id() != bob_uid)
+        departure.ciphertext.is_empty()
+            && departure.verify_signature()
+            && departure.verify_integrity()
     );
+    // A retry is a best-effort exchange, not a remote acceptance receipt. Keep
+    // using the real retry owner until both canonical and displayed membership
+    // reflect the original signed leave after Alice's listener restarts.
+    let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            bob_node.retry_channel_departures().await;
+            let canonical = alice_node.account_group_projection(channel);
+            if canonical.authorized.contains(&departure.id)
+                && canonical
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| !state.is_member(&bob_uid))
+                && alice_node
+                    .channel_members(channel)
+                    .iter()
+                    .all(|member| member.user_id() != bob_uid)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    if recovered.is_err() {
+        let (raw_leave, parent_cut_present, canonical_leave, canonical_member) = {
+            let log = alice_node.log.lock().unwrap();
+            let projection = crate::node::channel::ChannelBook::project_membership(
+                channel,
+                &log.events(&channel),
+            );
+            (
+                log.get(&departure.id).is_some(),
+                departure
+                    .parents
+                    .iter()
+                    .all(|parent| log.get(parent).is_some()),
+                projection.authorized.contains(&departure.id),
+                projection
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| state.is_member(&bob_uid)),
+            )
+        };
+        let retry_pending = bob_node
+            .channels
+            .lock()
+            .unwrap()
+            .pending_departures(&bob_uid)
+            .iter()
+            .any(|(id, _)| *id == channel);
+        let resumed_route = bob_node.routing_peer(&alice_uid).is_some_and(|peer| {
+            peer.addr == resumed_addr && peer.public == alice_node.identity.public()
+        });
+        panic!(
+            "offline departure retry failed: raw_leave={raw_leave} parent_cut_present={parent_cut_present} canonical_leave={canonical_leave} canonical_member={canonical_member} retry_pending={retry_pending} resumed_route={resumed_route}"
+        );
+    }
     resumed_task.abort();
     assert!(resumed_task.await.unwrap_err().is_cancelled());
     alice_node.sessions.clear();
