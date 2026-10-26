@@ -53,8 +53,40 @@ impl Node {
     pub(in crate::node) async fn maintain_account_group_operations(self: &Arc<Self>) {
         for group in self.maintain_account_group_operation_effects() {
             let members = self.channel_members(group);
-            self.distribute_channel(group, &members).await;
+            self.distribute_account_group_effects(group, &members).await;
         }
+    }
+
+    /// Distribute every control while confirming the latest exact source
+    /// message on that same bounded sync exchange, without a second fanout.
+    /// Coalesced earlier messages remain eligible for ordinary custody repair.
+    pub(in crate::node) async fn distribute_account_group_effects(
+        &self,
+        group: ConversationId,
+        members: &[crate::identity::device::PublicIdentity],
+    ) {
+        if let Some(event) = self.account_group_fanout_message(group) {
+            let projection = self.account_group_projection(group);
+            let eligible = self
+                .channels
+                .lock()
+                .expect("channels mutex")
+                .state(&group)
+                .is_some_and(|state| {
+                    !state.is_dissolved()
+                        && !state.pending_invite()
+                        && self.channel_identity_matches_account(state)
+                        && self.channel_identity_is_current_in(state, &projection)
+                });
+            if eligible {
+                self.distribute_channel_confirming(group, members, event)
+                    .await;
+                return;
+            }
+        }
+        // Controls still reach every member, including departure/dissolution
+        // effects and coalesced controls in groups larger than message fanout.
+        self.distribute_channel(group, members).await;
     }
 
     /// Exercise the real admitted effect with the existing completion-write fault.

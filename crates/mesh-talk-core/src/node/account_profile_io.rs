@@ -238,6 +238,12 @@ impl Node {
                 });
             }
         }
+        drop(store);
+        if profile.account_id() != self.account_id()
+            && let Err(error) = self.publish_public_profile_document(&profile.account_id())
+        {
+            log::debug!("contact profile publication deferred: {error}");
+        }
         Ok(applied)
     }
 

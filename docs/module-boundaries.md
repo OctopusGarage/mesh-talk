@@ -869,6 +869,13 @@ to core; the member dialog presents the policy without independently deciding
 history eligibility. The [channel guide](help/topics/channels.md#history-for-new-members)
 owns user-visible limits and availability.
 
+Native message presentation is queued onto the UI thread before acquiring the
+exact desktop-session guard. The queued callback revalidates its session and runtime
+ticket before emitting private events or notifications. A worker must not hold that
+guard while synchronously querying window focus: the UI thread may itself be waiting
+for the same session. `events.rs` owns this dispatch boundary and its lock-order and
+stale-session regressions; `runtime_bootstrap.rs` uses it for DM, group and file callbacks.
+
 ### Account document projections
 
 `node/account_documents/` owns private typed metadata and blobs, not group
@@ -901,6 +908,14 @@ The document store keeps a separate bounded custody-key quota and an owned-file
 scan budget consistent with legal document counts. `media_store.rs` prunes the
 enumerated unreferenced regular files in one pass, preserving live files and
 synchronizing the parent directory before successful return.
+
+`account_documents/public_profile.rs` relays original signed contact profiles under
+Profile consent; `account_profile_io.rs` retains signature, revision and avatar
+projection authority. Per-source document heads preserve each contact's original
+profile, with bounded optional publication repair that cannot block login.
+`account_documents/group_activity.rs` owns History-gated source-signed control
+observations tied to the selected inventory snapshot. It cannot install membership
+or keys. Both reuse the existing document worker and certified sibling sessions.
 
 `account_documents/inventory.rs` owns source-certified descriptive group snapshots,
 bounded automatic publication and account-private reference projection. It reuses

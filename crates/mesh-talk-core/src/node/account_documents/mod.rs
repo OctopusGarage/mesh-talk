@@ -7,9 +7,11 @@ use std::fmt;
 mod controls;
 mod custody;
 mod device_hostname;
+mod group_activity;
 mod group_control;
 mod group_operations;
 mod inventory;
+mod public_profile;
 pub use inventory::{GroupInventoryMember, GroupInventoryReference};
 pub(super) mod store;
 pub(super) mod sync;
@@ -30,6 +32,8 @@ pub enum AccountDocumentDomain {
     GroupInventory,
     DeviceHostname,
     GroupControl,
+    PublicProfile,
+    GroupActivity,
 }
 impl AccountDocumentDomain {
     /// Hostname and group-control domains independently shipped digest byte8.
@@ -95,6 +99,14 @@ pub enum AccountDocumentKey {
         channel: String,
         source_device: String,
     },
+    PublicProfile {
+        account: String,
+        source_device: String,
+    },
+    GroupActivity {
+        channel: String,
+        source_device: String,
+    },
 }
 impl DocumentConversation {
     fn valid(&self) -> bool {
@@ -113,6 +125,8 @@ fn hex(value: &str, len: usize) -> bool {
 impl AccountDocumentKey {
     pub fn domain(&self) -> AccountDocumentDomain {
         match self {
+            Self::PublicProfile { .. } => AccountDocumentDomain::PublicProfile,
+            Self::GroupActivity { .. } => AccountDocumentDomain::GroupActivity,
             Self::DeviceHostname { .. } => AccountDocumentDomain::DeviceHostname,
             Self::Draft { .. } => AccountDocumentDomain::Draft,
             Self::ReadReceipt { .. } => AccountDocumentDomain::ReadReceipt,
@@ -129,6 +143,14 @@ impl AccountDocumentKey {
     }
     fn valid(&self) -> bool {
         match self {
+            Self::PublicProfile {
+                account,
+                source_device,
+            } => hex(account, 32) && hex(source_device, 32),
+            Self::GroupActivity {
+                channel,
+                source_device,
+            } => hex(channel, 64) && hex(source_device, 32),
             Self::DeviceHostname { device_id } => hex(device_id, 32),
             Self::GroupInventory {
                 channel,
@@ -190,6 +212,8 @@ impl AccountDocumentKey {
     }
     fn limit(&self) -> usize {
         match self {
+            Self::PublicProfile { .. } => 1024 * 1024,
+            Self::GroupActivity { .. } => 8 * 1024,
             Self::DeviceHostname { .. } => 255,
             Self::GroupInventory { .. } => 128 * 1024,
             Self::GroupControl { .. } => super::account_group::wire::MAX_HEAD_BYTES,
@@ -205,7 +229,9 @@ impl AccountDocumentKey {
     pub fn is_private_control(&self) -> bool {
         matches!(
             self,
-            Self::DmReaction { .. }
+            Self::PublicProfile { .. }
+                | Self::GroupActivity { .. }
+                | Self::DmReaction { .. }
                 | Self::DmRecall { .. }
                 | Self::ChannelCustody { .. }
                 | Self::GroupInventory { .. }
@@ -216,6 +242,7 @@ impl AccountDocumentKey {
     }
     fn protocol_version(&self) -> u8 {
         match self {
+            Self::PublicProfile { .. } | Self::GroupActivity { .. } => 6,
             Self::DeviceHostname { .. } => 5,
             Self::GroupInventory { .. } => 4,
             Self::GroupControl { .. } | Self::GroupOperation { .. } => 5,
@@ -275,6 +302,7 @@ impl AccountDocumentMeta {
             && self.revision > 0
             && self.revision <= 9_007_199_254_740_991
             && hex(&self.writer_device, 32)
+            && (!matches!(&self.key, AccountDocumentKey::PublicProfile { source_device, .. } | AccountDocumentKey::GroupActivity { source_device, .. } if source_device != &self.writer_device))
             && (!matches!(&self.key, AccountDocumentKey::GroupInventory { source_device, .. } if source_device != &self.writer_device))
             && (!matches!(&self.key, AccountDocumentKey::GroupControl { source_device, .. } if source_device != &self.writer_device))
             && (!matches!(&self.key, AccountDocumentKey::DeviceHostname { device_id } if device_id != &self.writer_device))

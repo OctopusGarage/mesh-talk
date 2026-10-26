@@ -2,6 +2,103 @@
 use super::*;
 use crate::node::{AccountGroupStickerInput, AccountGroupTextInput, MessageProtection};
 
+async fn account_operation_send_confirms_exact_custody(external_member: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let holder_account = if external_member {
+        Account::generate()
+    } else {
+        Account::from_secret_bytes(account.secret_bytes())
+    };
+    let holder = node(&dir.path().join("holder"), &holder_account);
+    if !external_member {
+        source
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: holder.identity.public(),
+                certificate: account.certify(&holder.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    for current in [&source, &holder] {
+        current
+            .set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    source.roster.lock().unwrap().update(
+        &holder.signed_announce("Custody holder", address.port()),
+        address.ip(),
+        &source.user_id(),
+    );
+    holder.roster.lock().unwrap().update(
+        &source.signed_announce("Custody source", 9),
+        address.ip(),
+        &holder.user_id(),
+    );
+    let server = tokio::spawn(holder.clone().run_accept_loop(listener));
+    // Deliberately do not start the source runtime: the send fanout itself must
+    // obtain the exact durable-have response, independently of periodic repair.
+    let group = source
+        .create_channel("Account send custody", vec![holder.identity.public()])
+        .await
+        .unwrap();
+    let id = source
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    source
+        .submit_account_group_text_if(
+            &account.account_id(),
+            id,
+            group,
+            AccountGroupTextInput {
+                text: b"confirmed explicit account send".to_vec(),
+                reply_to: None,
+                expires_at_ms: None,
+                protection: None,
+            },
+            |commit| commit(),
+        )
+        .unwrap();
+    source.maintain_account_group_operations().await;
+    let status = source
+        .account_group_operation_status(&account.account_id(), id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.phase, AccountGroupOperationPhase::Committed);
+    let event = status
+        .primary_event
+        .expect("committed public message identity");
+    assert!(
+        holder
+            .channel_history(group, 10)
+            .iter()
+            .any(|row| row.id == event),
+        "the member received the exact account-operation message"
+    );
+    assert_eq!(
+        source.channel_custody_count(group, event),
+        Some(usize::from(external_member)),
+        "the explicit send fanout confirms external durable custody and excludes own-account siblings"
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn account_operation_send_fanout_confirms_external_member_custody() {
+    account_operation_send_confirms_exact_custody(true).await;
+}
+
+#[tokio::test]
+async fn account_operation_send_fanout_excludes_own_account_sibling_custody() {
+    account_operation_send_confirms_exact_custody(false).await;
+}
+
 async fn assert_member_message(sticker: bool, protected: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();

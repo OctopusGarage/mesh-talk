@@ -39,7 +39,8 @@ export function channelMemberAccounts(
       group.devices.find((device) => device.user_id === local.deviceId) ??
       group.devices[0];
   }
-  return [...groups.values()];
+  // Account ordering must not depend on which device supplied the roster.
+  return [...groups.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
 
 /** Invite one exact device per new account; existing accounts expose devices separately. */

@@ -11,28 +11,86 @@ import type {
 } from "@/lib/types";
 import "@/lib/i18n";
 
-const { chatState, authState, avatars, dialog, channelApi, bindingChanges } =
-  vi.hoisted(() => ({
-    authState: {
-      user: { id: "local-owner", username: "me", display_name: "Me" },
-      generation: 1,
-    },
-    bindingChanges: vi.fn(async (owner: string) => ({ owner, changes: [] })),
-    chatState: {
-      runEpoch: 1,
-      identityEpoch: 1,
-      groupOperations: {} as Record<
-        string,
-        import("@/store/accountGroupOperations").GroupOperationTicket
-      >,
-      cancelGroupOperation: vi.fn(async () => ({ kind: "pending" })),
-      refreshGroupOperations: vi.fn(async () => {}),
-      refreshRoster: vi.fn(async () => {}),
-      accounts: [] as Array<{
-        account_id: string;
-        device_count: number;
-        names: string[];
-      }>,
+const {
+  chatState,
+  authState,
+  avatars,
+  dialog,
+  channelApi,
+  bindingChanges,
+  presenceMap,
+} = vi.hoisted(() => ({
+  presenceMap: {} as Record<
+    string,
+    { member_count: number; online_count: number }
+  >,
+  authState: {
+    user: { id: "local-owner", username: "me", display_name: "Me" },
+    generation: 1,
+  },
+  bindingChanges: vi.fn(async (owner: string) => ({ owner, changes: [] })),
+  chatState: {
+    runEpoch: 1,
+    identityEpoch: 1,
+    groupOperations: {} as Record<
+      string,
+      import("@/store/accountGroupOperations").GroupOperationTicket
+    >,
+    cancelGroupOperation: vi.fn(async () => ({ kind: "pending" })),
+    refreshGroupOperations: vi.fn(async () => {}),
+    refreshRoster: vi.fn(async () => {}),
+    accounts: [] as Array<{
+      account_id: string;
+      device_count: number;
+      names: string[];
+    }>,
+    members: [
+      {
+        user_id: "owner-device",
+        account_id: "owner-account",
+        name: "Me",
+        replica_enabled: true,
+      },
+    ] as ChannelMemberInfo[],
+    channels: [] as ChannelInfo[],
+    channelOwner: "owner-device",
+    active: { kind: "channel", id: "channel", name: "Group" },
+    peers: [
+      {
+        user_id: "peer-device",
+        account_id: "peer-account",
+        name: "Alice",
+        addr: "127.0.0.1",
+        post_office: false,
+      },
+    ],
+    favorites: {},
+    myId: "owner-device",
+    myAccountId: "owner-account",
+    addMember: vi.fn(async (): Promise<unknown> => ({ kind: "committed" })),
+    removeMemberAccount: vi.fn(async (): Promise<unknown> => ({
+      kind: "committed",
+    })),
+    transferChannelOwner: vi.fn(async (): Promise<unknown> => ({
+      kind: "committed",
+    })),
+    removeMember: vi.fn(async (): Promise<unknown> => ({
+      kind: "committed",
+    })),
+    dissolveChannel: vi.fn(async (): Promise<unknown> => ({
+      kind: "committed",
+    })),
+    open: vi.fn(),
+  },
+  avatars: { "peer-account": "data:image/png;base64,AAAA" } as Record<
+    string,
+    string
+  >,
+  dialog: { onOpenChange: null as null | ((open: boolean) => void) },
+  channelApi: {
+    channelMembers: vi.fn(async (): Promise<ChannelMembersInfo> => ({
+      owner: "owner-device",
+      history_policy: "off",
       members: [
         {
           user_id: "owner-device",
@@ -40,62 +98,15 @@ const { chatState, authState, avatars, dialog, channelApi, bindingChanges } =
           name: "Me",
           replica_enabled: true,
         },
-      ] as ChannelMemberInfo[],
-      channels: [] as ChannelInfo[],
-      channelOwner: "owner-device",
-      active: { kind: "channel", id: "channel", name: "Group" },
-      peers: [
-        {
-          user_id: "peer-device",
-          account_id: "peer-account",
-          name: "Alice",
-          addr: "127.0.0.1",
-          post_office: false,
-        },
       ],
-      favorites: {},
-      myId: "owner-device",
-      myAccountId: "owner-account",
-      addMember: vi.fn(async (): Promise<unknown> => ({ kind: "committed" })),
-      removeMemberAccount: vi.fn(async (): Promise<unknown> => ({
-        kind: "committed",
-      })),
-      transferChannelOwner: vi.fn(async (): Promise<unknown> => ({
-        kind: "committed",
-      })),
-      removeMember: vi.fn(async (): Promise<unknown> => ({
-        kind: "committed",
-      })),
-      dissolveChannel: vi.fn(async (): Promise<unknown> => ({
-        kind: "committed",
-      })),
-      open: vi.fn(),
-    },
-    avatars: { "peer-account": "data:image/png;base64,AAAA" } as Record<
-      string,
-      string
-    >,
-    dialog: { onOpenChange: null as null | ((open: boolean) => void) },
-    channelApi: {
-      channelMembers: vi.fn(async (): Promise<ChannelMembersInfo> => ({
-        owner: "owner-device",
-        history_policy: "off",
-        members: [
-          {
-            user_id: "owner-device",
-            account_id: "owner-account",
-            name: "Me",
-            replica_enabled: true,
-          },
-        ],
-      })),
-      channelActivity: vi.fn(
-        async (_channelId: string): Promise<ChannelActivityInfo[]> => [],
-      ),
-      setChannelReplicaEnabled: vi.fn(async () => {}),
-      setGroupFileSharingOverride: vi.fn(async () => {}),
-    },
-  }));
+    })),
+    channelActivity: vi.fn(
+      async (_channelId: string): Promise<ChannelActivityInfo[]> => [],
+    ),
+    setChannelReplicaEnabled: vi.fn(async () => {}),
+    setGroupFileSharingOverride: vi.fn(async () => {}),
+  },
+}));
 
 vi.mock("@/lib/api", () => ({ chat: channelApi }));
 vi.mock("@/lib/api/privacy", () => ({ privacy: { bindingChanges } }));
@@ -119,7 +130,8 @@ vi.mock("@/store/contactPolicy", () => ({
     selector({ contacts: {}, loaded: true }),
 }));
 vi.mock("@/store/presence", () => ({
-  usePresence: (selector: (state: unknown) => unknown) => selector({ map: {} }),
+  usePresence: (selector: (state: unknown) => unknown) =>
+    selector({ map: presenceMap }),
   usePresenceFor: () => ({ online: false, last_seen_secs: null }),
   OFFLINE: { online: false, last_seen_secs: 0 },
   presenceStatus: () => "offline",
@@ -166,6 +178,7 @@ beforeEach(() => {
   (
     globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
+  for (const key of Object.keys(presenceMap)) delete presenceMap[key];
   chatState.groupOperations = {};
   chatState.cancelGroupOperation.mockClear();
   chatState.refreshGroupOperations.mockClear();
@@ -1219,6 +1232,67 @@ it("offers an account transfer on a shared owner sibling and retains its pending
     expect(host.textContent).toContain("Make Alice the channel owner?");
     expect(host.textContent).toContain("your linked devices");
     expect(host.textContent).not.toContain("Disable replica");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("keeps account member order and read-only device details identical on a sibling reference", () => {
+  chatState.members = [
+    { user_id: "owner-device", account_id: "owner-account", name: "Me" },
+    { user_id: "peer-device", account_id: "peer-account", name: "Alice" },
+  ];
+  presenceMap.channel = { member_count: 2, online_count: 1 };
+  const local = renderToStaticMarkup(createElement(MembersDialog));
+  chatState.channels = [
+    {
+      channel_id: "channel",
+      name: "Group",
+      owner: "owner-device",
+      member_count: 2,
+      shared_reference: true,
+      reference_members_complete: true,
+    },
+  ];
+  chatState.members.reverse();
+  const reference = renderToStaticMarkup(createElement(MembersDialog));
+  const rows = (html: string) =>
+    [...html.matchAll(/data-testid="member-profile-([^"]*)"/g)].map(
+      (match) => match[1],
+    );
+  expect(rows(reference)).toEqual(rows(local));
+  expect(reference).toContain("2 members");
+  expect(reference).toContain("1 known online");
+  for (const html of [local, reference]) {
+    expect(html).toContain(
+      'data-testid="member-devices-account:owner-account"',
+    );
+    expect(html).toContain('data-testid="member-devices-account:peer-account"');
+  }
+  expect(reference).not.toContain("Disable replica");
+});
+
+it("shows authenticated group activity on a sibling reference", async () => {
+  chatState.channels = [
+    {
+      channel_id: "channel",
+      name: "Group",
+      owner: "owner-device",
+      member_count: 1,
+      shared_reference: true,
+      reference_members_complete: true,
+    },
+  ];
+  channelApi.channelActivity.mockResolvedValue([
+    { kind: "created", actor: "owner-device", target: null, wall_clock: 1000 },
+  ]);
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(MembersDialog)));
+    await act(async () => dialog.onOpenChange?.(true));
+    expect(container.textContent).toContain("Activity");
+    expect(container.textContent).toContain("created this channel");
   } finally {
     await act(async () => root.unmount());
   }

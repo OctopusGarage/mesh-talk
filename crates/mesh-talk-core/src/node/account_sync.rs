@@ -490,6 +490,10 @@ impl Node {
             self.delivery_notify.notify_one();
         }
         if category == SyncCategory::Profile && enabled {
+            {
+                let _commit = self.account_sync_commit.lock().expect("sync commit mutex");
+                self.project_public_profile_documents()?;
+            }
             let conversations = self
                 .log
                 .lock()
@@ -2017,6 +2021,7 @@ impl Node {
         let mut revision = self.device_sync_policy_snapshot().1;
         let mut custody_migration = None;
         let mut inventory_publication = None;
+        let mut public_profile_publication = None;
         let mut group_access_publication = None;
         let mut fanout = fanout::FanoutQueue::default();
         let mut fanout_cursor = 0u64;
@@ -2049,6 +2054,11 @@ impl Node {
             self.migrate_channel_custody(&mut custody_migration);
             self.publish_account_group_access(&mut group_access_publication);
             self.publish_group_inventory(&mut inventory_publication);
+            if let Err(error) =
+                self.publish_public_profile_documents_page(&mut public_profile_publication)
+            {
+                log::debug!("contact profile publication deferred: {error}");
+            }
             // Explicit File copies and invitation capability/history preparation
             // share the existing attachment slots. Optional archive policy cannot stop
             // an already authorized account operation; control slots stay free.
@@ -2138,7 +2148,7 @@ impl Node {
                 };
                 let task = fanout_tasks.spawn(permit.track(async move {
                     let members = node.channel_members(group);
-                    node.distribute_channel(group, &members).await;
+                    node.distribute_account_group_effects(group, &members).await;
                     group
                 }));
                 fanout_owners.insert(task.id(), group);

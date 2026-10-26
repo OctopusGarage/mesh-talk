@@ -487,7 +487,8 @@
         "src-tauri/src/services/",
         "src-tauri/src/session_store.rs",
         "src-tauri/src/session_store/",
-        "src-tauri/src/linked_account.rs"
+        "src-tauri/src/linked_account.rs",
+        "src-tauri/src/events.rs"
       ],
       "rust": [
         {
@@ -500,7 +501,8 @@
             "commands::tests::",
             "owner_commands::tests::",
             "chat_commands::state::tests::",
-            "session_store::macos::tests::"
+            "session_store::macos::tests::",
+            "events::notification_policy_tests::notification_presentation_"
           ]
         }
       ],
@@ -560,6 +562,10 @@
           {
             "name": "Signed account nicknames project into persisted desktop and frontend state only for the current installed session; old completed markers without a signed card repair the already-bound profile, while a pending adoption never publishes its unrelated previous local nickname across restart",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Inbound DM, channel and file presentation queues before acquiring desktop-session authority; UI-thread execution revalidates the exact session and runtime without a worker/main-thread focus-query deadlock.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
           }
         ]
       }

@@ -12,6 +12,7 @@ use std::{
 const MAX_ORDINARY_KEYS: usize = 4096;
 const MAX_MESSAGE_KEYS: usize = 65536;
 const MAX_REFERENCE_KEYS: usize = 4096;
+const MAX_PRESENTATION_KEYS: usize = 4096;
 const MAX_GROUP_CONTROL_KEYS: usize = 4096;
 const MAX_GROUP_OPERATION_KEYS: usize = 4096;
 const MAX_OPERATION_LIVE: u64 = 32 * 1024 * 1024;
@@ -20,7 +21,8 @@ const MAX_OWNED_BLOBS: usize = MAX_ORDINARY_KEYS
     + MAX_MESSAGE_KEYS
     + MAX_REFERENCE_KEYS
     + MAX_GROUP_CONTROL_KEYS
-    + MAX_GROUP_OPERATION_KEYS;
+    + MAX_GROUP_OPERATION_KEYS
+    + 2 * MAX_PRESENTATION_KEYS;
 // Include key.salt and one replacement/partial blob interrupted before cleanup.
 const MAX_MEDIA_ENTRIES: usize = MAX_OWNED_BLOBS + 2;
 const MAX_LIVE: u64 = 128 * 1024 * 1024;
@@ -125,11 +127,11 @@ pub(in crate::node) struct AccountDocumentStore {
     account: [u8; 32],
     records: usize,
     journal_bytes: usize,
-    counts: [usize; 10],
+    counts: [usize; 12],
     live_bytes: u64,
     operation_keys: usize,
     operation_bytes: u64,
-    digest_xor: [[u8; 32]; 10],
+    digest_xor: [[u8; 32]; 12],
     incomplete: BTreeSet<AccountDocumentKey>,
     local_receipts: BTreeMap<AccountDocumentKey, RetainedPublicationReceipt>,
     // Bounded by current inventory keys; never exported in document metadata.
@@ -213,11 +215,11 @@ impl AccountDocumentStore {
             account: *account,
             records: rows.len(),
             journal_bytes,
-            counts: [0; 10],
+            counts: [0; 12],
             live_bytes: 0,
             operation_keys: 0,
             operation_bytes: 0,
-            digest_xor: [[0; 32]; 10],
+            digest_xor: [[0; 32]; 12],
             incomplete: BTreeSet::new(),
             local_receipts: BTreeMap::new(),
             inventory_source_floors: BTreeSet::new(),
@@ -704,6 +706,12 @@ impl AccountDocumentStore {
         self.validate(&meta)?;
         if meta.key.is_private_control()
             && !match meta.key {
+                AccountDocumentKey::PublicProfile { .. } => {
+                    super::public_profile::valid_payload(&meta, payload)
+                }
+                AccountDocumentKey::GroupActivity { .. } => {
+                    super::group_activity::valid_payload(&meta, payload)
+                }
                 AccountDocumentKey::GroupOperation { .. } => {
                     crate::node::account_group::operations::valid_payload(&meta, payload)
                 }
@@ -890,12 +898,18 @@ impl AccountDocumentStore {
         if !meta.valid(&self.account) {
             return Err(corrupt());
         }
+        let presentation = matches!(
+            meta.key,
+            AccountDocumentKey::PublicProfile { .. } | AccountDocumentKey::GroupActivity { .. }
+        );
         let seen = matches!(meta.key, AccountDocumentKey::ReadReceipt { .. });
         let custody = matches!(meta.key, AccountDocumentKey::ChannelCustody { .. });
         let reference = matches!(meta.key, AccountDocumentKey::GroupInventory { .. });
         let operation = matches!(meta.key, AccountDocumentKey::GroupOperation { .. });
         let group_control = matches!(meta.key, AccountDocumentKey::GroupControl { .. });
-        let count = if operation {
+        let count = if presentation {
+            self.counts[meta.key.domain() as usize]
+        } else if operation {
             self.operation_keys
         } else if group_control {
             self.counts[AccountDocumentDomain::GroupControl as usize]
@@ -912,10 +926,14 @@ impl AccountDocumentStore {
                 - self.counts[AccountDocumentDomain::ChannelCustody as usize]
                 - self.counts[AccountDocumentDomain::GroupInventory as usize]
                 - self.counts[AccountDocumentDomain::GroupControl as usize]
+                - self.counts[AccountDocumentDomain::PublicProfile as usize]
+                - self.counts[AccountDocumentDomain::GroupActivity as usize]
         };
         if !self.current.contains_key(&meta.key)
             && count
-                >= if operation {
+                >= if presentation {
+                    MAX_PRESENTATION_KEYS
+                } else if operation {
                     MAX_GROUP_OPERATION_KEYS
                 } else if group_control {
                     MAX_GROUP_CONTROL_KEYS
@@ -1197,6 +1215,7 @@ mod tests {
                 + MAX_REFERENCE_KEYS
                 + MAX_GROUP_CONTROL_KEYS
                 + MAX_GROUP_OPERATION_KEYS
+                + 2 * MAX_PRESENTATION_KEYS
         );
     }
 

@@ -9,6 +9,36 @@ use tauri_plugin_notification::NotificationExt;
 /// How many characters of a message body we surface in a notification preview.
 const PREVIEW_LEN: usize = 80;
 
+/// Queue native presentation before acquiring session authority. Window queries
+/// may synchronously dispatch to the main thread; holding the Session mutex on
+/// a worker during that roundtrip deadlocks a main-thread owner command.
+/// Revalidate inside the queued task so replacement sessions cannot receive an
+/// earlier runtime's notifications or frontend events.
+pub(crate) fn dispatch_runtime_presentation<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    authority: &crate::chat_commands::RuntimeAuthority,
+    present: impl FnOnce(&tauri::AppHandle<R>) + Send + 'static,
+) {
+    let queued_app = app.clone();
+    if let Err(error) = queue_runtime_presentation(
+        authority.clone(),
+        move || present(&queued_app),
+        |task| app.run_on_main_thread(task),
+    ) {
+        log::warn!("Unable to queue runtime presentation: {error}");
+    }
+}
+
+fn queue_runtime_presentation<E>(
+    authority: crate::chat_commands::RuntimeAuthority,
+    present: impl FnOnce() + Send + 'static,
+    enqueue: impl FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), E>,
+) -> Result<(), E> {
+    enqueue(Box::new(move || {
+        let _ = authority.current(|_| present());
+    }))
+}
+
 #[derive(Clone, Default)]
 pub struct NotificationContextState(
     Arc<Mutex<NotificationContext>>,
@@ -538,6 +568,120 @@ pub fn emit_file_received<R: Runtime>(
 mod notification_policy_tests {
     use super::*;
     use tauri::Listener;
+
+    fn presentation_authority() -> (
+        crate::state::SessionState,
+        crate::chat_commands::NodeState,
+        crate::chat_commands::RuntimeAuthority,
+    ) {
+        let session = crate::state::SessionState::default();
+        let node = crate::chat_commands::NodeState::empty();
+        let lease = session.publish(
+            "fixture token".into(),
+            crate::services::user::User {
+                user_id: "fixture-owner".into(),
+                account_login_name: None,
+                name: "fixture".into(),
+                display_name: "Fixture".into(),
+                address: "fixture".into(),
+                created_at: 0,
+                last_seen: 0,
+                is_online: true,
+            },
+            "fixture password".into(),
+        );
+        let authority =
+            crate::chat_commands::RuntimeAuthority::request(session.clone(), lease, node.clone())
+                .unwrap();
+        (session, node, authority)
+    }
+
+    #[test]
+    fn notification_presentation_queues_without_waiting_for_the_main_thread_session_lock() {
+        use std::{sync::mpsc, thread, time::Duration};
+        let (session, _node, authority) = presentation_authority();
+        let (queued_tx, queued_rx) = mpsc::channel();
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let presented = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = presented.clone();
+        let main_thread = thread::current().id();
+
+        // Model a main-thread owner command holding the real Session mutex.
+        // The runtime callback must enqueue and return while that guard is held,
+        // rather than acquiring Session first or waiting on window focus.
+        let (worker, queued, returned) = session
+            .with_owner(|owner| {
+                assert_eq!(owner, Some("fixture-owner"));
+                let worker = thread::spawn(move || {
+                    queue_runtime_presentation(
+                        authority,
+                        move || {
+                            assert_eq!(thread::current().id(), main_thread);
+                            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        },
+                        |task| queued_tx.send(task),
+                    )
+                    .unwrap();
+                    returned_tx.send(()).unwrap();
+                });
+                let queued = queued_rx.recv_timeout(Duration::from_secs(2));
+                let returned = returned_rx.recv_timeout(Duration::from_secs(2));
+                Ok((worker, queued, returned))
+            })
+            .unwrap();
+        // Release the simulated command before joining, including on regression.
+        worker.join().unwrap();
+        assert!(
+            returned.is_ok(),
+            "runtime callback must not wait for main-thread execution"
+        );
+        assert!(!presented.load(std::sync::atomic::Ordering::SeqCst));
+        queued.expect("presentation must queue without acquiring the Session mutex")();
+        assert!(presented.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn notification_presentation_drops_queued_work_after_session_or_runtime_replacement() {
+        for replacement in ["logout", "same_owner_session", "runtime"] {
+            let (session, node, authority) = presentation_authority();
+            let mut queued = None;
+            let presented = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = presented.clone();
+            queue_runtime_presentation(
+                authority.clone(),
+                move || {
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                },
+                |task| {
+                    queued = Some(task);
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+            match replacement {
+                "logout" => session.clear(),
+                "same_owner_session" => {
+                    let info = session
+                        .matching(&authority.lease, |info| info.clone())
+                        .unwrap();
+                    session.publish(info.token, info.user, info.password);
+                }
+                _ => {
+                    crate::chat_commands::RuntimeAuthority::request(
+                        session.clone(),
+                        authority.lease.clone(),
+                        node,
+                    )
+                    .unwrap();
+                }
+            }
+            queued.unwrap()();
+            assert!(
+                !presented.load(std::sync::atomic::Ordering::SeqCst),
+                "stale {replacement} must not notify or emit private events"
+            );
+        }
+    }
 
     #[test]
     fn dm_event_preserves_logical_identity_and_legacy_absence_for_unread_consumers() {

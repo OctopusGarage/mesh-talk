@@ -928,6 +928,7 @@ impl Node {
                 Ok(false) => {}
                 Err(error) => log::debug!("group inventory publication deferred: {error}"),
             }
+            self.publish_group_activity_for(*id);
         }
     }
 }

@@ -27,6 +27,8 @@ fn editable(key: &AccountDocumentKey) -> Result<(), CommandError> {
             | AccountDocumentKey::ChannelCustody { .. }
             | AccountDocumentKey::GroupInventory { .. }
             | AccountDocumentKey::DeviceHostname { .. }
+            | AccountDocumentKey::PublicProfile { .. }
+            | AccountDocumentKey::GroupActivity { .. }
     ) {
         return Err(CommandError::Authorization(
             "account controls require verified event ingestion".into(),
@@ -39,9 +41,14 @@ fn editable(key: &AccountDocumentKey) -> Result<(), CommandError> {
 /// Generic document responses must never expose private operation payloads or
 /// permit writes that bypass the core's signed control ingestion.
 fn generic_access(domain: AccountDocumentDomain) -> Result<(), CommandError> {
-    if domain == AccountDocumentDomain::GroupControl {
+    if matches!(
+        domain,
+        AccountDocumentDomain::GroupControl
+            | AccountDocumentDomain::PublicProfile
+            | AccountDocumentDomain::GroupActivity
+    ) {
         return Err(CommandError::Authorization(
-            "group controls require the typed account group interface".into(),
+            "account metadata requires its typed interface".into(),
         ));
     }
     Ok(())

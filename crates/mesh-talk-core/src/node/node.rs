@@ -979,6 +979,12 @@ impl Node {
         node.reconcile_account_profiles_on_open().map_err(|error| {
             LogError::CorruptFile(format!("account profile projection: {error}"))
         })?;
+        if let Err(error) = node.project_public_profile_documents() {
+            log::debug!("contact profile projection deferred: {error}");
+        }
+        if let Err(error) = node.publish_public_profile_documents() {
+            log::debug!("contact profile publication deferred: {error}");
+        }
         node.prune_expired_received_on_open()
             .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
         node.queue_approved_incomplete_files();
@@ -1212,10 +1218,13 @@ impl Node {
     }
 
     pub fn channel_activity(&self, channel: ConversationId) -> Vec<super::ChannelActivity> {
-        self.channels
-            .lock()
-            .expect("channels mutex not poisoned")
-            .activity(&channel)
+        {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            if book.state(&channel).is_some() {
+                return book.activity(&channel);
+            }
+        }
+        self.shared_group_activity(channel)
     }
 
     /// The current owner of `channel`, or empty if the channel is unknown.

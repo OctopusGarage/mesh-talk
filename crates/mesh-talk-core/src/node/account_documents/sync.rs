@@ -65,7 +65,7 @@ impl DocumentSyncScope {
                     | (1 << AccountDocumentDomain::DeviceHostname as usize)
                     | (1 << AccountDocumentDomain::GroupControl as usize)
             }
-            Self::Optional => 127,
+            Self::Optional => Self::All.mask() & !Self::Mandatory.mask(),
         }
     }
 }
@@ -73,7 +73,7 @@ pub(in crate::node) struct DocumentSyncCursor {
     scope: DocumentSyncScope,
     pub(super) domain: usize,
     pub(super) after: Option<AccountDocumentKey>,
-    pub(super) digests: [[u8; 32]; 10],
+    pub(super) digests: [[u8; 32]; 12],
     // The legacy digest remains access-only, even when the peer ignores the
     // optional operation probe. Its digest and continuation have a separate scope.
     operation_digest: [u8; 32],
@@ -97,6 +97,7 @@ pub(in crate::node) struct DocumentSyncCursor {
     group_retry_at: Option<Instant>,
     group_upgrade: bool,
     hostname_retry_at: Option<Instant>,
+    presentation_retry_at: Option<Instant>,
 }
 impl Default for DocumentSyncCursor {
     fn default() -> Self {
@@ -104,7 +105,7 @@ impl Default for DocumentSyncCursor {
             scope: DocumentSyncScope::All,
             domain: AccountDocumentDomain::GroupControl as usize,
             after: None,
-            digests: [[0; 32]; 10],
+            digests: [[0; 32]; 12],
             operation_digest: [0; 32],
             retry_at: None,
             last_failure_at: None,
@@ -126,6 +127,7 @@ impl Default for DocumentSyncCursor {
             group_retry_at: None,
             group_upgrade: false,
             hostname_retry_at: None,
+            presentation_retry_at: None,
         }
     }
 }
@@ -208,6 +210,13 @@ impl DocumentSyncCursor {
         self.error = None;
         self.error_domain = None;
     }
+    fn presentation_unavailable(&mut self) {
+        self.presentation_retry_at = Some(Instant::now() + Duration::from_secs(300));
+        self.after = None;
+        self.domain = 0;
+        self.pending = true;
+        self.up_to_date = false;
+    }
     fn hostname_unavailable(&mut self) {
         self.hostname_retry_at = Some(Instant::now() + Duration::from_secs(300));
         self.after = None;
@@ -267,6 +276,9 @@ impl DocumentSyncCursor {
         if let Some(error) = &self.error
             && (policy.history
                 || policy.appearance
+                || self
+                    .error_domain
+                    .is_some_and(|domain| document_enabled(domain, policy))
                 || self.error_domain == Some(AccountDocumentDomain::GroupInventory)
                 || self.error_domain == Some(AccountDocumentDomain::GroupControl))
         {
@@ -297,7 +309,7 @@ impl DocumentSyncCursor {
     }
 }
 
-const DOMAINS: [AccountDocumentDomain; 10] = [
+const DOMAINS: [AccountDocumentDomain; 12] = [
     AccountDocumentDomain::Draft,
     AccountDocumentDomain::ReadReceipt,
     AccountDocumentDomain::CustomizationPack,
@@ -308,16 +320,20 @@ const DOMAINS: [AccountDocumentDomain; 10] = [
     AccountDocumentDomain::GroupInventory,
     AccountDocumentDomain::DeviceHostname,
     AccountDocumentDomain::GroupControl,
+    AccountDocumentDomain::PublicProfile,
+    AccountDocumentDomain::GroupActivity,
 ];
 fn category(domain: AccountDocumentDomain) -> SyncCategory {
     match domain {
+        AccountDocumentDomain::PublicProfile => SyncCategory::Profile,
         AccountDocumentDomain::Draft
         | AccountDocumentDomain::ReadReceipt
         | AccountDocumentDomain::DmReaction
         | AccountDocumentDomain::DmRecall
         | AccountDocumentDomain::ChannelCustody
         | AccountDocumentDomain::GroupInventory
-        | AccountDocumentDomain::GroupControl => SyncCategory::History,
+        | AccountDocumentDomain::GroupControl
+        | AccountDocumentDomain::GroupActivity => SyncCategory::History,
         _ => SyncCategory::Appearance,
     }
 }
@@ -580,6 +596,12 @@ impl Node {
         {
             cursor.hostname_retry_at = None;
         }
+        if cursor
+            .presentation_retry_at
+            .is_some_and(|at| at <= Instant::now())
+        {
+            cursor.presentation_retry_at = None;
+        }
         let policy = self.device_sync_policy();
         let mut eligible = false;
         for _ in 0..DOMAINS.len() {
@@ -588,7 +610,8 @@ impl Node {
                 cursor.after = None;
                 continue;
             }
-            if ((4..6).contains(&cursor.domain) && cursor.control_retry_at.is_some())
+            if (cursor.domain >= 10 && cursor.presentation_retry_at.is_some())
+                || ((4..6).contains(&cursor.domain) && cursor.control_retry_at.is_some())
                 || (cursor.domain == 6 && cursor.custody_retry_at.is_some())
                 || (cursor.domain == 7 && cursor.inventory_retry_at.is_some())
                 || (DOMAINS[cursor.domain] == AccountDocumentDomain::GroupControl
@@ -639,6 +662,9 @@ impl Node {
         }
         if result.is_err()
             && match attempted_domain {
+                AccountDocumentDomain::PublicProfile | AccountDocumentDomain::GroupActivity => {
+                    cursor.presentation_retry_at.is_some()
+                }
                 AccountDocumentDomain::DeviceHostname => cursor.hostname_retry_at.is_some(),
                 AccountDocumentDomain::GroupInventory => cursor.inventory_retry_at.is_some(),
                 AccountDocumentDomain::GroupControl => cursor.group_retry_at.is_some(),
@@ -728,6 +754,7 @@ impl Node {
         };
         let request = DocumentRequest {
             version: match domain {
+                AccountDocumentDomain::PublicProfile | AccountDocumentDomain::GroupActivity => 6,
                 AccountDocumentDomain::DeviceHostname => 5,
                 AccountDocumentDomain::GroupInventory => 4,
                 AccountDocumentDomain::GroupControl => 5,
@@ -759,7 +786,9 @@ impl Node {
                 if request.version >= 2
                     && matches!(&error,NodeError::Session(super::super::session::SessionError::Transport(TransportError::Io(e))) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe))
                 {
-                    if domain == AccountDocumentDomain::GroupControl {
+                    if request.version == 6 {
+                        cursor.presentation_unavailable();
+                    } else if domain == AccountDocumentDomain::GroupControl {
                         cursor.group_interrupted(false);
                     } else if domain == AccountDocumentDomain::DeviceHostname {
                         cursor.hostname_unavailable();
@@ -802,7 +831,11 @@ impl Node {
                 Err(error) => {
                     let pre_reply_close = matches!(&error,TransportError::Io(e) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe));
                     if request.version >= 2 && pre_reply_close {
-                        if domain == AccountDocumentDomain::GroupControl {
+                        if request.version == 6 {
+                            if records == 0 {
+                                cursor.presentation_unavailable();
+                            }
+                        } else if domain == AccountDocumentDomain::GroupControl {
                             // Each access observation is independently signed.
                             // Preserve only fully received, validated role rows;
                             // operation rows still require the matching terminal
@@ -1121,6 +1154,10 @@ impl Node {
                         }
                     }
                     let mut supported_mask = cursor.scope.mask();
+                    if cursor.presentation_retry_at.is_some() {
+                        supported_mask &= !((1 << AccountDocumentDomain::PublicProfile as usize)
+                            | (1 << AccountDocumentDomain::GroupActivity as usize));
+                    }
                     if cursor.group_retry_at.is_some() {
                         supported_mask &= !(1 << AccountDocumentDomain::GroupControl as usize);
                     }
@@ -1186,6 +1223,7 @@ impl Node {
                     "account document policy changed".into(),
                 ));
             }
+            let public_profile = meta.key.domain() == AccountDocumentDomain::PublicProfile;
             let private_control = meta.key.is_private_control();
             let changed = node
                 .account_documents
@@ -1193,6 +1231,12 @@ impl Node {
                 .expect("documents mutex")
                 .merge(meta, &payload)
                 .map_err(NodeError::Log)?;
+            if public_profile {
+                let profile = crate::node::AccountProfile::decode(&payload).ok_or_else(failure)?;
+                if profile.account_id() != node.account_id() {
+                    node.receive_account_profile(&profile)?;
+                }
+            }
             if changed {
                 node.documents_imported();
                 if private_control {
@@ -2607,6 +2651,10 @@ mod group_control_tests {
             .target
             .set_device_sync_category(SyncCategory::Appearance, false)
             .unwrap();
+        fixture
+            .target
+            .set_device_sync_category(SyncCategory::Profile, false)
+            .unwrap();
         let mut cursor = DocumentSyncCursor::optional();
         fixture
             .target
@@ -2955,7 +3003,7 @@ mod group_control_tests {
             profile: false,
         };
         assert_eq!(cursor.domain, AccountDocumentDomain::GroupControl as usize);
-        assert_eq!(cursor.digests.len(), 10);
+        assert_eq!(cursor.digests.len(), DOMAINS.len());
         assert_eq!(
             DocumentSyncScope::Mandatory.mask(),
             (1 << AccountDocumentDomain::GroupInventory as usize)
@@ -3042,5 +3090,201 @@ mod group_control_tests {
                 .map(|support| &support.public),
             Some(&source.identity.public())
         );
+    }
+    // Paste this nested module INSIDE sync.rs::group_control_tests, alongside
+    // UpgradeFixture and receive_document_request. It reuses their private helpers.
+    mod presentation_compat_tests {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        async fn legacy_peer(fixture: &mut UpgradeFixture) -> (PeerRecord, Arc<AtomicUsize>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut peer = fixture.peer.clone();
+            peer.addr = listener.local_addr().unwrap();
+            let source = fixture.source.clone();
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let counted = attempts.clone();
+            fixture.servers.spawn(async move {
+            let mut children = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let source = source.clone();
+                let counted = counted.clone();
+                children.spawn(async move {
+                    let mut channel = source.privacy_accept(stream).await.unwrap();
+                    while let Ok(bytes) = channel.recv().await {
+                        let Some((_, AccountHistoryFrame::SessionRequest {
+                            request_id,
+                            request: super::super::super::super::account_sync_wire::AccountSessionRequest::Documents { body },
+                        })) = AccountHistoryFrame::decode_versioned(&bytes) else {
+                            break;
+                        };
+                        let request: DocumentRequest = serde_json::from_slice(&body).unwrap();
+                        if request.version > 5 {
+                            // An older enum parser closes on the unknown domain
+                            // before sending SessionReady or any document header.
+                            counted.fetch_add(1, Ordering::SeqCst);
+                            break;
+                        }
+                        if channel.send(&AccountHistoryFrame::SessionReady { request_id }
+                            .encode_version(AccountSyncVersion::V2).unwrap()).await.is_err()
+                        {
+                            break;
+                        }
+                        if !source.serve_account_documents(&mut channel, request).await {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+            (peer, attempts)
+        }
+
+        #[tokio::test]
+        async fn old_peer_v6_probe_cools_both_domains_without_blocking_drafts_and_retries_after_expiry()
+         {
+            let mut fixture = UpgradeFixture::new().await;
+            let (peer, attempts) = legacy_peer(&mut fixture).await;
+            let key = AccountDocumentKey::Draft {
+                conversation: DocumentConversation::Account("d".repeat(32)),
+            };
+            let first = fixture
+                .source
+                .put_account_document_if(
+                    key.clone(),
+                    b"before presentation probe".to_vec(),
+                    None,
+                    |commit| commit(),
+                )
+                .unwrap();
+            let mut cursor = DocumentSyncCursor::optional();
+            cursor.domain = AccountDocumentDomain::PublicProfile as usize;
+            assert!(
+                fixture
+                    .target
+                    .pull_account_documents_page(&peer, &mut cursor)
+                    .await
+                    .is_err()
+            );
+            let cooldown = cursor.presentation_retry_at.unwrap();
+            assert!(cooldown > Instant::now() + Duration::from_secs(240));
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+            assert!(cursor.retry_at.is_none());
+            assert!(cursor.error.is_none());
+
+            fixture
+                .source
+                .put_account_document_if(
+                    key.clone(),
+                    b"after presentation probe".to_vec(),
+                    Some(first.version()),
+                    |commit| commit(),
+                )
+                .unwrap();
+            for _ in 0..16 {
+                fixture
+                    .target
+                    .pull_account_documents_page(&peer, &mut cursor)
+                    .await
+                    .unwrap();
+                if !cursor.pending {
+                    break;
+                }
+            }
+            assert!(
+                !cursor.pending,
+                "legacy optional work must finish its bounded sweep"
+            );
+            assert_eq!(
+                fixture
+                    .target
+                    .account_document(&key)
+                    .unwrap()
+                    .unwrap()
+                    .payload(),
+                b"after presentation probe"
+            );
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                1,
+                "both v6 domains share the compatibility cooldown"
+            );
+            assert_eq!(cursor.presentation_retry_at, Some(cooldown));
+
+            // No clock delay: expire only this cursor's domain capability backoff.
+            cursor.presentation_retry_at = Some(Instant::now() - Duration::from_secs(1));
+            cursor.domain = AccountDocumentDomain::GroupActivity as usize;
+            assert!(
+                fixture
+                    .target
+                    .pull_account_documents_page(&peer, &mut cursor)
+                    .await
+                    .is_err()
+            );
+            // A retired pooled session may retry once on a fresh authenticated
+            // connection; this remains one bounded logical capability probe.
+            assert!((2..=3).contains(&attempts.load(Ordering::SeqCst)));
+            assert!(cursor.presentation_retry_at.unwrap() > cooldown);
+            fixture.servers.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn valid_v6_header_then_eof_is_an_interruption_not_legacy_downgrade() {
+            let mut fixture = UpgradeFixture::new().await;
+            let group = fixture
+                .source
+                .create_channel("bounded observed activity", vec![])
+                .await
+                .unwrap();
+            fixture.source.publish_group_inventory_for(group);
+            fixture.source.publish_group_activity_for(group);
+            let key = AccountDocumentKey::GroupActivity {
+                channel: hex::encode(group.as_bytes()),
+                source_device: fixture.source.user_id(),
+            };
+            let document = fixture.source.account_document(&key).unwrap().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut peer = fixture.peer.clone();
+            peer.addr = listener.local_addr().unwrap();
+            let source = fixture.source.clone();
+            let responder = tokio::spawn(async move {
+                let (mut channel, body) = receive_document_request(&source, listener).await;
+                let request: DocumentRequest = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request.version, 6);
+                assert_eq!(request.domain, AccountDocumentDomain::GroupActivity);
+                channel
+                    .send(
+                        &AccountHistoryFrame::DocumentHeader {
+                            body: serde_json::to_vec(&document.meta).unwrap(),
+                        }
+                        .encode_version(AccountSyncVersion::V2)
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                // A valid header proves the peer understands this domain. Truncate
+                // the body, rather than disguising a partial transfer as old support.
+            });
+            let mut cursor = DocumentSyncCursor::for_domain(AccountDocumentDomain::GroupActivity);
+            assert!(
+                fixture
+                    .target
+                    .pull_account_documents_page(&peer, &mut cursor)
+                    .await
+                    .is_err()
+            );
+            responder.await.unwrap();
+            assert!(cursor.presentation_retry_at.is_none());
+            assert!(cursor.retry_at.is_some());
+            assert!(cursor.error.is_some());
+            assert_eq!(
+                cursor.error_domain,
+                Some(AccountDocumentDomain::GroupActivity)
+            );
+            assert!(!cursor.up_to_date);
+            assert!(fixture.target.account_document(&key).unwrap().is_none());
+            fixture.servers.shutdown().await;
+        }
     }
 }

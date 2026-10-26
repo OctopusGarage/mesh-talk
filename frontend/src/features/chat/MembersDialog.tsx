@@ -434,14 +434,14 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
           <DialogTitle className="flex min-w-0 flex-wrap items-baseline gap-2">
             {t("members.title")}
             <span className="font-display text-base font-normal tabular-nums text-muted-foreground">
-              {sharedReference
-                ? t("conversation.members", {
-                    count: channel?.member_count ?? 0,
+              {channelId && presenceMap[channelId]?.member_count != null
+                ? t("presence.groupSummary", {
+                    total: presenceMap[channelId].member_count,
+                    online: presenceMap[channelId].online_count ?? 0,
                   })
-                : channelId && presenceMap[channelId]?.member_count != null
-                  ? t("presence.groupSummary", {
-                      total: presenceMap[channelId].member_count,
-                      online: presenceMap[channelId].online_count ?? 0,
+                : sharedReference
+                  ? t("conversation.members", {
+                      count: channel?.member_count ?? 0,
                     })
                   : t("presence.groupUpdating")}
             </span>
@@ -453,15 +453,9 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                 : "members.description",
             )}
           </DialogDescription>
-          {sharedReference ? (
-            channel?.reference_members_complete === false && (
-              <p className="text-xs text-muted-foreground">
-                {t("members.referencePartial")}
-              </p>
-            )
-          ) : (
+          {sharedReference && channel?.reference_members_complete === false && (
             <p className="text-xs text-muted-foreground">
-              {t("members.replicaHelp")}
+              {t("members.referencePartial")}
             </p>
           )}
           {!sharedReference &&
@@ -565,7 +559,9 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                   )
                 : [];
               const hasDeviceDetails =
-                group.devices.length > 1 || linkedCandidates.length > 0;
+                group.accountId !== null ||
+                group.devices.length > 1 ||
+                linkedCandidates.length > 0;
               // Self presence uses the same expiring runtime snapshot as other accounts.
               const accountId = group.accountId;
               const isSelf = accountId
@@ -738,6 +734,11 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                         {t("members.devices", { count: group.devices.length })}
                       </summary>
                       <div className="space-y-1 border-l pl-2">
+                        {isSelf && !sharedReference && (
+                          <p className="text-muted-foreground">
+                            {t("members.replicaHelp")}
+                          </p>
+                        )}
                         {group.devices.map((device) => (
                           <div
                             key={device.user_id}
@@ -887,7 +888,7 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
             />
           </div>
         )}
-        {!sharedReference && activity.length > 0 && (
+        {activity.length > 0 && (
           <div className="space-y-2 border-t pt-3">
             <h3 className="text-xs font-semibold text-muted-foreground">
               {t("members.activity")}

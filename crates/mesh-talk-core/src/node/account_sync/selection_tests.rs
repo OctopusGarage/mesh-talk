@@ -3367,3 +3367,106 @@ async fn recalled_private_file_blocks_late_cards_and_stale_sibling_byte_release(
     stale_server.abort();
     let _ = stale_server.await;
 }
+
+#[tokio::test]
+async fn foreign_public_profile_documents_cross_certified_loopback_with_profile_consent() {
+    use super::super::account_documents::{AccountDocumentDomain, sync::DocumentSyncCursor};
+    let (_dir, source, receiver) = sibling_nodes();
+    for node in [&source, &receiver] {
+        for category in [
+            SyncCategory::History,
+            SyncCategory::Appearance,
+            SyncCategory::Contacts,
+        ] {
+            node.set_device_sync_category(category, false).unwrap();
+        }
+    }
+    let foreign = Account::generate();
+    let profile = super::super::AccountProfile::new(
+        &foreign,
+        10,
+        "Offline group owner".into(),
+        "Original signed biography".into(),
+        Some(b"offline owner photo".to_vec()),
+    );
+    source.receive_account_profile(&profile).unwrap();
+    source
+        .publish_public_profile_document(&foreign.account_id())
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+    sibling_peer(&source, &receiver, "127.0.0.1:9".parse().unwrap());
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+
+    source
+        .set_device_sync_category(SyncCategory::Profile, false)
+        .unwrap();
+    let mut cursor = DocumentSyncCursor::default();
+    for _ in 0..16 {
+        receiver
+            .pull_account_documents_page(&peer, &mut cursor)
+            .await
+            .unwrap();
+    }
+    assert!(receiver.account_profile(&foreign.account_id()).is_none());
+    assert!(
+        receiver
+            .account_documents(AccountDocumentDomain::PublicProfile, None, 64)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+
+    source
+        .set_device_sync_category(SyncCategory::Profile, true)
+        .unwrap();
+    receiver
+        .set_device_sync_category(SyncCategory::Profile, false)
+        .unwrap();
+    let mut cursor = DocumentSyncCursor::default();
+    for _ in 0..16 {
+        receiver
+            .pull_account_documents_page(&peer, &mut cursor)
+            .await
+            .unwrap();
+    }
+    assert!(receiver.account_profile(&foreign.account_id()).is_none());
+    assert!(
+        receiver
+            .account_documents(AccountDocumentDomain::PublicProfile, None, 64)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+
+    receiver
+        .set_device_sync_category(SyncCategory::Profile, true)
+        .unwrap();
+    let mut cursor = DocumentSyncCursor::default();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while receiver.account_profile(&foreign.account_id()).as_ref() != Some(&profile) {
+            receiver
+                .pull_account_documents_page(&peer, &mut cursor)
+                .await
+                .unwrap();
+        }
+    })
+    .await
+    .expect("certified sibling imports the offline account's original signed profile");
+    assert_eq!(receiver.peer_avatar(&foreign.account_id()), profile.avatar);
+    assert!(
+        receiver
+            .account_documents(AccountDocumentDomain::AvatarOverride, None, 64)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        receiver.list_channels().is_empty(),
+        "presentation replication grants no physical membership"
+    );
+    assert!(!receiver.device_sync_policy().history);
+    assert!(!receiver.device_sync_policy().appearance);
+    server.abort();
+    let _ = server.await;
+}

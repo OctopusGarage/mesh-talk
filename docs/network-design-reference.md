@@ -742,6 +742,15 @@ Descriptive labels normalize control characters and bound UTF-8 text with a
 visible ellipsis or ID fallback. Invalid display text must not suppress a group
 entry, and this projection never renames its authoritative local group.
 
+Account-operation message fanout carries the committed public event ID into the
+existing bounded group distribution owner. That same round requests durable-have
+proofs from recipients and eligible custody relays; synchronizing event bytes alone
+cannot count as confirmation. Own-account siblings remain excluded from external
+member-copy counts, and full control distribution still reaches every routed member.
+The derived operation index is rebuilt on restart, allowing the latest retained
+source message to obtain missing confirmation after an upgrade without resending a
+new logical message. This evidence establishes custody, not delivery or reading.
+
 Small groups retain direct fanout. Text/sticker distribution in larger groups seeds a bounded subset and relies on authorized member recovery; membership/key controls retain their broader bounded fanout. File manifests have their own fanout behavior and must not inherit a text-only optimization without an explicit retention/recovery design.
 
 Channel send acceptance returns the exact locally committed event ID before
@@ -958,6 +967,24 @@ cryptographic account. Other accounts cannot request hostname documents even if
 they know the account ID and establish a Noise connection. The version-5 document
 domain has an independent legacy-peer cooldown; older peers keep ordinary sync
 and existing device labels. Unavailable hostnames fall back to the existing labels.
+
+Public contact profiles and group activity use optional version-6 document domains
+on the same certified sibling sessions. Existing domain identifiers, request versions,
+and signed inventory encodings remain unchanged. An older peer's pre-header close
+backs off only these extensions; ordinary documents and mandatory topology continue.
+Public profiles follow Profile consent on both devices and retain the contact's
+original account signature. Each source keeps one bounded head per contact; the
+public-profile owner resolves signed revision ties, including an explicit avatar
+clear. Private avatar overrides remain under Appearance consent. Publication repairs
+at most 16 contact heads per worker turn and optional repair cannot prevent login.
+
+Group activity follows History consent on both devices. A source signs at most 20
+control observations, binding them to its exact inventory snapshot. A reference
+consumer uses only the activity from the same selected source and matching snapshot;
+a missing or stale observation remains unavailable. Activity cannot import membership,
+keys, routes or message bodies. Local validated group state retains precedence.
+Both domains have separate bounded key quotas, reuse manifest/chunk/digest handling,
+and reject generic desktop writes in favor of the existing typed owners.
 
 Each domain compares a deterministic digest of signed metadata. Mismatches exchange
 paged manifests, then only needed verified content; a patch carries a complete

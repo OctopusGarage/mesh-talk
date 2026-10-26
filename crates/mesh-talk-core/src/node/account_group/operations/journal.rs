@@ -167,6 +167,8 @@ pub(in crate::node) struct OperationJournal {
     // Derived from retained source terminal records; never a second job journal.
     fanout_groups: BTreeMap<[u8; 32], u64>,
     fanout_order: BTreeMap<u64, [u8; 32]>,
+    // Latest exact source Text/Sticker effect per group; rebuilt on replay.
+    fanout_messages: BTreeMap<[u8; 32], (u64, EventId)>,
     records: usize,
     bytes: usize,
     live: usize,
@@ -515,6 +517,7 @@ impl OperationJournal {
             source_ready_after: None,
             fanout_groups: BTreeMap::new(),
             fanout_order: BTreeMap::new(),
+            fanout_messages: BTreeMap::new(),
             records: rows.len(),
             bytes: 22,
             live: 0,
@@ -746,6 +749,17 @@ impl OperationJournal {
             && !entry.status.committed_events.is_empty()
         {
             let group = *entry.reference.group.as_bytes();
+            if matches!(
+                entry.reference.kind,
+                AccountGroupOperationKind::Text | AccountGroupOperationKind::Sticker
+            ) && let Some(event) = entry.status.primary_event
+                && self
+                    .fanout_messages
+                    .get(&group)
+                    .is_none_or(|(sequence, _)| *sequence < entry.sequence)
+            {
+                self.fanout_messages.insert(group, (entry.sequence, event));
+            }
             if self
                 .fanout_groups
                 .get(&group)
@@ -1078,6 +1092,31 @@ impl Node {
             .map(|(sequence, group)| (*sequence, ConversationId::new(*group)))
             .collect()
     }
+    /// Exact public Message identity selected from committed source intents,
+    /// never from unrelated history or a caller's logical operation identifier.
+    pub(in crate::node) fn account_group_fanout_message(
+        &self,
+        group: ConversationId,
+    ) -> Option<EventId> {
+        let event = self
+            .group_operations
+            .lock()
+            .expect("group operation journal mutex")
+            .fanout_messages
+            .get(group.as_bytes())
+            .map(|(_, event)| *event)?;
+        self.log
+            .lock()
+            .expect("log mutex")
+            .get(&event)
+            .filter(|event| {
+                event.conversation_id == group
+                    && event.kind == crate::eventlog::EventKind::Message
+                    && event.author.ed25519_pub() == &self.identity.public().ed25519_pub
+            })
+            .map(|event| event.id)
+    }
+
     pub(in crate::node) fn account_group_fanout_sequence(
         &self,
         group: ConversationId,
@@ -1556,6 +1595,101 @@ mod tests {
         assert_eq!(
             journal.fanout_groups.get(group.as_bytes()),
             Some(&later[0].0)
+        );
+    }
+
+    #[test]
+    fn source_message_fanout_rebuilds_latest_exact_effect_after_control_and_reopen() {
+        let (dir, node, account, template, control) = fixture();
+        let group = control.conversation_id;
+        let mut parent = control.parents[0];
+        let mut latest = None;
+        for (offset, kind) in [
+            AccountGroupOperationKind::Text,
+            AccountGroupOperationKind::Sticker,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let body = if kind == AccountGroupOperationKind::Text {
+                crate::node::message::MessageBody::new(b"indexed text".to_vec(), None)
+            } else {
+                crate::node::message::MessageBody::sticker("1f602".into(), b"sticker".to_vec())
+            };
+            let operation = AccountGroupOperation::Send {
+                message: PreparedAccountGroupMessage::from_plaintext(kind, body.encode()).unwrap(),
+            };
+            let mut entry = template.clone();
+            entry.reference = OperationReference::new(
+                &node,
+                node.new_account_group_operation_id(&account.account_id())
+                    .unwrap(),
+                group,
+                &operation,
+                template.reference.executor.clone(),
+            );
+            entry.status.id = entry.reference.id;
+            entry.status.kind = kind;
+            entry.body = Some(operation);
+            let number = offset as u64 + 2;
+            let effect = Event::new(
+                &node.identity,
+                group,
+                number,
+                vec![parent],
+                number,
+                number,
+                EventKind::Message,
+                b"signed index fixture ciphertext".to_vec(),
+            );
+            assert_ne!(effect.id.as_bytes(), entry.reference.id.as_bytes());
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(effect.clone())
+                .unwrap();
+            {
+                let mut journal = node.group_operations.lock().unwrap();
+                journal.put(entry.clone()).unwrap();
+                journal
+                    .complete(&entry.reference, std::slice::from_ref(&effect))
+                    .unwrap();
+            }
+            parent = effect.id;
+            latest = Some(effect.id);
+            assert_eq!(node.account_group_fanout_message(group), latest);
+        }
+        let control = Event::new(
+            &node.identity,
+            group,
+            4,
+            vec![parent],
+            4,
+            4,
+            EventKind::ChannelRename,
+            b"later control".to_vec(),
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(control.clone())
+            .unwrap();
+        {
+            let mut journal = node.group_operations.lock().unwrap();
+            journal.put(template.clone()).unwrap();
+            journal.complete(&template.reference, &[control]).unwrap();
+        }
+        assert_eq!(node.account_group_fanout_message(group), latest);
+        let public = node.identity.public();
+        drop(node);
+        let reopened =
+            OperationJournal::open(dir.path(), "pw", account.public().ed25519_pub, public).unwrap();
+        assert_eq!(
+            reopened
+                .fanout_messages
+                .get(group.as_bytes())
+                .map(|(_, event)| *event),
+            latest
         );
     }
 

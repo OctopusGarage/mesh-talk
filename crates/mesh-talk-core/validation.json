@@ -146,7 +146,7 @@
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Affected canonical group access and inventory, followed by the exact durable operation result, publish before public fanout waits; canonical no-op retries allocate no invented public effect and obsolete owner authority cannot execute an awaiting control.",
+            "name": "Affected canonical group access and inventory, followed by the exact durable operation result, publish before public fanout waits; canonical no-op retries allocate no invented public effect and obsolete owner authority cannot execute an awaiting control. Exact committed message IDs request durable member/relay custody in the same bounded full-control fanout round, excluding own-account siblings.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           }
         ]
@@ -327,13 +327,16 @@
     {
       "id": "core-account-documents",
       "paths": [
-        "crates/mesh-talk-core/src/node/account_documents/"
+        "crates/mesh-talk-core/src/node/account_documents/",
+        "crates/mesh-talk-core/src/node/account_profile_io.rs",
+        "crates/mesh-talk-core/src/node/account_profile_data.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
-            "node::account_documents::"
+            "node::account_documents::",
+            "node::account_sync::selection_tests::foreign_public_profile_documents_cross_certified_loopback_with_profile_consent"
           ]
         }
       ],
@@ -343,6 +346,10 @@
         "invariants": [
           {
             "name": "Certified same-account authority, bounded versioned records and deletion tombstones preserve convergence without exposing private records to other group members",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Optional public profiles preserve original account signatures and consent; group activity is bounded, source-signed and tied to the selected inventory without importing authority.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]

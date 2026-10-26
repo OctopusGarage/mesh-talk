@@ -4756,6 +4756,8 @@ async fn group_inventory_v4_cooldown_preserves_fallback_while_v5_interruptions_r
                 .unwrap();
             a.set_device_sync_category(SyncCategory::History, !optional_off)
                 .unwrap();
+            a.set_device_sync_category(SyncCategory::Profile, !optional_off)
+                .unwrap();
         }
         source
             .put_account_document_if(key(), b"optional draft".to_vec(), None, |commit| commit())
@@ -4839,13 +4841,16 @@ async fn group_inventory_v4_cooldown_preserves_fallback_while_v5_interruptions_r
         for _ in 0..16 {
             if let Err(error) = target.pull_account_documents_page(&peer, &mut cursor).await {
                 let (domain, version) = *versions.lock().unwrap().last().unwrap();
-                assert_eq!(version, 5);
+                assert!(matches!(version, 5 | 6));
                 if domain == AccountDocumentDomain::DeviceHostname {
                     hostname_rejections += 1;
                 }
                 assert!(matches!(
                     domain,
-                    AccountDocumentDomain::DeviceHostname | AccountDocumentDomain::GroupControl
+                    AccountDocumentDomain::DeviceHostname
+                        | AccountDocumentDomain::GroupControl
+                        | AccountDocumentDomain::PublicProfile
+                        | AccountDocumentDomain::GroupActivity
                 ));
                 assert!(
                     matches!(error,
@@ -4853,7 +4858,7 @@ async fn group_inventory_v4_cooldown_preserves_fallback_while_v5_interruptions_r
                             crate::transport::TransportError::Io(error)
                         )) if error.kind() == std::io::ErrorKind::UnexpectedEof
                     ),
-                    "only the fixture's deliberate v5 transport closure is retryable"
+                    "only the fixture's deliberate unsupported-domain transport closure is retryable"
                 );
             }
         }

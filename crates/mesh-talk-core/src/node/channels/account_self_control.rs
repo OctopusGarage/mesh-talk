@@ -940,6 +940,10 @@ pub(in crate::node) mod tests {
         for (name, node) in &nodes {
             node.set_device_sync_category(SyncCategory::History, false)
                 .unwrap();
+            // This regression isolates mandatory account membership/control
+            // reconciliation from optional public-profile archive traffic.
+            node.set_device_sync_category(SyncCategory::Profile, false)
+                .unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             node.configure_privacy(
@@ -1040,6 +1044,34 @@ pub(in crate::node) mod tests {
             )
             .await
             .unwrap();
+            // This scenario retains authenticated stale membership provenance,
+            // not a live discovery advertisement for the retired participant.
+            // Withdraw only its route after retirement; signed heads and the
+            // certified account directory must survive the simulated outage.
+            let offline_public = offline.identity.public();
+            for (_, node) in &nodes {
+                if node.user_id() != offline.user_id() {
+                    node.roster.lock().unwrap().forget(&offline_public);
+                }
+            }
+            for node in [&reference, &online] {
+                assert!(
+                    node.linked_devices().iter().any(|device| {
+                        device.public == offline_public
+                            && device.certificate.verify()
+                            && device.certificate.account_id() == shared.account_id()
+                    }),
+                    "route withdrawal must preserve the offline source's certified identity"
+                );
+                assert!(
+                    node.group_control_heads(group).iter().any(|head| {
+                        head.proof.public() == offline_public
+                            && head.valid(&shared.public().ed25519_pub)
+                            && head.access.observation.role == AccountGroupRole::Member
+                    }),
+                    "route withdrawal must retain the authentic stale Member head"
+                );
+            }
         }
         let executor_label = nodes
             .iter()

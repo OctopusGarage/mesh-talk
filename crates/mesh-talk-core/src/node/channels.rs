@@ -1852,7 +1852,19 @@ impl Node {
         channel: ConversationId,
         members: &[PublicIdentity],
     ) {
-        self.distribute_channel_targets(channel, members, None, true)
+        self.distribute_channel_targets(channel, members, None, true, None)
+            .await;
+    }
+
+    /// Full control distribution with one exact-message custody probe on each
+    /// existing sync exchange. Account operations retain all-member fanout.
+    pub(in crate::node) async fn distribute_channel_confirming(
+        &self,
+        channel: ConversationId,
+        members: &[PublicIdentity],
+        event: EventId,
+    ) {
+        self.distribute_channel_targets(channel, members, None, true, Some(event))
             .await;
     }
 
@@ -1866,10 +1878,10 @@ impl Node {
         members: &[PublicIdentity],
         automatic_inline: bool,
     ) {
-        self.distribute_channel_targets(channel, members, None, false)
+        self.distribute_channel_targets(channel, members, None, false, None)
             .await;
         if automatic_inline {
-            self.distribute_channel_targets(file, members, None, false)
+            self.distribute_channel_targets(file, members, None, false, None)
                 .await;
         }
         let recipients: Vec<_> = members
@@ -2389,6 +2401,7 @@ impl Node {
         members: &[PublicIdentity],
         fanout: Option<usize>,
         replicate_to_post_office: bool,
+        confirming: Option<EventId>,
     ) {
         let me = self.identity.public().user_id();
         let peers: Vec<PeerRecord> = {
@@ -2417,7 +2430,10 @@ impl Node {
         stream::iter(targets)
             .for_each_concurrent(CHANNEL_CONTROL_FANOUT_CONCURRENCY, |peer| async move {
                 let _ = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
-                    if let Ok(mut ch) = self.privacy_sync_dial(peer.addr, &peer.public).await {
+                    if let Some(event) = confirming {
+                        self.sync_and_confirm_custody(channel, event, &peer).await;
+                    } else if let Ok(mut ch) = self.privacy_sync_dial(peer.addr, &peer.public).await
+                    {
                         let store = self.sync_store(ch.peer_identity());
                         if request_round(&mut ch, &store, channel).await.is_ok() {
                             self.recycle_sync_channel(ch);
@@ -2429,13 +2445,14 @@ impl Node {
             .await;
         if replicate_to_post_office {
             let _ = self
-                .replicate_to_post_office_targets(
+                .replicate_to_post_office_targets_confirming(
                     channel,
                     members
                         .iter()
                         .filter(|member| member.user_id() != me)
                         .cloned()
                         .collect(),
+                    confirming,
                 )
                 .await;
         }

@@ -91,6 +91,9 @@ impl DocumentRequest {
         }
         let request: Self = serde_json::from_slice(body).ok()?;
         ((match request.domain {
+            AccountDocumentDomain::PublicProfile | AccountDocumentDomain::GroupActivity => {
+                request.version == 6
+            }
             AccountDocumentDomain::GroupControl => request.version == 5,
             AccountDocumentDomain::DeviceHostname => request.version == 5,
             AccountDocumentDomain::GroupInventory => request.version == 4,
