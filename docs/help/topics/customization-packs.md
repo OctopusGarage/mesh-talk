@@ -14,7 +14,7 @@ These screens offer marketplace installation and **Install ZIP** for a local pac
 
 The app starts without optional libraries. Install packs from the marketplace or a local ZIP. Installed packs remain available after upgrades; removed packs stay removed after restart.
 
-New stickers send the selected image through encrypted media delivery. Recipients can view the single sticker without installing its pack. Installing a pack adds its collection to the sticker picker; it is independent from receiving and retaining message images. Updating or removing a pack does not change retained new-message artwork. Older ID-only messages still need their matching pack and otherwise show the sent fallback.
+New stickers send the selected image and a short descriptive label through encrypted media delivery. Conversation previews and quoted replies show labels such as `[Wave]` instead of internal filenames. When an older sticker has no recoverable label, the app shows `[Sticker]` in your interface language. Recipients can view the single sticker without installing its pack. Installing a pack adds its collection to the sticker picker; it is independent from receiving and retaining message images. Updating or removing a pack does not change retained new-message artwork. Older ID-only messages still need their matching pack and otherwise show the sent fallback.
 
 Missing images show the fallback while the app waits for an authorized source. A message arriving does not prove that its image has arrived. Media recovery requires a reachable device or post office that still retains the permitted bytes; clearing retained media or losing every source can make an image unavailable.
 

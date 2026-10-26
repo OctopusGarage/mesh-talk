@@ -273,9 +273,11 @@ impl Node {
         target: EventId,
         author: &str,
     ) -> bool {
+        let host = super::super::conversation::account_conversation_id(&self.account_id(), peer);
+        let target = self.file_message_logical_id(host, target);
         self.private_dm_recall_claims(peer)
             .iter()
-            .any(|(id, actor)| *id == target && actor == author)
+            .any(|(id, actor)| self.file_message_logical_id(host, *id) == target && actor == author)
     }
     pub(in crate::node) fn project_private_dm_controls(
         &self,

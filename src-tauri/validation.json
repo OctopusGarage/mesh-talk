@@ -2,6 +2,85 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-screenshot-shortcuts",
+      "paths": [
+        "src-tauri/src/screenshot_shortcuts.rs",
+        "src-tauri/src/settings.rs",
+        "src-tauri/src/chat_commands/platform.rs",
+        "src-tauri/src/app_lock.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/Cargo.toml",
+        "Cargo.lock"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "screenshot_shortcuts::tests::",
+            "settings::tests::screenshot_shortcuts_persist_per_device_without_portable_export",
+            "chat_commands::platform::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Persist device-local capture accelerators and register opt-in global shortcuts under exact unlocked session authority.",
+        "guide": "docs/settings.md#screenshot-shortcuts",
+        "invariants": [
+          {
+            "name": "Global bindings default off; shortcut choices never enter portable account preferences. Failed replacement preserves previous keys or reports degraded state.",
+            "reference": "docs/settings.md#screenshot-shortcuts"
+          },
+          {
+            "name": "Native shortcut events and captured pixels cannot escape a retired or locked session; window restoration retains capture authority.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "consumers": [
+        "frontend-screenshot-shortcuts"
+      ],
+      "escalation": [
+        "Verify native packaged-app foreground/background/tray capture, OS shortcut conflicts and screen-recording permission on macOS, Windows and Linux; browser mocks do not prove native global shortcut registration."
+      ]
+    },
+    {
+      "id": "desktop-installed-sticker-sources",
+      "paths": [
+        "src-tauri/src/chat_commands/files.rs",
+        "src-tauri/src/chat_commands/models.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "chat_commands::files::tests::registered_sticker_source_rejects_wrong_owner_before_waiting_for_runtime",
+            "chat_commands::files::tests::registered_sticker_source_requires_current_crypto_account_and_valid_image",
+            "chat_commands::models::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Register installed sticker snapshots in the current node local cache using owner and cryptographic account admission.",
+        "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
+        "invariants": [
+          {
+            "name": "Account mismatch and session retirement reject registration; core owns image validation and bounded candidate storage.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "History exposes only core-authenticated file-message aliases as opaque IDs; protection redaction, exact file availability and owner-scoped source registration retain their authority.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          }
+        ]
+      },
+      "consumers": [
+        "frontend-sticker-media"
+      ],
+      "escalation": [
+        "Verify real native direct sticker delivery with identical installed artwork, missing or changed artwork, and an older peer; focused unit checks do not prove installed candidate behavior."
+      ]
+    },
+    {
       "id": "desktop-group-file-network-cost",
       "paths": [
         "src-tauri/src/network_cost/",

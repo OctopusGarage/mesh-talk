@@ -154,7 +154,13 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
   };
 
   // Always-prompt "Save as…" override; the dialog opens at the Downloads folder.
-  const saveAs = async (fileConv: string, name: string, mime: string) => {
+  const saveAs = async (
+    fileConv: string,
+    name: string,
+    mime: string,
+    size: number,
+    media: boolean,
+  ) => {
     const lease = captureChatOwnership();
     if (
       !lease.current() ||
@@ -164,7 +170,9 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
       return;
     try {
       setSavingFile(fileConv);
-      await saveAttachment({ fileConv, name, mime }, lease, { mode: "as" });
+      await saveAttachment({ fileConv, name, mime, size, media }, lease, {
+        mode: "as",
+      });
     } catch (e) {
       if (lease.current() && markUnavailableFileError(fileConv, e)) return;
       if (lease.current()) handleSaveError(e);
@@ -327,7 +335,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                   {fileGlyph(f.name, f.mime)}
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium">
-                      {attachmentLabel(f.name, f.mime, f)}
+                      {attachmentLabel(f.name, f.mime, f, t("message.sticker"))}
                     </div>
                     <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                       <IdentityGlyph
@@ -410,7 +418,9 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                     disabled={
                       !statuses[f.fileConv]?.ready || savingFile !== null
                     }
-                    onClick={() => void saveAs(f.fileConv, f.name, f.mime)}
+                    onClick={() =>
+                      void saveAs(f.fileConv, f.name, f.mime, f.size, f.media)
+                    }
                     className="mt-1 pl-6 text-xs text-muted-foreground hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {t("files.saveAs")}

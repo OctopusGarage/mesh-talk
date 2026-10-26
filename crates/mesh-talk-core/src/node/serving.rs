@@ -165,6 +165,27 @@ impl Node {
             let store = self.sync_store(channel.peer_identity());
             match request_round(&mut channel, &store, conv).await {
                 Ok(_) => {
+                    if conv
+                        == super::conversation::dm_conversation_id(
+                            &self.identity.public(),
+                            &peer.public,
+                        )
+                        && !self.certified_sibling(&peer.public)
+                        && self.file_identity_capability_due(peer.addr, &peer.public)
+                    {
+                        let requests = self.pending_file_message_identities(&peer.public);
+                        let offers = self.file_message_identity_controls_for(&peer.public, true);
+                        if (!requests.is_empty() || !offers.is_empty())
+                            && self
+                                .exchange_file_message_identities(&mut channel, requests, offers)
+                                .await
+                                .is_err()
+                        {
+                            // An optional metadata query may close an old endpoint;
+                            // the preceding ordinary reconciliation is already durable.
+                            return Ok(());
+                        }
+                    }
                     self.recycle_sync_channel(channel);
                     return Ok(());
                 }
@@ -561,6 +582,18 @@ impl Node {
                 wanted,
             )
             .await;
+            return;
+        }
+        if let Some((
+            super::account_sync_wire::AccountSyncVersion::V2,
+            super::account_sync_wire::AccountHistoryFrame::FileMessageIdentitiesRequest {
+                account_id,
+                requests,
+            },
+        )) = super::account_sync_wire::AccountHistoryFrame::decode_versioned(&first)
+        {
+            self.serve_account_file_message_identities(&mut channel, &account_id, requests)
+                .await;
             return;
         }
         if let Some((
@@ -995,6 +1028,34 @@ impl Node {
                                         return;
                                     }
                                     let store = self.sync_store(channel.peer_identity());
+                                    let manifests = self.files.lock().expect("files lock").manifest_events(fc);
+                                    if let Some(manifest) = manifests.into_iter().find(|manifest| self.incoming_offer(fc, Some(*manifest), Some(&peer.public)).is_some())
+                                        && self.exchange_file_message_identities(&mut channel, vec![(fc, manifest)], vec![]).await.is_err() {
+                                        drop(channel);
+                                        let Ok(reconnected) = self.privacy_sync_dial(peer.addr, &peer.public).await else { return; };
+                                        channel = reconnected;
+                                    }
+                                    if let Some(manifest) = self.sticker_recovery_offer(fc, &peer.public) {
+                                        match super::session::request_sticker_file_proof(&mut channel, fc, manifest).await {
+                                            Ok(Some(headers)) => {
+                                                use crate::eventlog::sync::SyncStore;
+                                                store.lock().expect("sync store lock").sticker_file_consent(&fc, &manifest, headers);
+                                                if self.media.contains(fc) && self.has_verified_file_completion(fc) && !self.pending_sticker_aliases(fc) {
+                                                    self.recycle_sync_channel(channel);
+                                                    return;
+                                                }
+                                            }
+                                            Ok(None) => {}
+                                            Err(_) => {
+                                                drop(channel);
+                                                let Ok(reconnected) = self.privacy_sync_dial(peer.addr, &peer.public).await else { return; };
+                                                channel = reconnected;
+                                                if self.attachment_consent_status(fc) != Some(super::attachment_consent::ReceiveDecision::Accepted) {
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
                                     if super::session::request_file_round(&mut channel, &store, fc)
                                         .await
                                         .is_ok()

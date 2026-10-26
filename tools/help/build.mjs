@@ -3,6 +3,13 @@ import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadHelp, helpCategories } from "./load.mjs";
 import { renderMarkdown, escapeHtml as e } from "./render.mjs";
+import {
+  publicationBase,
+  sitemap,
+  markdownIndex,
+  fullManual,
+  documentationScope,
+} from "./discovery.mjs";
 function navigation(data, id) {
   return Object.entries(helpCategories)
     .map(([category, label]) => {
@@ -54,8 +61,14 @@ function articleSections(body) {
     : "";
   return { html, contents };
 }
-function page(data, title, content, { id, projectHref } = {}) {
-  return `<!doctype html><html lang="en" class="manual"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>${e(title)} · Mesh-Talk Help</title><link rel="stylesheet" href="theme.css"><link rel="stylesheet" href="style.css"><script src="i18n.js" defer></script><link rel="describedby" type="text/plain" href="llms.txt">${id ? `<link rel="alternate" type="text/markdown" href="${id}.md">` : ""}</head><body><a class="skip" href="#main">Skip to content</a><header><div class="breadcrumb"><a class="wordmark" href="${projectHref}">Mesh-Talk</a><span aria-hidden="true">/</span><a href="index.html">User guide</a></div><div class="header-links"><a href="index.html">Search help</a><small data-version="${e(data.version)}">Version ${e(data.version)} · English</small><label class="language-control" hidden><span class="sr-only">Language</span><select id="site-language" aria-label="Language"><option value="en" lang="en">English</option><option value="es" lang="es">Español</option><option value="pt-BR" lang="pt-BR">Português</option><option value="ja" lang="ja">日本語</option><option value="ko" lang="ko">한국어</option><option value="zh-Hans" lang="zh-Hans">简体中文</option><option value="zh-Hant" lang="zh-Hant">繁體中文</option><option value="yue" lang="yue">粵語</option></select></label></div></header><div class="layout"><aside><details><summary>Browse help topics</summary><nav aria-label="Help topics">${navigation(data, id)}</nav></details></aside><main id="main" tabindex="-1">${content}</main></div><script type="module" src="navigation.mjs"></script><p id="language-status" class="language-status" role="status"></p></body></html>`;
+function page(
+  data,
+  title,
+  content,
+  { id, projectHref, pageBase, summary } = {},
+) {
+  const metadata = `<meta name="description" content="${e(summary)}"><link rel="canonical" href="${e(new URL(id ? id + ".html" : "index.html", pageBase).href)}">`;
+  return `<!doctype html><html lang="en" class="manual"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>${e(title)} · Mesh-Talk Help</title>${metadata}<link rel="stylesheet" href="theme.css"><link rel="stylesheet" href="style.css"><script src="i18n.js" defer></script><link rel="describedby" type="text/plain" href="llms.txt"><link rel="alternate" type="text/markdown" href="${id || "index"}.md"></head><body><a class="skip" href="#main">Skip to content</a><header><div class="breadcrumb"><a class="wordmark" href="${projectHref}">Mesh-Talk</a><span aria-hidden="true">/</span><a href="index.html">User guide</a></div><div class="header-links"><a href="index.html">Search help</a><small data-version="${e(data.version)}">Version ${e(data.version)} · English</small><label class="language-control" hidden><span class="sr-only">Language</span><select id="site-language" aria-label="Language"><option value="en" lang="en">English</option><option value="es" lang="es">Español</option><option value="pt-BR" lang="pt-BR">Português</option><option value="ja" lang="ja">日本語</option><option value="ko" lang="ko">한국어</option><option value="zh-Hans" lang="zh-Hans">简体中文</option><option value="zh-Hant" lang="zh-Hant">繁體中文</option><option value="yue" lang="yue">粵語</option></select></label></div></header><div class="layout"><aside><details><summary>Browse help topics</summary><nav aria-label="Help topics">${navigation(data, id)}</nav></details></aside><main id="main" tabindex="-1">${content}</main></div><script type="module" src="navigation.mjs"></script><p id="language-status" class="language-status" role="status"></p></body></html>`;
 }
 export async function buildHelp({
   root,
@@ -64,9 +77,10 @@ export async function buildHelp({
 } = {}) {
   if (!out) throw Error("Output directory required");
   const data = await loadHelp({ root });
-  const base = new URL(url);
-  if (!base.pathname.endsWith("/")) throw Error("Help URL must end in /");
+  const base = publicationBase(url, "Help");
   for (const dir of [resolve(out), resolve(out, "v", data.version)]) {
+    const prefix = dir === resolve(out) ? "" : `v/${data.version}/`;
+    const pageBase = new URL(prefix, base);
     const projectHref =
       dir === resolve(out) ? "../index.html" : "../../../index.html";
     await mkdir(dir, { recursive: true });
@@ -143,7 +157,12 @@ export async function buildHelp({
             )
             .join("") +
           '</ul><script type="module" src="site.mjs"></script>',
-        { projectHref },
+        {
+          projectHref,
+          pageBase,
+          summary:
+            "Practical Mesh-Talk guides to local accounts, connecting across networks, messaging, files and privacy.",
+        },
       ),
     );
     for (const t of data.topics) {
@@ -178,15 +197,16 @@ export async function buildHelp({
           data,
           t.title,
           `<p class="help-language-note" hidden>This guide is written in English. Navigation and search follow your language.</p><div class="article-heading" lang="en">${heading}</div><div class="article-layout"><article lang="en" aria-labelledby="article-title">${article}<footer><a href="${t.id}.md">Read as Markdown</a> · <a href="index.html">All help</a><nav class="topic-neighbors" aria-label="More help topics">${neighbors}</nav></footer></article>${sections.contents}</div>`,
-          { id: t.id, projectHref },
+          { id: t.id, projectHref, pageBase, summary: t.summary },
         ),
       );
       await writeFile(join(dir, t.id + ".md"), t.body);
     }
-    const prefix = dir === resolve(out) ? "" : `v/${data.version}/`;
+    await writeFile(join(dir, "index.md"), markdownIndex(data, pageBase));
+    await writeFile(join(dir, "llms-full.txt"), fullManual(data, pageBase));
     await writeFile(
       join(dir, "llms.txt"),
-      `# Mesh-Talk Help\n\nEnglish product help for Mesh-Talk ${data.version}. Public documentation only.\n\n- [Complete help index](${new URL(prefix + "index.json", base)})\n` +
+      `# Mesh-Talk Help\n\nEnglish product help for Mesh-Talk ${data.version}. Public documentation only.\n\n${documentationScope(data.version)}\n\n- [Markdown index](${new URL("index.md", pageBase)})\n- [Full manual](${new URL("llms-full.txt", pageBase)})\n- [Complete help index](${new URL(prefix + "index.json", base)})\n` +
         data.topics
           .map(
             (t) =>
@@ -196,6 +216,13 @@ export async function buildHelp({
         "\n",
     );
   }
+  await writeFile(
+    join(resolve(out), "sitemap.xml"),
+    sitemap([
+      new URL("index.html", base),
+      ...data.topics.map((topic) => new URL(topic.id + ".html", base)),
+    ]),
+  );
   return data;
 }
 if (

@@ -833,14 +833,27 @@ mod tests {
         }
 
         fn announce_peer(&self, announce: mesh_talk_core::discovery::Announce) {
+            self.announce_peer_with_sender(announce, |socket, bytes, destination| {
+                socket.send_to(bytes, destination)
+            });
+        }
+
+        fn announce_peer_with_sender(
+            &self,
+            announce: mesh_talk_core::discovery::Announce,
+            mut send: impl FnMut(
+                &std::net::UdpSocket,
+                &[u8],
+                std::net::SocketAddr,
+            ) -> std::io::Result<usize>,
+        ) {
             let uid = announce.public().user_id();
             // Signed discovery is real; this fixture deliberately has no accepting
             // remote node, so the automatic worker cannot produce a receipt.
             let bytes = mesh_talk_core::discovery::announce::encode(&announce);
             let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-            socket
-                .send_to(&bytes, (std::net::Ipv4Addr::LOCALHOST, self.discovery_port))
-                .unwrap();
+            let destination =
+                std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, self.discovery_port));
             tauri::async_runtime::block_on(async {
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     while self
@@ -853,13 +866,45 @@ mod tests {
                         .peer_public(&uid)
                         .is_none()
                     {
-                        tokio::task::yield_now().await;
+                        // UDP delivery is not acknowledged by send_to. Repeat the
+                        // signed fixture announcement until the roster observes
+                        // it, without extending the existing setup deadline.
+                        send(&socket, &bytes, destination).unwrap();
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                     }
                 })
                 .await
-                .unwrap();
+                .expect("fixture peer was not observed within the discovery deadline");
             });
         }
+    }
+
+    #[test]
+    fn discovery_fixture_retries_a_dropped_initial_announcement() {
+        use mesh_talk_core::{
+            discovery::Announce,
+            identity::{account::Account, device::DeviceIdentity},
+        };
+        let fixture = Fixture::new();
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let mut attempts = 0;
+        fixture.announce_peer_with_sender(
+            Announce::new_with_account(&identity, &account, "Offline target", 1),
+            |socket, bytes, destination| {
+                attempts += 1;
+                if attempts == 1 {
+                    // UDP send success does not imply that a datagram arrived.
+                    Ok(bytes.len())
+                } else {
+                    socket.send_to(bytes, destination)
+                }
+            },
+        );
+        assert!(
+            attempts >= 2,
+            "the initial announcement was deliberately dropped"
+        );
     }
 
     #[test]

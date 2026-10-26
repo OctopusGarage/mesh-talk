@@ -30,6 +30,8 @@ import { subscribeSyncInvalidation } from "@/lib/syncInvalidation";
 import { errorMessage } from "@/lib/error";
 import { FavoriteEditor, type FavoriteDraft } from "./FavoriteEditor";
 import { FavoriteAttachment } from "./FavoriteAttachment";
+import { messageSummary } from "@/lib/messagePresentation";
+import { usePacks } from "@/store/packs";
 
 function expired(message: FavoriteMessage) {
   return message.expires_at_ms != null && message.expires_at_ms <= Date.now();
@@ -75,6 +77,7 @@ export function FavoritesDialog() {
 }
 function FavoritesContents({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
+  const packs = usePacks((s) => s.packs);
   const items = useMessageFavorites((s) => s.items);
   const loading = useMessageFavorites((s) => s.loading);
   const error = useMessageFavorites((s) => s.error);
@@ -435,7 +438,7 @@ function FavoritesContents({ onClose }: { onClose: () => void }) {
                           .map((message) =>
                             expired(message)
                               ? t("messageFavorites.contentUnavailable")
-                              : message.text || message.file?.name || "",
+                              : messageSummary(message, t, packs),
                           )
                           .filter(Boolean)
                           .join(" · ")}

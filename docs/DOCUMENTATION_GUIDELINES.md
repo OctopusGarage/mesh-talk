@@ -20,6 +20,12 @@ The site and README may summarize a capability, but link to its owning guide
 for setup, flags, support matrices, and changing limits. Do not copy a CLI option
 table, release procedure, or full feature inventory into either overview.
 
+The [change alignment checklist](maintenance-checklist.md) owns the cross-surface
+maintenance inventory: select applicable items when behavior changes, identify
+generated and externally published consumers, and record evidence or follow-ups
+in the PR. This guide owns writing and audience rules; the checklist links to
+existing owners rather than duplicating their product contracts.
+
 ## Shared domain language
 
 [CONTEXT.md](../CONTEXT.md) owns domain definitions; [DDD conventions](domain-design.md)
@@ -66,6 +72,12 @@ reachability requirements. Link to [the glossary](../CONTEXT.md),
 [group reception](group-conversation-reception.md) for the authoritative definitions.
 
 ## Public documentation styling
+
+The [public discovery contract](help-system.md#public-discovery-and-factual-accuracy)
+owns canonical URLs, Markdown exports, sitemaps, application metadata and product
+fact consistency. Generate these with `node tools/help/build-site.mjs --out <dir>`;
+do not maintain separate AI-only instructions or infer Stable availability from
+the documentation source version.
 
 The [shared public theme](../site/theme.css) owns the landing page and generated
 help reader's colors, self-hosted Space Grotesk headings, system body font, focus

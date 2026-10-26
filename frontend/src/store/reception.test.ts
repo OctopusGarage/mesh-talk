@@ -4,6 +4,7 @@ import {
   viewIdentities,
   reconcileHistory,
   emptyReception,
+  mergeReception,
 } from "./reception";
 import {
   loadReceptionLedger,
@@ -409,4 +410,154 @@ it("retains exact linked seen identities before future history and ledger evicti
   );
   const known = applyAccountSeen(history, "account:peer", ["history-future"]);
   expect(known.unreadIds["account:peer"]).not.toContain("history-future");
+});
+
+it("collapses only authenticated file aliases and remembers old callbacks across scoped reloads", () => {
+  const key = "account:peer";
+  let state = receiveIdentity(emptyReception(), key, {
+    event_id: "device-a",
+    received_at: 20,
+  });
+  state = receiveIdentity(
+    state,
+    key,
+    { event_id: "device-b", received_at: 10, arrival_kind: "catch_up" },
+    true,
+  );
+  const rows = [
+    {
+      id: "canonical",
+      fromMe: false,
+      fileMessageAliases: ["canonical", "device-a", "device-b"],
+    },
+  ];
+  state = reconcileHistory(state, key, rows, false);
+  expect(state.unreadIds[key]).toEqual(["canonical"]);
+  expect(state.ledger[key].canonical).toMatchObject({
+    seen: false,
+    late: true,
+    receivedAt: 10,
+    mentioned: true,
+  });
+  expect(state.ledger[key]["device-a"]).toBeUndefined();
+  saveReceptionLedger("owner", "account", state.ledger);
+  state = emptyReception(loadReceptionLedger("owner", "account"));
+  state = receiveIdentity(state, key, { event_id: "device-a" });
+  expect(state.unreadIds[key]).toEqual(["canonical"]);
+  expect(loadReceptionLedger("other", "account")).toEqual({});
+  state = receiveIdentity(state, "account:other", { event_id: "device-a" });
+  expect(state.unreadIds["account:other"]).toEqual(["device-a"]);
+  state = reconcileHistory(
+    state,
+    key,
+    [
+      {
+        id: "intentional-second",
+        fromMe: false,
+        fileMessageAliases: ["intentional-second"],
+      },
+    ],
+    true,
+  );
+  expect(state.unreadIds[key]).toEqual(["canonical", "intentional-second"]);
+});
+it("preserves real viewed or account-read alias evidence when a canonical binding arrives", () => {
+  for (const read of [viewIdentities, applyAccountSeen]) {
+    let state = receiveIdentity(emptyReception(), "account:peer", {
+      event_id: "alias",
+    });
+    state = read(state, "account:peer", ["alias"]);
+    state = reconcileHistory(
+      state,
+      "account:peer",
+      [
+        {
+          id: "canonical",
+          fromMe: false,
+          fileMessageAliases: ["alias", "canonical"],
+        },
+      ],
+      true,
+    );
+    expect(state.unreadIds["account:peer"]).toEqual([]);
+    state = receiveIdentity(state, "account:peer", { event_id: "alias" });
+    expect(state.unreadIds["account:peer"]).toEqual([]);
+  }
+});
+it("resolves alias reads after binding and bounds optional alias metadata", () => {
+  const state = reconcileHistory(
+    emptyReception(),
+    "account:peer",
+    [{ id: "canonical", fromMe: false, fileMessageAliases: ["alias"] }],
+    true,
+  );
+  expect(
+    viewIdentities(state, "account:peer", ["alias"]).unreadIds["account:peer"],
+  ).toEqual([]);
+  expect(
+    applyAccountSeen(state, "account:peer", ["alias"]).unreadIds[
+      "account:peer"
+    ],
+  ).toEqual([]);
+  const ledger = Object.fromEntries(
+    Array.from({ length: 1024 }, (_, i) => [
+      `id-${i}`,
+      {
+        seen: false,
+        late: true,
+        messageAliases: Array.from(
+          { length: 64 },
+          (_, j) => `${i}-${j}-` + "a".repeat(190),
+        ),
+      },
+    ]),
+  );
+  saveReceptionLedger("owner", "account", { "account:peer": ledger });
+  expect(
+    Object.keys(loadReceptionLedger("owner", "account")["account:peer"]),
+  ).toHaveLength(1024);
+});
+
+it("merges saved canonical bindings with early startup aliases without adding unread", () => {
+  const key = "account:peer";
+  const saved = reconcileHistory(
+    emptyReception(),
+    key,
+    [{ id: "canonical", fromMe: false, fileMessageAliases: ["alias"] }],
+    true,
+  );
+  const pending = receiveIdentity(emptyReception(), key, { event_id: "alias" });
+  const merged = mergeReception(
+    { ...saved, unread: { [key]: 1 } },
+    { ...pending, unread: { [key]: 1 } },
+  );
+  expect(merged.unreadIds[key]).toEqual(["canonical"]);
+  expect(merged.unread[key]).toBe(1);
+});
+it("ignores malformed stored aliases while preserving canonical unread state", () => {
+  localStorage.setItem(
+    "mesh-talk-reception-v2:owner:account",
+    JSON.stringify({
+      "account:peer": {
+        canonical: {
+          seen: false,
+          late: false,
+          messageAliases: [
+            null,
+            4,
+            "",
+            "\u0000",
+            "canonical",
+            "valid",
+            "valid",
+          ],
+        },
+      },
+    }),
+  );
+  const ledger = loadReceptionLedger("owner", "account");
+  expect(ledger["account:peer"].canonical.messageAliases).toEqual(["valid"]);
+  expect(emptyReception(ledger).unreadIds["account:peer"]).toEqual([
+    "canonical",
+  ]);
 });

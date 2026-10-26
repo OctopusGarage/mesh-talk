@@ -21,6 +21,7 @@ export type SearchTarget =
     };
 
 export interface ChatMessage {
+  fileMessageAliases?: string[];
   protection?: import("@/lib/types").MessageProtection | null;
   /** Authenticated absolute send-time deadline; null/absent means keep. */
   expiresAtMs?: number | null;

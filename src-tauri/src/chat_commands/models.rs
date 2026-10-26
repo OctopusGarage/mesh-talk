@@ -45,6 +45,8 @@ pub struct HistoryFileInfo {
 /// One merged history line (sent or received) for display.
 #[derive(Serialize)]
 pub struct HistoryItem {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub file_message_aliases: Vec<String>,
     pub protection: Option<mesh_talk_core::node::MessageProtection>,
     pub expires_at_ms: Option<u64>,
     pub id: Option<String>, // hex EventId; null when there is no stable id (see From impl)
@@ -70,6 +72,11 @@ impl From<mesh_talk_core::node::HistoryEntry> for HistoryItem {
             Some(hex::encode(h.id.as_bytes()))
         };
         HistoryItem {
+            file_message_aliases: h
+                .file_message_aliases
+                .iter()
+                .map(|id| hex::encode(id.as_bytes()))
+                .collect(),
             protection: h.protection,
             expires_at_ms: h.expires_at_ms,
             id,
@@ -212,7 +219,7 @@ mod protected_projection_tests {
 
     #[test]
     fn protected_history_redacts_live_and_recalled_text_defensively() {
-        let item = HistoryItem::from(mesh_talk_core::node::HistoryEntry {
+        let mut item = HistoryItem::from(mesh_talk_core::node::HistoryEntry {
             expires_at_ms: None,
             id: mesh_talk_core::eventlog::EventId::new([1; 32]),
             from_me: true,
@@ -231,8 +238,20 @@ mod protected_projection_tests {
             recalled: true,
             recalled_text: Some(b"protected secret".to_vec()),
             sticker: None,
+            file_message_aliases: vec![mesh_talk_core::eventlog::EventId::new([3; 32])],
         });
-        let json = serde_json::to_value(item).unwrap();
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(
+            json["file_message_aliases"],
+            serde_json::json!([hex::encode([3; 32])])
+        );
+        item.file_message_aliases.clear();
+        assert!(
+            serde_json::to_value(&item)
+                .unwrap()
+                .get("file_message_aliases")
+                .is_none()
+        );
         assert_eq!(json["text"], "");
         assert!(json["recalled_text"].is_null());
         assert_eq!(json["protection"], "authenticate");

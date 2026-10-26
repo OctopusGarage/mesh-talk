@@ -22,6 +22,8 @@ import { ContactContextMenu } from "../HiddenContactsDialog";
 import { MemberProfileDialog } from "../MemberProfileDialog";
 import { useDrafts } from "@/store/drafts";
 import { useAuth } from "@/store/auth";
+import { usePacks } from "@/store/packs";
+import { messageSummary } from "@/lib/messagePresentation";
 
 export function ConversationRow({
   conv,
@@ -51,6 +53,7 @@ export function ConversationRow({
   listSize: number;
 }) {
   const { t } = useTranslation();
+  const packs = usePacks((s) => s.packs);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const active = useChat((s) => s.active);
@@ -96,12 +99,7 @@ export function ConversationRow({
       ? groupPresenceLabel(presence, t)
       : prioritizeSubtitle
         ? subtitle
-        : (latest?.protection
-            ? t("protectedMessage.label")
-            : latest?.text
-              ? latest.text
-              : "") ||
-          latest?.file?.name ||
+        : (latest ? messageSummary(latest, t, packs) : "") ||
           (personal
             ? subtitle
             : channel

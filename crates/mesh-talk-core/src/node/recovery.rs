@@ -4,7 +4,7 @@
 use super::Node;
 use crate::discovery::roster::Roster;
 use crate::eventlog::LogError;
-use crate::eventlog::event::{ConversationId, EventId};
+use crate::eventlog::event::{ConversationId, EventId, EventKind};
 use crate::identity::{account::Account, account_keystore, device::DeviceIdentity, keystore};
 use crate::recovery::snapshot::{
     SNAPSHOT_SCHEMA_VERSION, SnapshotError, SnapshotHeaderV1, SnapshotRecordV1, SnapshotWriter,
@@ -292,6 +292,8 @@ impl Node {
     ) -> Result<Arc<Self>, SnapshotError> {
         let mut media_names = HashMap::new();
         let mut account_created_at_ms = None;
+        let mut signed_ids = HashSet::new();
+        let mut manifest_parents = HashMap::new();
         let header = read_snapshot(&mut source, |record| {
             match record {
                 SnapshotRecordV1::FileCard { manifest, .. } => {
@@ -313,10 +315,36 @@ impl Node {
                 SnapshotRecordV1::AccountCreation { created_at_ms } => {
                     account_created_at_ms = created_at_ms;
                 }
+                SnapshotRecordV1::SignedEvent { event } => {
+                    signed_ids.insert(event.id);
+                    if event.kind == EventKind::FileManifest {
+                        manifest_parents.insert(event.id, event.parents);
+                    }
+                }
                 _ => {}
             }
             Ok(())
         })?;
+        // Detached sibling proofs do not carry their original device-pair DAG.
+        // Preserve them outside the log, including descendants of detached proofs.
+        let mut detached = HashSet::new();
+        let mut children: HashMap<EventId, Vec<EventId>> = HashMap::new();
+        let mut pending = std::collections::VecDeque::new();
+        for (id, parents) in &manifest_parents {
+            if parents.iter().any(|parent| !signed_ids.contains(parent)) {
+                pending.push_back(*id);
+            }
+            for parent in parents {
+                children.entry(*parent).or_default().push(*id);
+            }
+        }
+        while let Some(id) = pending.pop_front() {
+            if detached.insert(id)
+                && let Some(next) = children.get(&id)
+            {
+                pending.extend(next.iter().copied());
+            }
+        }
         source
             .seek(SeekFrom::Start(0))
             .map_err(|_| SnapshotError::Io)?;
@@ -386,6 +414,7 @@ impl Node {
             // rows in a disjoint local sequence range. Their original event IDs
             // are retained in recovered_sent_ids for history and later exports.
             let mut next_restored_legacy_seq = u64::MAX;
+            let mut identity_bundles = Vec::new();
             let installed_header = read_snapshot(&mut source, |record| {
                 match record {
                     SnapshotRecordV1::SentDm {
@@ -524,6 +553,18 @@ impl Node {
                             .map_err(|_| SnapshotError::Io)?;
                     }
                     SnapshotRecordV1::SignedEvent { event } => {
+                        if super::file_message_identity::is_bundle(&event) {
+                            identity_bundles.push(event);
+                            return Ok(());
+                        }
+                        if detached.contains(&event.id) {
+                            node.account_file_proofs
+                                .lock()
+                                .expect("file proofs lock")
+                                .insert(event)
+                                .map_err(|_| SnapshotError::InvalidEvent)?;
+                            return Ok(());
+                        }
                         node.log
                             .lock()
                             .expect("event log mutex not poisoned")
@@ -578,6 +619,10 @@ impl Node {
                     .store_from_path(ConversationId::new(file_conv), name, &path)
                     .map_err(|_| SnapshotError::Io)?;
                 std::fs::remove_file(path).map_err(|_| SnapshotError::Io)?;
+            }
+            for bundle in identity_bundles {
+                node.import_file_message_identity(bundle)
+                    .map_err(|_| SnapshotError::InvalidFileCard)?;
             }
             // The node was opened before records were installed, so its cached
             // channel/file views are stale. Return a verified fresh view.
@@ -681,6 +726,12 @@ impl Node {
         destination: W,
         created_at_ms: u64,
     ) -> Result<(), SnapshotError> {
+        let identity_bundles = self.file_message_identity_snapshot();
+        let detached_file_proofs = self
+            .account_file_proofs
+            .lock()
+            .expect("file proofs lock")
+            .snapshot();
         let own_account = self.account_id();
         let candidate_contacts = self.known_account_ids();
         let now = self.expiry_now();
@@ -705,6 +756,22 @@ impl Node {
         let received_conversations = received.conversations();
         let event_conversations = log.conversations();
         let file_conversations = received_files.conversations();
+        let retained_file_ids: HashSet<_> = file_conversations
+            .iter()
+            .flat_map(|host| {
+                received_files
+                    .entries_ref(host)
+                    .iter()
+                    .filter(|row| !self.file_message_row_suppressed(row))
+                    .map(|row| row.event_id)
+            })
+            .collect();
+        let supplemental_events: Vec<_> = detached_file_proofs
+            .into_iter()
+            .filter(|event| retained_file_ids.contains(&event.id))
+            .chain(identity_bundles)
+            .filter(|event| log.get(&event.id).is_none())
+            .collect();
         let file_contacts: Vec<_> = candidate_contacts
             .into_iter()
             .filter(|account_id| {
@@ -716,6 +783,7 @@ impl Node {
                     .any(|entry| {
                         !delivery.file_erased(entry.conversation, entry.event_id)
                             && !delivery.manifest_event_erased(entry.event_id)
+                            && !self.file_message_row_suppressed(entry)
                     })
             })
             .collect();
@@ -740,6 +808,7 @@ impl Node {
                     .filter(|entry| {
                         !delivery.file_erased(entry.conversation, entry.event_id)
                             && !delivery.manifest_event_erased(entry.event_id)
+                            && !self.file_message_row_suppressed(entry)
                     })
                     .count()
             })
@@ -750,6 +819,7 @@ impl Node {
             .filter(|entry| {
                 !delivery.file_erased(entry.conversation, entry.event_id)
                     && !delivery.manifest_event_erased(entry.event_id)
+                    && !self.file_message_row_suppressed(entry)
             })
             .filter_map(|entry| crate::file::decode_manifest(&entry.plaintext))
             .map(|manifest| manifest.file_conv())
@@ -779,6 +849,7 @@ impl Node {
                 .and_then(|count| count.checked_add(current_profiles.len()))
                 .and_then(|count| count.checked_add(1))
                 .and_then(|count| count.checked_add(event_count))
+                .and_then(|count| count.checked_add(supplemental_events.len()))
                 .and_then(|count| count.checked_add(file_count))
                 .and_then(|count| count.checked_add(file_contacts.len()))
                 .and_then(|count| count.checked_add(portable_favorites.len()))
@@ -909,6 +980,9 @@ impl Node {
                 })?;
             }
         }
+        for event in supplemental_events {
+            writer.push(&SnapshotRecordV1::SignedEvent { event })?;
+        }
         for account_id in file_contacts {
             writer.push(&SnapshotRecordV1::AccountContact { account_id })?;
         }
@@ -916,6 +990,7 @@ impl Node {
             for entry in received_files.entries_ref(&conversation) {
                 if delivery.file_erased(entry.conversation, entry.event_id)
                     || delivery.manifest_event_erased(entry.event_id)
+                    || self.file_message_row_suppressed(entry)
                     || self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock)
                 {
                     continue;

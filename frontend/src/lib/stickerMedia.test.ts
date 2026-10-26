@@ -71,3 +71,65 @@ it("refuses remote, empty, noncanonical and oversized installed image snapshots"
       snapshotSticker({ id: "cat-wave", emoji: "👋", url }, "👋"),
     ).toThrow();
 });
+
+it("snapshots a semantic label in a canonical v2 marker independently of the pack", () => {
+  const snapshot = snapshotSticker(
+    {
+      id: "pack:cats:calm",
+      emoji: "🙂",
+      label: "静下心",
+      url: "data:image/png;base64,AQID",
+    },
+    "🙂",
+  );
+  expect(snapshot.name).toBe(
+    "mt-sticker-v2-cGFjazpjYXRzOmNhbG0K8J-ZggrpnZnkuIvlv4M.png",
+  );
+  expect(decodeStickerMedia({ ...snapshot, size: 3, media: true })).toEqual({
+    id: "pack:cats:calm",
+    fallback: "🙂",
+    label: "静下心",
+  });
+});
+
+it("fits long Unicode labels within a portable filename without splitting graphemes", () => {
+  const snapshot = snapshotSticker(
+    {
+      id: "a".repeat(126),
+      emoji: "🙂".repeat(8),
+      label: "静下心".repeat(27),
+      url: "data:image/png;base64,AQID",
+    },
+    "🙂".repeat(8),
+  );
+  expect(snapshot.name.length).toBeLessThanOrEqual(255);
+  const metadata = decodeStickerMedia({ ...snapshot, size: 3, media: true });
+  expect(metadata?.label).toBeTruthy();
+  expect(metadata?.label).toMatch(/^[静下心]+$/);
+});
+
+it("removes label controls and bidi overrides before sending and rejects them on receipt", () => {
+  const snapshot = snapshotSticker(
+    {
+      id: "calm",
+      emoji: "🙂",
+      label: "  静\n下\u202e心  ",
+      url: "data:image/png;base64,AQID",
+    },
+    "🙂",
+  );
+  expect(decodeStickerMedia({ ...snapshot, size: 3, media: true })?.label).toBe(
+    "静 下心",
+  );
+  for (const label of ["", " ", "evil\u202e", "a\nb", "a".repeat(81)]) {
+    const name = `mt-sticker-v2-${btoa(
+      unescape(encodeURIComponent(`calm\n🙂\n${label}`)),
+    )
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "")}.png`;
+    expect(
+      decodeStickerMedia({ name, size: 3, media: true, mime: "image/png" }),
+    ).toBeNull();
+  }
+});

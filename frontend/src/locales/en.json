@@ -325,6 +325,8 @@
     "source_unscoped": "Signed discovery (network scope unspecified)"
   },
   "message": {
+    "sticker": "[Sticker]",
+    "recalledSummary": "[Message recalled]",
     "expiresIn": "Expires in {{time}} after sending; removed on both sides",
     "delivery": {
       "postOfficeDisabled": "Post-office sending was disabled on this device when no direct route was known. Review connection settings if you want to use a trusted post office.",
@@ -447,7 +449,30 @@
     "textValue": "Annotation text",
     "undo": "Undo annotation",
     "cancel": "Cancel",
-    "send": "Send screenshot"
+    "send": "Send screenshot",
+    "shortcuts": {
+      "recording": "Press a shortcut…",
+      "recordingHint": "Press a modifier and a letter, number or F-key. Esc cancels.",
+      "bindingHint": "Click to change. Saved on this device only.",
+      "unassigned": "Not assigned",
+      "clear": "Clear shortcut",
+      "clearAction": "Clear shortcut for {{action}}",
+      "invalid": "Use a modifier with a letter, number or F1–F12.",
+      "reserved": "This shortcut is reserved for editing or system actions. Choose another.",
+      "duplicate": "Choose a different shortcut for each capture action.",
+      "empty": "Assign at least one shortcut before enabling global activation.",
+      "globalTitle": "Use screenshot shortcuts globally",
+      "globalDescription": "Allow these shortcuts while another app is active. Mesh-Talk must be running and unlocked.",
+      "checking": "Checking global shortcuts…",
+      "globalActive": "Global shortcuts active",
+      "globalInactive": "Global shortcuts unavailable; app shortcuts still work",
+      "appOnly": "Shortcuts work within Mesh-Talk",
+      "restore": "Restore defaults",
+      "registrationFailed": "Could not register global shortcuts. Change the binding or free it in the other app, then retry.",
+      "scopeApp": "App only",
+      "scopeGlobal": "Global",
+      "chooseConversation": "Choose a conversation before taking a screenshot."
+    }
   },
   "settings": {
     "originSharing": "Share my originating post office",
@@ -1203,7 +1228,7 @@
     "copyFailed": "Could not copy. Select the instructions above and copy them manually.",
     "group": "Group",
     "person": "Person",
-    "selectedCount": "{{count}} / 16 selected",
+    "selectedCount": "{{count}} / {{total}} selected",
     "search": "Search contacts and groups",
     "selectedOnly": "Selected only",
     "noMatches": "No matching conversations.",

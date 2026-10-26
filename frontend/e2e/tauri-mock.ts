@@ -369,7 +369,7 @@ export const test = base.extend({
       const stickerFileMetadata = (path: unknown, fileConv: string) => {
         const name = String(path).split(/[\\/]/).pop() || "file";
         const bytes = stagedFiles.get(String(path));
-        if (!name.startsWith("mt-sticker-v1-") || !bytes) return {};
+        if (!/^mt-sticker-v[12]-/.test(name) || !bytes) return {};
         stickerMediaFiles.set(fileConv, [...bytes]);
         const ext = name.split(".").pop()!;
         const mime = (
@@ -648,6 +648,11 @@ export const test = base.extend({
 
       // --- Settings ---------------------------------------------------------
       const appSettings = {
+        screenshot_shortcuts: {
+          capture: "CommandOrControl+Shift+KeyX" as string | null,
+          capture_hidden: "CommandOrControl+Alt+Shift+KeyX" as string | null,
+          global: false,
+        },
         minimize_to_tray: true,
         notifications: true,
         download_dir: "/home/tester/Downloads",
@@ -669,6 +674,7 @@ export const test = base.extend({
         confirm_sensitive_copy: false,
         clipboard_clear_seconds: 0,
       };
+      let screenshotRegistrationId = 0;
       const localAgentAccess = {
         enabled: false,
         running: false,
@@ -2272,6 +2278,15 @@ export const test = base.extend({
             return localAgentAccess;
           },
           get_app_settings: () => appSettings,
+          sync_screenshot_shortcuts: () => ({
+            global_active: appSettings.screenshot_shortcuts.global,
+            error: null,
+            generation: 1,
+            registration_id: ++screenshotRegistrationId,
+          }),
+          suspend_screenshot_shortcuts: () => null,
+          pause_screenshot_shortcuts: () => null,
+          wake_screenshot_window: () => null,
           reconcile_account_settings: () => appSettings,
           load_conversation_drafts: snapshotDrafts,
           save_conversation_drafts: (a) => {

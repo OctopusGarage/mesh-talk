@@ -495,6 +495,23 @@ pub fn emit_channel_message<R: Runtime>(
     }
 }
 
+fn file_notification_body(
+    name: &str,
+    mime: &str,
+    size: u64,
+    media: bool,
+    protected: bool,
+) -> String {
+    use mesh_talk_core::file::sticker;
+    if !protected
+        && sticker::valid_manifest(name, mime, size, media)
+        && let Some(metadata) = sticker::from_name(name)
+    {
+        return format!("[{}]", metadata.label.as_deref().unwrap_or("Sticker"));
+    }
+    "sent a file".into()
+}
+
 pub fn emit_file_received<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
     owner: &str,
@@ -547,7 +564,18 @@ pub fn emit_file_received<R: Runtime>(
         NotificationTarget::File
     };
     match decision.alert {
-        Alert::Live => notify_if_unfocused(app_handle, target, &event.from, "sent a file"),
+        Alert::Live => notify_if_unfocused(
+            app_handle,
+            target,
+            &event.from,
+            &file_notification_body(
+                &event.name,
+                &event.mime,
+                event.size,
+                event.media,
+                event.protection.is_some(),
+            ),
+        ),
         Alert::Summary(count) => notify_if_unfocused(
             app_handle,
             target,
@@ -679,6 +707,33 @@ mod notification_policy_tests {
             assert!(
                 !presented.load(std::sync::atomic::Ordering::SeqCst),
                 "stale {replacement} must not notify or emit private events"
+            );
+        }
+    }
+
+    #[test]
+    fn sticker_notification_uses_validated_label_and_preserves_protection() {
+        let v2 = "mt-sticker-v2-cGFjazpjYXRzOmNhbG0K8J-ZggrpnZnkuIvlv4M.png";
+        let v1 = "mt-sticker-v1-YnVpbHRpbjp3YXZlCvCfkYs.png";
+        assert_eq!(
+            file_notification_body(v2, "image/png", 100, true, false),
+            "[静下心]"
+        );
+        assert_eq!(
+            file_notification_body(v1, "image/png", 100, true, false),
+            "[Sticker]"
+        );
+        for (name, mime, size, media, protected) in [
+            (v2, "image/png", 100, true, true),
+            (v2, "image/jpeg", 100, true, false),
+            (v2, "image/png", 0, true, false),
+            (v2, "image/png", 100, false, false),
+            ("mt-sticker-v2-malformed.png", "image/png", 100, true, false),
+            ("private.png", "image/png", 100, true, false),
+        ] {
+            assert_eq!(
+                file_notification_body(name, mime, size, media, protected),
+                "sent a file"
             );
         }
     }

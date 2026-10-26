@@ -3,6 +3,24 @@
   "language": "en",
   "topics": [
     {
+      "id": "about-mesh-talk",
+      "title": "About Mesh-Talk",
+      "summary": "Encrypted desktop messaging across local and connected networks, with local accounts and optional peer-operated post offices.",
+      "category": "getting-started",
+      "keywords": [
+        "overview",
+        "what is Mesh-Talk",
+        "local account",
+        "cloud account",
+        "internet",
+        "serverless",
+        "LLM",
+        "supported platforms"
+      ],
+      "platforms": ["macos", "windows", "linux"],
+      "document": "topics/about-mesh-talk.md"
+    },
+    {
       "id": "first-run",
       "title": "Start using Mesh-Talk",
       "summary": "Create a local identity, find someone nearby, and send your first message.",
@@ -512,11 +530,7 @@
         "自动化",
         "智能体"
       ],
-      "platforms": [
-        "macos",
-        "windows",
-        "linux"
-      ],
+      "platforms": ["macos", "windows", "linux"],
       "document": "topics/local-agent-access.md",
       "target": {
         "kind": "settings",

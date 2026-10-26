@@ -325,6 +325,8 @@
     "source_unscoped": "署名済み検出記録（ネットワーク範囲不明）"
   },
   "message": {
+    "sticker": "[スタンプ]",
+    "recalledSummary": "[メッセージは取り消されました]",
     "expiresIn": "送信後 {{time}} で双方のメッセージを削除",
     "delivery": {
       "postOfficeDisabled": "前回の試行時、この端末には既知の直接経路がなく、ポストオフィスへの送信が無効でした。信頼するポストオフィスを利用する場合は接続設定を確認してください。",
@@ -447,7 +449,30 @@
     "textValue": "注釈テキスト",
     "undo": "注釈を元に戻す",
     "cancel": "キャンセル",
-    "send": "スクリーンショットを送信"
+    "send": "スクリーンショットを送信",
+    "shortcuts": {
+      "recording": "ショートカットを入力…",
+      "recordingHint": "修飾キーと英字、数字またはファンクションキーを押します。Esc で取消。",
+      "bindingHint": "クリックして変更。このデバイスにのみ保存します。",
+      "unassigned": "未設定",
+      "clear": "ショートカットを解除",
+      "clearAction": "「{{action}}」のショートカットを解除",
+      "invalid": "修飾キーと英字、数字または F1–F12 を使用してください。",
+      "reserved": "編集やシステム操作用のキーです。別の組み合わせを選んでください。",
+      "duplicate": "各キャプチャ操作に異なるショートカットを設定してください。",
+      "empty": "グローバル機能を有効にする前にショートカットを設定してください。",
+      "globalTitle": "グローバル撮影ショートカット",
+      "globalDescription": "他のアプリの使用中も利用できます。Mesh-Talk が起動し、ロック解除されている必要があります。",
+      "checking": "グローバルショートカットを確認中…",
+      "globalActive": "グローバルショートカットは有効です",
+      "globalInactive": "グローバル登録は利用不可。アプリ内では使用できます",
+      "appOnly": "ショートカットは Mesh-Talk 内でのみ有効です",
+      "restore": "初期設定に戻す",
+      "registrationFailed": "グローバル登録に失敗しました。キーを変更するか他のアプリの割り当てを解除して再試行してください。",
+      "scopeApp": "アプリ内",
+      "scopeGlobal": "グローバル",
+      "chooseConversation": "撮影する前に会話を選択してください。"
+    }
   },
   "settings": {
     "originSharing": "自分の登録元ポストオフィスを共有",
@@ -1198,7 +1223,7 @@
     "copyFailed": "コピーできませんでした。上の案内を選択して手動でコピーしてください。",
     "group": "グループ",
     "person": "連絡先",
-    "selectedCount": "{{count}} / 16 件を選択中",
+    "selectedCount": "{{total}} 件中 {{count}} 件を選択",
     "search": "連絡先とグループを検索",
     "selectedOnly": "選択済みのみ",
     "noMatches": "一致する会話はありません。",

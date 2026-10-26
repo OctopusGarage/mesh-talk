@@ -5,6 +5,10 @@ validation guidance. Start with the path that matches your task. The
 [documentation guidelines](DOCUMENTATION_GUIDELINES.md) explain where new information
 belongs and how to keep the site, README, and guides aligned.
 
+For feature changes or a maintenance sweep, use the
+[change alignment checklist](maintenance-checklist.md). It maps maintained
+surfaces to their owners, change triggers, evidence and follow-up records.
+
 | I want to…                                    | Start here                                                   | Continue with                                                                                                                                    |
 | --------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Install or try the desktop app                | [Project overview](../README.md)                             | [Install and update](updates.md) · [Troubleshooting](../specifications/troubleshooting_guide.md)                                                 |
@@ -79,6 +83,7 @@ subscriptions and incoming HTTP webhooks are later stages.
 | [`docs/screenshots/README.md`](screenshots/README.md)                                         | How current demo screenshots are captured and shared with the site.                                      |
 | [`docs/CUSTOMIZATION_PACKS.md`](CUSTOMIZATION_PACKS.md)                                       | ZIP pack format, Pack Studio, local installation, and GitHub Pages marketplace publishing.               |
 | [`docs/DOCUMENTATION_GUIDELINES.md`](DOCUMENTATION_GUIDELINES.md)                             | Audience, source-of-truth rules, writing standards, and documentation review checklist.                  |
+| [`docs/maintenance-checklist.md`](maintenance-checklist.md)                                 | Cross-surface maintenance inventory, change triggers, alignment review and unresolved follow-ups.        |
 
 ## Design boundaries
 

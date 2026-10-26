@@ -55,8 +55,10 @@ vi.mock("@/store/drafts", async (importOriginal) => {
   };
 });
 vi.mock("@/store/chat", () => ({
-  useChat: (selector: (state: typeof chatState) => unknown) =>
-    selector(chatState),
+  useChat: Object.assign(
+    (selector: (state: typeof chatState) => unknown) => selector(chatState),
+    { getState: () => chatState },
+  ),
   convKey: (conv: { kind: string; id: string }) => `${conv.kind}:${conv.id}`,
   displayName: (_favorites: unknown, _id: string, name: string) => name,
   captureChatOwnership: () => ({ current: () => true }),

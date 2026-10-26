@@ -306,6 +306,7 @@ impl Node {
                 for entry in records.entries(&conversation) {
                     if delivery.file_erased(entry.conversation, entry.event_id)
                         || delivery.manifest_event_erased(entry.event_id)
+                        || self.file_message_row_suppressed(&entry)
                     {
                         continue;
                     }

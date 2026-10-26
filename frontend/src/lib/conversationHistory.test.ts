@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { categorize, hasLink, matchesQuery } from "./conversationHistory";
 import type { ChatMessage } from "@/store/chat";
+import { encodeStickerMediaName } from "./stickerMedia";
 
 function msg(over: Partial<ChatMessage>): ChatMessage {
   return {
@@ -55,6 +56,18 @@ describe("categorize", () => {
 });
 
 describe("matchesQuery", () => {
+  it("finds stickers by semantic name and never by their encoded transport marker", () => {
+    const message = msg({
+      file: {
+        ...file(""),
+        name: encodeStickerMediaName("calm", "🙂", "png", "静下心"),
+        mime: "image/png",
+        media: true,
+      },
+    });
+    expect(matchesQuery(message, "静下心")).toBe(true);
+    expect(matchesQuery(message, "mt-sticker")).toBe(false);
+  });
   it("empty query matches everything", () => {
     expect(matchesQuery(msg({ text: "anything" }), "  ")).toBe(true);
   });

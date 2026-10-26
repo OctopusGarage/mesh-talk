@@ -6,6 +6,7 @@ pub const MAX_STICKER_BYTES: usize = 3 * 1024 * 1024;
 pub struct StickerMetadata {
     pub id: String,
     pub fallback: String,
+    pub label: Option<String>,
 }
 
 use std::io::Cursor;
@@ -13,7 +14,8 @@ use std::io::Cursor;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use image::{AnimationDecoder, ImageDecoder, ImageFormat, ImageReader, Limits};
 
-const PREFIX: &str = "mt-sticker-v1-";
+const PREFIX_V1: &str = "mt-sticker-v1-";
+const PREFIX_V2: &str = "mt-sticker-v2-";
 const MAX_PIXELS: u64 = 16_000_000;
 const MAX_ANIMATION_PIXELS: u64 = 64_000_000;
 const MAX_FRAMES: usize = 256;
@@ -21,22 +23,43 @@ const MAX_DECODE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Recognizes the reserved namespace even when the presentation metadata is malformed.
 pub fn is_sticker_name(name: &str) -> bool {
-    name.starts_with(PREFIX)
+    name.starts_with(PREFIX_V1) || name.starts_with(PREFIX_V2)
 }
 
-/// Parses canonical v1 presentation metadata; this is not the asset checksum.
+/// Parses canonical versioned presentation metadata; this is not the asset checksum.
 pub fn from_name(name: &str) -> Option<StickerMetadata> {
-    if !name.is_ascii() || name.len() > 233 {
+    let (payload, version_two) = if let Some(payload) = name.strip_prefix(PREFIX_V1) {
+        (payload, false)
+    } else {
+        (name.strip_prefix(PREFIX_V2)?, true)
+    };
+    if !name.is_ascii() || name.len() > if version_two { 255 } else { 233 } {
         return None;
     }
-    let (encoded, _) = name.strip_prefix(PREFIX)?.rsplit_once('.')?;
+    let (encoded, _) = payload.rsplit_once('.')?;
     expected_format(name)?;
     let decoded = URL_SAFE_NO_PAD.decode(encoded).ok()?;
     if URL_SAFE_NO_PAD.encode(&decoded) != encoded {
         return None;
     }
     let text = std::str::from_utf8(&decoded).ok()?;
-    let (id, fallback) = text.split_once('\n')?;
+    let (id, remainder) = text.split_once('\n')?;
+    let (fallback, label) = if version_two {
+        let (fallback, label) = remainder.split_once('\n')?;
+        if label.is_empty()
+            || label.trim() != label
+            || label.chars().count() > 80
+            || label.chars().any(|c| {
+                c.is_control()
+                    || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+            })
+        {
+            return None;
+        }
+        (fallback, Some(label.to_owned()))
+    } else {
+        (remainder, None)
+    };
     if id.is_empty()
         || id.len() > 126
         || !id
@@ -52,6 +75,7 @@ pub fn from_name(name: &str) -> Option<StickerMetadata> {
     Some(StickerMetadata {
         id: id.into(),
         fallback: fallback.into(),
+        label,
     })
 }
 
@@ -202,12 +226,92 @@ mod tests {
             from_name("mt-sticker-v1-YnVpbHRpbjp3YXZlCvCfkYs.png"),
             Some(StickerMetadata {
                 id: "builtin:wave".into(),
-                fallback: "👋".into()
+                fallback: "👋".into(),
+                label: None
             })
         );
         assert!(from_name(&name(&"a".repeat(126), &"😀".repeat(8), "webp")).is_some());
         assert!(is_sticker_name("mt-sticker-v1-malformed"));
         assert!(!is_sticker_name("vacation.png"));
+    }
+
+    fn name_v2(id: &str, fallback: &str, label: &str, extension: &str) -> String {
+        format!(
+            "mt-sticker-v2-{}.{}",
+            URL_SAFE_NO_PAD.encode(format!("{id}\n{fallback}\n{label}")),
+            extension
+        )
+    }
+
+    #[test]
+    fn v2_metadata_has_a_canonical_cross_language_vector() {
+        let value = name_v2("pack:cats:calm", "🙂", "静下心", "png");
+        assert_eq!(
+            value,
+            "mt-sticker-v2-cGFjazpjYXRzOmNhbG0K8J-ZggrpnZnkuIvlv4M.png"
+        );
+        assert_eq!(
+            from_name(&value),
+            Some(StickerMetadata {
+                id: "pack:cats:calm".into(),
+                fallback: "🙂".into(),
+                label: Some("静下心".into())
+            })
+        );
+        assert!(is_sticker_name("mt-sticker-v2-malformed"));
+        assert!(!is_sticker_name("mt-sticker-v3-malformed"));
+        assert!(valid_manifest(&value, "image/png", 1, true));
+        assert!(!valid_manifest(&value, "image/jpeg", 1, true));
+        assert!(validate_image(&value, "image/png", &png(2, 2)).is_ok());
+    }
+
+    #[test]
+    fn v2_metadata_enforces_label_and_total_name_bounds() {
+        assert!(from_name(&name_v2("x", "🙂", &"a".repeat(80), "png")).is_some());
+        assert!(
+            from_name(&name_v2(
+                "x",
+                "a",
+                &format!("{}{}", "😀".repeat(20), "a".repeat(60)),
+                "png"
+            ))
+            .is_some()
+        );
+        // 177 payload bytes yield 236 base64 bytes and an exact 255-byte WebP name.
+        let maximum = name_v2(&"x".repeat(125), "a", &"b".repeat(49), "webp");
+        assert_eq!(maximum.len(), 255);
+        assert!(from_name(&maximum).is_some());
+        assert!(from_name(&name_v2(&"x".repeat(126), "a", &"b".repeat(49), "webp")).is_none());
+        for label in [
+            "".to_owned(),
+            " ".to_owned(),
+            " label".to_owned(),
+            "label ".to_owned(),
+            "a\nb".to_owned(),
+            "a\rb".to_owned(),
+            "a\u{0085}b".to_owned(),
+            "a".repeat(81),
+            "静".repeat(80),
+        ] {
+            assert!(
+                from_name(&name_v2("x", "🙂", &label, "png")).is_none(),
+                "{label:?}"
+            );
+        }
+        for control in [
+            '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}',
+            '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{feff}',
+        ] {
+            assert!(from_name(&name_v2("x", "🙂", &format!("a{control}b"), "png")).is_none());
+        }
+        for value in [
+            name_v2("A", "🙂", "calm", "png"),
+            name_v2("x", "a\nb", "calm", "png"),
+            name_v2("x", "🙂", "calm", "PNG"),
+            "mt-sticker-v2-eAphCmE=.png".to_owned(),
+        ] {
+            assert!(from_name(&value).is_none(), "{value}");
+        }
     }
 
     #[test]

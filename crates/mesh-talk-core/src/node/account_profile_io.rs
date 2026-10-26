@@ -5,6 +5,41 @@ use crate::discovery::roster::PeerRecord;
 use crate::node::profile::ProfilePayload;
 
 impl Node {
+    /// Best known presentation name for an account, including offline contacts.
+    /// Names are descriptive and may be shared by different account identities.
+    pub fn account_display_name(&self, account_id: &str) -> Option<String> {
+        if let Some(profile) = self.account_profile(account_id)
+            && !profile.display_name.trim().is_empty()
+        {
+            return Some(profile.display_name);
+        }
+        let live = self
+            .roster
+            .lock()
+            .expect("roster lock not poisoned")
+            .peers();
+        if let Some(peer) = live
+            .into_iter()
+            .filter(|peer| {
+                !peer.post_office
+                    && peer.account_id.as_deref() == Some(account_id)
+                    && !peer.name.trim().is_empty()
+            })
+            .max_by_key(|peer| (peer.last_seen, peer.public.user_id()))
+        {
+            return Some(peer.name);
+        }
+        // Historical signed announcements remain descriptive after presence expires.
+        // With no current profile or live device, choose a stable known name.
+        self.historical_dm_peers()
+            .into_iter()
+            .filter(|proof| {
+                proof.account_id().as_deref() == Some(account_id) && !proof.name.trim().is_empty()
+            })
+            .map(|proof| proof.name)
+            .min()
+    }
+
     pub fn account_profile(&self, account_id: &str) -> Option<AccountProfile> {
         #[cfg(test)]
         if let Some(hook) = self.profile_read_hook.lock().unwrap().take() {
