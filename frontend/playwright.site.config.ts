@@ -6,6 +6,7 @@ export default defineConfig({
   testDir: "./e2e",
   testMatch: [
     "site-audit.spec.ts",
+    "site-discovery.spec.ts",
     "site-motion.spec.ts",
     "site-faq-motion.spec.ts",
     "site-network-flow.spec.ts",

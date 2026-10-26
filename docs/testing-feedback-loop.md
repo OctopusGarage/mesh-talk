@@ -77,6 +77,9 @@ For every new requirement, the implementation owner follows this sequence:
    observable acceptance criteria, including applicable failure, permission,
    persistence and lifetime behavior. Clarify the rule in its owning guide when
    its meaning changes; preserve the canonical glossary.
+   Select applicable [maintenance inventory](maintenance-checklist.md) items for
+   documentation, generated exports, external publications and other consumers;
+   record evidence, justified exclusions and owned follow-ups in the PR.
 2. Preview `make verify-plan` against the actual diff. Review consumers and
    browser/native escalation, including runtime relationships that imports cannot
    reveal. Extend the owning implementation before creating another rule owner.
@@ -509,6 +512,14 @@ build/test timings as the workspace grows; incomplete reports still fail the gat
 Loopback UDP reply fixtures connect their receiving socket to their own listener
 so concurrent discovery traffic cannot masquerade as a reply. Tests must still
 reject extra replies from that listener after a refresh.
+
+Registered desktop IPC fixtures wait for their signed peer to appear and repeat
+its UDP announcement within the existing setup deadline. A successful UDP send is
+not receipt evidence; a lost first datagram must not fail an unrelated privacy or
+session test before its assertions run. The dropped-first-announcement regression
+in `owner_commands::tests` exercises this setup path. Shared-fixture changes keep
+the existing `desktop-session` selector over all owner-command tests and require
+their consumers to run; they do not change production discovery guarantees.
 
 
 To assess performance after deployment, compare at least several unchanged-scope

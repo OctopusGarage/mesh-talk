@@ -82,7 +82,12 @@ test("all generated local page links resolve in root and version snapshot", asyn
     for (const name of ["index.html", "connect.html"]) {
       const body = await readFile(join(out, prefix, name), "utf8");
       for (const [, href] of body.matchAll(/(?:href|src)="([^"#]+)"/g))
-        if (!href.startsWith("../")) await readFile(join(out, prefix, href));
+        if (href.startsWith("https://example.test/project/help/"))
+          await readFile(
+            join(out, href.slice("https://example.test/project/help/".length)),
+          );
+        else if (!href.startsWith("../"))
+          await readFile(join(out, prefix, href));
     }
   assert.match(
     await readFile(join(out, "v/0.4.0/llms.txt"), "utf8"),
