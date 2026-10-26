@@ -513,6 +513,14 @@ Loopback UDP reply fixtures connect their receiving socket to their own listener
 so concurrent discovery traffic cannot masquerade as a reply. Tests must still
 reject extra replies from that listener after a refresh.
 
+Registered desktop IPC fixtures wait for their signed peer to appear and repeat
+its UDP announcement within the existing setup deadline. A successful UDP send is
+not receipt evidence; a lost first datagram must not fail an unrelated privacy or
+session test before its assertions run. The dropped-first-announcement regression
+in `owner_commands::tests` exercises this setup path. Shared-fixture changes keep
+the existing `desktop-session` selector over all owner-command tests and require
+their consumers to run; they do not change production discovery guarantees.
+
 
 To assess performance after deployment, compare at least several unchanged-scope
 runs with warm caches and a cold-cache run. Record time from PR update to all
