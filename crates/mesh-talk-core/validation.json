@@ -1414,6 +1414,9 @@
       "id": "core-group-file-network-cost",
       "paths": [
         "crates/mesh-talk-core/src/node/network_cost.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/node/file_completion.rs",
+        "crates/mesh-talk-core/src/node/media_store.rs",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
         "crates/mesh-talk-core/src/node/runtime.rs"

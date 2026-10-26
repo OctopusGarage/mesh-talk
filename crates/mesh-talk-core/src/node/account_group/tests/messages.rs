@@ -111,38 +111,40 @@ async fn ordinary_member_sticker_uses_durable_account_sender() {
 }
 
 /// Timeout diagnostics expose protocol stages only, never message or intent data.
-pub(super) fn account_send_timeout_stage(
+pub(super) fn panic_account_send_timeout(
     source: &Node,
     reference: &Node,
     external: &Node,
     account: &Account,
     id: AccountGroupOperationId,
-) -> &'static str {
+) -> ! {
     let Ok(Some(status)) = source.account_group_operation_status(&account.account_id(), id) else {
-        return "action timeout: selected source has not imported the request";
+        panic!("action timeout: selected source has not imported the request");
     };
-    if status.phase != AccountGroupOperationPhase::Committed {
-        return "action timeout: selected source has not committed the effect";
-    }
+    assert!(
+        status.phase == AccountGroupOperationPhase::Committed,
+        "action timeout: selected source has not committed the effect"
+    );
     let Some(event) = status.primary_event else {
-        return "action timeout: selected source has no original effect receipt";
+        panic!("action timeout: selected source has no original effect receipt");
     };
-    if external.log.lock().unwrap().get(&event).is_none() {
-        return "action timeout: committed original effect has not reached the external member";
-    }
-    if reference
-        .account_group_operation_inputs()
-        .into_iter()
-        .any(|(_, _, frame)| {
-            frame.projection.results.iter().any(|result| {
-                result.reference.id == id
-                    && result.status.phase == AccountGroupOperationPhase::Committed
-            })
-        })
-    {
-        return "action timeout: committed source frame awaits private-copy adoption";
-    }
-    "action timeout: committed source frame has not reached the reference device"
+    assert!(
+        external.log.lock().unwrap().get(&event).is_some(),
+        "action timeout: committed original effect has not reached the external member"
+    );
+    assert!(
+        !reference
+            .account_group_operation_inputs()
+            .into_iter()
+            .any(|(_, _, frame)| {
+                frame.projection.results.iter().any(|result| {
+                    result.reference.id == id
+                        && result.status.phase == AccountGroupOperationPhase::Committed
+                })
+            }),
+        "action timeout: committed source frame awaits private-copy adoption"
+    );
+    panic!("action timeout: committed source frame has not reached the reference device")
 }
 
 async fn reference_member_send_fixture(fail_receive: bool) {
@@ -304,10 +306,7 @@ async fn reference_member_send_fixture(fail_receive: bool) {
             })
             .await
             .unwrap_or_else(|_| {
-                panic!(
-                    "{}",
-                    account_send_timeout_stage(&source, &reference, &external, &account, id)
-                )
+                panic_account_send_timeout(&source, &reference, &external, &account, id)
             });
             reference.maintain_account_group_operation_effects();
             assert_ne!(
@@ -358,10 +357,7 @@ async fn reference_member_send_fixture(fail_receive: bool) {
         })
         .await
         .unwrap_or_else(|_| {
-            panic!(
-                "{}",
-                account_send_timeout_stage(&source, &reference, &external, &account, id)
-            )
+            panic_account_send_timeout(&source, &reference, &external, &account, id)
         });
         let event_id = status
             .primary_event

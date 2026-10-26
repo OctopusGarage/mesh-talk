@@ -43,14 +43,18 @@ impl Chain {
             let (dm, _) = mpsc::unbounded_channel();
             let (channel, _) = mpsc::unbounded_channel();
             let (file, _) = mpsc::unbounded_channel();
+            // Sidecars and managed media belong to the directory, not the log
+            // filename. Independent network peers must never share that store.
+            let node_dir = dir.path().join(i.to_string());
+            std::fs::create_dir(&node_dir).unwrap();
             let node = Node::open(
                 DeviceIdentity::generate(),
                 Arc::new(Mutex::new(Roster::default())),
                 dm,
                 channel,
                 file,
-                &dir.path().join(format!("{i}-events.log")),
-                &dir.path().join(format!("{i}-sent.log")),
+                &node_dir.join("events.log"),
+                &node_dir.join("sent.log"),
                 "pw",
             )
             .unwrap();
@@ -336,7 +340,9 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
         chain.nodes[2].decide_attachment(file, true).unwrap();
     }
     chain.round(2, 1, file).await;
+    assert!(chain.nodes[2].log.lock().unwrap().events(&file).is_empty());
     assert_eq!(chain.nodes[2].file_progress(file).unwrap().done, 0);
+    assert!(!chain.nodes[2].file_ready_to_save(file));
     assert_eq!(holder.log.lock().unwrap().events(&file).len(), retained);
     assert_eq!(
         holder.log.lock().unwrap().events(&group).len(),

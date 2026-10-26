@@ -379,7 +379,7 @@ async fn reference_message_action(recall: bool) {
                     })
             },
             || {
-                super::messages::account_send_timeout_stage(
+                super::messages::panic_account_send_timeout(
                     if recall || turn == 0 {
                         &source
                     } else {
