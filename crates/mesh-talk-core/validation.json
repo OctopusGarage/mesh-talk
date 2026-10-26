@@ -1073,7 +1073,8 @@
       ],
       "consumers": [
         "desktop-chat",
-        "desktop-account-profile"
+        "desktop-account-profile",
+        "integration-service"
       ],
       "capability": {
         "summary": "Authenticate ordinary profiles automatically, preserve immutable system-recorded creation metadata and keep private verification independent.",

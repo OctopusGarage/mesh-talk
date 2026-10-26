@@ -1193,7 +1193,7 @@
     "copyFailed": "Could not copy. Select the instructions above and copy them manually.",
     "group": "Group",
     "person": "Person",
-    "selectedCount": "{{count}} / 16 selected",
+    "selectedCount": "{{count}} / {{total}} selected",
     "search": "Search contacts and groups",
     "selectedOnly": "Selected only",
     "noMatches": "No matching conversations.",

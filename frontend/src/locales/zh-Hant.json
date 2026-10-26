@@ -1191,7 +1191,7 @@
     "copyFailed": "複製失敗，請選取上方說明並手動複製。",
     "group": "群組",
     "person": "聯絡人",
-    "selectedCount": "已選擇 {{count}} / 16",
+    "selectedCount": "已選 {{count}} / {{total}} 個",
     "search": "搜尋聯絡人和群組",
     "selectedOnly": "只顯示已選",
     "noMatches": "沒有符合的對話。",

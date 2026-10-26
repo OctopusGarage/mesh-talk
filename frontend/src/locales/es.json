@@ -1188,7 +1188,7 @@
     "copyFailed": "No se pudo copiar. Selecciona las instrucciones y cópialas manualmente.",
     "group": "Grupo",
     "person": "Persona",
-    "selectedCount": "{{count}} / 16 seleccionadas",
+    "selectedCount": "{{count}} / {{total}} seleccionadas",
     "search": "Buscar contactos y grupos",
     "selectedOnly": "Solo seleccionadas",
     "noMatches": "No hay conversaciones coincidentes.",
