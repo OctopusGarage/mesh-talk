@@ -201,6 +201,9 @@ export async function runNativeStickerAcceptance() {
     assert.equal(received.file.file_conv, sent.file.file_conv);
     const bytes = await until("native durable image bytes", () => receiver.media(received.file.file_conv));
     assert.equal(hash(bytes), artwork.original.sha256);
+    // Activate the owned receiver before awaiting its visible rendering, as
+    // captureNativeEvidence does for WKWebView's suspended frame callbacks.
+    await receiver.focus();
     const image = await until("real native webview decoded received sticker", () => receiver.execute("const img=document.querySelector('[data-message-id=\"'+arguments[0]+'\"] [data-testid=message-sticker]'),r=img?.getBoundingClientRect();return img?.complete&&img.naturalWidth>0&&r.width>0&&r.top>=0&&r.bottom<=innerHeight&&{decoded:true,width:img.naturalWidth,height:img.naturalHeight};", [received.id]));
     await until("exact sender completion", async () => (await sender.invoke("owner_delivery_statuses", { owner: sender.owner, account: receiver.account, ids: [sent.id] })).some(row => row.id === sent.id && row.status === "delivered"));
     await receiver.focus();
