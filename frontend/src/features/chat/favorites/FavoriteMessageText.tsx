@@ -1,5 +1,6 @@
 import { usePacks } from "@/store/packs";
-import { stickerById } from "@/lib/stickerPacks";
+import { messageSticker, messageSummary } from "@/lib/messagePresentation";
+import { useTranslation } from "react-i18next";
 import { StickerThumb } from "../StickerThumb";
 export function FavoriteMessageText({
   text,
@@ -11,14 +12,16 @@ export function FavoriteMessageText({
   fallback: string;
 }) {
   const packs = usePacks((s) => s.packs);
-  const item = sticker ? stickerById(sticker, packs) : undefined;
-  if (item)
+  const { t } = useTranslation();
+  const item = messageSticker({ text, sticker }, packs);
+  const description = messageSummary({ text, sticker }, t, packs);
+  if (item?.url)
     return (
-      <StickerThumb src={item.url} alt={item.label ?? text} fallback={text} />
+      <StickerThumb src={item.url} alt={description} fallback={item.fallback} />
     );
   return (
     <p className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-sm [overflow-wrap:anywhere]">
-      {text || fallback}
+      {sticker ? description : text || fallback}
     </p>
   );
 }

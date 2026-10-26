@@ -480,3 +480,39 @@ it.each(["Alice", ""])(
     expect(store.getState().ledger[channelKey].archive.seen).toBe(true);
   },
 );
+
+it("reconciles late file identity bindings in both history display and unread reception", async () => {
+  const store = session();
+  store.setState({
+    active: conversation,
+    cacheOrder: [key],
+    ledger: {
+      [key]: {
+        first: { seen: false, late: false },
+        second: { seen: false, late: true },
+      },
+    },
+    unreadIds: { [key]: ["first", "second"] },
+    unread: { [key]: 2 },
+  });
+  invoke.mockImplementation((command: string) =>
+    Promise.resolve(
+      command === "owner_account_history"
+        ? [
+            {
+              ...row("canonical"),
+              file_message_aliases: ["canonical", "first", "second"],
+            },
+          ]
+        : [],
+    ),
+  );
+  await reloadConversation(store.setState, store.getState);
+  expect(store.getState().unreadIds[key]).toEqual(["canonical"]);
+  expect(store.getState().unread[key]).toBe(1);
+  expect(store.getState().messages[key][0].fileMessageAliases).toEqual([
+    "canonical",
+    "first",
+    "second",
+  ]);
+});

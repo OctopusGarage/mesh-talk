@@ -4567,6 +4567,7 @@ it("sends installed sticker bytes as media and retries that snapshot after pack 
   expect(decodeStickerMedia(failed.file!)).toEqual({
     id: "pack:cats:wave",
     fallback: "👋",
+    label: "Wave",
   });
   expect(
     invoke.mock.calls.some(([cmd]) => cmd === "owner_enqueue_sticker"),

@@ -45,6 +45,7 @@ pub mod recovery;
 mod routed_discovery;
 mod runtime_admission;
 mod runtime_bootstrap;
+mod screenshot_shortcuts;
 pub mod services;
 pub mod session_store;
 pub mod settings;
@@ -193,6 +194,11 @@ pub fn run_tauri_configured(
                 )
                 .build(),
         )
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(crate::screenshot_shortcuts::handle_shortcut)
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -223,6 +229,7 @@ pub fn run_tauri_configured(
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         handle.state::<crate::app_lock::AppLock>().tick(&handle);
+                        crate::screenshot_shortcuts::suspend_retired(&handle).await;
                     }
                 });
             }
@@ -324,6 +331,7 @@ pub fn run_tauri_configured(
         .manage(app_state.app_lock().clone())
         .manage(app_state)
         .manage(settings_state)
+        .manage(crate::screenshot_shortcuts::ScreenshotShortcutState::default())
         .manage(crate::events::NotificationContextState::default())
         .manage(trust_state)
         .manage(favorites_state)
@@ -475,6 +483,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::get_presence,
                 crate::chat_commands::rescan_peers,
                 crate::chat_commands::probe_peer_endpoint,
+                crate::chat_commands::register_sticker_source,
                 crate::chat_commands::write_temp_file,
                 crate::chat_commands::delete_temp_file,
                 crate::chat_commands::capture_screen,
@@ -503,6 +512,10 @@ pub fn run_tauri_configured(
                 crate::drafts::save_conversation_drafts,
                 crate::drafts::publish_legacy_conversation_drafts,
                 crate::settings::set_app_settings,
+                crate::screenshot_shortcuts::sync_screenshot_shortcuts,
+                crate::screenshot_shortcuts::suspend_screenshot_shortcuts,
+                crate::screenshot_shortcuts::pause_screenshot_shortcuts,
+                crate::screenshot_shortcuts::wake_screenshot_window,
                 crate::trust::get_trust,
                 crate::trust::mark_verified,
                 crate::account_documents::get_account_documents,

@@ -41,6 +41,10 @@ impl AccountFileProofs {
         Ok(())
     }
 
+    pub(super) fn snapshot(&self) -> Vec<Event> {
+        self.events.values().cloned().collect()
+    }
+
     pub(crate) fn get(&self, id: &EventId) -> Option<&Event> {
         self.events.get(id)
     }

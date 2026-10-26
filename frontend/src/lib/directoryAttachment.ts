@@ -1,4 +1,4 @@
-import { decodeStickerMedia } from "./stickerMedia";
+import { decodeStickerMedia, stickerSummary } from "./stickerMedia";
 
 /** The sender uses a regular tar attachment so older clients can still download it. */
 export const DIRECTORY_MIME = "application/x-mesh-talk-directory-tar";
@@ -11,11 +11,12 @@ export function attachmentLabel(
   name: string,
   mime: string,
   metadata?: { media: boolean; size: number },
+  genericSticker = "[Sticker]",
 ): string {
   const sticker = metadata
     ? decodeStickerMedia({ name, mime, ...metadata })
     : null;
-  if (sticker) return sticker.fallback;
+  if (sticker) return stickerSummary(sticker, genericSticker);
   return isDirectoryAttachment(mime) && name.endsWith(".tar")
     ? name.slice(0, -4)
     : name;

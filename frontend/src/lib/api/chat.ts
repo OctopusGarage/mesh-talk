@@ -536,6 +536,13 @@ export const chat = {
   /** Write picked/pasted bytes to a temp file and return its path, to feed the file-send
    *  pipeline. `name` (the picker has one) is kept verbatim so the real filename + extension
    *  survive; without it a `pasted-<ts>.<ext>` name is synthesized for clipboard bytes. */
+  registerStickerSource: (
+    owner: string,
+    account: string,
+    name: string,
+    bytes: number[],
+  ) => invoke<void>("register_sticker_source", { owner, account, name, bytes }),
+
   writeTempFile: (bytes: number[], ext: string, name?: string) =>
     invoke<string>("write_temp_file", { bytes, ext, name }),
   deleteTempFile: (path: string) => invoke<void>("delete_temp_file", { path }),

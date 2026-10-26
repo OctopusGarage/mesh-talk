@@ -129,7 +129,7 @@ for (const viewport of [
     await selectSettingsCategory(page, "integrations");
     const picker = page.getByTestId("agent-conversation-picker");
     const summary = picker.locator("summary");
-    await expect(summary).toContainText("0 / 16 selected");
+    await expect(summary).toContainText("0 / 300 selected");
     await expect(picker.getByRole("searchbox")).toBeHidden();
     await summary.focus();
     await page.keyboard.press("Enter");
@@ -148,7 +148,7 @@ for (const viewport of [
     await search.fill("  喵星球  ");
     await expect(picker.getByRole("checkbox")).toHaveCount(1);
     await picker.getByRole("checkbox").check();
-    await expect(summary).toContainText("1 / 16 selected");
+    await expect(summary).toContainText("1 / 300 selected");
     await search.fill("does not exist");
     await expect(picker.getByText("No matching conversations.")).toBeVisible();
     await search.fill("");
@@ -161,7 +161,7 @@ for (const viewport of [
     });
     await summary.click();
     await expect(picker.getByRole("searchbox")).toBeHidden();
-    await expect(summary).toContainText("1 / 16 selected");
+    await expect(summary).toContainText("1 / 300 selected");
     await page.screenshot({
       path: testInfo.outputPath("agent-picker-collapsed.png"),
     });

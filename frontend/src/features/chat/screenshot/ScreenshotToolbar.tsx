@@ -13,6 +13,11 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { colors, type Ink, type Tool } from "./annotations";
+import {
+  EDITOR_TOOL_KEYS,
+  ariaShortcut,
+  formatShortcut,
+} from "@/lib/screenshotShortcuts";
 
 const buttonClass =
   "flex h-9 w-9 shrink-0 items-center justify-center rounded hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 disabled:opacity-35";
@@ -77,7 +82,8 @@ export function ScreenshotToolbar({
           <button
             key={value}
             type="button"
-            title={t(`screenshot.${key}`)}
+            title={`${t(`screenshot.${key}`)} · ${EDITOR_TOOL_KEYS[value]}`}
+            aria-keyshortcuts={EDITOR_TOOL_KEYS[value]}
             aria-label={t(`screenshot.${key}`)}
             aria-pressed={tool === value}
             disabled={sending || (!selected && value !== "select")}
@@ -90,7 +96,8 @@ export function ScreenshotToolbar({
         <span className="mx-1 h-5 w-px bg-neutral-200" />
         <button
           type="button"
-          title={t("screenshot.undo")}
+          title={`${t("screenshot.undo")} · ${formatShortcut("CommandOrControl+KeyZ")}`}
+          aria-keyshortcuts={ariaShortcut("CommandOrControl+KeyZ")}
           aria-label={t("screenshot.undo")}
           disabled={!canUndo || sending}
           onClick={onUndo}
@@ -100,7 +107,8 @@ export function ScreenshotToolbar({
         </button>
         <button
           type="button"
-          title={t("screenshot.cancel")}
+          title={`${t("screenshot.cancel")} · Esc`}
+          aria-keyshortcuts="Escape"
           aria-label={t("screenshot.cancel")}
           disabled={sending}
           onClick={onCancel}
@@ -111,7 +119,8 @@ export function ScreenshotToolbar({
         <button
           type="button"
           data-testid="screenshot-send"
-          title={t("screenshot.confirm")}
+          title={`${t("screenshot.confirm")} · Enter`}
+          aria-keyshortcuts="Enter"
           aria-label={t("screenshot.confirm")}
           disabled={!selected || sending}
           onClick={onConfirm}

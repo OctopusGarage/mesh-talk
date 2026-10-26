@@ -33,6 +33,7 @@ vi.mock("@/store/fileAvailability", () => ({
   },
 }));
 import { saveAttachment } from "./attachmentSave";
+import { encodeStickerMediaName } from "./stickerMedia";
 const file = { fileConv: "fc", name: "report.txt", mime: "text/plain" };
 beforeEach(() => {
   vi.clearAllMocks();
@@ -68,6 +69,35 @@ it("Save as prompts at the configured directory and remembers the selected path"
   expect(m.saveFile).toHaveBeenCalledWith("fc", "/chosen/report.txt");
   expect(m.remember).toHaveBeenCalledWith("fc", "/chosen/report.txt");
 });
+it("suggests a safe readable sticker export name instead of its transport marker", async () => {
+  const name = encodeStickerMediaName("calm", "🙂", "png", "静下心");
+  await saveAttachment(
+    { ...file, name, mime: "image/png", media: true, size: 42 },
+    { current: () => true },
+    { mode: "as" },
+  );
+  expect(m.save).toHaveBeenCalledWith({
+    defaultPath: "/configured/静下心.png",
+  });
+});
+it.each([
+  ["../静/心", "_静_心.png"],
+  ["CON", "_CON.png"],
+  ["...", "sticker.png"],
+])(
+  "keeps sticker export label %s inside a legal filename",
+  async (label, expected) => {
+    const name = encodeStickerMediaName("calm", "🙂", "png", label);
+    await saveAttachment(
+      { ...file, name, mime: "image/png", media: true, size: 42 },
+      { current: () => true },
+      { mode: "as" },
+    );
+    expect(m.save).toHaveBeenCalledWith({
+      defaultPath: `/configured/${expected}`,
+    });
+  },
+);
 it("Save default remembers the actual collision-resolved path", async () => {
   await saveAttachment(file, { current: () => true }, { mode: "default" });
   expect(m.save).not.toHaveBeenCalled();

@@ -520,6 +520,13 @@ impl Node {
                 claims.push((EventId::new(env.target), env.route.sender_account));
             }
         }
+        out = out
+            .into_iter()
+            .map(|target| self.file_message_logical_id(acct_conv, target))
+            .collect();
+        for (target, _) in &mut claims {
+            *target = self.file_message_logical_id(acct_conv, *target);
+        }
         if claims.is_empty() {
             return out;
         }
@@ -577,11 +584,17 @@ impl Node {
             }
             let files = self.received_files.lock().expect("received files lock");
             for row in files.entries_ref(&acct_conv) {
-                if targets.contains(&row.event_id)
+                let logical = self.file_message_row_logical_id(row);
+                if targets.contains(&logical)
                     && recallable_manifest(&row.plaintext)
-                    && let Some(account) = authors.get(&row.from)
+                    && let Some(account) = authors.get(&row.from).cloned().or_else(|| {
+                        self.file_message_identities
+                            .lock()
+                            .expect("file identity lock")
+                            .row_author_account(row)
+                    })
                 {
-                    author_of.insert(row.event_id, (account.clone(), row.wall_clock));
+                    author_of.insert(logical, (account, row.wall_clock));
                 }
             }
         }

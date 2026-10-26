@@ -8,11 +8,41 @@ import {
   refreshFileAvailability,
   useFileAvailability,
 } from "@/store/fileAvailability";
+import { decodeStickerMedia } from "./stickerMedia";
+
+interface Attachment {
+  fileConv: string;
+  name: string;
+  mime?: string;
+  media?: boolean;
+  size?: number;
+}
+
+/** Export a recognized sticker as an image with a legal, human-readable basename. */
+function exportName(file: Attachment): string {
+  const sticker = decodeStickerMedia({
+    ...file,
+    media: file.media ?? false,
+    size: file.size ?? 0,
+  });
+  if (!sticker) return file.name;
+  let label =
+    (sticker.label ?? "sticker")
+      .replace(/[<>:"/\\|?*]/gu, "_")
+      .replace(/^[. ]+|[. ]+$/gu, "") || "sticker";
+  if (
+    /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³])(?:\.|$)/iu.test(
+      label,
+    )
+  )
+    label = `_${label}`;
+  return `${label}.${file.name.split(".").pop()}`;
+}
 
 /** One save continuation for every attachment surface. A lease belongs to the
  * initiating chat session; readiness must still hold after any native dialog. */
 export async function saveAttachment(
-  file: { fileConv: string; name: string; mime?: string },
+  file: Attachment,
   lease: { current: () => boolean; owner?: string | null },
   options: {
     mode: "as" | "default";
@@ -50,7 +80,7 @@ export async function saveAttachment(
       }
     }
     if (destination === undefined) {
-      const defaultPath = await defaultSavePath(file.name);
+      const defaultPath = await defaultSavePath(exportName(file));
       if (!current()) return null;
       const selected = directory
         ? await open({ directory: true, defaultPath })

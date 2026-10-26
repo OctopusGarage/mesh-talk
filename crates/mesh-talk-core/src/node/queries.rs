@@ -69,6 +69,23 @@ impl Node {
         use super::delivery_store::DeliveryTransaction;
         use std::collections::{HashMap, HashSet};
 
+        let selected_ids: Vec<EventId>;
+        let selection = match selection {
+            HistorySelection::Selected(ids) => {
+                selected_ids = ids
+                    .iter()
+                    .map(|id| self.file_message_logical_id(conversation, *id))
+                    .collect();
+                HistorySelection::Selected(&selected_ids)
+            }
+            HistorySelection::Context(id) => {
+                HistorySelection::Context(self.file_message_logical_id(conversation, id))
+            }
+            HistorySelection::Protected(id) => {
+                HistorySelection::Protected(self.file_message_logical_id(conversation, id))
+            }
+            other => other,
+        };
         let is_channel = account.is_none()
             && (self.channel_shared_reference(conversation).is_some()
                 || self
@@ -226,6 +243,14 @@ impl Node {
             }
             _ => None,
         });
+        let identities = self
+            .file_message_identities
+            .lock()
+            .expect("file identity lock");
+        let suppression = self
+            .account_suppression
+            .lock()
+            .expect("account suppression lock");
         let mut file_ids = HashSet::new();
         let mut file_rows: Vec<_> = durable_files.iter().collect();
         file_rows.sort_by_key(|row| row.wall_clock);
@@ -240,9 +265,13 @@ impl Node {
             let from_me = row.from == me
                 || recovered_me.contains(&row.from)
                 || own_devices.contains(&row.from);
-            if seen.insert(row.event_id) {
+            let logical = identities.row_logical(row);
+            if suppression.contains(conversation, logical) {
+                continue;
+            }
+            if seen.insert(logical) {
                 rows.push(HistoryRow {
-                    id: row.event_id,
+                    id: logical,
                     wall_clock: row.wall_clock,
                     from_me,
                     who: if from_me { "you" } else { &row.from },
@@ -252,6 +281,8 @@ impl Node {
                 });
             }
         }
+        drop(suppression);
+        drop(identities);
         // Channel file acceptance is durable before its history sidecar is
         // projected. Read the same retained manifest from that pending WAL entry.
         for transaction in pending {
@@ -310,6 +341,16 @@ impl Node {
             .iter()
             .map(|row| {
                 let mut entry = row.decode();
+                entry.reply_to = entry
+                    .reply_to
+                    .map(|target| self.file_message_logical_id(conversation, target));
+                if row.file {
+                    entry.file_message_aliases = self
+                        .file_message_identities
+                        .lock()
+                        .expect("file identity lock")
+                        .aliases(conversation, row.id);
+                }
                 if let HistorySelection::Protected(id) = selection
                     && row.id == id
                     && entry.protection.is_some()
@@ -404,6 +445,7 @@ impl HistoryRow<'_> {
         };
         HistoryEntry {
             id: self.id,
+            file_message_aliases: Vec::new(),
             wall_clock: self.wall_clock,
             from_me: self.from_me,
             who: self.who.to_string(),

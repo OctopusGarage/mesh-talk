@@ -8,6 +8,7 @@ import { useDrafts } from "@/store/drafts";
 import { useAuth } from "@/store/auth";
 import { emptyReception, viewIdentities } from "@/store/reception";
 import { ConversationRow } from "./ConversationRow";
+import { encodeStickerMediaName } from "@/lib/stickerMedia";
 
 vi.mock("@/components/GroupAvatar", () => ({ GroupAvatar: () => null }));
 let host: HTMLDivElement;
@@ -72,6 +73,35 @@ it("keeps the prefix in Chinese with no cached messages", async () => {
   await i18n.changeLanguage("zh-Hans");
   await render();
   expect(host.textContent).toContain("[有人@我]");
+});
+
+it("shows the semantic sticker summary in both preview and title without exposing its transport name", async () => {
+  const name = encodeStickerMediaName("pack:cats:calm", "🙂", "png", "静下心");
+  useChat.setState({
+    messages: {
+      [key]: [
+        {
+          id: "sticker",
+          fromMe: false,
+          who: "bob",
+          text: "",
+          wallClock: 100,
+          replyTo: null,
+          file: {
+            name,
+            mime: "image/png",
+            media: true,
+            size: 42,
+            fileConv: "file",
+          },
+        },
+      ],
+    },
+  });
+  await render(false);
+  const row = host.querySelector('[data-testid="conversation-row-team"]')!;
+  expect(row.textContent).toContain("[静下心]");
+  expect(row.innerHTML).not.toContain(name);
 });
 
 it("conceals protected draft text and title while preserving the mention indicator", async () => {

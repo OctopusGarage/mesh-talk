@@ -88,6 +88,16 @@
         "integration-http",
         "desktop-integrations"
       ],
+      "capability": {
+        "summary": "Describe only granted destinations using known display names while preserving exact destination IDs for sends.",
+        "guide": "docs/bot-integrations.md#api-discovery-and-authentication",
+        "invariants": [
+          {
+            "name": "Granted account names resolve from profiles or verified discovery, including offline contacts; unknown names fall back to IDs and ungranted contacts remain undisclosed.",
+            "reference": "docs/bot-integrations.md#api-discovery-and-authentication"
+          }
+        ]
+      },
       "escalation": [
         "Changed grant/IPC/public capability contracts require affected desktop integration consumers and private-IPC evidence."
       ]

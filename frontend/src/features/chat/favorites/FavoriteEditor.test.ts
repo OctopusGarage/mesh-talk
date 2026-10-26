@@ -24,6 +24,28 @@ const draft: FavoriteDraft = {
   ],
 };
 afterEach(() => vi.useRealTimers());
+it("describes a legacy sticker without its pack instead of treating its emoji fallback as text", async () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        createElement(FavoriteEditor, {
+          draft: {
+            ...draft,
+            messages: [
+              { ...draft.messages[0], text: "🙂", sticker: "unknown" },
+            ],
+          },
+          onClose: () => {},
+        }),
+      ),
+    );
+    expect(document.body.textContent).toContain("[Sticker]");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
 it("withholds original content when its explicit deadline passes in an open editor", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(10_000);

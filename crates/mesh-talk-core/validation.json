@@ -49,7 +49,11 @@
         "crates/mesh-talk-core/src/node/sticker_media_tests.rs",
         "crates/mesh-talk-core/src/node/recall.rs",
         "crates/mesh-talk-core/src/node/file_completion.rs",
-        "crates/mesh-talk-core/src/node/serving.rs"
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/node/session.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/eventlog/sync.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
       ],
       "rust": [
         {
@@ -57,9 +61,11 @@
           "filters": [
             "file::sticker::tests::",
             "node::sticker_media_tests::",
+            "node::sticker_media::",
             "node::files::",
             "node::recall::",
-            "node::file_completion::"
+            "node::file_completion::",
+            "node::session::tests::"
           ]
         }
       ],
@@ -75,11 +81,19 @@
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           },
           {
+            "name": "Canonical v1 sticker metadata remains readable; v2 carries a bounded safe label through encrypted delivery and retained history without changing authenticated image identity",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
             "name": "Bounded canonical presentation metadata remains compatible ordinary media and never grants cross-conversation read access",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           },
           {
             "name": "A cached image only completes a new manifest after exact retained ancestry, origin binding and durable byte validation; cache presence alone never proves recipient delivery",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "Exact installed artwork can reconstruct authenticated original-author chunks from bounded optional headers; signature, checksum, retained manifest authorization and exact completion are unchanged. Missing or incompatible sources use ordinary byte transfer.",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           }
         ]
@@ -1073,7 +1087,8 @@
       ],
       "consumers": [
         "desktop-chat",
-        "desktop-account-profile"
+        "desktop-account-profile",
+        "integration-service"
       ],
       "capability": {
         "summary": "Authenticate ordinary profiles automatically, preserve immutable system-recorded creation metadata and keep private verification independent.",
@@ -1416,6 +1431,97 @@
       },
       "escalation": [
         "Require real direct-pairing, private-record restart, unrelated-peer denial and native canonical logout/relogin evidence. Legacy CLI V1/V2/V3 remain compatible."
+      ]
+    },
+    {
+      "id": "core-authenticated-route-order",
+      "paths": [
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime_tests.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "authenticated_preferred_route_keeps_last_slot_ahead_of_known_stalled_route",
+            "fresh_one_off_routes_lead_and_signed_ports_supersede_cached_ports",
+            "reachable_route_is_not_blocked_by_stalled_former_lan_handshake",
+            "alternate_route_reclaims_idle_sessions_before_waiting_on_stale_route"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Keep authenticated working routes ahead of already known supplied endpoints while preserving fresh one-off precedence and signed port replacement.",
+        "guide": "docs/routed-network-discovery.md#network-changes-and-recovery",
+        "invariants": [
+          {
+            "name": "A known stalled supplied route cannot consume the last outbound slot ahead of an authenticated preferred route; fresh unknown endpoints and signed port replacement retain their existing meaning.",
+            "reference": "docs/routed-network-discovery.md#network-changes-and-recovery"
+          }
+        ]
+      },
+      "escalation": [
+        "Use the real loopback single-slot stalled-route regression and signed-port/fresh-endpoint tests; physical VM NAT discovery and native delivery remain separate environment acceptance."
+      ]
+    },
+    {
+      "id": "core-file-message-identity",
+      "paths": [
+        "crates/mesh-talk-core/src/node/file_message_identity.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/node/delivery_store.rs",
+        "crates/mesh-talk-core/src/node/node.rs",
+        "crates/mesh-talk-core/src/node/reactions.rs",
+        "crates/mesh-talk-core/src/node/account_documents/controls.rs",
+        "crates/mesh-talk-core/src/node/session.rs",
+        "crates/mesh-talk-core/src/node/account_session.rs",
+        "crates/mesh-talk-core/src/node/account_sync_wire.rs",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/node/session_pool.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/opaque_relay.rs",
+        "crates/mesh-talk-core/src/node/recovery.rs",
+        "crates/mesh-talk-core/src/recovery/snapshot.rs",
+        "crates/mesh-talk-core/src/node/lifecycle.rs",
+        "crates/mesh-talk-core/src/node/queries.rs",
+        "crates/mesh-talk-core/src/node/recall.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::file_message_identity::",
+            "account_file_history_deduplicates_recipient_device_manifest_copies",
+            "optional_file_message_identity_exchange_keeps_metadata_out_of_history",
+            "account_history_pages_reuse_one_authenticated_connection",
+            "logical_file_identity_extension_preserves_existing_account_tags",
+            "optional_identity_request_rejection_preserves_reusable_account_capability",
+            "identity_capability_cooldown_is_bounded_and_independent_of_account_sessions",
+            "file_identity_repair_bounds_each_history_scan_and_advances_past_legacy_rows",
+            "federated_file_consent_and_complete_bytes_need_no_direct_client_route"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Project one authenticated logical file message across per-device signed manifests while preserving exact consent/completion and intentional repeated sends.",
+        "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
+        "invariants": [
+          {
+            "name": "Only a sender-signed binding of exact manifest IDs, source certificate, recipient account and manifest bytes establishes equivalence; artwork, transfer IDs and send time do not.",
+            "reference": "CONTEXT.md#conversations-and-history"
+          },
+          {
+            "name": "Canonical history identity and alias suppression survive private synchronization, deletion, recall and recovery; deployed manifest/account-card encodings and exact delivery receipts remain unchanged.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          }
+        ]
+      },
+      "consumers": [
+        "desktop-chat"
+      ],
+      "escalation": [
+        "Run duplicate device fanout/sibling import, deliberate repeat, signed identity tampering, restart, recall/delete, relay-only and recovery snapshot regressions; test optional metadata fallback with older peers before merge."
       ]
     }
   ],

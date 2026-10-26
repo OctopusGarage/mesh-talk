@@ -130,6 +130,8 @@ pub struct HistoryEntry {
     /// Authenticated absolute UTC deadline shared by sender and recipient.
     pub expires_at_ms: Option<u64>,
     pub id: EventId,
+    /// Author-authenticated per-device manifest aliases for this logical file message.
+    pub file_message_aliases: Vec<EventId>,
     pub from_me: bool,
     pub who: String,
     pub text: Vec<u8>,
@@ -271,6 +273,9 @@ pub struct Node {
     pub(super) account_access_updates:
         tokio::sync::watch::Sender<Option<super::AccountAccessSnapshot>>,
     pub(in crate::node) account_preferences: Mutex<super::account_preferences::AccountPreferences>,
+    pub(in crate::node) file_message_identity_cursor: std::sync::atomic::AtomicUsize,
+    pub(in crate::node) file_message_identities:
+        Mutex<super::file_message_identity::FileMessageIdentities>,
     pub(in crate::node) account_file_proofs: Mutex<super::account_file_proofs::AccountFileProofs>,
     pub(in crate::node) account_sync_notify: tokio::sync::Notify,
     pub(in crate::node) account_history_revision: std::sync::atomic::AtomicU64,
@@ -344,6 +349,7 @@ pub struct Node {
     /// inline preview loads from a durable source that survives chunk prune + restart.
     /// SEPARATE from the chunked attachment path (generic files are never written here).
     pub(in crate::node) media: crate::node::media_store::MediaStore,
+    pub(super) sticker_sources: Mutex<super::sticker_media::StickerSources>,
     /// Per-peer Double Ratchet sessions (forward-secret DM crypto), encrypted on disk.
     pub(in crate::node) dm_ratchet: Mutex<DmRatchet>,
     /// Serializes every DM ratchet consumer and ordered recovery.
@@ -700,11 +706,16 @@ impl Node {
             &dir.join("account-file-proofs.log"),
             password,
         )?;
+        let file_message_identities = super::file_message_identity::FileMessageIdentities::open(
+            &dir.join("file-message-identities.log"),
+            password,
+        )?;
         let mut files = FileBook::new();
         for c in received_files.conversations() {
             for entry in received_files.entries(&c) {
                 if delivery.file_erased(entry.conversation, entry.event_id)
                     || delivery.manifest_event_erased(entry.event_id)
+                    || file_message_identities.row_suppressed(&entry, &account_suppression)
                 {
                     continue;
                 }
@@ -729,6 +740,7 @@ impl Node {
             .conversations()
             .iter()
             .flat_map(|conversation| received_files.entries(conversation))
+            .filter(|row| !file_message_identities.row_suppressed(row, &account_suppression))
             .filter_map(|row| {
                 super::files::validated_manifest(&row.plaintext)
                     .map(|manifest| manifest.file_conv())
@@ -826,6 +838,8 @@ impl Node {
             account_access: Mutex::new(account_access),
             account_access_updates,
             account_file_proofs: Mutex::new(account_file_proofs),
+            file_message_identities: Mutex::new(file_message_identities),
+            file_message_identity_cursor: std::sync::atomic::AtomicUsize::new(0),
             account_sync_notify: tokio::sync::Notify::new(),
             account_history_revision: std::sync::atomic::AtomicU64::new(0),
             account_archive_cache: Mutex::new(Default::default()),
@@ -878,6 +892,7 @@ impl Node {
             attachment_consent: Mutex::new(attachment_consent),
             file_consent: Mutex::new(file_consent),
             media,
+            sticker_sources: Mutex::new(Default::default()),
             dm_ratchet: Mutex::new(dm_ratchet),
             delivery: Mutex::new(delivery),
             delivery_observations: Mutex::new(Default::default()),

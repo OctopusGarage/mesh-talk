@@ -1229,9 +1229,10 @@ impl Node {
                 .get(&candidate.ip())
                 .is_none_or(|port| *port == candidate.port())
         });
-        // The caller may supply a fresh one-off endpoint (for example, a
-        // pairing listener) before its signed port reaches the roster.
-        if !supplied_relay_address {
+        // A fresh one-off endpoint (for example, a pairing listener) can lead
+        // before its signed port reaches the roster. Known supplied routes keep
+        // their existing order so they cannot displace an authenticated winner.
+        if !supplied_relay_address && !candidates.contains(&addr) {
             candidates.insert(0, addr);
         }
         let mut unique = std::collections::HashSet::new();
