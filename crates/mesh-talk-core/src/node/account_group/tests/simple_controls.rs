@@ -284,7 +284,7 @@ async fn assert_reference_controls(modern: bool) {
     };
     link(&owner, &reference);
     link(&reference, &owner);
-    let mut servers = tokio::task::JoinSet::new();
+    let mut servers = Vec::new();
     let mut addresses = Vec::new();
     for (name, target) in [("owner", &owner), ("reference", &reference)] {
         target
@@ -294,7 +294,11 @@ async fn assert_reference_controls(modern: bool) {
         let address = listener.local_addr().unwrap();
         configure(target, &dir.path().join(name), address.port());
         addresses.push(address);
-        servers.spawn(target.clone().run_accept_loop(listener));
+        // Full channel recovery legitimately downloads a modern sibling's public
+        // authority even with History OFF. Keep this fixture reference-only by
+        // running the real Noise server and account-operation owner directly.
+        servers.push(inbound_server(target.clone(), listener));
+        servers.push(tokio::spawn(target.clone().run_account_history_loop()));
     }
     for (left, right, address) in [
         (&owner, &reference, addresses[1]),
@@ -359,6 +363,10 @@ async fn assert_reference_controls(modern: bool) {
         ),
         (AccountGroupOperation::Dissolve, EventKind::ChannelDissolve),
     ] {
+        assert!(
+            reference.channel_members(group).is_empty(),
+            "private role and operation synchronization must preserve the reference-only fixture"
+        );
         let id = reference
             .new_account_group_operation_id(&account.account_id())
             .unwrap();
@@ -482,8 +490,12 @@ async fn assert_reference_controls(modern: bool) {
             "legacy delegated controls do not invent a public grant"
         );
     }
-    servers.abort_all();
-    while servers.join_next().await.is_some() {}
+    for server in &servers {
+        server.abort();
+    }
+    for server in servers {
+        let _ = server.await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
