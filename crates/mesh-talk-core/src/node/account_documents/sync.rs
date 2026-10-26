@@ -102,8 +102,7 @@ impl DocumentSyncCursor {
     ) -> (super::super::SyncPhase, Option<String>, bool) {
         use super::super::SyncPhase;
         let upgrade = self.requires_upgrade
-            && ((policy.history || policy.appearance) && !self.control_upgrade
-                || policy.history && self.control_upgrade)
+            && (policy.history || policy.appearance && !self.control_upgrade)
             || self.custody_upgrade && policy.history
             || self.inventory_upgrade;
         if let Some(error) = &self.error

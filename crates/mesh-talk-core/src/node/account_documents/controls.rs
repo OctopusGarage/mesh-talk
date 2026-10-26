@@ -474,8 +474,8 @@ impl Node {
         let files = self.received_files.lock().expect("received files mutex");
         for row in files.entries_ref(&conv) {
             if row.event_id != target
-                || !super::super::files::validated_manifest(&row.plaintext)
-                    .is_some_and(|m| m.protection().is_some())
+                || super::super::files::validated_manifest(&row.plaintext)
+                    .is_none_or(|m| m.protection().is_none())
             {
                 continue;
             }

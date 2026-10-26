@@ -270,7 +270,7 @@ impl Node {
                 let rows = self.received_files.lock().expect("files lock not poisoned");
                 rows.entry(card.id).is_some_and(|row| {
                     let deadline = crate::expiry::deadline(&row.plaintext);
-                    !deadline.is_some_and(|time| time <= super::node::now_millis())
+                    deadline.is_none_or(|time| time > super::node::now_millis())
                         && ancestors.iter().any(|(alias, prior, _)| {
                             *alias == card.id
                                 && rows.entry(prior.id).is_some_and(|prior_row| {
