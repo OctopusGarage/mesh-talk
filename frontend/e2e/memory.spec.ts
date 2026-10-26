@@ -28,24 +28,11 @@ const CHANNEL = { id: "chan_team_dddd4444" };
  * no real backend, no timers.
  */
 
-async function register(page: Page, user = "tester") {
-  await page.goto("/");
-  await page.getByTestId("login-tab-register").click();
-  await page.getByTestId("login-username").fill(user);
-  await page.getByTestId("login-password").fill("password123");
-  await page.getByTestId("login-submit").click();
-}
-
-async function signIn(page: Page, user = "tester") {
-  await page.getByTestId("login-tab-signin").click();
-  await page.getByTestId("login-username").fill(user);
-  await page.getByTestId("login-password").fill("password123");
-  await page.getByTestId("login-submit").click();
-}
-
 async function enterChat(page: Page, user = "mem") {
-  await register(page, user);
-  await signIn(page, user);
+  await page.goto("/");
+  await page.getByTestId("login-username").fill(user);
+  await page.getByTestId("login-password").fill("password123");
+  await page.getByTestId("login-submit").click();
   await waitForChatShell(page);
   await expect(
     page.getByTestId(`conversation-row-${BOB.account}`),

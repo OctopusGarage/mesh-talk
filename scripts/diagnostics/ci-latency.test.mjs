@@ -38,13 +38,13 @@ test("full browser coverage remains on every desktop OS with bounded shards", ()
 
 test("the stable UI gate requires coverage merged from all Linux shards", () => {
   const ui = read("e2e-ui.yml");
-  const coverage = ui.split("  coverage:\n")[1]?.split("  lite:\n")[0];
+  const coverage = ui.split("  coverage:\n")[1]?.split("  packs:\n")[0];
   assert.ok(coverage);
   assert.match(coverage, /needs: \[e2e, unit-coverage\]/);
   assert.match(coverage, /actions\/download-artifact@/);
   assert.match(coverage, /collect-ui-coverage.mjs/);
   assert.match(coverage, /merge-e2e-coverage.mjs/);
-  assert.match(ui, /needs: \[e2e, coverage, reports, lite, portable, firefox-extended\]/);
+  assert.match(ui, /needs: \[e2e, coverage, reports, packs, portable, firefox-extended\]/);
   assert.match(ui, /COVERAGE: \$\{\{ needs.coverage.result \}\}/);
   assert.match(ui, /test "\$COVERAGE" = success/);
 });
@@ -69,9 +69,9 @@ test("every protected health platform check requires both source and platform re
 });
 
 test("the final UI gate rejects failed, cancelled or missing required jobs", () => {
-  const env = { BASELINE: "success", COVERAGE: "success", REPORTS: "success", LITE: "success", PORTABLE: "success", FIREFOX: "skipped", EXTENDED: "false" };
+  const env = { BASELINE: "success", COVERAGE: "success", REPORTS: "success", PACKS: "success", PORTABLE: "success", FIREFOX: "skipped", EXTENDED: "false" };
   assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", env).status, 0);
-  for (const job of ["BASELINE", "COVERAGE", "REPORTS", "LITE", "PORTABLE"]) {
+  for (const job of ["BASELINE", "COVERAGE", "REPORTS", "PACKS", "PORTABLE"]) {
     for (const result of ["failure", "cancelled", "skipped", ""]) assert.notEqual(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, [job]: result }).status, 0, `${job}=${result}`);
   }
   assert.notEqual(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, EXTENDED: "true" }).status, 0);
@@ -96,7 +96,7 @@ test("UI coverage consumers share one same-workflow Linux unit run", () => {
   assert.match(producer, /runs-on: ubuntu-24.04/);
   assert.match(producer, /unit-coverage-artifact.mjs seal/);
   assert.match(producer, /name: ui-unit-coverage-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
-  for (const job of ["coverage", "lite"]) {
+  for (const job of ["coverage", "packs"]) {
     const consumer = ui.split(`  ${job}:\n`)[1].split(/^  [a-z][\w-]*:\n/m)[0];
     assert.match(consumer, /needs:.*unit-coverage/);
     assert.match(consumer, /unit-coverage-artifact.mjs restore/);

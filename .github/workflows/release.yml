@@ -30,6 +30,7 @@ env:
 jobs:
   preflight:
     runs-on: ubuntu-latest
+    timeout-minutes: 250
     permissions:
       contents: read
       checks: read
@@ -51,11 +52,11 @@ jobs:
           RELEASE_NIGHTLY: ${{ github.event_name == 'schedule' || inputs.publish_nightly }}
           RELEASE_PUBLICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
         run: node scripts/release/preflight.mjs
-      - name: Require successful exact-source CI before Nightly compilation
+      - name: Wait for successful exact-source CI before Nightly compilation
         if: steps.inputs.outputs.nightly == 'true' && steps.inputs.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/release/check-source-checks.mjs "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+        run: node scripts/release/check-source-checks.mjs "$GITHUB_REPOSITORY" "$GITHUB_SHA" --wait
 
   build-release:
     needs: preflight
@@ -66,12 +67,14 @@ jobs:
       attestations: write
     env:
       ARTIFACT_TAG: ${{ needs.preflight.outputs.tag }}
+      # Free updater keys are available only to the existing trusted publication sources.
+      MESH_TALK_UPDATER_PUBLIC_KEY: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/v')) && vars.MESH_TALK_UPDATER_PUBLIC_KEY || '' }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/v')) && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/v')) && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
       MESH_TALK_BUILD_TAG: ${{ (needs.preflight.outputs.nightly == 'true' || startsWith(github.ref, 'refs/tags/')) && needs.preflight.outputs.tag || format('v{0}-dev', needs.preflight.outputs.version) }}
-      MESH_TALK_VARIANT: ${{ matrix.variant }}
     strategy:
       fail-fast: false
       matrix:
-        variant: [default, lite]
         target:
           - x86_64-apple-darwin
           - aarch64-apple-darwin
@@ -93,7 +96,8 @@ jobs:
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
           - os: linux
-            runner: ubuntu-latest
+            # Keep the AppImage glibc baseline aligned with Linux ARM64.
+            runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: linux
             runner: ubuntu-22.04-arm
@@ -119,10 +123,10 @@ jobs:
       # 3.6️⃣ Install protoc
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: brew install protobuf zstd sevenzip
       - name: Install protoc (Windows)
         if: runner.os == 'Windows'
-        run: choco install protoc
+        run: choco install protoc zstandard -y
 
       # Linux needs the Tauri GTK/WebKit stack (+ protoc) to build the AppImage/deb/rpm.
       - name: Install Tauri system dependencies (Linux)
@@ -145,7 +149,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # Native objects and build-script executables depend on the runner ABI.
+          key: ${{ matrix.target }}-${{ matrix.runner }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install zip on Windows
         if: runner.os == 'Windows'
@@ -159,21 +164,23 @@ jobs:
           npm run build
           npm run check:build-syntax
 
+      - name: Prepare optional signed updater artifacts
+        run: node scripts/release/updater.mjs prepare
+
       # 6️⃣ Build Tauri app
       - name: Build Tauri app
         run: |
           cd src-tauri
           # Local release builds use four codegen units for speed. Ship the
-          # smaller single-unit binary on every release target and edition.
-          node ../frontend/node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }} -- --config profile.release.package.mesh-talk.codegen-units=1
+          # smaller single-unit binary on every release target.
+          node ../frontend/node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }} --config ../tmp/updater-build.json -- --config profile.release.package.mesh-talk.codegen-units=1
 
       - name: Build headless post-office node
-        if: matrix.variant == 'default'
         run: cargo build --locked --release --target ${{ matrix.target }} -p mesh-talk-core --bin mesh-talk-node
 
-      - name: Verify edition assets
+      - name: Verify frontend assets
         shell: bash
-        run: node scripts/release/check-variant-assets.mjs "$MESH_TALK_VARIANT"
+        run: node scripts/release/check-variant-assets.mjs
 
       # 7️⃣ Collect artifacts
       - name: Collect build artifacts
@@ -199,6 +206,19 @@ jobs:
           done
 
           ls -lh release || true
+
+      - name: Collect version-bound updater artifacts
+        run: node scripts/release/updater.mjs collect ${{ matrix.target }}
+
+      - name: Build native delta verification helper
+        if: runner.os != 'Linux' && env.MESH_TALK_UPDATER_PUBLIC_KEY != ''
+        run: node scripts/release/updater.mjs delta-helper
+
+      - name: Produce verified optional native delta artifacts
+        if: runner.os != 'Linux'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/release/updater.mjs delta ${{ matrix.target }}
 
       # 8️⃣ Generate SHA256 checksums
       - name: Generate SHA256 checksums
@@ -288,9 +308,6 @@ jobs:
           esac
 
           ZIP_NAME="release_zips/mesh-talk_${TAG}_${OS_NAME}_${ARCH}.zip"
-          if [[ "$MESH_TALK_VARIANT" == lite ]]; then
-            ZIP_NAME="${ZIP_NAME%.zip}_lite.zip"
-          fi
 
           case "$OS_NAME" in
             macos)
@@ -304,6 +321,14 @@ jobs:
               ;;
           esac
 
+          # Bind standalone updater bytes and signatures to the same verified ZIP.
+          shopt -s nullglob
+          updater_files=(release/mesh-talk-update_* release/mesh-talk-update-raw_* release/mesh-talk-patch_*)
+          if [[ "${#updater_files[@]}" -gt 0 ]]; then
+            zip "$ZIP_NAME" "${updater_files[@]}"
+            cp "${updater_files[@]}" release_zips/
+          fi
+
           BUNDLE_FILE="${ZIP_NAME}.bundle"
           cosign sign-blob --yes --bundle "$BUNDLE_FILE" "$ZIP_NAME"
 
@@ -311,7 +336,6 @@ jobs:
           ls -lh release_zips
 
       - name: Package and sign post-office node
-        if: matrix.variant == 'default'
         shell: bash
         run: |
           set -euo pipefail
@@ -325,10 +349,18 @@ jobs:
         with:
           subject-path: "release_zips/*.zip"
 
+      - name: Attest standalone updater and optional delta provenance
+        if: env.MESH_TALK_UPDATER_PUBLIC_KEY != ''
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            release_zips/mesh-talk-update*
+            release_zips/mesh-talk-patch_*
+
       # 📦 SBOM (CycloneDX): full dependency inventory for supply-chain auditing. Generated
       # once on Linux x64 (deps are platform-independent) and shipped with the release.
       - name: Generate SBOM (CycloneDX)
-        if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.variant == 'default'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         uses: anchore/sbom-action@v0
         with:
           path: .
@@ -341,7 +373,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: mesh-talk-${{ matrix.variant }}-${{ matrix.os }}-${{ matrix.target }}
+          name: mesh-talk-${{ matrix.os }}-${{ matrix.target }}
           path: release_zips/*
           if-no-files-found: error
 
@@ -402,7 +434,7 @@ jobs:
           overwrite_files: ${{ needs.preflight.outputs.nightly != 'true' }}
           tag_name: ${{ needs.preflight.outputs.tag }}
           body_path: release_notes.md
-          generate_release_notes: true
+          generate_release_notes: false
           files: workflow-assets/*
       - name: Verify actual draft release assets
         if: startsWith(github.ref, 'refs/tags/') || needs.preflight.outputs.nightly == 'true'
@@ -498,7 +530,7 @@ jobs:
           node scripts/release/release-state.mjs verify "$RELEASE_TAG" draft-assets
       - uses: actions/download-artifact@v8
         with:
-          pattern: mesh-talk-default-linux-*
+          pattern: mesh-talk-linux-*
           merge-multiple: true
           path: container-input
           github-token: ${{ secrets.GITHUB_TOKEN }}

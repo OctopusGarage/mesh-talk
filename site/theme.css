@@ -9,22 +9,22 @@
 }
 :root {
   color-scheme: dark;
-  --ink: #0b191d;
-  --ink-2: #11252a;
-  --ink-3: #193238;
-  --line: #2b454b;
-  --line-2: #47676d;
-  --signal: #94dac8;
-  --signal-2: #70c6b1;
-  --paper: #eef4f1;
-  --muted: #abc0b9;
+  --ink: #090f12;
+  --ink-2: #111c20;
+  --ink-3: #1b2b30;
+  --line: #293b40;
+  --line-2: #48666c;
+  --signal: #a5e7d0;
+  --signal-2: #b9f3de;
+  --paper: #eef5f1;
+  --muted: #acbeb8;
   --faint: #bdcec8;
   --presence: var(--signal);
   --display:
     "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --body: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
-  --maxw: 1240px;
+  --maxw: 1200px;
   --pad: clamp(1.25rem, 5vw, 3rem);
 }
 @media (prefers-color-scheme: light) {
@@ -96,5 +96,66 @@ h3 {
   *::after {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+/* Language controls are shared by the public site and every help depth. */
+.language-control {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.language-control[hidden] {
+  display: none;
+}
+.language-control .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.language-control select {
+  max-width: 120px;
+  min-height: 40px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  padding: 8px 24px 8px 10px;
+  background: var(--ink-2);
+  color: var(--paper);
+  font: 0.82rem/1.4 var(--body);
+  cursor: pointer;
+}
+.language-status {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 100;
+  max-width: min(360px, calc(100vw - 40px));
+  margin: 0;
+  padding: 12px 16px;
+  background: var(--ink-3);
+  color: var(--paper);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px #0003;
+  font-size: 0.85rem;
+}
+.language-status:empty {
+  display: none;
+}
+html:lang(zh),
+html:lang(yue) {
+  --display: "Space Grotesk", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+html:lang(ja) {
+  --display:
+    "Space Grotesk", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+}
+@media (max-width: 720px) {
+  .language-control select {
+    font-size: 1rem;
+    min-height: 44px;
   }
 }

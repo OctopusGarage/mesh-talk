@@ -139,6 +139,196 @@ async fn private_probe_does_not_multiply_handshakes_for_one_devices_cached_addre
     server.abort();
 }
 
+#[tokio::test]
+async fn historical_route_probes_leave_capacity_for_healthy_foreground_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut servers = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let identity = DeviceIdentity::generate();
+        let account = crate::identity::account::Account::generate();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proof = crate::discovery::Announce::new_with_account(
+            &identity,
+            &account,
+            "Cached departed device",
+            address.port(),
+        );
+        {
+            let mut state = alice.privacy.state.write().unwrap();
+            let state = state.as_mut().unwrap();
+            state.proofs.record(&proof).unwrap();
+            state.routes.record(&proof.public(), address.ip()).unwrap();
+        }
+        let accepted = accepted.clone();
+        servers.spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                held.push(listener.accept().await.unwrap().0);
+                accepted.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+    }
+    assert_eq!(alice.cached_routing_peers().len(), 8);
+    let producer = tokio::spawn({
+        let alice = alice.clone();
+        async move {
+            alice
+                .probe_private_routes_with_budget(Duration::from_secs(10))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while accepted.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // These are eight different real identity-pinned TCP attempts, rather than
+    // manually occupied permits or duplicates of one admission key.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let stalled_sockets = accepted.load(Ordering::SeqCst);
+    let (healthy, _) = node(&dir.path().join("healthy"));
+    let expected = healthy.identity.public();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let responder = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let channel = healthy.privacy_accept(socket).await.unwrap();
+        healthy.serve_connection(channel).await;
+    });
+    let round = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut channel = alice
+            .privacy_sync_dial(address, &expected)
+            .await
+            .map_err(|error| error.to_string())?;
+        let store = alice.sync_store(&expected);
+        super::session::request_round(
+            &mut channel,
+            &store,
+            crate::eventlog::ConversationId::new([231; 32]),
+        )
+        .await
+        .map_err(|error| error.to_string())
+    })
+    .await;
+    producer.abort();
+    let _ = producer.await;
+    responder.abort();
+    let _ = responder.await;
+    servers.abort_all();
+    while servers.join_next().await.is_some() {}
+    assert!(
+        round.is_ok_and(|result| result.is_ok()),
+        "healthy foreground Noise+sync missed its one-second deadline while historical probes held {stalled_sockets} real stalled TCP sockets"
+    );
+}
+
+#[tokio::test]
+async fn historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let arrivals = Arc::new(Mutex::new(Vec::new()));
+    let mut servers = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let identity = DeviceIdentity::generate();
+        let account = crate::identity::account::Account::generate();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proof = crate::discovery::Announce::new_with_account(
+            &identity,
+            &account,
+            "Cached departed device",
+            address.port(),
+        );
+        {
+            let mut state = alice.privacy.state.write().unwrap();
+            let state = state.as_mut().unwrap();
+            state.proofs.record(&proof).unwrap();
+            state.routes.record(&proof.public(), address.ip()).unwrap();
+        }
+        let arrivals = arrivals.clone();
+        servers.spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                held.push(listener.accept().await.unwrap().0);
+                arrivals.lock().unwrap().push(address);
+            }
+        });
+    }
+    for _ in 0..4 {
+        alice
+            .probe_private_routes_with_budget(Duration::from_millis(250))
+            .await;
+    }
+    let visited = arrivals
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    assert_eq!(
+        visited, 8,
+        "a canceled round must resume at peers it never launched rather than skipping the same cached suffix forever"
+    );
+    alice.set_invisible(true).await.unwrap();
+    let before = arrivals.lock().unwrap().len();
+    alice
+        .probe_private_routes_with_budget(Duration::from_millis(100))
+        .await;
+    assert_eq!(
+        arrivals.lock().unwrap().len(),
+        before,
+        "retained routing metadata cannot bypass the current private policy"
+    );
+    alice.set_invisible(false).await.unwrap();
+    alice
+        .probe_private_routes_with_budget(Duration::from_millis(100))
+        .await;
+    assert!(
+        arrivals.lock().unwrap().len() > before,
+        "a later permitted privacy generation must recover probing"
+    );
+    let released = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let permits = (0..super::session_pool::MAX_DIRECTION_CONNECTIONS)
+                .map(|_| alice.sessions.try_outbound())
+                .collect::<Option<Vec<_>>>();
+            if let Some(permits) = permits {
+                break permits;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("whole-round cancellation must release every background TCP permit");
+    drop(released);
+    servers.abort_all();
+    while servers.join_next().await.is_some() {}
+}
+
 #[test]
 fn failed_presence_cache_write_is_not_a_successful_empty_snapshot() {
     let dir = tempfile::tempdir().unwrap();
@@ -3110,4 +3300,132 @@ async fn alternate_route_reclaims_idle_sessions_before_waiting_on_stale_route() 
         "idle pooled connections must yield capacity to a reachable alternate route"
     );
     assert_eq!(result.unwrap().unwrap().peer_identity(), &expected);
+}
+
+#[tokio::test]
+async fn account_change_recovery_is_read_only_until_exact_device_acceptance() {
+    use crate::identity::account::Account;
+    let directory = tempfile::tempdir().unwrap();
+    let (recipient, _) = node(directory.path());
+    recipient
+        .configure_privacy(
+            directory.path(),
+            "pw",
+            &recipient.signed_announce("Recipient", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let devices = [DeviceIdentity::generate(), DeviceIdentity::generate()];
+    let previous = Account::generate();
+    let current = Account::generate();
+    for device in &devices {
+        let old = Announce::new_with_account(device, &previous, "Before", 2);
+        recipient.roster.lock().unwrap().update(
+            &old,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &recipient.user_id(),
+        );
+    }
+    recipient.cached_peer_snapshot_async().await.unwrap();
+    let claims: Vec<_> = devices
+        .iter()
+        .map(|device| Announce::new_with_account(device, &current, "After", 2))
+        .collect();
+    for proof in &claims {
+        recipient.roster.lock().unwrap().update(
+            proof,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &recipient.user_id(),
+        );
+    }
+    let documents = || {
+        ["privacy.policy", "peer-proofs"]
+            .map(|name| std::fs::read(directory.path().join(name)).unwrap())
+    };
+    let before = documents();
+    let changes = recipient.account_binding_changes(&current.account_id());
+    assert_eq!(changes.len(), 2);
+    assert_eq!(
+        recipient.account_binding_changes(&previous.account_id()),
+        changes
+    );
+    assert_eq!(
+        documents(),
+        before,
+        "diagnostics must not grant or persist new bindings"
+    );
+    assert!(
+        recipient
+            .accept_account_binding_change_guarded(&changes[0], |_| Err(denied()))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        documents(),
+        before,
+        "retired host authority cannot mutate a binding"
+    );
+    let selected = changes[0].clone();
+    let third = Account::generate();
+    let device = devices
+        .iter()
+        .find(|device| device.public().user_id() == selected.device_id)
+        .unwrap();
+    let newer = Announce::new_with_account(device, &third, "Changed again", 2);
+    assert!(
+        recipient
+            .accept_account_binding_change_guarded(&selected, |commit| {
+                recipient.roster.lock().unwrap().update(
+                    &newer,
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    &recipient.user_id(),
+                );
+                commit()
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        documents(),
+        before,
+        "a changed proposal must fail at commit"
+    );
+    let reviewed = claims
+        .iter()
+        .find(|proof| proof.user_id == selected.device_id)
+        .unwrap();
+    recipient.roster.lock().unwrap().update(
+        reviewed,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        &recipient.user_id(),
+    );
+    recipient
+        .accept_account_binding_change_guarded(&selected, |commit| commit())
+        .await
+        .unwrap();
+    let remaining = recipient.account_binding_changes(&current.account_id());
+    assert_eq!(
+        remaining.len(),
+        1,
+        "accepting one device must not accept a second unreviewed change"
+    );
+    assert_ne!(remaining[0].device_id, selected.device_id);
+    assert!(
+        recipient
+            .privacy_snapshot()
+            .allowed_accounts
+            .iter()
+            .any(|account| account.id == current.account_id())
+    );
+    let state = recipient.privacy.state.read().unwrap();
+    let proofs = &state.as_ref().unwrap().proofs;
+    assert!(proofs.accepts_binding(reviewed));
+    assert!(
+        !proofs.accepts_binding(
+            claims
+                .iter()
+                .find(|proof| proof.user_id == remaining[0].device_id)
+                .unwrap()
+        )
+    );
 }

@@ -98,10 +98,12 @@ function Panel({
 export function DiagnosticsDialog({
   open: controlledOpen,
   onOpenChange,
+  onCloseAutoFocus,
   initialTab = "overview",
 }: {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  onCloseAutoFocus?: (event: Event) => void;
   initialTab?: "overview" | "peers" | "logs" | "help";
 } = {}) {
   const { t } = useTranslation();
@@ -183,6 +185,7 @@ export function DiagnosticsDialog({
         </DialogTrigger>
       )}
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         className="max-w-[min(50rem,calc(100vw-2rem))]"
         data-testid="diagnostics-dialog"
       >

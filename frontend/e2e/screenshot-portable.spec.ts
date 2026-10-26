@@ -1,6 +1,11 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, openBobDm, revealComposerTools } from "./helpers/session";
 
+test.beforeEach(async ({ context, browserName }) => {
+  if (browserName === "chromium")
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+});
+
 async function openCapture(
   page: import("@playwright/test").Page,
   mode: "screenshot-now" | "screenshot-hidden",
@@ -19,6 +24,26 @@ async function selectRegion(page: import("@playwright/test").Page) {
   });
   await expect(page.getByTestId("screenshot-send")).toBeEnabled();
 }
+
+test("Enter sends a staged screenshot after capture loses input focus", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  for (const mode of ["screenshot-now", "screenshot-hidden"] as const) {
+    await openCapture(page, mode);
+    await selectRegion(page);
+    await page.getByTestId("screenshot-send").click();
+    await expect(page.getByTestId("composer-pending-image")).toBeVisible();
+    // Simulate native window restoration leaving keyboard focus on the background.
+    await page.getByTestId("composer-input").evaluate((input) => input.blur());
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("composer-pending-image")).toHaveCount(0);
+    await expect(
+      page.getByRole("article", { name: /screenshot\.png/ }).last(),
+    ).toBeVisible();
+  }
+});
 
 test("screenshot selection annotation and explicit send produce cropped PNG", async ({
   page,
@@ -52,6 +77,16 @@ test("screenshot selection annotation and explicit send produce cropped PNG", as
   await expect(
     page.getByRole("article", { name: /screenshot\.png/ }),
   ).toHaveCount(0);
+  // Chromium permits automated clipboard reads. WebKit still exercises the
+  // real gesture-triggered write above, without automated read permission.
+  let copiedBytes: number[] | undefined;
+  if (testInfo.project.name === "chromium") {
+    copiedBytes = await page.evaluate(async () => {
+      const [item] = await navigator.clipboard.read();
+      const png = await item.getType("image/png");
+      return Array.from(new Uint8Array(await png.arrayBuffer()));
+    });
+  }
   await page.getByTestId("composer-send").click();
   await expect(page.getByTestId("screenshot-editor")).toHaveCount(0);
   await expect(
@@ -68,6 +103,33 @@ test("screenshot selection annotation and explicit send produce cropped PNG", as
       height: view.getUint32(20),
     };
   });
+  if (copiedBytes) {
+    const samePixels = await page.evaluate(async (clipboardBytes) => {
+      const sentBytes = (
+        window as unknown as { __lastWrittenFileBytes: number[] }
+      ).__lastWrittenFileBytes;
+      async function pixels(bytes: number[]) {
+        const image = await createImageBitmap(
+          new Blob([new Uint8Array(bytes)], { type: "image/png" }),
+        );
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext("2d")!;
+        context.drawImage(image, 0, 0);
+        const data = Array.from(
+          context.getImageData(0, 0, image.width, image.height).data,
+        );
+        image.close();
+        return { width: canvas.width, height: canvas.height, data };
+      }
+      return (
+        JSON.stringify(await pixels(clipboardBytes)) ===
+        JSON.stringify(await pixels(sentBytes))
+      );
+    }, copiedBytes);
+    expect(samePixels).toBe(true);
+  }
   expect(saved).toEqual({
     signature: [137, 80, 78, 71, 13, 10, 26, 10],
     width: 70,
@@ -305,3 +367,31 @@ for (const [width, height] of [
     expect(pixels.corner).toEqual([255, 255, 255, 255]);
   });
 }
+
+test("clipboard denial retains the edited screenshot for retry without staging", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await openBobDm(page);
+  await page.evaluate(() => {
+    const write = navigator.clipboard.write.bind(navigator.clipboard);
+    let denied = false;
+    navigator.clipboard.write = (items) => {
+      if (!denied) {
+        denied = true;
+        return Promise.reject(new Error("Clipboard permission denied"));
+      }
+      return write(items);
+    };
+  });
+  await openCapture(page, "screenshot-now");
+  await selectRegion(page);
+  await page.getByTestId("screenshot-send").click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Clipboard permission denied",
+  );
+  await expect(page.getByTestId("composer-pending-files")).toHaveCount(0);
+  await expect(page.getByTestId("screenshot-editor")).toBeVisible();
+  await page.getByTestId("screenshot-send").click();
+  await expect(page.getByTestId("composer-pending-image")).toBeVisible();
+});

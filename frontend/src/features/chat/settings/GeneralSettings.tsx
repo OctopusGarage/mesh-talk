@@ -2,6 +2,7 @@ import { Languages, MinusSquare, Rocket } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Switch } from "@/components/ui/switch";
 import {
+  LANGUAGE_LABELS,
   resolveLanguage,
   setLanguage,
   SUPPORTED_LANGUAGES,
@@ -9,14 +10,6 @@ import {
 } from "@/lib/i18n";
 import { SettingsRow, SELECT_CLASS } from "./primitives";
 import type { SettingsController } from "./useSettingsController";
-const LANGUAGE_LABELS: Record<Language, string> = {
-  en: "English",
-  es: "Español",
-  ja: "日本語",
-  "zh-Hans": "简体中文",
-  "zh-Hant": "繁體中文",
-  yue: "粵語",
-};
 export function GeneralSettings({
   controller: c,
 }: {
@@ -40,7 +33,7 @@ export function GeneralSettings({
             className={SELECT_CLASS}
           >
             {SUPPORTED_LANGUAGES.map((language) => (
-              <option key={language} value={language}>
+              <option key={language} value={language} lang={language}>
                 {LANGUAGE_LABELS[language]}
               </option>
             ))}

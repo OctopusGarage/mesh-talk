@@ -57,3 +57,15 @@ test("mutation builds reuse one incremental tree per matrix runner", () => {
   assert.doesNotMatch(wrapper, /"(?:-j|--jobs)"/);
   assert.match(workflow, /name: mutants-report-\$\{\{ matrix.worker \}\}/);
 });
+
+test("mutation job budget fits the observed workspace sample without relaxing test deadlines", () => {
+  // Run 40187525604 selected 17 mutants in a shard. Builds reached 130s;
+  // retain the runner's 240s suite bound for the baseline and every mutant.
+  const selected = 17;
+  const buildSeconds = 130;
+  const suiteSeconds = Number(wrapper.match(/"--timeout", "(\d+)"/)[1]);
+  const setupSeconds = 6 * 60;
+  const jobMinutes = Number(workflow.split("  mutants:\n")[1].match(/timeout-minutes: (\d+)/)[1]);
+  assert.ok(jobMinutes * 60 >= setupSeconds + (selected + 1) * (buildSeconds + suiteSeconds),
+    "job timeout must allow the baseline and complete sample to finish");
+});

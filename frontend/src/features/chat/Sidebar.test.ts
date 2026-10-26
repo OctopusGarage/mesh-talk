@@ -7,6 +7,7 @@ const { chatState, policyState } = vi.hoisted(() => ({
   chatState: {
     active: null as null | { kind: string; id: string; name: string },
     unread: { "account:alice": 2 },
+    ledger: {},
     messages: {
       "account:alice": [{ text: "See you on the LAN" }],
     } as Record<string, Array<{ text?: string; file?: { name: string } }>>,
@@ -68,10 +69,19 @@ vi.mock("@/store/contactPolicy", () => ({
   useContactPolicy: (selector: (state: typeof policyState) => unknown) =>
     selector(policyState),
 }));
-vi.mock("@/store/auth", () => ({
-  useAuth: (selector: (state: unknown) => unknown) =>
-    selector({ user: { id: "owner", username: "Me" }, logout: () => {} }),
-}));
+vi.mock("@/store/auth", () => {
+  const authState = {
+    user: { id: "owner", username: "Me" },
+    generation: 0,
+    logout: () => {},
+  };
+  return {
+    useAuth: Object.assign(
+      (selector: (state: typeof authState) => unknown) => selector(authState),
+      { getState: () => authState, subscribe: () => () => {} },
+    ),
+  };
+});
 vi.mock("@/store/settings", () => ({
   useSettings: (selector: (state: unknown) => unknown) =>
     selector({ callsEnabled: false }),
@@ -139,13 +149,13 @@ beforeEach(async () => {
   await i18n.changeLanguage("en");
 });
 
-it("keeps Saved Messages available without peers or loaded contacts", () => {
+it("keeps Message Yourself available without peers or loaded contacts", () => {
   chatState.accounts = [];
   policyState.loaded = false;
   policyState.contacts = { "my-account": true };
   const html = renderToStaticMarkup(createElement(Sidebar));
   expect(html).toContain('data-testid="conversation-row-my-account"');
-  expect(html).toContain("Saved Messages");
+  expect(html).toContain("Message Yourself");
   expect(html).not.toContain('data-testid="contact-profile-my-account"');
   expect(html).not.toContain('data-testid="conversation-actions-my-account"');
 });
@@ -160,7 +170,7 @@ it("shows the personal conversation once even when its account is discovered", (
   expect(html.match(/data-testid="conversation-row-my-account"/g)).toHaveLength(
     1,
   );
-  expect(html).toContain("Saved Messages");
+  expect(html).toContain("Message Yourself");
 });
 
 it("replaces the personal row with the current runtime account", () => {

@@ -13,6 +13,9 @@ const { chatState, policyState } = vi.hoisted(() => ({
     members: [],
     messages: {},
     reactions: {},
+    deleted: {},
+    searchTarget: null,
+    expiryNow: Date.now(),
     unreadIds: {},
     lateUnreadIds: {},
     overflowUnread: {},
@@ -36,10 +39,15 @@ vi.mock("@/store/chat", () => ({
   convKey: (conv: { kind: string; id: string }) => `${conv.kind}:${conv.id}`,
   captureChatOwnership: () => ({ current: () => true }),
 }));
-vi.mock("@/store/auth", () => ({
-  useAuth: (selector: (state: { user: null }) => unknown) =>
-    selector({ user: null }),
-}));
+vi.mock("@/store/auth", () => {
+  const authState = { user: null, generation: 0 };
+  return {
+    useAuth: Object.assign(
+      (selector: (state: typeof authState) => unknown) => selector(authState),
+      { getState: () => authState, subscribe: () => () => {} },
+    ),
+  };
+});
 vi.mock("@/store/contactPolicy", () => ({
   useContactPolicy: (selector: (state: typeof policyState) => unknown) =>
     selector(policyState),

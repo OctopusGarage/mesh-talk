@@ -84,16 +84,19 @@ export function conversationList(
         name: favorites[id]?.custom_alias || c.name,
       },
       pinned: favorites[id]?.pinned ?? false,
-      subtitle: c.dissolved
-        ? t("conversation.dissolvedChannel")
-        : c.archived
-          ? t("conversation.archivedChannel")
-          : c.left
-            ? t("conversation.leftChannel")
-            : c.pending_invite
-              ? t("conversation.pendingInvite")
-              : t("conversation.members", { count: c.member_count }),
+      subtitle: c.shared_reference
+        ? t("conversation.sharedReference")
+        : c.dissolved
+          ? t("conversation.dissolvedChannel")
+          : c.archived
+            ? t("conversation.archivedChannel")
+            : c.left
+              ? t("conversation.leftChannel")
+              : c.pending_invite
+                ? t("conversation.pendingInvite")
+                : t("conversation.members", { count: c.member_count }),
       prioritizeSubtitle: !!(
+        c.shared_reference ||
         c.dissolved ||
         c.archived ||
         c.left ||

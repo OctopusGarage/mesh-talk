@@ -10,6 +10,10 @@ description = "Scoped local messaging capabilities for Mesh-Talk bots, scripts a
 workspace = true
 
 [dependencies]
+hyper = { version = "1.7", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1", default-features = false, features = ["service", "tokio"] }
+schemars = "1.0.4"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 mesh-talk-core = { path = "../mesh-talk-core" }
 tokio = { workspace = true }
 serde = { workspace = true }

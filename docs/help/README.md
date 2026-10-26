@@ -25,9 +25,11 @@ and the technical [documentation map](../README.md).
 | Add another computer                    | [Link devices](topics/link-devices.md)               |
 | Protect the screen or change visibility | [Privacy controls](topics/privacy.md)                |
 | Change alerts and previews              | [Notifications](topics/notifications.md)             |
+| Collect messages with personal notes    | [Favorites](topics/favorites.md)                     |
 | Search or retain local messages         | [History](topics/history.md)                         |
 | Keep a recoverable copy                 | [Backup and restore](topics/backup.md)               |
 | Change theme or wallpaper               | [Appearance](topics/appearance.md)                   |
+| Let a local agent send updates          | [Local agent access](topics/local-agent-access.md)          |
 | Change language or startup behavior     | [General settings](topics/language.md)               |
 | Install a newer release                 | [Updates](topics/updates.md)                         |
 | Investigate connectivity                | [Diagnostics](topics/diagnostics.md)                 |

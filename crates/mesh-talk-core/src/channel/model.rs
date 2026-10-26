@@ -128,6 +128,8 @@ pub struct ChannelState {
     members: Vec<PublicIdentity>,
     epoch: u64,
     owner: String,
+    account_owner: Option<String>,
+    account_members: HashMap<String, String>,
     dissolved: bool,
     genesis_owner: String,
     pending_invite: bool,
@@ -150,6 +152,8 @@ impl ChannelState {
             epoch: meta.epoch,
             dissolved: false,
             owner: meta.owner.clone(),
+            account_owner: None,
+            account_members: HashMap::new(),
             genesis_owner: meta.owner,
             pending_invite: false,
             accepted_event_id: None,
@@ -231,9 +235,74 @@ impl ChannelState {
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
-    /// The channel owner's device `user_id` — the only principal allowed to change membership.
+    /// Legacy owner device identifier. Use `can_admin` for projected owner roles.
     pub fn owner(&self) -> &str {
         &self.owner
+    }
+    /// Account roles are installed only by the validated channel projection.
+    pub fn owner_account_id(&self) -> Option<&str> {
+        self.account_owner.as_deref()
+    }
+    pub(crate) fn member_account_id(&self, user_id: &str) -> Option<&str> {
+        self.account_members.get(user_id).map(String::as_str)
+    }
+    pub fn can_admin(&self, user_id: &str) -> bool {
+        if self.dissolved {
+            return false;
+        }
+        if let Some(owner) = &self.account_owner {
+            self.is_accepted_member(user_id) && self.account_members.get(user_id) == Some(owner)
+        } else {
+            self.owner == user_id
+        }
+    }
+    pub(crate) fn install_account_projection(
+        &mut self,
+        owner: String,
+        participants: Vec<(PublicIdentity, String)>,
+        epoch: u64,
+    ) {
+        self.account_owner = Some(owner);
+        self.account_members = participants
+            .iter()
+            .map(|(member, account)| (member.user_id(), account.clone()))
+            .collect();
+        self.accepted_members = self.account_members.keys().cloned().collect();
+        self.members = participants.into_iter().map(|(member, _)| member).collect();
+        self.members.sort_unstable_by_key(PublicIdentity::user_id);
+        self.members.dedup();
+        self.epoch = epoch;
+        if let Some(me) = &self.my_user_id {
+            self.pending_invite = self.is_member(me) && !self.is_accepted_member(me);
+        }
+    }
+    pub(crate) fn install_account_invites(&mut self, participants: Vec<(PublicIdentity, String)>) {
+        for (member, account) in participants {
+            let uid = member.user_id();
+            if !self.is_member(&uid) {
+                self.members.push(member);
+            }
+            self.account_members.entry(uid).or_insert(account);
+        }
+        self.members.sort_unstable_by_key(PublicIdentity::user_id);
+        if let Some(me) = &self.my_user_id {
+            self.pending_invite = self.is_member(me) && !self.is_accepted_member(me);
+        }
+    }
+    /// Copy projected authority without replacing local sending/receiving ratchets.
+    pub(crate) fn install_membership_projection(&mut self, projected: Self) {
+        self.name = projected.name;
+        self.name_version = projected.name_version;
+        self.members = projected.members;
+        self.epoch = projected.epoch;
+        self.owner = projected.owner;
+        self.account_owner = projected.account_owner;
+        self.account_members = projected.account_members;
+        self.dissolved = projected.dissolved;
+        self.accepted_members = projected.accepted_members;
+        if let Some(me) = &self.my_user_id {
+            self.pending_invite = self.is_member(me) && !self.is_accepted_member(me);
+        }
     }
     pub fn is_dissolved(&self) -> bool {
         self.dissolved
@@ -305,6 +374,17 @@ impl ChannelState {
     pub fn members(&self) -> &[PublicIdentity] {
         &self.members
     }
+    /// Content recipients, distinct from the roster's visible pending invitations.
+    /// Legacy groups retain their original invitation/key-distribution contract.
+    pub(crate) fn recipient_members(&self) -> Vec<PublicIdentity> {
+        self.members
+            .iter()
+            .filter(|member| {
+                self.account_owner.is_none() || self.is_accepted_member(&member.user_id())
+            })
+            .cloned()
+            .collect()
+    }
     pub fn is_member(&self, user_id: &str) -> bool {
         self.members.iter().any(|m| m.user_id() == user_id)
     }
@@ -314,6 +394,7 @@ impl ChannelState {
 
     /// Set this node's identity (who "I" am) for sender-key send/AAD. Idempotent.
     pub fn set_identity(&mut self, my_user_id: String) {
+        self.pending_invite = self.is_member(&my_user_id) && !self.is_accepted_member(&my_user_id);
         self.my_user_id = Some(my_user_id);
     }
 
@@ -348,10 +429,51 @@ impl ChannelState {
         self.my_sender.insert(epoch, sk);
     }
 
+    /// Current-epoch receive material for an authorized sibling. The caller owns
+    /// account membership admission and encrypted transport. These distributions
+    /// seed receive chains only; a new device must generate its own sending key.
+    pub(crate) fn current_receive_distributions(
+        &self,
+    ) -> Vec<(String, u64, SenderKeyDistribution)> {
+        let mut distributions: Vec<_> = self
+            .sender_chains
+            .iter()
+            .filter(|((_, epoch), _)| *epoch == self.epoch)
+            .map(|((author, epoch), chain)| (author.clone(), *epoch, chain.current_distribution()))
+            .collect();
+        if let Some(author) = &self.my_user_id
+            && let Some(sender) = self.my_sender.get(&self.epoch)
+        {
+            distributions.retain(|(existing, _, _)| existing != author);
+            distributions.push((author.clone(), self.epoch, sender.distribution()));
+        }
+        distributions.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        distributions
+    }
+
     /// Record a peer's sender chain for `(author, epoch)` from their distribution.
     pub fn record_sender_chain(&mut self, author: String, epoch: u64, skd: &SenderKeyDistribution) {
         self.sender_chains
             .entry((author, epoch))
+            .or_insert_with(|| SenderChain::from_distribution(skd));
+    }
+
+    /// Install receive-only material from a centrally admitted account sibling.
+    /// Ordinary sender-key distributions remain first-wins; only this explicit
+    /// recovery path may advance an existing receiver past an unavailable gap
+    /// beyond the normal skip bound. Routine snapshots preserve pending delivery.
+    pub(crate) fn refresh_sender_chain(
+        &mut self,
+        author: String,
+        epoch: u64,
+        skd: &SenderKeyDistribution,
+    ) {
+        if epoch != self.epoch {
+            return;
+        }
+        self.sender_chains
+            .entry((author, epoch))
+            .and_modify(|chain| chain.refresh_distribution(skd))
             .or_insert_with(|| SenderChain::from_distribution(skd));
     }
 
@@ -725,6 +847,263 @@ mod tests {
                 .open_sender_message(&a.public().user_id(), &wire)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn account_projection_gives_owner_siblings_the_same_rights_and_removes_revoked_devices() {
+        let owner = DeviceIdentity::generate();
+        let sibling = DeviceIdentity::generate();
+        let removed = DeviceIdentity::generate();
+        let mut state =
+            ChannelState::from_meta(new_channel_id(), meta("group", &[&owner, &removed], 4));
+        state.install_account_projection(
+            "owner-account".into(),
+            vec![
+                (owner.public(), "owner-account".into()),
+                (sibling.public(), "owner-account".into()),
+            ],
+            5,
+        );
+        assert!(state.can_admin(&owner.public().user_id()));
+        assert!(state.can_admin(&sibling.public().user_id()));
+        assert!(!state.is_member(&removed.public().user_id()));
+        assert!(!state.can_admin(&removed.public().user_id()));
+        assert_eq!(state.epoch(), 5);
+        assert_eq!(state.owner_account_id(), Some("owner-account"));
+        assert_eq!(state.owner(), owner.public().user_id());
+    }
+
+    #[test]
+    fn removed_pending_account_does_not_survive_the_next_authority_projection() {
+        let owner = DeviceIdentity::generate();
+        let invited = DeviceIdentity::generate();
+        let mut state = ChannelState::from_meta(new_channel_id(), meta("group", &[&owner], 0));
+        state.install_account_projection("owner".into(), vec![(owner.public(), "owner".into())], 0);
+        state.install_account_invites(vec![(invited.public(), "invited".into())]);
+        state.install_account_projection("owner".into(), vec![(owner.public(), "owner".into())], 1);
+        assert!(
+            !state.is_member(&invited.public().user_id()),
+            "a removed pending account must disappear from every device roster"
+        );
+    }
+
+    #[test]
+    fn account_invites_receive_no_content_keys_until_the_account_accepts() {
+        let owner = DeviceIdentity::generate();
+        let invitee = DeviceIdentity::generate();
+        let sibling = DeviceIdentity::generate();
+        let mut state = ChannelState::from_meta(new_channel_id(), meta("group", &[&owner], 0));
+        state.install_account_projection(
+            "owner-account".into(),
+            vec![(owner.public(), "owner-account".into())],
+            0,
+        );
+        state.install_account_invites(vec![
+            (invitee.public(), "invited-account".into()),
+            (sibling.public(), "invited-account".into()),
+        ]);
+        assert_eq!(
+            state.members().len(),
+            3,
+            "invites remain visible in the roster"
+        );
+        let recipients = state.recipient_members();
+        let keys = crate::node::channel::seal_keys_for(
+            &owner,
+            &recipients,
+            &state.my_sender_distribution(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(keys.entries.len(), 1);
+        assert_eq!(keys.entries[0].user_id, owner.public().user_id());
+        state.install_account_projection(
+            "owner-account".into(),
+            vec![
+                (owner.public(), "owner-account".into()),
+                (invitee.public(), "invited-account".into()),
+                (sibling.public(), "invited-account".into()),
+            ],
+            1,
+        );
+        let recipients = state.recipient_members();
+        let keys = crate::node::channel::seal_keys_for(
+            &owner,
+            &recipients,
+            &state.my_sender_distribution(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            keys.entries.len(),
+            3,
+            "account consent includes both certified devices"
+        );
+    }
+
+    #[test]
+    fn current_receive_snapshot_recovers_a_gap_without_restoring_consumed_keys() {
+        let author = DeviceIdentity::generate();
+        let receiver = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let members = meta("gap", &[&author, &receiver], 0);
+        let mut source = ChannelState::from_meta(channel, members.clone());
+        source.set_identity(author.user_id());
+        let initial = source.my_sender_distribution();
+        let mut target = ChannelState::from_meta(channel, members);
+        target.set_identity(receiver.user_id());
+        target.record_sender_chain(author.user_id(), 0, &initial);
+        let consumed = source.seal_sender_message(b"consumed").unwrap();
+        assert!(
+            target
+                .open_sender_message(&author.user_id(), &consumed)
+                .is_some()
+        );
+        let skipped = source
+            .seal_sender_message(b"skipped before recovery")
+            .unwrap();
+        let next = source.seal_sender_message(b"consume after skip").unwrap();
+        assert!(
+            target
+                .open_sender_message(&author.user_id(), &next)
+                .is_some()
+        );
+        // These events are intentionally unavailable to this device. The
+        // bounded normal ratchet must reject this gap rather than allocate it.
+        for _ in 0..1002 {
+            source.seal_sender_message(b"unavailable").unwrap();
+        }
+        let too_far = source.seal_sender_message(b"beyond skip bound").unwrap();
+        assert!(
+            target
+                .open_sender_message(&author.user_id(), &too_far)
+                .is_none()
+        );
+        let snapshot = source.current_receive_distributions().pop().unwrap().2;
+        target.refresh_sender_chain(author.user_id(), 0, &snapshot);
+        let future = source.seal_sender_message(b"future").unwrap();
+        assert_eq!(
+            target
+                .open_sender_message(&author.user_id(), &future)
+                .as_deref(),
+            Some(&b"future"[..])
+        );
+        assert!(
+            target
+                .open_sender_message(&author.user_id(), &consumed)
+                .is_none()
+        );
+        assert!(
+            target
+                .open_sender_message(&author.user_id(), &too_far)
+                .is_none()
+        );
+        assert!(!target.has_my_sender(0));
+        target.refresh_sender_chain(author.user_id(), 0, &initial);
+        target.refresh_sender_chain(author.user_id(), 0, &snapshot);
+        assert_eq!(
+            target
+                .open_sender_message(&author.user_id(), &skipped)
+                .as_deref(),
+            Some(&b"skipped before recovery"[..])
+        );
+        assert!(
+            target
+                .open_sender_message(&author.user_id(), &skipped)
+                .is_none()
+        );
+        assert!(
+            target
+                .open_sender_message(&author.user_id(), &consumed)
+                .is_none()
+        );
+        let following = source.seal_sender_message(b"still forward").unwrap();
+        assert!(
+            target
+                .open_sender_message(&author.user_id(), &following)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn routine_receive_snapshot_preserves_small_out_of_order_messages() {
+        let author = DeviceIdentity::generate();
+        let receiver = DeviceIdentity::generate();
+        let channel = new_channel_id();
+        let members = meta("out of order", &[&author, &receiver], 0);
+        let mut source = ChannelState::from_meta(channel, members.clone());
+        source.set_identity(author.user_id());
+        let initial = source.my_sender_distribution();
+        let mut target = ChannelState::from_meta(channel, members);
+        target.set_identity(receiver.user_id());
+        target.record_sender_chain(author.user_id(), 0, &initial);
+        let pending = source
+            .seal_sender_message(b"pending ordinary message")
+            .unwrap();
+        let later = source
+            .seal_sender_message(b"later ordinary message")
+            .unwrap();
+        let snapshot = source.current_receive_distributions().pop().unwrap().2;
+        target.refresh_sender_chain(author.user_id(), 0, &snapshot);
+        assert_eq!(
+            target
+                .open_sender_message(&author.user_id(), &later)
+                .as_deref(),
+            Some(&b"later ordinary message"[..])
+        );
+        assert_eq!(
+            target
+                .open_sender_message(&author.user_id(), &pending)
+                .as_deref(),
+            Some(&b"pending ordinary message"[..])
+        );
+        assert!(
+            target
+                .open_sender_message(&author.user_id(), &pending)
+                .is_none()
+        );
+        assert!(!target.has_my_sender(0));
+    }
+
+    #[test]
+    fn receive_bootstrap_never_copies_another_devices_sending_chain() {
+        let alice_identity = DeviceIdentity::generate();
+        let target_identity = DeviceIdentity::generate();
+        let members = meta("general", &[&alice_identity, &target_identity], 0);
+        let id = new_channel_id();
+        let mut source = ChannelState::from_meta(id, members.clone());
+        source.set_identity(alice_identity.public().user_id());
+        let old = source.seal_sender_message(b"before linking").unwrap();
+        let snapshots = source.current_receive_distributions();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].0, alice_identity.public().user_id());
+        assert_eq!(snapshots[0].1, 0);
+        assert_eq!(snapshots[0].2.n, 1);
+        let mut target = ChannelState::from_meta(id, members);
+        target.set_identity(target_identity.public().user_id());
+        for (author, epoch, distribution) in snapshots {
+            target.record_sender_chain(author, epoch, &distribution);
+        }
+        assert!(
+            !target.has_my_sender(0),
+            "receive bootstrap never installs a sending key"
+        );
+        assert!(
+            target
+                .open_sender_message(&alice_identity.public().user_id(), &old)
+                .is_none()
+        );
+        let future = source.seal_sender_message(b"after linking").unwrap();
+        assert_eq!(
+            target
+                .open_sender_message(&alice_identity.public().user_id(), &future)
+                .as_deref(),
+            Some(&b"after linking"[..])
+        );
+        let target_distribution = target.my_sender_distribution();
+        let source_distribution = source.my_sender_distribution();
+        assert_ne!(target_distribution.chain_key, source_distribution.chain_key);
+        assert_eq!(target_distribution.n, 0);
     }
 
     #[test]

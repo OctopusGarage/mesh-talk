@@ -10,6 +10,10 @@ let container: HTMLDivElement;
 let image: { onload: (() => void) | null };
 const send = vi.fn();
 const cancel = vi.fn();
+const writeClipboard = vi.fn();
+const exportedPng = {
+  arrayBuffer: async () => new Uint8Array([1, 2]).buffer,
+} as Blob;
 const context = new Proxy({}, { get: () => vi.fn(), set: () => true });
 beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -59,13 +63,21 @@ beforeEach(async () => {
     toJSON: () => ({}),
   });
   vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(
-    (callback) =>
-      callback({
-        arrayBuffer: async () => new Uint8Array([1, 2]).buffer,
-      } as Blob),
+    (callback) => callback(exportedPng),
   );
   HTMLCanvasElement.prototype.setPointerCapture = vi.fn();
   HTMLCanvasElement.prototype.releasePointerCapture = vi.fn();
+  writeClipboard.mockReset().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { write: writeClipboard },
+  });
+  vi.stubGlobal(
+    "ClipboardItem",
+    class {
+      constructor(public data: Record<string, Promise<Blob>>) {}
+    },
+  );
   send.mockReset().mockResolvedValue(undefined);
   cancel.mockReset();
   container = document.createElement("div");
@@ -164,6 +176,7 @@ it("cancels with Escape and never exports", async () => {
   await key("Escape");
   expect(cancel).toHaveBeenCalledOnce();
   expect(send).not.toHaveBeenCalled();
+  expect(writeClipboard).not.toHaveBeenCalled();
 });
 it("keeps the selection and retry action when export fails", async () => {
   send.mockRejectedValueOnce(new Error("disk full"));
@@ -201,4 +214,52 @@ it("lets Enter activate a focused Cancel button instead of confirming", async ()
   expect(send).not.toHaveBeenCalled();
   await act(async () => button.click());
   expect(cancel).toHaveBeenCalledOnce();
+});
+
+it("copies the exported PNG before staging the same bytes", async () => {
+  let finishCopy!: () => void;
+  writeClipboard.mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        finishCopy = resolve;
+      }),
+  );
+  await select();
+  await key("Enter");
+  expect(writeClipboard).toHaveBeenCalledOnce();
+  const [item] = writeClipboard.mock.calls[0][0];
+  expect(await item.data["image/png"]).toBe(exportedPng);
+  expect(send).not.toHaveBeenCalled();
+  await act(async () => finishCopy());
+  expect(send).toHaveBeenCalledExactlyOnceWith(new Uint8Array([1, 2]));
+});
+
+it("keeps the editor available for retry when clipboard access fails", async () => {
+  writeClipboard.mockRejectedValueOnce(
+    new Error("Clipboard permission denied"),
+  );
+  await select();
+  await key("Enter");
+  expect(container.querySelector("[role=alert]")?.textContent).toContain(
+    "Clipboard permission denied",
+  );
+  expect(send).not.toHaveBeenCalled();
+  await key("Enter");
+  expect(writeClipboard).toHaveBeenCalledTimes(2);
+  expect(send).toHaveBeenCalledOnce();
+});
+
+it("starts copying during confirmation before asynchronous PNG encoding finishes", async () => {
+  let finishEncoding!: BlobCallback;
+  vi.mocked(HTMLCanvasElement.prototype.toBlob).mockImplementation(
+    (callback) => {
+      finishEncoding = callback;
+    },
+  );
+  await select();
+  await key("Enter");
+  expect(writeClipboard).toHaveBeenCalledOnce();
+  expect(send).not.toHaveBeenCalled();
+  await act(async () => finishEncoding(exportedPng));
+  expect(send).toHaveBeenCalledOnce();
 });

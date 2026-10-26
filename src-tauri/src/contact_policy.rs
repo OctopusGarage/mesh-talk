@@ -380,12 +380,13 @@ mod tests {
         );
     }
 
-    fn session() -> crate::state::SessionState {
+    pub(super) fn session() -> crate::state::SessionState {
         let session = crate::state::SessionState::default();
         session.set(
             "token".into(),
             crate::services::user::User {
                 user_id: "alice".into(),
+                account_login_name: None,
                 name: "alice".into(),
                 display_name: "Alice".into(),
                 address: String::new(),
@@ -581,7 +582,7 @@ mod tests {
             .build()
             .unwrap();
         for cmd in ["list_accounts", "set_contact_hidden", "delete_contact"] {
-            let runtime_guard = node_state.0.blocking_lock();
+            let runtime_guard = node_state.0.blocking_write();
             let (entered, waiting) = channel();
             *app_state.owner_command_captured.lock().unwrap() = Some(entered);
             let window = webview.clone();
@@ -672,7 +673,7 @@ mod tests {
         .unwrap();
         let before = node.account_reactions(A);
         assert_eq!(before.len(), 1);
-        *node_state.0.blocking_lock() = Some(runtime);
+        *node_state.0.blocking_write() = Some(runtime);
         let app = tauri::test::mock_builder()
             .manage(app_state.clone())
             .manage(node_state.clone())
@@ -688,7 +689,7 @@ mod tests {
             .build()
             .unwrap();
         for cmd in ["delete_contact", "set_contact_hidden", "list_accounts"] {
-            let guard = node_state.0.blocking_lock();
+            let guard = node_state.0.blocking_write();
             let (entered, waiting) = channel();
             *app_state.owner_command_captured.lock().unwrap() = Some(entered);
             let window = webview.clone();
@@ -718,7 +719,7 @@ mod tests {
                 "replacement session's durable data survives"
             );
         }
-        tauri::async_runtime::block_on(node_state.0.blocking_lock().take().unwrap().stop());
+        tauri::async_runtime::block_on(node_state.0.blocking_write().take().unwrap().stop());
     }
 
     #[test]
@@ -819,7 +820,7 @@ mod tests {
         ))
         .unwrap();
         let own = runtime.account_id().to_owned();
-        *node_state.0.blocking_lock() = Some(runtime);
+        *node_state.0.blocking_write() = Some(runtime);
         assert!(invoke(
             "set_contact_hidden",
             serde_json::json!({ "owner": "alice", "account": own, "hidden": true, "name": "self" })
@@ -877,7 +878,7 @@ mod tests {
         // Stop the node: restoration remains a local authenticated operation.
         app.state::<crate::chat_commands::NodeState>()
             .0
-            .blocking_lock()
+            .blocking_write()
             .take();
         assert!(
             invoke(
@@ -1306,7 +1307,7 @@ pub async fn set_contact_hidden(
             if let Some(entered) = captured.lock().unwrap().as_ref() {
                 let _ = entered.send("contact-runtime-wait");
             }
-            Some(node.0.blocking_lock())
+            Some(node.0.blocking_read())
         } else {
             None
         };
@@ -1343,6 +1344,7 @@ pub struct HiddenContactChange {
 #[tauri::command]
 pub async fn set_contact_hidden_batch(
     owner: String,
+    expected_account: String,
     records: Vec<HiddenContactChange>,
     expected: std::collections::HashMap<String, Option<String>>,
     app: tauri::State<'_, crate::state::AppState>,
@@ -1356,33 +1358,23 @@ pub async fn set_contact_hidden_batch(
     let app = app.inner().clone();
     let policy = policy.inner().clone();
     // Bound awaiting the runtime before entering the synchronous persistence transaction.
-    let runtime = if records.iter().any(|row| row.hidden) {
-        Some(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                node.0.clone().lock_owned(),
-            )
-            .await
-            .map_err(|_| "Runtime observation timed out")?,
-        )
-    } else {
-        None
-    };
+    let runtime = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        node.0.clone().read_owned(),
+    )
+    .await
+    .map_err(|_| "Runtime observation timed out")?;
     tokio::task::spawn_blocking(move || {
         policy.transaction_for_lease(&app, &lease, || {
-            let own = runtime.as_ref().and_then(|guard| guard.as_ref());
-            if records.iter().any(|row| row.hidden) {
-                node.check_installation(&lease).map_err(|e| e.to_string())?;
-                if own.and_then(|rt| rt.host_account_id()) != Some(owner.as_str()) {
-                    return Err("Hiding a contact requires this account's running node".into());
-                }
+            node.check_installation(&lease).map_err(|e| e.to_string())?;
+            let own = runtime
+                .as_ref()
+                .ok_or("Contact synchronization requires a running node")?;
+            if own.host_account_id() != Some(owner.as_str()) || own.account_id() != expected_account
+            {
+                return Err("Contact preferences belong to another account".into());
             }
-            policy.update_batch_unlocked(
-                &owner,
-                &records,
-                own.map(|rt| rt.account_id()),
-                Some(&expected),
-            )
+            policy.update_batch_unlocked(&owner, &records, Some(own.account_id()), Some(&expected))
         })
     })
     .await
@@ -1392,6 +1384,72 @@ pub async fn set_contact_hidden_batch(
 #[cfg(test)]
 mod batch_tests {
     use super::*;
+    #[test]
+    fn linked_batch_rejects_a_stale_crypto_account_for_the_same_local_owner() {
+        use tauri::Manager;
+        let dir = tempfile::tempdir().unwrap();
+        let app_state =
+            crate::state::AppState::new(crate::services::auth_service::AuthService::new(Arc::new(
+                mesh_talk_core::identity::manager::IdentityManager::new(
+                    mesh_talk_core::storage::file_manager::FileManager::new(dir.path().to_owned()),
+                ),
+            )));
+        let signed_in = super::tests::session().get().unwrap();
+        app_state
+            .session()
+            .set(signed_in.token, signed_in.user, signed_in.password);
+        let node = crate::chat_commands::NodeState::empty();
+        let runtime = tauri::async_runtime::block_on(mesh_talk_core::node::NodeRuntime::start(
+            dir.path(),
+            "alice",
+            "Alice",
+            "password",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        ))
+        .unwrap();
+        let current_account = runtime.account_id().to_owned();
+        let previous_account = "f".repeat(32);
+        assert_ne!(current_account, previous_account);
+        *node.0.blocking_write() = Some(runtime);
+        let policy = HiddenContactsState::new(dir.path().to_owned());
+        let app = tauri::test::mock_builder()
+            .manage(app_state)
+            .manage(node.clone())
+            .manage(policy.clone())
+            .invoke_handler(tauri::generate_handler![set_contact_hidden_batch])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let rejected: Vec<_> = [false, true].into_iter().map(|hidden| {
+            tauri::test::get_ipc_response(&webview, tauri::webview::InvokeRequest {
+                cmd: "set_contact_hidden_batch".into(), callback: tauri::ipc::CallbackFn(0), error: tauri::ipc::CallbackFn(1),
+                url: if cfg!(windows) { "http://tauri.localhost" } else { "tauri://localhost" }.parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+                    "owner": "alice", "expectedAccount": previous_account,
+                    "records": [{ "account": "b".repeat(32), "hidden": hidden, "name": "Old account" }],
+                    "expected": { "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": null }
+                })), headers: Default::default(), invoke_key: tauri::test::INVOKE_KEY.into(),
+            }).is_err()
+        }).collect();
+        tauri::async_runtime::block_on(node.0.blocking_write().take().unwrap().stop());
+        assert!(
+            rejected.into_iter().all(|rejected| rejected),
+            "both hidden updates and clears must reject an old cryptographic account"
+        );
+        assert!(
+            !policy.path("alice").exists(),
+            "stale import must not write the retained local user's preferences"
+        );
+        let _ = app.state::<HiddenContactsState>();
+    }
+
     #[test]
     fn linked_hidden_batch_cannot_restore_a_contact_deleted_after_its_snapshot() {
         for hidden in [true, false] {

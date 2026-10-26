@@ -6,15 +6,27 @@ import {
 } from "./rosterProjection";
 export { isContactPeer } from "./rosterProjection";
 
+/** Presentation policy; callers bind readiness to the current local owner. */
+export function isContactVisible(
+  accountId: string,
+  hidden: Record<string, unknown>,
+  loaded: boolean,
+) {
+  return loaded && !hidden[accountId];
+}
+
 export function visiblePeers(
   peers: PeerInfo[],
   hidden: Record<string, unknown>,
 ) {
-  return peers.filter((p) => isContactPeer(p) && !hidden[peerAccountKey(p)]);
+  return peers.filter(
+    (p) =>
+      isContactPeer(p) && isContactVisible(peerAccountKey(p), hidden, true),
+  );
 }
 
-export function visibleSearchHits(
-  hits: SearchHitInfo[],
+export function visibleSearchHits<T extends SearchHitInfo>(
+  hits: T[],
   peers: PeerInfo[],
   hidden: Record<string, unknown>,
   loaded: boolean,
@@ -23,7 +35,10 @@ export function visibleSearchHits(
   return hits.filter(
     (h) =>
       h.is_channel ||
-      (loaded &&
-        !hidden[h.account_id ?? roster.accountForDevice(h.target) ?? h.target]),
+      isContactVisible(
+        h.account_id ?? roster.accountForDevice(h.target) ?? h.target,
+        hidden,
+        loaded,
+      ),
   );
 }

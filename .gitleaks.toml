@@ -2,7 +2,7 @@
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "Paths that legitimately contain key-shaped strings (test fixtures, lockfiles, generated keys, design-doc prose/examples)."
 paths = [
   '''Cargo\.lock''',
@@ -14,3 +14,14 @@ paths = [
   '''docs/.*\.md''',
   '''specifications/.*\.md''',
 ]
+
+# These are public full-version test identities, not credentials. Keep the
+# exception tied to both exact values and the verifier example; scan other
+# values in the same file and these values in every other file normally.
+[[allowlists]]
+description = "SDK signed-version fixture identities in the release verifier test"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)src-tauri/examples/delta-artifact\.rs$''']
+regexTarget = "secret"
+regexes = ['''^99\.0\.0-nightly\.42\.[12]$''']

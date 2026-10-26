@@ -5,6 +5,8 @@
 //! `tauri-plugin-autostart` (the source of truth is the OS launch-agent), so the
 //! frontend reads/writes it through the plugin's own enable/disable/is-enabled.
 
+mod shared;
+
 use crate::config_store;
 use crate::{commands::CommandError, runtime_admission::RuntimeAdmission};
 use serde::{Deserialize, Serialize};
@@ -74,6 +76,9 @@ pub struct AppSettings {
     /// Share public presence with an opted-in post-office bridge. Defaults off.
     #[serde(default)]
     pub bridge_discovery_enabled: bool,
+    /// Permit disclosure of this device's originating office. Independent opt-in.
+    #[serde(default)]
+    pub origin_sharing_enabled: bool,
     /// Preferred relay fingerprint. Other verified relays remain available for failover.
     #[serde(default)]
     pub bridge_hub_id: String,
@@ -120,6 +125,7 @@ impl Default for AppSettings {
             post_office_receive_enabled: true,
             physical_lan_only: false,
             bridge_discovery_enabled: false,
+            origin_sharing_enabled: false,
             bridge_hub_id: String::new(),
             ringtone: default_ringtone(),
             privacy_level: PrivacyLevel::Balanced,
@@ -174,6 +180,7 @@ struct AccountSettings {
     post_office_receive_enabled: bool,
     physical_lan_only: bool,
     bridge_discovery_enabled: bool,
+    origin_sharing_enabled: bool,
     bridge_hub_id: String,
     ringtone: String,
     privacy_level: PrivacyLevel,
@@ -202,6 +209,7 @@ impl From<&AppSettings> for AccountSettings {
             post_office_receive_enabled: value.post_office_receive_enabled,
             physical_lan_only: value.physical_lan_only,
             bridge_discovery_enabled: value.bridge_discovery_enabled,
+            origin_sharing_enabled: value.origin_sharing_enabled,
             bridge_hub_id: value.bridge_hub_id.clone(),
             ringtone: value.ringtone.clone(),
             privacy_level: value.privacy_level,
@@ -229,6 +237,7 @@ impl AccountSettings {
             post_office_receive_enabled: self.post_office_receive_enabled,
             physical_lan_only: self.physical_lan_only,
             bridge_discovery_enabled: self.bridge_discovery_enabled,
+            origin_sharing_enabled: self.origin_sharing_enabled,
             bridge_hub_id: self.bridge_hub_id.clone(),
             ringtone: self.ringtone.clone(),
             privacy_level: self.privacy_level,
@@ -285,8 +294,16 @@ pub fn retention_cutoff_ms(days: u32) -> Option<u64> {
     Some(now.saturating_sub(days as u64 * 24 * 60 * 60 * 1000))
 }
 
+struct AppliedSettings {
+    revision: u64,
+    lease: crate::state::SessionLease,
+    account: String,
+    node: std::sync::Weak<mesh_talk_core::node::Node>,
+}
+
 #[derive(Default)]
 struct SettingsRuntime {
+    applied: Option<AppliedSettings>,
     revision: u64,
     global: GlobalSettings,
     owner: Option<String>,
@@ -310,6 +327,20 @@ impl SettingsState {
             Some(path),
         )
     }
+    fn account_path(&self, owner: &str) -> Result<std::path::PathBuf, CommandError> {
+        #[cfg(test)]
+        let root = self
+            .2
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(crate::data_dir);
+        #[cfg(not(test))]
+        let root = crate::data_dir();
+        config_store::account_path(&root, owner, SETTINGS_FILE)
+            .ok_or_else(|| CommandError::Authorization("Invalid settings owner".into()))
+    }
+
     fn snapshot(&self, owner: &str) -> Result<(u64, AppSettings), CommandError> {
         let inner = self.0.lock().unwrap();
         if inner.owner.as_deref() != Some(owner) {
@@ -318,6 +349,42 @@ impl SettingsState {
             ));
         }
         Ok((inner.revision, inner.current.clone()))
+    }
+
+    fn needs_application(
+        &self,
+        runtime: &mesh_talk_core::node::NodeRuntime,
+        admission: &RuntimeAdmission,
+    ) -> bool {
+        let inner = self.0.lock().unwrap();
+        !inner.applied.as_ref().is_some_and(|applied| {
+            applied.revision == inner.revision
+                && &applied.lease == admission.lease()
+                && applied.account == runtime.account_id()
+                && applied
+                    .node
+                    .upgrade()
+                    .is_some_and(|node| Arc::ptr_eq(&node, &runtime.handle()))
+        })
+    }
+
+    fn mark_applied(
+        &self,
+        runtime: &mesh_talk_core::node::NodeRuntime,
+        admission: &RuntimeAdmission,
+        revision: u64,
+    ) -> Result<(), CommandError> {
+        let mut inner = self.0.lock().unwrap();
+        if inner.owner.as_deref() != Some(admission.lease().owner()) || inner.revision != revision {
+            return Err(CommandError::Authorization("settings superseded".into()));
+        }
+        inner.applied = Some(AppliedSettings {
+            revision,
+            lease: admission.lease().clone(),
+            account: runtime.account_id().to_owned(),
+            node: Arc::downgrade(&runtime.handle()),
+        });
+        Ok(())
     }
 
     /// Hold the current revision through the synchronous destructive commit.
@@ -448,30 +515,52 @@ pub fn record_last_user<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &SettingsState,
     last_user: Option<String>,
-) {
+) -> bool {
     let mut inner = state.0.lock().unwrap();
     inner.global.last_user = last_user.clone();
     inner.current.last_user = last_user;
     #[cfg(test)]
-    if let Some(path) = state.2.as_ref() {
-        std::fs::write(path, serde_json::to_vec(&inner.global).unwrap()).unwrap();
-        return;
+    let path = state
+        .2
+        .clone()
+        .or_else(|| config_store::config_path(app, SETTINGS_FILE));
+    #[cfg(not(test))]
+    let path = config_store::config_path(app, SETTINGS_FILE);
+    let Some(path) = path else {
+        log::warn!("No config directory: saved-login metadata not persisted");
+        return false;
+    };
+    if let Err(error) = config_store::write_account(&path, &inner.global) {
+        log::warn!("Failed to persist saved-login metadata: {error}");
+        return false;
     }
-    save(app, &inner.global);
+    true
 }
 
 /// Read the current two non-autostart toggles. (Launch-at-login is queried via
 /// the autostart plugin's `is_enabled` on the frontend.)
 #[tauri::command]
-pub fn get_app_settings(
+pub async fn get_app_settings(
     app: tauri::State<'_, crate::state::AppState>,
     state: tauri::State<'_, SettingsState>,
+    node_state: tauri::State<'_, crate::chat_commands::NodeState>,
     owner: Option<String>,
+    expected_account: Option<String>,
 ) -> Result<AppSettings, CommandError> {
     match owner {
-        Some(owner) => config_store::with_account(&app, &owner, SETTINGS_FILE, |_| {
-            state.get_for_owner(&owner).map(redact_login_owner)
-        }),
+        Some(owner) if expected_account.is_none() => {
+            config_store::with_account(&app, &owner, SETTINGS_FILE, |_| {
+                state.get_for_owner(&owner).map(redact_login_owner)
+            })
+        }
+        Some(owner) => {
+            RuntimeAdmission::capture(&app, &node_state, &owner)?
+                .with_runtime(|runtime| {
+                    require_settings_account(runtime, expected_account.as_deref())?;
+                    state.get_for_owner(&owner).map(redact_login_owner)
+                })
+                .await
+        }
         None => {
             if app.session().capture().is_ok() {
                 return Err(CommandError::Authorization(
@@ -520,6 +609,17 @@ async fn apply_relay_settings(
 ) -> Result<(), CommandError> {
     let node = runtime.handle();
     node.set_physical_lan_only_if(settings.physical_lan_only, |commit| {
+        admission.authorize_io(runtime, &mut || {
+            state
+                .commit_current(owner, revision, || Ok(commit()))
+                .map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+                })?
+        })
+    })
+    .await
+    .map_err(|error| CommandError::Authorization(error.to_string()))?;
+    node.set_origin_sharing_enabled_if(settings.origin_sharing_enabled, |commit| {
         admission.authorize_io(runtime, &mut || {
             state
                 .commit_current(owner, revision, || Ok(commit()))
@@ -579,29 +679,46 @@ async fn apply_running_settings(
     let prune_state = state.clone();
     let prune_owner = owner.clone();
     let prune_settings = settings.clone();
+    let applied_state = state.clone();
     // The detached task owns both lifecycle and application serialization if the IPC is cancelled.
     let prune_admission = admission.clone();
-    let serialization = admission
+    let (serialization, applied_node) = admission
         .detached(move |runtime, admission| {
             Box::pin(async move {
                 apply_relay_settings(runtime, admission, &state, &owner, revision, &settings)
                     .await?;
-                Ok(serialization)
+                Ok((serialization, runtime.handle()))
             })
         })
         .await?;
     let Some(cutoff) = retention_cutoff_ms(prune_settings.retention_days) else {
-        return Ok(());
+        let _serialization = serialization;
+        return prune_admission
+            .with_runtime(|runtime| {
+                if !Arc::ptr_eq(&applied_node, &runtime.handle()) {
+                    return Err(CommandError::Authorization(
+                        "settings runtime replaced".into(),
+                    ));
+                }
+                applied_state.mark_applied(runtime, &prune_admission, revision)
+            })
+            .await;
     };
     prune_admission
-        .blocking(move |runtime, _| {
+        .blocking(move |runtime, admission| {
             let _serialization = serialization;
+            if !Arc::ptr_eq(&applied_node, &runtime.handle()) {
+                return Err(CommandError::Authorization(
+                    "settings runtime replaced".into(),
+                ));
+            }
             prune_state.commit_current(&prune_owner, revision, || {
                 runtime
                     .prune_older_than(cutoff)
                     .map(|_| ())
                     .map_err(CommandError::from)
-            })
+            })?;
+            applied_state.mark_applied(runtime, admission, revision)
         })
         .await
 }
@@ -634,24 +751,117 @@ pub(crate) async fn prune_running_settings(
         .await;
 }
 
-/// Update the toggles and persist them. If "stay signed in" was just turned OFF,
-/// immediately forget the saved keychain secret + `last_user` so the next launch
-/// shows the login screen (the toggle is the user's control over the stored secret).
+/// Project authenticated sibling preferences into the native settings owner. Remote
+/// application bypasses the local publisher and retains local paths/credentials.
 #[tauri::command]
-pub async fn set_app_settings(
-    app: tauri::AppHandle,
+pub async fn reconcile_account_settings(
     app_state: tauri::State<'_, crate::state::AppState>,
     state: tauri::State<'_, SettingsState>,
     node_state: tauri::State<'_, crate::chat_commands::NodeState>,
-    owner: Option<String>,
-    settings: AppSettings,
+    owner: String,
+    expected_account: String,
+    seed_missing: bool,
+) -> Result<AppSettings, CommandError> {
+    let admission = RuntimeAdmission::capture(&app_state, &node_state, &owner)?;
+    reconcile_shared_settings(
+        &admission,
+        &state,
+        &owner,
+        &expected_account,
+        seed_missing,
+        &crate::data_dir(),
+    )
+    .await
+}
+
+async fn reconcile_shared_settings(
+    admission: &RuntimeAdmission,
+    state: &SettingsState,
+    owner: &str,
+    expected_account: &str,
+    seed_missing: bool,
+    root: &std::path::Path,
+) -> Result<AppSettings, CommandError> {
+    let projected = admission
+        .with_runtime(|runtime| {
+            use mesh_talk_core::node::SyncCategory;
+            if runtime.account_id() != expected_account {
+                return Err(CommandError::Authorization(
+                    "Settings belong to another account".into(),
+                ));
+            }
+            let node = runtime.handle();
+            let previous = state.get_for_owner(owner)?;
+            if !node.device_sync_policy().appearance {
+                return if state.needs_application(runtime, admission) {
+                    state.snapshot(owner).map(Some)
+                } else {
+                    Ok(None)
+                };
+            }
+            let records = node.account_preferences(SyncCategory::Appearance);
+            if seed_missing {
+                for (key, value) in shared::values(&previous) {
+                    if !records.iter().any(|record| record.key == key) {
+                        node.set_account_preference_if_absent(
+                            SyncCategory::Appearance,
+                            key,
+                            Some(value),
+                        )?;
+                    }
+                }
+            }
+            let next = protect_imported_settings(
+                &previous,
+                shared::project(
+                    &previous,
+                    &node.account_preferences(SyncCategory::Appearance),
+                ),
+            );
+            if shared::changed(&previous, &next).is_empty() {
+                return if state.needs_application(runtime, admission) {
+                    state.snapshot(owner).map(Some)
+                } else {
+                    Ok(None)
+                };
+            }
+            let path = config_store::account_path(root, owner, SETTINGS_FILE)
+                .ok_or_else(|| CommandError::Authorization("Invalid settings owner".into()))?;
+            config_store::write_account(&path, &AccountSettings::from(&next))?;
+            state.update_for_owner(owner, next)?;
+            state.snapshot(owner).map(Some)
+        })
+        .await?;
+    if let Some((revision, settings)) = projected {
+        apply_running_settings(
+            admission.clone(),
+            state.clone(),
+            owner.to_owned(),
+            revision,
+            settings,
+        )
+        .await?;
+    }
+    admission
+        .with_runtime(|_| state.get_for_owner(owner).map(redact_login_owner))
+        .await
+}
+
+fn require_settings_account(
+    runtime: &mesh_talk_core::node::NodeRuntime,
+    expected: Option<&str>,
 ) -> Result<(), CommandError> {
-    let admission = owner
-        .as_deref()
-        .map(|owner| RuntimeAdmission::capture(&app_state, &node_state, owner))
-        .transpose()?;
+    if expected != Some(runtime.account_id()) {
+        return Err(CommandError::Authorization(
+            "Settings belong to another account or account is not ready".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_settings(mut settings: AppSettings) -> Result<AppSettings, CommandError> {
     let level = settings.privacy_level;
-    let mut settings = settings.with_privacy_level(level);
+    settings = settings.with_privacy_level(level);
     let hub = settings.bridge_hub_id.trim();
     if !hub.is_empty() && (hub.len() != 32 || !hub.bytes().all(|b| b.is_ascii_hexdigit())) {
         return Err(CommandError::InvalidInput(
@@ -659,31 +869,195 @@ pub async fn set_app_settings(
         ));
     }
     settings.bridge_hub_id = hub.to_ascii_lowercase();
-    match owner.as_deref() {
-        Some(owner) => config_store::with_account_lease(
+    Ok(settings)
+}
+
+/// Linked preference records are not fresh local consent to relax protection.
+/// Keep each existing protection while still importing stronger and routine values.
+fn protect_imported_settings(previous: &AppSettings, mut next: AppSettings) -> AppSettings {
+    let level = next.privacy_level;
+    next = next.with_privacy_level(level);
+    let longer_or_disabled = |old: u32, new: u32| old > 0 && (new == 0 || new > old);
+    let mut preserved = false;
+    macro_rules! keep {
+        ($field:ident, $weaker:expr) => {
+            if $weaker {
+                next.$field = previous.$field;
+                preserved = true;
+            }
+        };
+    }
+    keep!(
+        notification_preview,
+        !previous.notification_preview && next.notification_preview
+    );
+    keep!(
+        auto_lock_seconds,
+        longer_or_disabled(previous.auto_lock_seconds, next.auto_lock_seconds)
+    );
+    keep!(
+        lock_when_hidden,
+        previous.lock_when_hidden && !next.lock_when_hidden
+    );
+    keep!(
+        confirm_sensitive_copy,
+        previous.confirm_sensitive_copy && !next.confirm_sensitive_copy
+    );
+    keep!(
+        clipboard_clear_seconds,
+        longer_or_disabled(
+            previous.clipboard_clear_seconds,
+            next.clipboard_clear_seconds
+        )
+    );
+    keep!(
+        retention_days,
+        longer_or_disabled(previous.retention_days, next.retention_days)
+    );
+    if preserved {
+        next.privacy_level = PrivacyLevel::Custom;
+    }
+    next
+}
+
+fn requires_identity_verification(previous: &AppSettings, next: &AppSettings) -> bool {
+    let longer_or_disabled = |old: u32, new: u32| old > 0 && (new == 0 || new > old);
+    (!previous.stay_signed_in && next.stay_signed_in)
+        || (!previous.notification_preview && next.notification_preview)
+        || longer_or_disabled(previous.auto_lock_seconds, next.auto_lock_seconds)
+        || (previous.lock_when_hidden && !next.lock_when_hidden)
+        || (previous.confirm_sensitive_copy && !next.confirm_sensitive_copy)
+        || longer_or_disabled(
+            previous.clipboard_clear_seconds,
+            next.clipboard_clear_seconds,
+        )
+        || longer_or_disabled(previous.retention_days, next.retention_days)
+}
+
+/// Update the toggles and persist them. If "stay signed in" was just turned OFF,
+/// immediately forget the saved keychain secret + `last_user` so the next launch
+/// shows the login screen (the toggle is the user's control over the stored secret).
+#[tauri::command]
+pub async fn set_app_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    app_state: tauri::State<'_, crate::state::AppState>,
+    state: tauri::State<'_, SettingsState>,
+    node_state: tauri::State<'_, crate::chat_commands::NodeState>,
+    owner: Option<String>,
+    settings: AppSettings,
+    patch: Option<serde_json::Value>,
+    expected_account: Option<String>,
+    password: Option<String>,
+) -> Result<(), CommandError> {
+    let mut admission = owner
+        .as_deref()
+        .map(|owner| RuntimeAdmission::capture(&app_state, &node_state, owner))
+        .transpose()?;
+    // Serialize the comparison and durable save, but never hold a synchronous
+    // settings/session guard while the operating system asks for verification.
+    let _save = state.1.lock().await;
+    let entry_revision = owner
+        .as_deref()
+        .map(|owner| state.snapshot(owner).map(|(revision, _)| revision))
+        .transpose()?;
+    if let Some(owner) = owner.as_deref() {
+        let previous = state.get_for_owner(owner)?;
+        let next = match patch.as_ref() {
+            Some(patch) => shared::patch(&previous, patch)?,
+            None => settings.clone(),
+        };
+        let next = normalize_settings(next)?;
+        if requires_identity_verification(&previous, &next) {
+            let verified = admission
+                .take()
+                .unwrap()
+                .verify_identity(password, "change Mesh-Talk privacy protections")
+                .await?;
+            admission = Some(verified);
+        }
+    }
+    // Installation controls remain usable during startup. They cannot write
+    // account preference rows or normalize/change private account settings.
+    if let Some(owner) = owner.as_deref()
+        && expected_account.is_none()
+        && patch.as_ref().is_some_and(shared::installation_patch)
+    {
+        return config_store::with_account_lease(
             &app_state,
             admission.as_ref().unwrap().lease(),
             SETTINGS_FILE,
-            |path| {
-                let previous = state.get_for_owner(owner)?;
-                let (settings, clear_user) =
-                    preserve_login_bookkeeping(settings.clone(), &previous);
-                config_store::write_account(path, &AccountSettings::from(&settings))?;
-                let global = state.update_for_owner(owner, settings)?;
-                save(&app, &global);
-                if let Some(user) = clear_user.as_deref() {
-                    crate::session_store::clear(user);
-                }
-                Ok(())
+            |_| {
+                admission.as_ref().unwrap().sensitive_commit(|| {
+                    if state.snapshot(owner)?.0 != entry_revision.unwrap() {
+                        return Err(CommandError::Authorization(
+                            "settings superseded during verification".into(),
+                        ));
+                    }
+                    let previous = state.get_for_owner(owner)?;
+                    let settings = shared::patch(&previous, patch.as_ref().unwrap())?;
+                    let (settings, clear_user) = preserve_login_bookkeeping(settings, &previous);
+                    let global = state.update_for_owner(owner, settings)?;
+                    save(&app, &global);
+                    if let Some(user) = clear_user.as_deref() {
+                        crate::session_store::clear(user);
+                    }
+                    Ok(())
+                })
             },
-        )?,
+        );
+    }
+    match owner.as_deref() {
+        Some(owner) => {
+            admission
+                .as_ref()
+                .unwrap()
+                .with_runtime(|runtime| {
+                    require_settings_account(runtime, expected_account.as_deref())?;
+                    if state.snapshot(owner)?.0 != entry_revision.unwrap() {
+                        return Err(CommandError::Authorization(
+                            "settings superseded during verification".into(),
+                        ));
+                    }
+                    let previous = state.get_for_owner(owner)?;
+                    let settings = match patch.as_ref() {
+                        Some(patch) => shared::patch(&previous, patch)?,
+                        None => settings.clone(),
+                    };
+                    let settings = normalize_settings(settings)?;
+                    let (settings, clear_user) = preserve_login_bookkeeping(settings, &previous);
+                    // Only the user's edited keys acquire new revisions. Reconcile never
+                    // takes this path, so sibling changes cannot echo into fresh records.
+                    for (key, value) in shared::changed(&previous, &settings) {
+                        runtime.handle().set_account_preference(
+                            mesh_talk_core::node::SyncCategory::Appearance,
+                            key,
+                            Some(value),
+                        )?;
+                    }
+                    let path = state.account_path(owner)?;
+                    config_store::write_account(&path, &AccountSettings::from(&settings))?;
+                    let global = state.update_for_owner(owner, settings)?;
+                    save(&app, &global);
+                    if let Some(user) = clear_user.as_deref() {
+                        crate::session_store::clear(user);
+                    }
+                    Ok(())
+                })
+                .await?
+        }
         None => {
             if app_state.session().capture().is_ok() {
                 return Err(CommandError::Authorization(
                     "settings owner required".into(),
                 ));
             }
-            let (settings, clear_user) = preserve_login_bookkeeping(settings, &state.get());
+            let previous = state.get();
+            let settings = match patch.as_ref() {
+                Some(patch) => shared::patch(&previous, patch)?,
+                None => settings,
+            };
+            let (settings, clear_user) =
+                preserve_login_bookkeeping(normalize_settings(settings)?, &previous);
             let global = state.update_without_owner(settings)?;
             save(&app, &global);
             if let Some(user) = clear_user.as_deref() {
@@ -692,6 +1066,7 @@ pub async fn set_app_settings(
         }
     }
 
+    drop(_save);
     // Apply the durable account preference to its running node, if still current.
     if let (Some(owner), Some(admission)) = (owner, admission) {
         let (revision, settings) = state.snapshot(&owner)?;
@@ -709,6 +1084,491 @@ pub async fn set_app_settings(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn denied_saved_login_change_leaves_acknowledged_settings_untouched() {
+        use tauri::Manager;
+        let root = tempfile::tempdir().unwrap();
+        let auth = crate::state::AppState::new(crate::services::auth_service::AuthService::new(
+            Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().into()),
+            )),
+        ));
+        let user = crate::services::user::User {
+            user_id: "settings-owner".into(),
+            name: "Owner".into(),
+            account_login_name: None,
+            display_name: "Owner".into(),
+            address: "fixture".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        auth.session().publish("session".into(), user, "pw".into());
+        let state = SettingsState::isolated(root.path().join("settings.json"));
+        state.set(AppSettings {
+            stay_signed_in: false,
+            ..AppSettings::default()
+        });
+        state.activate_at("settings-owner", &root.path().join("account.json"));
+        auth.app_lock()
+            .set_identity_verifier(|| Err(CommandError::Authentication("Invalid password".into())));
+        let app = tauri::test::mock_builder()
+            .manage(auth)
+            .manage(state.clone())
+            .manage(crate::chat_commands::NodeState::empty())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let result = set_app_settings(
+            app.handle().clone(),
+            app.state(),
+            app.state(),
+            app.state(),
+            Some("settings-owner".into()),
+            state.get(),
+            Some(serde_json::json!({"stay_signed_in": true})),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(CommandError::Auth(_))));
+        assert!(!state.get().stay_signed_in);
+        assert!(!root.path().join("settings.json").exists());
+        assert!(!root.path().join("account.json").exists());
+    }
+
+    #[tokio::test]
+    async fn successful_settings_save_releases_serialization_before_live_application() {
+        use tauri::Manager;
+        let root = tempfile::tempdir().unwrap();
+        let auth = crate::state::AppState::new(crate::services::auth_service::AuthService::new(
+            Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().into()),
+            )),
+        ));
+        let user = crate::services::user::User {
+            user_id: "settings-success-owner".into(),
+            name: "Owner".into(),
+            account_login_name: None,
+            display_name: "Owner".into(),
+            address: "fixture".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        let lease = auth.session().publish("session".into(), user, "pw".into());
+        let state = SettingsState::isolated(root.path().join("settings.json"));
+        state.activate_at(lease.owner(), &root.path().join("missing.json"));
+        let node = crate::chat_commands::NodeState::empty();
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            root.path(),
+            lease.owner(),
+            "Owner",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let account = runtime.account_id().to_owned();
+        *node.0.write().await = Some(runtime);
+        let app = tauri::test::mock_builder()
+            .manage(auth)
+            .manage(state.clone())
+            .manage(node.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            set_app_settings(
+                app.handle().clone(),
+                app.state(),
+                app.state(),
+                app.state(),
+                Some(lease.owner().into()),
+                state.get(),
+                Some(serde_json::json!({"ringtone": "digital"})),
+                Some(account),
+                None,
+            ),
+        )
+        .await
+        .expect("save must release serialization before applying")
+        .unwrap();
+        assert_eq!(state.get().ringtone, "digital");
+        assert!(state.account_path(lease.owner()).unwrap().exists());
+        assert!(state.1.try_lock().is_ok());
+        node.0.write().await.take().unwrap().stop().await;
+    }
+
+    #[test]
+    fn imported_settings_keep_local_protections_and_accept_stronger_preferences() {
+        let previous = AppSettings::default().with_privacy_level(PrivacyLevel::Strict);
+        let mut imported = AppSettings::default().with_privacy_level(PrivacyLevel::Custom);
+        imported.auto_lock_seconds = 30;
+        imported.ringtone = "digital".into();
+        let next = protect_imported_settings(&previous, imported);
+        assert_eq!(next.auto_lock_seconds, 30);
+        assert!(next.lock_when_hidden);
+        assert!(next.confirm_sensitive_copy);
+        assert!(!next.notification_preview);
+        assert_eq!(next.clipboard_clear_seconds, 30);
+        assert_eq!(next.ringtone, "digital");
+        assert_eq!(next.privacy_level, PrivacyLevel::Custom);
+        assert!(!requires_identity_verification(&previous, &next));
+        assert_eq!(normalize_settings(next).unwrap().auto_lock_seconds, 30);
+    }
+
+    #[test]
+    fn sensitive_settings_compare_effective_protections() {
+        let strict = AppSettings::default().with_privacy_level(PrivacyLevel::Strict);
+        let mut cosmetic = strict.clone();
+        cosmetic.ringtone = "other".into();
+        assert!(!requires_identity_verification(&strict, &cosmetic));
+        assert!(requires_identity_verification(
+            &strict,
+            &AppSettings::default()
+        ));
+        assert!(!requires_identity_verification(
+            &AppSettings::default(),
+            &strict
+        ));
+        let mut custom = strict.clone();
+        custom.privacy_level = PrivacyLevel::Custom;
+        custom.auto_lock_seconds = 120;
+        assert!(requires_identity_verification(&strict, &custom));
+        custom = strict.clone();
+        custom.notification_preview = true;
+        assert!(requires_identity_verification(&strict, &custom));
+        let mut signed_out = strict.clone();
+        signed_out.stay_signed_in = false;
+        assert!(requires_identity_verification(&signed_out, &strict));
+    }
+
+    #[tokio::test]
+    async fn startup_reads_local_settings_before_the_cryptographic_runtime_is_ready() {
+        use tauri::Manager;
+        let root = tempfile::tempdir().unwrap();
+        let app = crate::state::AppState::new(crate::services::auth_service::AuthService::new(
+            Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+            )),
+        ));
+        let user = crate::services::user::User {
+            user_id: "startup-settings-owner".into(),
+            account_login_name: None,
+            name: "settings".into(),
+            display_name: "Settings".into(),
+            address: "local".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        app.session().publish("first".into(), user, "pw".into());
+        let settings = SettingsState::default();
+        settings.0.lock().unwrap().owner = Some("startup-settings-owner".into());
+        settings
+            .update_for_owner(
+                "startup-settings-owner",
+                AppSettings {
+                    notifications: false,
+                    ..AppSettings::default()
+                },
+            )
+            .unwrap();
+        let host = tauri::test::mock_builder()
+            .manage(app)
+            .manage(settings)
+            .manage(crate::chat_commands::NodeState::empty())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let values = get_app_settings(
+            host.state(),
+            host.state(),
+            host.state(),
+            Some("startup-settings-owner".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!values.notifications);
+        assert!(
+            get_app_settings(
+                host.state(),
+                host.state(),
+                host.state(),
+                Some("wrong-owner".into()),
+                None
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            get_app_settings(
+                host.state(),
+                host.state(),
+                host.state(),
+                Some("startup-settings-owner".into()),
+                Some("not-started-account".into())
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_settings_seed_project_without_echo_and_survive_restart_with_local_paths() {
+        use mesh_talk_core::node::{NodeRuntime, SyncCategory};
+        let root = tempfile::tempdir().unwrap();
+        let app = crate::state::AppState::new(crate::services::auth_service::AuthService::new(
+            Arc::new(mesh_talk_core::identity::manager::IdentityManager::new(
+                mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
+            )),
+        ));
+        let user = crate::services::user::User {
+            user_id: "shared-settings-owner".into(),
+            account_login_name: None,
+            name: "settings".into(),
+            display_name: "Settings".into(),
+            address: "local".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        app.session()
+            .publish("first".into(), user.clone(), "pw".into());
+        let nodes = crate::chat_commands::NodeState::empty();
+        let runtime = NodeRuntime::start(
+            root.path(),
+            "shared-settings-owner",
+            "Settings",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let account = runtime.account_id().to_owned();
+        assert!(require_settings_account(&runtime, None).is_err());
+        assert!(require_settings_account(&runtime, Some("wrong-account")).is_err());
+        assert!(require_settings_account(&runtime, Some(&account)).is_ok());
+        let handle = runtime.handle();
+        *nodes.0.write().await = Some(runtime);
+        let state = SettingsState::default();
+        let path = config_store::account_path(root.path(), "shared-settings-owner", SETTINGS_FILE)
+            .unwrap();
+        state.activate_at("shared-settings-owner", &path);
+        state
+            .update_for_owner(
+                "shared-settings-owner",
+                AppSettings {
+                    ringtone: "marimba".into(),
+                    download_dir: "/this-device".into(),
+                    ..AppSettings::default()
+                },
+            )
+            .unwrap();
+        handle
+            .set_device_sync_category(SyncCategory::Appearance, true)
+            .unwrap();
+        let admission = RuntimeAdmission::capture_current(&app, &nodes).unwrap();
+        assert!(
+            reconcile_shared_settings(
+                &admission,
+                &state,
+                "shared-settings-owner",
+                "wrong-account",
+                true,
+                root.path()
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            handle
+                .account_preferences(SyncCategory::Appearance)
+                .is_empty()
+        );
+        reconcile_shared_settings(
+            &admission,
+            &state,
+            "shared-settings-owner",
+            &account,
+            false,
+            root.path(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            handle
+                .account_preferences(SyncCategory::Appearance)
+                .is_empty(),
+            "a new target never exports defaults"
+        );
+        handle
+            .set_account_preference(
+                SyncCategory::Appearance,
+                "settings.notifications".into(),
+                None,
+            )
+            .unwrap();
+        reconcile_shared_settings(
+            &admission,
+            &state,
+            "shared-settings-owner",
+            &account,
+            true,
+            root.path(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            handle.account_preferences(SyncCategory::Appearance).len(),
+            16
+        );
+        assert!(
+            handle
+                .account_preferences(SyncCategory::Appearance)
+                .iter()
+                .find(|row| row.key == "settings.notifications")
+                .unwrap()
+                .value
+                .is_none(),
+            "source seeding preserves tombstones"
+        );
+        for (key, value) in [
+            ("ringtone", "\"digital\""),
+            ("notifications", "false"),
+            ("physical_lan_only", "true"),
+        ] {
+            handle
+                .set_account_preference(
+                    SyncCategory::Appearance,
+                    format!("settings.{key}"),
+                    Some(value.into()),
+                )
+                .unwrap();
+        }
+        handle
+            .set_device_sync_category(SyncCategory::Appearance, false)
+            .unwrap();
+        let paused = reconcile_shared_settings(
+            &admission,
+            &state,
+            "shared-settings-owner",
+            &account,
+            false,
+            root.path(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(paused.ringtone, "marimba");
+        assert!(!handle.physical_lan_only());
+        handle
+            .set_device_sync_category(SyncCategory::Appearance, true)
+            .unwrap();
+        let before: std::collections::BTreeMap<_, _> = handle
+            .account_preferences(SyncCategory::Appearance)
+            .into_iter()
+            .map(|row| (row.key.clone(), row))
+            .collect();
+        let applied = reconcile_shared_settings(
+            &admission,
+            &state,
+            "shared-settings-owner",
+            &account,
+            false,
+            root.path(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied.ringtone, "digital");
+        assert!(!applied.notifications);
+        assert!(
+            handle.physical_lan_only(),
+            "import applies existing native runtime policy"
+        );
+        assert_eq!(applied.download_dir, "/this-device");
+        let after: std::collections::BTreeMap<_, _> = handle
+            .account_preferences(SyncCategory::Appearance)
+            .into_iter()
+            .map(|row| (row.key.clone(), row))
+            .collect();
+        assert_eq!(before, after, "remote application creates no new revisions");
+        assert!(!state.needs_application(nodes.0.read().await.as_ref().unwrap(), &admission));
+        // Model a durable projection whose live application was interrupted by
+        // locking: the next unchanged snapshot must retry, without re-export.
+        state.0.lock().unwrap().applied = None;
+        handle
+            .set_physical_lan_only_if(false, |commit| commit())
+            .await
+            .unwrap();
+        reconcile_shared_settings(
+            &admission,
+            &state,
+            "shared-settings-owner",
+            &account,
+            false,
+            root.path(),
+        )
+        .await
+        .unwrap();
+        assert!(handle.physical_lan_only());
+        assert!(!state.needs_application(nodes.0.read().await.as_ref().unwrap(), &admission));
+        app.session()
+            .publish("replacement".into(), user, "pw".into());
+        assert!(
+            reconcile_shared_settings(
+                &admission,
+                &state,
+                "shared-settings-owner",
+                &account,
+                true,
+                root.path()
+            )
+            .await
+            .is_err()
+        );
+        nodes.0.write().await.take().unwrap().stop().await;
+        let restarted = NodeRuntime::start(
+            root.path(),
+            "shared-settings-owner",
+            "Settings",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let reopened: std::collections::BTreeMap<_, _> = restarted
+            .handle()
+            .account_preferences(SyncCategory::Appearance)
+            .into_iter()
+            .map(|row| (row.key.clone(), row))
+            .collect();
+        assert_eq!(after, reopened);
+        let replacement_admission = RuntimeAdmission::capture_current(&app, &nodes).unwrap();
+        assert!(
+            state.needs_application(&restarted, &replacement_admission),
+            "a new runtime never inherits an old applied token"
+        );
+        state.activate_at("shared-settings-owner", &path);
+        assert_eq!(state.get().ringtone, "digital");
+        assert_eq!(state.get().download_dir, "/this-device");
+        restarted.stop().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delayed_settings_application_rejects_newer_disabled_save_and_same_owner_relogin() {
         for replace_session in [false, true] {
@@ -720,6 +1580,7 @@ mod tests {
             ));
             let user = crate::services::user::User {
                 user_id: "settings-owner".into(),
+                account_login_name: None,
                 name: "settings".into(),
                 display_name: "Settings".into(),
                 address: "local".into(),
@@ -745,7 +1606,7 @@ mod tests {
             .await
             .unwrap();
             let handle = runtime.handle();
-            *node.0.lock().await = Some(runtime);
+            *node.0.write().await = Some(runtime);
             let state = SettingsState::default();
             state.0.lock().unwrap().owner = Some("settings-owner".into());
             state
@@ -754,6 +1615,7 @@ mod tests {
                     AppSettings {
                         retention_days: 1,
                         physical_lan_only: true,
+                        origin_sharing_enabled: true,
                         ..AppSettings::default()
                     },
                 )
@@ -786,7 +1648,11 @@ mod tests {
                 !handle.physical_lan_only(),
                 "obsolete settings cannot commit runtime policy or reach retention pruning"
             );
-            node.0.lock().await.take().unwrap().stop().await;
+            assert!(
+                !handle.origin_sharing_enabled(),
+                "obsolete settings cannot enable origin disclosure"
+            );
+            node.0.write().await.take().unwrap().stop().await;
         }
     }
 
@@ -801,6 +1667,7 @@ mod tests {
             ));
             let user = crate::services::user::User {
                 user_id: "settings-owner".into(),
+                account_login_name: None,
                 name: "settings".into(),
                 display_name: "Settings".into(),
                 address: "local".into(),
@@ -826,7 +1693,7 @@ mod tests {
             .await
             .unwrap();
             let handle = runtime.handle();
-            *node.0.lock().await = Some(runtime);
+            *node.0.write().await = Some(runtime);
             let state = SettingsState::default();
             state.0.lock().unwrap().owner = Some("settings-owner".into());
             state
@@ -834,6 +1701,7 @@ mod tests {
                     "settings-owner",
                     AppSettings {
                         physical_lan_only: true,
+                        origin_sharing_enabled: true,
                         ..AppSettings::default()
                     },
                 )
@@ -852,7 +1720,7 @@ mod tests {
             });
             held.recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap();
-            let runtime_guard = node.0.lock().await;
+            let runtime_guard = node.0.write().await;
             let runtime = runtime_guard.as_ref().unwrap();
             let result = {
                 let pending = apply_relay_settings(
@@ -906,7 +1774,12 @@ mod tests {
                 change == "current",
                 "startup policy for {change}"
             );
-            node.0.lock().await.take().unwrap().stop().await;
+            assert_eq!(
+                handle.origin_sharing_enabled(),
+                change == "current",
+                "origin disclosure policy for {change}"
+            );
+            node.0.write().await.take().unwrap().stop().await;
         }
     }
 
@@ -1079,7 +1952,40 @@ mod tests {
         assert!(s.post_office_receive_enabled);
         assert!(!s.physical_lan_only);
         assert!(!s.bridge_discovery_enabled, "bridge discovery defaults off");
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["origin_sharing_enabled"],
+            serde_json::json!(false),
+            "existing installations do not opt into origin disclosure"
+        );
         assert!(s.bridge_hub_id.is_empty(), "no hub is pinned by default");
+    }
+
+    #[test]
+    fn origin_sharing_is_owner_scoped_and_survives_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let alice_path = config_store::account_path(root.path(), "alice", SETTINGS_FILE).unwrap();
+        let bob_path = config_store::account_path(root.path(), "bob", SETTINGS_FILE).unwrap();
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "origin_sharing_enabled": true
+        }))
+        .unwrap();
+        config_store::write_account(&alice_path, &AccountSettings::from(&settings)).unwrap();
+        let state = SettingsState::default();
+        state.activate_at("alice", &alice_path);
+        assert_eq!(
+            serde_json::to_value(state.get()).unwrap()["origin_sharing_enabled"],
+            serde_json::json!(true)
+        );
+        state.activate_at("bob", &bob_path);
+        assert_eq!(
+            serde_json::to_value(state.get()).unwrap()["origin_sharing_enabled"],
+            serde_json::json!(false)
+        );
+        state.activate_at("alice", &alice_path);
+        assert_eq!(
+            serde_json::to_value(state.get()).unwrap()["origin_sharing_enabled"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]

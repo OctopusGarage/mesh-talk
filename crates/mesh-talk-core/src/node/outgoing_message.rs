@@ -51,24 +51,27 @@ impl Node {
         let _serial = self.outgoing_requests_gate.lock().await;
         authorize(&mut || Ok(()))?;
         let digest = request.digest();
-        {
-            let store = self.delivery.lock().expect("delivery lock");
-            if let Some(existing) = store.request(&request.request_id) {
-                let mut acceptance = None;
-                authorize(&mut || {
-                    if existing.digest != digest {
-                        return Err(NodeError::RequestConflict);
-                    }
-                    acceptance = Some(MessageAcceptance {
-                        message_id: existing.message_id,
-                        duplicate: true,
-                    });
-                    Ok(())
-                })?;
-                return acceptance.ok_or_else(|| {
-                    NodeError::Authorization("authorization did not execute lookup".into())
+        let existing = self
+            .delivery
+            .lock()
+            .expect("delivery lock")
+            .request(&request.request_id)
+            .cloned();
+        if let Some(existing) = existing {
+            let mut acceptance = None;
+            authorize(&mut || {
+                if existing.digest != digest {
+                    return Err(NodeError::RequestConflict);
+                }
+                acceptance = Some(MessageAcceptance {
+                    message_id: existing.message_id,
+                    duplicate: true,
                 });
-            }
+                Ok(())
+            })?;
+            return acceptance.ok_or_else(|| {
+                NodeError::Authorization("authorization did not execute lookup".into())
+            });
         }
         if let Some(reply_to) = request.reply_to
             && !self.integration_reply_retained(&request.destination, reply_to)
@@ -261,11 +264,15 @@ impl Node {
         request: Option<RequestRecord>,
         authorize: &mut impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<EventId, NodeError> {
-        let mut store = self.delivery.lock().expect("delivery lock");
         let mut result = None;
         let mut wrapped = Some(wrapped);
         let mut request = request;
         authorize(&mut || {
+            let _membership = self
+                .channel_membership_commit
+                .lock()
+                .expect("channel membership commit lock");
+            let mut store = self.delivery.lock().expect("delivery lock");
             let wrapped = wrapped
                 .take()
                 .ok_or_else(|| NodeError::InvalidInput("accept is single-use".into()))?;
@@ -275,7 +282,10 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-            if !state.is_member(&self.user_id()) || state.pending_invite() || state.is_dissolved() {
+            if !self.channel_identity_is_current(state)
+                || state.pending_invite()
+                || state.is_dissolved()
+            {
                 return Err(NodeError::Channel("not an active channel member".into()));
             }
             let (payload, rotation, senders) = state
@@ -292,7 +302,7 @@ impl Node {
             if let Some(distribution) = rotation {
                 let sealed = super::channel::seal_keys_for(
                     &self.identity,
-                    state.members(),
+                    &state.recipient_members(),
                     &distribution,
                     state.epoch(),
                 )
@@ -361,6 +371,7 @@ impl Node {
         let id = result.ok_or_else(|| {
             NodeError::Authorization("authorization did not execute acceptance".into())
         })?;
+        let mut store = self.delivery.lock().expect("delivery lock");
         if self.recover_delivery(&mut store).is_err() {
             log::warn!("accepted channel message awaits local recovery");
         }

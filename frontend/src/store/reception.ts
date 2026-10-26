@@ -1,6 +1,8 @@
 import type { ArrivalKind, ReceptionMetadata } from "@/lib/types";
 
 export interface ReceptionEntry {
+  /** Content-free evidence that this external message mentioned the local user. */
+  mentioned?: boolean;
   seen: boolean;
   late: boolean;
   receivedAt?: number;
@@ -15,6 +17,8 @@ export interface ConversationReception {
   processing?: boolean;
 }
 export interface ReceptionState {
+  /** Account documents outlive the viewed-entry LRU and may precede history. */
+  accountSeen?: Record<string, string[]>;
   ledger: ReceptionLedger;
   overflowUnread: Record<string, number>;
   unreadIds: Record<string, string[]>;
@@ -73,6 +77,7 @@ export function boundLedger(ledger: ReceptionLedger): ReceptionLedger {
 export function emptyReception(
   ledger: ReceptionLedger = {},
   overflowUnread: Record<string, number> = {},
+  accountSeen?: Record<string, string[]>,
 ): ReceptionState {
   const bounded = boundLedger(ledger);
   const overflow = { ...overflowUnread };
@@ -86,6 +91,7 @@ export function emptyReception(
       overflow[key] = Math.min(1_000_000, (overflow[key] ?? 0) + dropped);
   }
   return {
+    ...(accountSeen ? { accountSeen } : {}),
     ledger: bounded,
     overflowUnread: Object.fromEntries(
       Object.entries(overflow)
@@ -142,6 +148,7 @@ export function mergeReception(
                       ...old,
                       seen: old.seen || incoming.seen,
                       late: old.late || incoming.late,
+                      mentioned: old.mentioned || incoming.mentioned,
                       receivedAt: old.receivedAt ?? incoming.receivedAt,
                       arrivalKind: old.arrivalKind ?? incoming.arrivalKind,
                     }
@@ -168,7 +175,28 @@ export function mergeReception(
       ),
     ]),
   );
-  const merged = emptyReception(ledger, overflow);
+  const merged = emptyReception(
+    ledger,
+    overflow,
+    persisted.accountSeen || pending.accountSeen
+      ? Object.fromEntries(
+          [
+            ...new Set([
+              ...Object.keys(persisted.accountSeen ?? {}),
+              ...Object.keys(pending.accountSeen ?? {}),
+            ]),
+          ].map((key) => [
+            key,
+            [
+              ...new Set([
+                ...(persisted.accountSeen?.[key] ?? []),
+                ...(pending.accountSeen?.[key] ?? []),
+              ]),
+            ],
+          ]),
+        )
+      : undefined,
+  );
   const unread = Object.fromEntries(
     [
       ...new Set([
@@ -202,6 +230,7 @@ export function receiveIdentity(
   state: ReceptionState,
   key: string,
   event: ReceptionMetadata,
+  mentioned = false,
 ): ReceptionState {
   if (event.reception_only) {
     const batch = state.reception[key];
@@ -226,7 +255,10 @@ export function receiveIdentity(
     : undefined;
   if (old) {
     let next = state;
-    if (old.receivedAt === undefined && event.received_at !== undefined) {
+    if (
+      (old.receivedAt === undefined && event.received_at !== undefined) ||
+      (mentioned && !old.mentioned && !event.own_device)
+    ) {
       next = {
         ...state,
         ledger: {
@@ -235,7 +267,8 @@ export function receiveIdentity(
             ...state.ledger[key],
             [id]: {
               ...old,
-              receivedAt: event.received_at,
+              mentioned: !event.own_device && (old.mentioned || mentioned),
+              receivedAt: old.receivedAt ?? event.received_at,
               arrivalKind: event.arrival_kind ?? old.arrivalKind,
             },
           },
@@ -257,7 +290,10 @@ export function receiveIdentity(
   const entries = {
     ...(state.ledger[key] ?? {}),
     [id]: {
-      seen: event.own_device === true,
+      ...(mentioned && !event.own_device ? { mentioned: true } : {}),
+      seen:
+        event.own_device === true ||
+        state.accountSeen?.[key]?.includes(id) === true,
       late: kind !== "live",
       receivedAt: event.received_at,
       arrivalKind: kind,
@@ -266,6 +302,7 @@ export function receiveIdentity(
   const next = emptyReception(
     { ...state.ledger, [key]: entries },
     state.overflowUnread,
+    state.accountSeen,
   );
   const previous = state.reception[key];
   const batch = event.batch_id ?? undefined;
@@ -318,6 +355,7 @@ export function viewIdentities(
     ...emptyReception(
       { ...state.ledger, [key]: entries },
       state.overflowUnread,
+      state.accountSeen,
     ),
     reception: state.reception,
   };
@@ -325,7 +363,7 @@ export function viewIdentities(
 export function reconcileHistory(
   state: ReceptionState,
   key: string,
-  rows: { id: string | null; fromMe: boolean }[],
+  rows: { id: string | null; fromMe: boolean; mentioned?: boolean }[],
   discover: boolean,
 ): ReceptionState {
   const entries = { ...(state.ledger[key] ?? {}) };
@@ -334,13 +372,22 @@ export function reconcileHistory(
     if (Object.prototype.hasOwnProperty.call(entries, row.id)) {
       // The resolved history owner can classify an own send that arrived before
       // device/account identity was available to the live callback.
-      if (row.fromMe && !entries[row.id].seen)
-        entries[row.id] = { ...entries[row.id], seen: true };
+      const old = entries[row.id];
+      if (row.fromMe || row.mentioned)
+        entries[row.id] = {
+          ...old,
+          seen: old.seen || row.fromMe,
+          mentioned: !row.fromMe && (old.mentioned || row.mentioned),
+        };
       continue;
     }
     Object.defineProperty(entries, row.id, {
       value: {
-        seen: row.fromMe || !discover,
+        ...(row.mentioned && !row.fromMe ? { mentioned: true } : {}),
+        seen:
+          row.fromMe ||
+          !discover ||
+          state.accountSeen?.[key]?.includes(row.id) === true,
         late: true,
         arrivalKind: "history_sync",
       },
@@ -353,8 +400,45 @@ export function reconcileHistory(
     ...emptyReception(
       { ...state.ledger, [key]: entries },
       state.overflowUnread,
+      state.accountSeen,
     ),
     reception: state.reception,
+  };
+}
+
+/** Exact monotone sibling reads never advance a timestamp or another conversation. */
+export function validAccountSeenIdentity(id: string): boolean {
+  return (
+    id.length > 0 &&
+    id.length <= 200 &&
+    !Array.from(id).some((character) => {
+      const code = character.codePointAt(0)!;
+      return code < 32 || (code >= 127 && code <= 159);
+    })
+  );
+}
+
+export function applyAccountSeen(
+  state: ReceptionState,
+  key: string,
+  ids: string[],
+): ReceptionState {
+  const existing = state.accountSeen?.[key] ?? [];
+  const valid = ids.filter(validAccountSeenIdentity);
+  const count = Object.values(state.accountSeen ?? {}).reduce(
+    (total, entries) => total + entries.length,
+    0,
+  );
+  const additions = [...new Set(valid)]
+    .filter((id) => !existing.includes(id))
+    .slice(0, Math.max(0, 65536 - count));
+  const accountSeen = {
+    ...state.accountSeen,
+    [key]: [...existing, ...additions],
+  };
+  return {
+    ...viewIdentities({ ...state, accountSeen }, key, valid),
+    accountSeen,
   };
 }
 

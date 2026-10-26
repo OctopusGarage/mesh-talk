@@ -376,7 +376,7 @@ async fn save_file_to_dir_for_owner(
     // Capture before waiting, then retain runtime and session authority through
     // the actual disk write. A frontend lease check cannot protect native I/O.
     let admission = RuntimeAdmission::capture(&app, &state, owner)?;
-    let guard = state.0.clone().lock_owned().await;
+    let guard = state.0.clone().read_owned().await;
     let path = tokio::task::spawn_blocking(move || {
         let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
         admission.checked(runtime, || {
@@ -608,6 +608,7 @@ mod tests {
         ));
         let user = crate::services::user::User {
             user_id: "bob".into(),
+            account_login_name: None,
             name: "bob".into(),
             display_name: "Bob".into(),
             address: "local".into(),

@@ -40,6 +40,7 @@ beforeEach(() => {
   });
   usePresence.setState({ map: {}, unavailable: false });
   vi.spyOn(chat, "getDeviceSyncStatus").mockResolvedValue([]);
+  vi.spyOn(chat, "getDeviceHostnames").mockResolvedValue({});
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -168,4 +169,45 @@ it("removes account device details immediately on logout", async () => {
 it("scopes linked-device status reads to the originating desktop owner", async () => {
   await render();
   expect(chat.getDeviceSyncStatus).toHaveBeenCalledWith("owner");
+});
+
+it("shows private hostnames for this device and offline linked devices", async () => {
+  vi.mocked(chat.getDeviceSyncStatus).mockResolvedValue([status("old-device")]);
+  vi.mocked(chat.getDeviceHostnames).mockResolvedValue({
+    "this-device": "Kingson-MacBook",
+    "old-device": "Office-PC",
+    "unrelated-device": "Private-other-host",
+  });
+  await render();
+  const panel = await open();
+  expect(
+    panel.querySelector('[data-device-id="this-device"]')?.textContent,
+  ).toContain("Kingson-MacBook");
+  expect(
+    panel.querySelector('[data-device-id="this-device"]')?.textContent,
+  ).toContain("This device");
+  expect(
+    panel.querySelector('[data-device-id="old-device"]')?.textContent,
+  ).toContain("Office-PC");
+  expect(panel.textContent).not.toContain("Private-other-host");
+  expect(chat.getDeviceHostnames).toHaveBeenCalledWith("owner", "our-account");
+});
+
+it("discards a pending private hostname read after account replacement", async () => {
+  let resolve!: (value: Record<string, string>) => void;
+  vi.mocked(chat.getDeviceHostnames).mockReturnValueOnce(
+    new Promise((done) => {
+      resolve = done;
+    }),
+  );
+  await render();
+  await act(async () =>
+    useChat.setState({ myAccountId: "new-account", myId: "new-device" }),
+  );
+  await act(async () =>
+    resolve({ "new-device": "Previous-account-private-host" }),
+  );
+  const panel = await open();
+  expect(panel.textContent).not.toContain("Previous-account-private-host");
+  expect(panel.textContent).toContain("This device");
 });

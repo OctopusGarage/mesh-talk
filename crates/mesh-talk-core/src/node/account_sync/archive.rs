@@ -7,7 +7,19 @@ pub(super) fn empty_history_digest() -> [u8; 32] {
     ArchiveIndex::default().finish().digest
 }
 
-type AccountExportPage = (Vec<HistoryRecord>, Option<HistoryCursor>, [u8; 32]);
+type AccountExportPage = (
+    Vec<HistoryRecord>,
+    Option<HistoryCursor>,
+    [u8; 32],
+    (u64, [u8; 32]),
+);
+type RecalledAccounts = HashMap<ConversationId, HashSet<EventId>>;
+
+fn recalled_in(recalled: &RecalledAccounts, conversation: ConversationId, target: EventId) -> bool {
+    recalled
+        .get(&conversation)
+        .is_some_and(|ids| ids.contains(&target))
+}
 
 #[derive(Clone)]
 enum ArchiveRow {
@@ -73,6 +85,8 @@ struct ArchiveKey {
     revisions: [u64; 8],
     channels: Vec<ConversationId>,
     accounts: Vec<String>,
+    controls: (u64, [u8; 32]),
+    recalls: [u8; 32],
 }
 impl ArchiveKey {
     // Appends leave captured selectors valid. Erasure, policy and authorization
@@ -83,6 +97,8 @@ impl ArchiveKey {
             && self.version == current.version
             && self.channels == current.channels
             && self.accounts == current.accounts
+            && self.controls == current.controls
+            && self.recalls == current.recalls
             && self.revisions[3..] == current.revisions[3..]
     }
 }
@@ -99,6 +115,40 @@ pub(in crate::node) struct ArchiveCache {
 }
 
 impl Node {
+    /// Resolve each conversation's recalls once, before taking any row-store
+    /// locks. The same projection filters selectors and materialized payloads.
+    pub(super) fn account_archive_recalls(&self) -> (RecalledAccounts, [u8; 32]) {
+        let own = self.account_id();
+        let mut peers = self.known_account_ids();
+        peers.push(own.clone());
+        peers.sort();
+        peers.dedup();
+        let mut recalled = HashMap::new();
+        let mut digest = [0u8; 32];
+        let mut count = 0u64;
+        for peer in peers {
+            let conversation = account_conversation_id(&own, &peer);
+            let targets = self.recalled_targets_account(&peer);
+            for target in &targets {
+                let mut hash = Sha256::new();
+                hash.update(b"mesh-talk-account-archive-recall-v1");
+                hash.update(conversation.as_bytes());
+                hash.update(target.as_bytes());
+                for (byte, part) in digest.iter_mut().zip(hash.finalize()) {
+                    *byte ^= part;
+                }
+                count = count.saturating_add(1);
+            }
+            if !targets.is_empty() {
+                recalled.insert(conversation, targets);
+            }
+        }
+        let mut hash = Sha256::new();
+        hash.update(digest);
+        hash.update(count.to_be_bytes());
+        (recalled, hash.finalize().into())
+    }
+
     fn build_archive_index(
         &self,
         requester: &PublicIdentity,
@@ -106,6 +156,7 @@ impl Node {
         include_files: bool,
         version: AccountSyncVersion,
         previous: Option<ArchiveIndex>,
+        recalled: &RecalledAccounts,
     ) -> ArchiveIndex {
         let own = self.account_id();
         let mut page = previous.unwrap_or_default();
@@ -141,6 +192,9 @@ impl Node {
                         let Some(env) = DmEnvelope::decode(&entry.plaintext) else {
                             continue;
                         };
+                        if recalled_in(recalled, conversation, EventId::new(env.msg_id)) {
+                            continue;
+                        }
                         if self.recipient_expired(
                             &env.body,
                             EventId::new(env.msg_id),
@@ -184,6 +238,9 @@ impl Node {
                         let Some(env) = DmEnvelope::decode(&entry.plaintext) else {
                             continue;
                         };
+                        if recalled_in(recalled, conversation, EventId::new(env.msg_id)) {
+                            continue;
+                        }
                         let other = if env.route.sender_account == own {
                             &env.route.recipient_account
                         } else if env.route.recipient_account == own {
@@ -324,6 +381,7 @@ impl Node {
                 {
                     page.scanned.insert((4, host), index + 1);
                     if entry.plaintext.is_empty()
+                        || recalled_in(recalled, host, entry.event_id)
                         || self.recipient_expired(
                             &entry.plaintext,
                             entry.event_id,
@@ -379,6 +437,7 @@ impl Node {
         history: bool,
         files: bool,
         version: AccountSyncVersion,
+        recalls: [u8; 32],
     ) -> ArchiveKey {
         let me = self.user_id();
         let requester_id = requester.user_id();
@@ -415,6 +474,8 @@ impl Node {
             history,
             files,
             version,
+            controls: self.private_dm_control_revision(),
+            recalls,
             channels,
             accounts: if files {
                 let mut accounts = self.known_account_ids();
@@ -445,12 +506,13 @@ impl Node {
         files: bool,
         version: AccountSyncVersion,
     ) -> Result<AccountExportPage, NodeError> {
+        let (recalled, recalls) = self.account_archive_recalls();
         // The lock prevents duplicate concurrent index builds. Producers never acquire it.
         let mut cache = self
             .account_archive_cache
             .lock()
             .expect("archive cache mutex not poisoned");
-        let key = self.archive_key(requester, history, files, version);
+        let key = self.archive_key(requester, history, files, version, recalls);
         if cache.key.as_ref() != Some(&key) || cache.index.is_none() {
             let incremental = cache.key.as_ref().is_some_and(|old| {
                 old.history == key.history
@@ -458,6 +520,8 @@ impl Node {
                     && old.version == key.version
                     && old.channels == key.channels
                     && old.accounts == key.accounts
+                    && old.controls == key.controls
+                    && old.recalls == key.recalls
                     && old.revisions[3] == key.revisions[3]
                     && old.revisions[5..] == key.revisions[5..]
                     && old.revisions[..3] != key.revisions[..3]
@@ -471,14 +535,15 @@ impl Node {
             let scanned_before: usize = previous
                 .as_ref()
                 .map_or(0, |index| index.scanned.values().sum());
-            let index = self.build_archive_index(requester, history, files, version, previous);
+            let index =
+                self.build_archive_index(requester, history, files, version, previous, &recalled);
             #[cfg(test)]
             {
                 cache.scanned_rows += index.scanned.values().sum::<usize>() - scanned_before;
             }
-            if !key
-                .accepts_append_only_change(&self.archive_key(requester, history, files, version))
-            {
+            if !key.accepts_append_only_change(
+                &self.archive_key(requester, history, files, version, recalls),
+            ) {
                 cache.index = None;
                 return Err(NodeError::Channel(
                     "account archive changed while indexing".into(),
@@ -507,7 +572,7 @@ impl Node {
         let next = (selected.len() > RECORDS_PER_PAGE).then(|| *selected[RECORDS_PER_PAGE - 1].0);
         let mut records = Vec::with_capacity(RECORDS_PER_PAGE);
         for (key, row) in selected.into_iter().take(RECORDS_PER_PAGE) {
-            if let Some(record) = self.materialize_archive_row(*key, row)? {
+            if let Some(record) = self.materialize_archive_row(*key, row, &recalled)? {
                 records.push(record);
             }
         }
@@ -515,19 +580,27 @@ impl Node {
             .key
             .as_ref()
             .expect("archive key installed")
-            .accepts_append_only_change(&self.archive_key(requester, history, files, version))
+            .accepts_append_only_change(
+                &self.archive_key(requester, history, files, version, recalls),
+            )
         {
             return Err(NodeError::Channel(
                 "account archive changed while selecting page".into(),
             ));
         }
-        Ok((records, next, index.digest))
+        Ok((
+            records,
+            next,
+            index.digest,
+            cache.key.as_ref().expect("archive key installed").controls,
+        ))
     }
 
     fn materialize_archive_row(
         &self,
         key: HistoryCursor,
         row: &ArchiveRow,
+        recalled: &RecalledAccounts,
     ) -> Result<Option<HistoryRecord>, NodeError> {
         let stale = || NodeError::Channel("account archive selector invalidated".into());
         let conversation = match row {
@@ -537,6 +610,9 @@ impl Node {
             | ArchiveRow::ReceivedChannel { conversation, .. }
             | ArchiveRow::File { conversation, .. } => *conversation,
         };
+        if key.tag != 1 && recalled_in(recalled, conversation, EventId::new(key.id)) {
+            return Ok(None);
+        }
         if self
             .account_suppression
             .lock()

@@ -16,6 +16,16 @@ beforeEach(() => {
   useAvatars.setState({ owner: "host", ownId: "own", local: {}, received: {} });
 });
 
+it("own-avatar publication carries the originating owner and cryptographic account", async () => {
+  invoke.mockResolvedValue(undefined);
+  await useAvatars.getState().setAvatar("own", "scoped-photo");
+  expect(invoke).toHaveBeenCalledWith("publish_avatar", {
+    owner: "host",
+    expectedAccount: "own",
+    avatar: "scoped-photo",
+  });
+});
+
 it("clears local and received avatars when the signed-in owner changes", () => {
   useAvatars.setState({
     local: { contact: "alice-local" },
@@ -35,6 +45,7 @@ it("a linked device's signed own-avatar update replaces the stale local override
   expect(useAvatars.getState().received.own).toBe("new-linked-photo");
   await vi.waitFor(() =>
     expect(invoke).toHaveBeenCalledWith("set_avatar", {
+      expectedAccount: "own",
       owner: "host",
       id: "own",
       dataUrl: null,
@@ -56,6 +67,7 @@ it("a linked device's avatar clear removes both own-avatar sources", async () =>
   expect(useAvatars.getState().received.own).toBeUndefined();
   await vi.waitFor(() =>
     expect(invoke).toHaveBeenCalledWith("set_avatar", {
+      expectedAccount: "own",
       owner: "host",
       id: "own",
       dataUrl: null,
@@ -77,6 +89,7 @@ it("a durable linked-device clear prevents a stale avatar from being republished
   ).toBe(false);
   await vi.waitFor(() =>
     expect(invoke).toHaveBeenCalledWith("set_avatar", {
+      expectedAccount: "own",
       owner: "host",
       id: "own",
       dataUrl: null,
@@ -109,7 +122,11 @@ it("clearing my own avatar removes the previously received sibling photo immedia
   await useAvatars.getState().setAvatar("own", null);
   expect(useAvatars.getState().received.own).toBeUndefined();
   expect(useAvatars.getState().local.own).toBeUndefined();
-  expect(invoke).toHaveBeenCalledWith("publish_avatar", { avatar: null });
+  expect(invoke).toHaveBeenCalledWith("publish_avatar", {
+    owner: "host",
+    expectedAccount: "own",
+    avatar: null,
+  });
 });
 
 it("startup never republishes an older avatar after a newer local edit", async () => {
@@ -129,7 +146,12 @@ it("startup never republishes an older avatar after a newer local edit", async (
   await reassert;
   expect(
     invoke.mock.calls.filter(([command]) => command === "publish_avatar"),
-  ).toEqual([["publish_avatar", { avatar: "new-photo" }]]);
+  ).toEqual([
+    [
+      "publish_avatar",
+      { owner: "host", expectedAccount: "own", avatar: "new-photo" },
+    ],
+  ]);
 });
 
 it("startup skips republish when the durable profile load fails", async () => {
@@ -158,7 +180,9 @@ it("current own-avatar success publishes and current failure reconciles", async 
       ? Promise.reject(new Error("disk"))
       : Promise.resolve({ own: "persisted" }),
   );
-  await useAvatars.getState().setAvatar("own", "failed");
+  await expect(
+    useAvatars.getState().setAvatar("own", "failed"),
+  ).rejects.toThrow();
   expect(invoke.mock.calls.map(([command]) => command)).toEqual([
     "set_avatar",
     "get_avatars",
@@ -419,6 +443,45 @@ for (const avatar of ["new-photo", null]) {
     expect(persisted.own).toBe(avatar ?? undefined);
     expect(
       invoke.mock.calls.filter(([command]) => command === "publish_avatar"),
-    ).toEqual([["publish_avatar", { avatar }]]);
+    ).toEqual([
+      ["publish_avatar", { owner: "host", expectedAccount: "own", avatar }],
+    ]);
   });
 }
+
+it("rejects a current avatar CAS failure after restoring the authoritative saved picture", async () => {
+  invoke.mockImplementation((command: string) => {
+    if (command === "set_avatar")
+      return Promise.reject(new Error("CAS conflict"));
+    if (command === "get_avatars")
+      return Promise.resolve({ contact: "sibling-photo" });
+    return Promise.resolve();
+  });
+  await expect(
+    useAvatars.getState().setAvatar("contact", "chosen-photo"),
+  ).rejects.toThrow("CAS conflict");
+  expect(useAvatars.getState().local.contact).toBe("sibling-photo");
+  invoke.mockResolvedValue(undefined);
+  await useAvatars.getState().setAvatar("contact", "retry-photo");
+  expect(useAvatars.getState().local.contact).toBe("retry-photo");
+});
+
+it("does not report an older avatar failure after a newer intent starts during rollback", async () => {
+  let read!: (value: Record<string, string>) => void;
+  let writes = 0;
+  invoke.mockImplementation((command: string) => {
+    if (command === "set_avatar" && ++writes === 1)
+      return Promise.reject(new Error("first CAS conflict"));
+    if (command === "get_avatars")
+      return new Promise((resolve) => {
+        read = resolve;
+      });
+    return Promise.resolve();
+  });
+  const first = useAvatars.getState().setAvatar("contact", "first");
+  await vi.waitFor(() => expect(read).toBeDefined());
+  const second = useAvatars.getState().setAvatar("contact", "second");
+  read({ contact: "saved" });
+  await Promise.all([first, second]);
+  expect(useAvatars.getState().local.contact).toBe("second");
+});

@@ -5,7 +5,7 @@ use mesh_talk_core::discovery::roster::{PeerRecord, RouteSource};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize, Clone)]
 pub struct PresenceEvidence {
@@ -13,7 +13,19 @@ pub struct PresenceEvidence {
     last_seen_secs: u64,
     expires_in_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    origin_hops: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     post_office: Option<PresencePostOffice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registration_origin: Option<PresenceRegistrationOrigin>,
+}
+
+/// Consented registration relationship, independently expiring from its route.
+#[derive(Serialize, Clone)]
+pub struct PresenceRegistrationOrigin {
+    user_id: String,
+    name: String,
+    expires_in_secs: f64,
 }
 
 /// Immediate directory introducer, not a geographic origin or delivery receipt.
@@ -91,6 +103,10 @@ fn add_peer_with_sources(
         .account_id
         .clone()
         .unwrap_or_else(|| format!("device:{}", peer.public.user_id()));
+    let wall_now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let unix_now = wall_now.as_secs();
     let evidence: Vec<_> = peer
         .presence_routes(now)
         .filter_map(|(route, age, remaining)| {
@@ -106,6 +122,21 @@ fn add_peer_with_sources(
                 source,
                 last_seen_secs: age,
                 expires_in_secs: remaining,
+                registration_origin: route
+                    .registration_origin
+                    .as_ref()
+                    .filter(|origin| {
+                        route.source == RouteSource::PostOffice
+                            && origin.valid_for(&peer.public, unix_now)
+                    })
+                    .map(|origin| PresenceRegistrationOrigin {
+                        user_id: origin.office_user_id(),
+                        name: origin.office_name().to_owned(),
+                        expires_in_secs: std::time::Duration::from_secs(origin.expires_at_secs())
+                            .saturating_sub(wall_now)
+                            .as_secs_f64(),
+                    }),
+                origin_hops: route.origin_hops,
                 post_office: (route.source == RouteSource::PostOffice).then(|| {
                     offices
                         .get(&route.addr)
@@ -200,7 +231,9 @@ fn add_self(out: &mut HashMap<String, PresenceInfo>, account_id: String, user_id
             source: "self",
             last_seen_secs: 0,
             expires_in_secs: lease,
+            origin_hops: None,
             post_office: None,
+            registration_origin: None,
         }],
     });
 }
@@ -211,7 +244,7 @@ pub async fn get_presence(
     state: tauri::State<'_, NodeState>,
 ) -> Result<HashMap<String, PresenceInfo>, CommandError> {
     let node = {
-        let guard = state.0.lock().await;
+        let guard = state.0.read().await;
         let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
         if !rt.discovery_available() {
             return Err(CommandError::Internal("discovery unavailable".into()));
@@ -222,7 +255,7 @@ pub async fn get_presence(
         .cached_peer_snapshot_async()
         .await
         .map_err(|e| CommandError::Io(e.to_string()))?;
-    let guard = state.0.lock().await;
+    let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     if !rt.discovery_available() || !std::sync::Arc::ptr_eq(&rt.handle(), &node) {
         return Err(CommandError::not_started());
@@ -262,30 +295,12 @@ pub async fn get_presence(
         }
     }
     for channel in rt.list_channels() {
-        let pending: HashSet<_> = rt.channel_pending_members(channel.id).into_iter().collect();
-        let mut accounts = HashSet::new();
-        let mut unbound = HashSet::new();
-        for device in rt.channel_members(channel.id) {
-            let id = device.user_id();
-            if pending.contains(&id) || node.device_is_post_office(&device) {
-                continue;
-            }
-            let account = if id == rt.user_id() {
-                Some(rt.account_id().to_owned())
-            } else {
-                rt.account_id_for_device(&device)
-            };
-            if let Some(account) = account {
-                accounts.insert(account);
-            } else {
-                unbound.insert(id);
-            }
-        }
+        let (accounts, unbound) = node.channel_member_account_sets(channel.id);
         add_group(
             &mut out,
             hex::encode(channel.id.as_bytes()),
-            accounts,
-            unbound,
+            accounts.into_iter().collect(),
+            unbound.into_iter().collect(),
         );
     }
     Ok(out)
@@ -298,6 +313,84 @@ mod tests {
         discovery::{Announce, Roster},
         identity::{account::Account, device::DeviceIdentity},
     };
+
+    #[test]
+    fn directory_registration_origin_keeps_windows_identity_without_borrowing_introducer_or_lease()
+    {
+        use mesh_talk_core::node::{OriginConsent, RegistrationOrigin};
+        let device = DeviceIdentity::generate();
+        let office = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &Account::generate(), "Duncan", 1);
+        let unix_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let origin = RegistrationOrigin::new(
+            &office,
+            "Windows 10 office",
+            OriginConsent::new(&device, &office.public(), unix_now + 5),
+        )
+        .unwrap();
+        let mut roster = Roster::default();
+        roster.update_relayed(&proof, "127.0.0.1:47479".parse().unwrap(), "self");
+        let mut peer = roster.get(&proof.user_id).unwrap().clone();
+        let now = Instant::now();
+        peer.routes[0].presence_expires_at = Some(now + std::time::Duration::from_secs(10));
+        peer.routes[0].registration_origin = Some(origin.clone());
+        let mut out = HashMap::new();
+        add_peer(&mut out, &peer, now);
+        let json = serde_json::to_value(&out[&proof.account_id().unwrap()]).unwrap();
+        let evidence = &json["devices"][0]["evidence"][0];
+        assert_eq!(evidence["registration_origin"]["name"], "Windows 10 office");
+        assert_eq!(evidence["registration_origin"]["user_id"], office.user_id());
+        assert!(
+            evidence["registration_origin"]["expires_in_secs"]
+                .as_f64()
+                .unwrap()
+                <= 5.0
+        );
+        assert_eq!(evidence["post_office"]["endpoint"], "127.0.0.1:47479");
+        assert!(evidence["post_office"].get("name").is_none());
+
+        // A valid signature for Duncan cannot establish an origin for someone else.
+        peer.public = DeviceIdentity::generate().public();
+        let mut out = HashMap::new();
+        add_peer(&mut out, &peer, now);
+        let json = serde_json::to_value(&out[&proof.account_id().unwrap()]).unwrap();
+        assert!(
+            json["devices"][0]["evidence"][0]
+                .get("registration_origin")
+                .is_none()
+        );
+
+        // A non-directory route must never expose this optional directory proof.
+        peer.public = device.public();
+        peer.routes[0].source = RouteSource::Lan;
+        let mut out = HashMap::new();
+        add_peer(&mut out, &peer, now);
+        let json = serde_json::to_value(&out[&proof.account_id().unwrap()]).unwrap();
+        assert!(
+            json["devices"][0]["evidence"][0]
+                .get("registration_origin")
+                .is_none()
+        );
+
+        peer.routes[0].source = RouteSource::PostOffice;
+        peer.routes[0].registration_origin = RegistrationOrigin::new(
+            &office,
+            "Windows 10 office",
+            OriginConsent::new(&device, &office.public(), unix_now.saturating_sub(1)),
+        );
+        let mut out = HashMap::new();
+        add_peer(&mut out, &peer, now);
+        let json = serde_json::to_value(&out[&proof.account_id().unwrap()]).unwrap();
+        assert!(
+            json["devices"][0]["evidence"][0]
+                .get("registration_origin")
+                .is_none(),
+            "a live directory route cannot extend the registration proof"
+        );
+    }
     #[test]
     fn local_account_has_a_real_presentation_lease_for_frontend_group_aging() {
         let mut out = HashMap::new();
@@ -349,6 +442,7 @@ mod tests {
             route.source = RouteSource::PostOffice;
             route.addr = office.addr;
             route.presence_expires_at = Some(now + std::time::Duration::from_secs(lifetime));
+            route.origin_hops = Some(index - 3);
             peer.routes.push(route);
             offices.push(office);
         }
@@ -357,6 +451,9 @@ mod tests {
         let json = serde_json::to_value(&out[&account.account_id()]).unwrap();
         let evidence = json["devices"][0]["evidence"].as_array().unwrap();
         assert_eq!(evidence.len(), 3);
+        assert!(evidence[0].get("origin_hops").is_none());
+        assert_eq!(evidence[1]["origin_hops"], 0);
+        assert_eq!(evidence[2]["origin_hops"], 1);
         assert!(evidence[0].get("post_office").is_none());
         assert_eq!(evidence[1]["post_office"]["name"], "mac-mini-post-office");
         assert_eq!(

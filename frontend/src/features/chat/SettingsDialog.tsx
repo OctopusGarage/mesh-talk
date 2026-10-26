@@ -13,6 +13,7 @@ import {
 import { SETTINGS_CATEGORIES, type SettingsCategory } from "./settings/model";
 import { useSettingsController } from "./settings/useSettingsController";
 import { SettingsError } from "./settings/primitives";
+import { LocalAgentSettings } from "./settings/LocalAgentSettings";
 import { GeneralSettings } from "./settings/GeneralSettings";
 import { AppearanceSettings } from "./settings/AppearanceSettings";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -25,10 +26,12 @@ import { HistorySettings } from "./settings/HistorySettings";
 export function SettingsDialog({
   open: controlledOpen,
   onOpenChange,
+  onCloseAutoFocus,
   initialTarget,
 }: {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  onCloseAutoFocus?: (event: Event) => void;
   initialTarget?: { category: SettingsCategory; controlId?: string };
 } = {}) {
   const { t } = useTranslation();
@@ -71,12 +74,19 @@ export function SettingsDialog({
       <SecuritySettings
         controller={controller}
         onDraftChange={setPresetDraft}
+        onAgentSettings={() => {
+          focusTarget.current = "#setting-local-agent-access";
+          setCategory("general");
+        }}
         onNotifications={() => {
           focusTarget.current = "#setting-notification-preview";
           setCategory("notifications");
         }}
       />
     ),
+    integrations: controller.settings ? (
+      <LocalAgentSettings controller={controller} />
+    ) : null,
     files: <FileSettings controller={controller} />,
     history: <HistorySettings controller={controller} />,
   }[category];
@@ -97,6 +107,7 @@ export function SettingsDialog({
         </DialogTrigger>
       )}
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         className="grid h-[min(44rem,calc(100vh-2rem))] supports-[height:100dvh]:h-[min(44rem,calc(100dvh-2rem))] max-w-[min(56rem,calc(100vw-2rem))] grid-rows-[auto_minmax(0,1fr)_auto] gap-4 overflow-hidden"
         data-testid="settings-dialog"
       >

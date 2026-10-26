@@ -1,3 +1,13 @@
+import { ConversationBio } from "./ConversationHeaders";
+import { useMessageCollection } from "./favorites/useMessageCollection";
+import {
+  CollectionToolbar,
+  FavoriteEditor,
+} from "./favorites/MessageCollection";
+import { canCollect, MAX_FAVORITE_MESSAGES } from "./favorites/selection";
+import { useFavoriteMembership } from "./favorites/useFavoriteMembership";
+import { NotificationPermissionNotice } from "./NotificationPermissionNotice";
+import { useNotificationPermissionReminder } from "./useNotificationPermissionReminder";
 import { displayIdentity } from "@/lib/displayIdentity";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso } from "react-virtuoso";
@@ -13,7 +23,7 @@ import { useTranslation } from "react-i18next";
 import { needsCustomWindowControls } from "@/lib/platform";
 import { ReceptionStatus } from "./ReceptionStatus";
 import { Composer } from "./Composer";
-import { ConversationDrafts } from "./conversationDrafts";
+import { useDrafts } from "@/store/drafts";
 import {
   EmptyState,
   StartupFailureState,
@@ -77,12 +87,16 @@ export function ConversationView() {
   const active = useChat((s) => s.active);
   const owner = useAuth((s) => s.user?.id ?? null);
   const authGeneration = useAuth((s) => s.generation);
+  const notificationReminder = useNotificationPermissionReminder(
+    `${owner}:${authGeneration}`,
+  );
   const receptionScope = useChat((s) => `${s.runEpoch}:${s.identityEpoch}`);
   const myAccountId = useChat((s) => s.myAccountId);
   const isPersonal = active?.kind === "account" && active.id === myAccountId;
   const channels = useChat((s) => s.channels);
   const favorites = useChat((s) => s.favorites);
   const admitText = useChat((s) => s.admitText);
+  const admitProtectedText = useChat((s) => s.admitTextAndWait);
   const retry = useChat((s) => s.retry);
   const [expiryDurationMs, setExpiryDurationMs] = useState<number | null>(null);
   const expiresAtSend = () =>
@@ -103,6 +117,25 @@ export function ConversationView() {
   const attachments = useAttachmentIntake(t, {
     expiresAtSend,
     onHandoff: () => setExpiryDurationMs(null),
+    captureProtection: () => {
+      const snapshot = useDrafts.getState().captureProtection(...draftScope);
+      return {
+        protection: snapshot.protection,
+        onAccepted: (batch) => {
+          if (
+            (useDrafts.getState().texts[key] ?? "") ||
+            (!batch && (attachmentDraftCounts.current.get(draftKey) ?? 0) > 0)
+          )
+            return;
+          if (!snapshot.accept()) return;
+          setProtectionReset((previous) => ({
+            key: draftKey,
+            n: (previous?.n ?? 0) + 1,
+            applyIf: () => !useDrafts.getState().protections[key],
+          }));
+        },
+      };
+    },
   });
   const recallMessage = useChat((s) => s.recallMessage);
   const sendSticker = useChat((s) => s.sendSticker);
@@ -119,12 +152,41 @@ export function ConversationView() {
     return map;
   }, [members]);
   const key = active ? convKey(active) : "";
+  const collection = useMessageCollection(
+    active,
+    `${owner}:${authGeneration}:${receptionScope}:${key}`,
+  );
+
   useEffect(() => {
     setPendingDelete(null);
   }, [key]);
-  const drafts = useRef(new ConversationDrafts());
+  const draftsLoaded = useDrafts(
+    (s) => s.owner === owner && s.generation === authGeneration && s.loaded,
+  );
+  useEffect(
+    () => () => {
+      void useDrafts.getState().flush();
+    },
+    [key],
+  );
+  const attachmentDraftCounts = useRef(new Map<string, number>());
+  const [protectionReset, setProtectionReset] = useState<{
+    key: string;
+    n: number;
+    applyIf: () => boolean;
+  } | null>(null);
+  const [acceptedClear, setAcceptedClear] = useState<{
+    key: string;
+    n: number;
+    applyIf: () => boolean;
+  } | null>(null);
   const draftKey = `${owner}:${authGeneration}:${key}`;
-  const messages = useChat((s) =>
+  const draftScope = [owner!, authGeneration, key] as const;
+  const admissionPending = useDrafts(
+    (s) =>
+      s.owner === owner && s.generation === authGeneration && !!s.pending[key],
+  );
+  const historyMessages = useChat((s) =>
     active ? (s.messages[key] ?? NO_MESSAGES) : NO_MESSAGES,
   );
   const reactions = useChat((s) =>
@@ -138,6 +200,33 @@ export function ConversationView() {
   const loading = useChat((s) => s.loading);
   const historyError = useChat((s) => s.historyError === key);
   const searchTarget = useChat((s) => s.searchTarget);
+  const exactContext =
+    searchTarget?.key === key && "reference" in searchTarget
+      ? searchTarget.context
+      : null;
+  const expiryNow = useChat((s) => s.expiryNow);
+  const deletedContextIds = useChat((s) => s.deleted[key] ?? NO_IDS);
+  const messages = useMemo(
+    () =>
+      exactContext
+        ? exactContext.filter(
+            (message) =>
+              (!message.id || !deletedContextIds.includes(message.id)) &&
+              (message.expiresAtMs == null || message.expiresAtMs > expiryNow),
+          )
+        : historyMessages,
+    [exactContext, historyMessages, deletedContextIds, expiryNow],
+  );
+  const savedMessageIds = useFavoriteMembership(
+    active,
+    messages,
+    `${owner}:${authGeneration}:${receptionScope}:${key}`,
+  );
+  const closeSearchContext = () => {
+    useChat.setState({ searchTarget: null });
+    // Let the canonical recent rows replace context before moving their viewport.
+    requestAnimationFrame(() => viewport.jumpToLatest());
+  };
   const ready = useChat((s) => s.ready);
   const bootFailed = useChat((s) => s.bootFailed);
   const myName = useAuth((s) => s.user?.display_name || s.user?.username || "");
@@ -148,7 +237,7 @@ export function ConversationView() {
     loading,
     historyError,
     searchTarget,
-    markMessagesViewed,
+    exactContext ? undefined : markMessagesViewed,
   );
 
   const unreadNavigationRequest = useRef(0);
@@ -286,6 +375,10 @@ export function ConversationView() {
   }
 
   const isChannel = active.kind === "channel";
+  const activeChannel = isChannel
+    ? channels.find((channel) => channel.channel_id === active.id)
+    : undefined;
+  const sharedReference = activeChannel?.shared_reference === true;
   const archived =
     isChannel &&
     channels.some(
@@ -306,7 +399,8 @@ export function ConversationView() {
     channels.some(
       (channel) => channel.channel_id === active.id && channel.pending_invite,
     );
-  const readOnly = archived || dissolved || left || pendingInvite;
+  const readOnly =
+    sharedReference || archived || dissolved || left || pendingInvite;
   // Reaction `who` is keyed by account id for account conversations, device user-id for channels.
   const selfReactionId = isChannel ? myId : myAccountId;
   // Alias (if set) overrides the conversation's announced name in the header + composer.
@@ -328,8 +422,12 @@ export function ConversationView() {
     // getting clipped under the shell's overflow-hidden / behind the sidebar).
     <main
       className="conversation-canvas relative flex min-w-0 flex-1 flex-col"
-      onPointerDownCapture={() => useChat.getState().markLegacyActiveRead()}
-      onFocusCapture={() => useChat.getState().markLegacyActiveRead()}
+      onPointerDownCapture={() => {
+        if (!exactContext) useChat.getState().markLegacyActiveRead();
+      }}
+      onFocusCapture={() => {
+        if (!exactContext) useChat.getState().markLegacyActiveRead();
+      }}
     >
       <AnimatePresence>
         {attachments.dragOver && (
@@ -377,7 +475,8 @@ export function ConversationView() {
           <ChannelHeader
             id={active.id}
             name={headerName}
-            memberCount={members.length}
+            memberCount={activeChannel?.member_count ?? members.length}
+            sharedReference={sharedReference}
             archived={archived}
             dissolved={dissolved}
             left={left}
@@ -386,11 +485,15 @@ export function ConversationView() {
         ) : (
           <DmHeader id={active.id} name={headerName} />
         )}
-        <div className="flex-1" />
+        {active.kind === "account" && !isPersonal ? (
+          <ConversationBio accountId={active.id} />
+        ) : (
+          <div className="flex-1" />
+        )}
         <ConversationHistoryDialog
           conversation={{ ...active, name: headerName }}
         />
-        {isChannel && !archived && !pendingInvite ? (
+        {isChannel && (sharedReference || (!archived && !pendingInvite)) ? (
           <MembersDialog key={key} dissolved={dissolved} />
         ) : (
           active.kind === "account" &&
@@ -403,6 +506,41 @@ export function ConversationView() {
           )
         )}
       </header>
+      {notificationReminder.visible && (
+        <NotificationPermissionNotice
+          onDismiss={notificationReminder.dismiss}
+        />
+      )}
+      {collection.error && (
+        <p
+          role="alert"
+          className="break-words border-b px-4 py-2 text-sm text-destructive"
+        >
+          {collection.error}
+        </p>
+      )}
+      {collection.inspecting && (
+        <p
+          role="status"
+          className="border-b px-4 py-2 text-sm text-muted-foreground"
+        >
+          {t("common.loading")}
+        </p>
+      )}
+      {collection.selecting && (
+        <CollectionToolbar
+          selected={collection.selected}
+          onCancel={collection.cancel}
+          onCollect={() => collection.collect(collection.selected)}
+        />
+      )}
+      {collection.draft && (
+        <FavoriteEditor
+          key={`favorite:${owner}:${authGeneration}:${key}`}
+          draft={collection.draft}
+          onClose={collection.cancel}
+        />
+      )}
       <ReceptionStatus
         key={`${receptionScope}:${key}`}
         conversation={key}
@@ -448,7 +586,18 @@ export function ConversationView() {
             role="status"
             className="absolute inset-x-4 top-3 z-10 mx-auto max-w-[38rem] rounded-md border bg-card px-4 py-2 text-center text-[13px] shadow-elevation"
           >
-            {t("search.outsideRecent")}
+            {t("search.contextUnavailable")}
+          </div>
+        )}
+        {exactContext && (
+          <div className="absolute right-4 top-3 z-10 rounded-md border bg-card px-3 py-2 text-sm shadow-elevation">
+            <button
+              type="button"
+              onClick={closeSearchContext}
+              className="text-signal"
+            >
+              {t("conversation.jumpToLatest")}
+            </button>
           </div>
         )}
         {loading && messages.length === 0 && (
@@ -482,7 +631,7 @@ export function ConversationView() {
             scrollerRef={viewport.scrollerRef}
             // `key` resets all virtualization state (scroll pos, measured heights) when
             // switching conversations — equivalent to the old `[messages.length, key]` reset.
-            key={key}
+            key={exactContext ? `${key}:search:${searchTarget?.request}` : key}
             data={messages}
             // ReceptionStatus batches announcements; row mounts are silent.
             role="log"
@@ -496,7 +645,9 @@ export function ConversationView() {
             initialTopMostItemIndex={viewport.initialIndex}
             // Stick to the bottom on new messages only while the user is already there
             // (preserves scroll position when reading history / prepending older items).
-            followOutput={(isAtBottom) => (isAtBottom ? "auto" : false)}
+            followOutput={(isAtBottom) =>
+              !exactContext && isAtBottom ? "auto" : false
+            }
             atBottomStateChange={viewport.atBottomStateChange}
             rangeChanged={({ startIndex }) => viewport.rangeChanged(startIndex)}
             onScroll={viewport.onScroll}
@@ -552,7 +703,42 @@ export function ConversationView() {
                   )}
                 >
                   {showDay && <DaySeparator label={formatDay(m.wallClock)} />}
+                  {collection.selecting && (
+                    <label className="mx-4 flex items-center gap-2 rounded px-2 py-1 text-xs text-muted-foreground focus-within:ring-2 focus-within:ring-ring">
+                      <input
+                        type="checkbox"
+                        data-testid={`favorite-select-${m.id}`}
+                        checked={collection.selected.some(
+                          (item) => item.id === m.id,
+                        )}
+                        disabled={
+                          !canCollect(m) ||
+                          (collection.selected.length >=
+                            MAX_FAVORITE_MESSAGES &&
+                            !collection.selected.some(
+                              (item) => item.id === m.id,
+                            ))
+                        }
+                        onChange={() => collection.toggle(m)}
+                        className="h-4 w-4 accent-[hsl(var(--signal))]"
+                      />
+                      {t("messageFavorites.selectMessage", {
+                        text: m.protection
+                          ? t("protectedMessage.label")
+                          : (m.text || m.file?.name || "").slice(0, 60),
+                      })}
+                    </label>
+                  )}
                   <MessageBubble
+                    onCollect={
+                      canCollect(m)
+                        ? (message) => collection.collect([message])
+                        : undefined
+                    }
+                    onSelectMessages={
+                      canCollect(m) ? collection.start : undefined
+                    }
+                    collected={!!m.id && savedMessageIds.has(m.id)}
                     m={m}
                     parent={parent}
                     showAuthor={showAuthor}
@@ -560,7 +746,7 @@ export function ConversationView() {
                     showTime={showTime}
                     isChannel={isChannel}
                     isPersonal={isPersonal}
-                    readOnly={readOnly}
+                    readOnly={readOnly || !!exactContext}
                     authorAvatarId={authorAccount ?? m.who}
                     authorName={authorName}
                     onViewAuthor={() =>
@@ -617,7 +803,10 @@ export function ConversationView() {
               }}
               transition={{ duration: motionOK ? 0.12 : 0.08, ease }}
               aria-label={t("conversation.jumpToLatest")}
-              onClick={viewport.jumpToLatest}
+              onClick={() => {
+                if (exactContext) closeSearchContext();
+                else viewport.jumpToLatest();
+              }}
               className="absolute bottom-3 right-4 z-10 rounded-md border bg-card p-2 shadow-elevation hover:bg-accent"
             >
               <ChevronDown className="h-4 w-4" />
@@ -668,7 +857,7 @@ export function ConversationView() {
         </DialogContent>
       </Dialog>
 
-      {pendingInvite ? (
+      {pendingInvite && !sharedReference ? (
         <PendingChannelInvite key={key} channelId={active.id} />
       ) : readOnly ? (
         <div
@@ -676,12 +865,23 @@ export function ConversationView() {
           role="status"
         >
           {t(
-            dissolved
-              ? "conversation.dissolvedChannelHint"
-              : left
-                ? "conversation.leftChannelHint"
-                : "conversation.archivedChannelHint",
+            sharedReference
+              ? activeChannel?.legacy_membership
+                ? "conversation.legacySharedReferenceHint"
+                : "conversation.sharedReferenceHint"
+              : dissolved
+                ? "conversation.dissolvedChannelHint"
+                : left
+                  ? "conversation.leftChannelHint"
+                  : "conversation.archivedChannelHint",
           )}
+        </div>
+      ) : !draftsLoaded ? (
+        <div
+          className="border-t bg-card px-5 py-4 text-sm text-muted-foreground"
+          role="status"
+        >
+          {t("drafts.loading")}
         </div>
       ) : (
         <Composer
@@ -690,9 +890,24 @@ export function ConversationView() {
           screenshotAvailable={attachments.screenshotAvailable}
           stagedScreenshot={attachments.stagedScreenshot}
           key={`${owner}:${authGeneration}:${key}`}
-          initialDraft={drafts.current.get(draftKey)}
+          protectionReset={
+            protectionReset?.key === draftKey ? protectionReset : undefined
+          }
+          acceptedClear={
+            acceptedClear?.key === draftKey ? acceptedClear : undefined
+          }
+          onAttachmentDraftChange={(count, edited = true) => {
+            attachmentDraftCounts.current.set(draftKey, count);
+            if (edited) useDrafts.getState().touch(...draftScope);
+          }}
+          initialDraft={useDrafts.getState().texts[key] ?? ""}
+          initialProtection={useDrafts.getState().protections[key]}
+          onProtectionChange={(mode) =>
+            useDrafts.getState().setProtection(...draftScope, mode)
+          }
+          admissionPending={admissionPending}
           onDraftChange={(text) => {
-            drafts.current.set(draftKey, text);
+            useDrafts.getState().edit(owner!, authGeneration, key, text);
           }}
           placeholder={
             isChannel
@@ -711,7 +926,7 @@ export function ConversationView() {
           onAttach={attachments.attachFile}
           onAttachDirectory={attachments.attachDirectory}
           onImage={attachments.pickMedia}
-          onSend={(text) => {
+          onSend={(text, protection) => {
             const current = () => {
               const auth = useAuth.getState();
               const conversation = useChat.getState().active;
@@ -723,19 +938,42 @@ export function ConversationView() {
               );
             };
             if (!current()) return false;
-            // Transfer the submitted text to the bounded outgoing intent once.
-            // Its bubble owns acceptance/retry feedback; it is no longer a draft.
-            const admitted = admitText(
-              text,
-              replyTo?.id ?? null,
-              expiresAtSend(),
-            );
-            if (admitted && current()) {
-              setExpiryDurationMs(null);
-              setReply(null);
-              setPrefill(null);
-            }
-            return admitted;
+            // Ordinary text transfers immediately; protected text keeps its draft
+            // and retry ownership until durable acceptance.
+            const admitted = protection
+              ? (useDrafts
+                  .getState()
+                  .admit(...draftScope, text, () =>
+                    admitProtectedText(
+                      text,
+                      replyTo?.id ?? null,
+                      expiresAtSend(),
+                      protection,
+                    ),
+                  )
+                  ?.then((result) => {
+                    if (result.cleared)
+                      setAcceptedClear((previous) => ({
+                        key: draftKey,
+                        n: (previous?.n ?? 0) + 1,
+                        applyIf: () =>
+                          (useDrafts.getState().texts[key] ?? "") === "" &&
+                          !useDrafts.getState().protections[key],
+                      }));
+                    return result.accepted;
+                  }) ?? false)
+              : admitText(text, replyTo?.id ?? null, expiresAtSend());
+            const finish = (accepted: boolean) => {
+              if (accepted && current()) {
+                setExpiryDurationMs(null);
+                setReply(null);
+                setPrefill(null);
+              }
+              return accepted;
+            };
+            return typeof admitted === "boolean"
+              ? finish(admitted)
+              : admitted.then(finish);
           }}
           onPasteFiles={attachments.pasteFiles}
           onScreenshot={attachments.captureScreenshot}

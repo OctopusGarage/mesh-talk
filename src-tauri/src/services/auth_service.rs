@@ -113,8 +113,8 @@ impl AuthService {
     /// Check a lock-screen credential without creating a new session or runtime.
     pub fn verify_credentials(&self, name: &str, password: &str) -> AuthResult<String> {
         self.identity_manager
-            .authenticate_user(name, password)
-            .map(|identity| identity.user_id)
+            .authenticate_account_login(name, password)
+            .map(|identity| identity.user.user_id.clone())
             .map_err(|_| AuthError::InvalidCredentials)
     }
     /// Create a new authentication service
@@ -125,6 +125,10 @@ impl AuthService {
             identity_manager,
             session: crate::desktop_session::SessionState::default(),
         }
+    }
+
+    pub(crate) fn identity_manager(&self) -> &IdentityManager {
+        &self.identity_manager
     }
 
     pub(crate) fn session(&self) -> &crate::desktop_session::SessionState {
@@ -198,6 +202,7 @@ impl AuthService {
             user_id: identity_user.user_id.clone(),
             display_name: identity_user.effective_display_name().to_string(),
             name: identity_user.username,
+            account_login_name: None,
             address: normalized_address.to_string(),
             created_at: identity_user.created_at,
             last_seen: now,
@@ -225,12 +230,11 @@ impl AuthService {
             ));
         }
 
-        let password = password.trim().to_string();
-
-        // Authenticate the user with IdentityManager
-        let identity_user = self
+        // Preserve the raw login secret: legacy identity and node stores may
+        // intentionally use trimmed and raw forms respectively.
+        let resolved = self
             .identity_manager
-            .authenticate_user(normalized_name, &password)
+            .authenticate_account_login(normalized_name, &password)
             .map_err(|e| match e {
                 mesh_talk_core::identity::errors::IdentityError::UserNotFound(_) => {
                     AuthError::UserNotFound
@@ -241,11 +245,13 @@ impl AuthService {
                 _ => AuthError::StorageError(format!("Failed to authenticate user: {}", e)),
             })?;
 
+        let identity_user = &resolved.user;
         let mut user = User {
             user_id: identity_user.user_id.clone(),
             display_name: identity_user.effective_display_name().to_string(),
-            name: identity_user.username,
-            address: identity_user.public_key, // Using public key as address for now
+            name: identity_user.username.clone(),
+            account_login_name: Some(resolved.login_name.clone()),
+            address: identity_user.public_key.clone(), // Using public key as address for now
             created_at: identity_user.created_at,
             last_seen: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -258,9 +264,13 @@ impl AuthService {
         // Reauthentication revokes the previous token. The desktop has one live
         // session; the former registry never expired active admission or logout.
         let token = Session::new(user.user_id.clone(), SESSION_DURATION_SECS).token;
-        let lease = self
-            .session
-            .activate(token.clone(), user.clone(), password)?;
+        let lease = self.session.activate_with_credentials(
+            token.clone(),
+            user.clone(),
+            resolved.identity_password.clone(),
+            resolved.node_storage_password.clone(),
+            password,
+        )?;
         Ok((user, token, lease))
     }
 
@@ -323,6 +333,76 @@ mod tests {
     use super::*;
     use mesh_talk_core::storage::file_manager::FileManager;
     use std::sync::Arc;
+
+    #[test]
+    fn linked_account_login_uses_shared_credentials_and_preserves_local_storage_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(IdentityManager::new(FileManager::new(
+            dir.path().to_owned(),
+        )));
+        let auth = AuthService::new(manager.clone());
+        let local = auth
+            .register(
+                "Messi10".into(),
+                "old-local-password".into(),
+                "fixture".into(),
+            )
+            .unwrap();
+        manager
+            .set_display_name("Messi10", "old-local-password", "Shared nickname")
+            .unwrap();
+        manager
+            .install_account_login(
+                "Messi10",
+                "old-local-password",
+                " old-local-password ",
+                &"a".repeat(32),
+                "Federer",
+                "source-account-password",
+            )
+            .unwrap();
+        let result = auth.login("Federer".into(), "source-account-password".into());
+        assert!(
+            result.is_ok(),
+            "the account login must resolve the retained local identity"
+        );
+        let (user, _) = result.unwrap();
+        assert_eq!(user.user_id, local.user_id);
+        assert_eq!(user.name, "Messi10", "the private storage key is preserved");
+        let session = auth.session.get().unwrap();
+        assert_eq!(session.password, "old-local-password");
+        assert_eq!(session.node_storage_password, " old-local-password ");
+        assert_eq!(session.account_login_password, "source-account-password");
+        let debug = format!("{session:?}");
+        assert!(!debug.contains("old-local-password"));
+        assert!(!debug.contains("source-account-password"));
+        assert!(!debug.contains(&session.token));
+        let info = crate::commands::UserInfo::from(user);
+        assert_eq!(info.username, "Federer");
+        assert_eq!(info.display_name, "Shared nickname");
+        assert_eq!(
+            auth.verify_credentials("Federer", "source-account-password")
+                .unwrap(),
+            local.user_id
+        );
+        assert!(
+            auth.verify_credentials("Messi10", "old-local-password")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_login_preserves_raw_node_and_saved_login_secrets() {
+        let (auth, _) = setup_test_context();
+        auth.register("legacy".into(), "password-legacy".into(), "fixture".into())
+            .unwrap();
+        auth.login("legacy".into(), " password-legacy ".into())
+            .unwrap();
+        let session = auth.session.get().unwrap();
+        assert_eq!(session.password, "password-legacy");
+        assert_eq!(session.node_storage_password, " password-legacy ");
+        assert_eq!(session.account_login_password, " password-legacy ");
+    }
 
     #[test]
     fn delayed_persisted_rename_does_not_retarget_current_service_user() {
